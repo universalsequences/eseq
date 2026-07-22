@@ -355,6 +355,26 @@ impl SnapshotSequencerClock {
             }
         }
 
+        // Publish the local phase every scheduler block, not only on a step
+        // transition. The UI record path needs a phase in the track's own
+        // timebase (including per-step overrides), not the global 16th phase.
+        for t in 0..num_tracks {
+            let track = &snapshot.tracks[t];
+            let num_steps = track.params.num_steps;
+            let clock = &self.track_clocks[t];
+            if clock.cycle_beats <= 0.0 {
+                continue;
+            }
+            let position = self.total_beats % clock.cycle_beats;
+            if let Some(step) = Self::derive_local_step(clock, position, num_steps) {
+                let step_beats = (clock.step_ends[step] - clock.boundaries[step]).max(1.0e-9);
+                let phase = ((position - clock.boundaries[step]) / step_beats).clamp(0.0, 1.0);
+                state.transport.track_playheads[t].store(step as u32, Ordering::Relaxed);
+                state.transport.track_playhead_phases[t]
+                    .store((phase as f32).to_bits(), Ordering::Relaxed);
+            }
+        }
+
         let phase_16th = (self.total_beats / 0.25).fract() as f32;
         state
             .transport
@@ -8407,7 +8427,7 @@ mod tests {
         state.toggle_play();
         state.toggle_step_and_clear_plocks(0, 0);
         let mut snapshot = (*state.latest_scheduler_snapshot()).clone();
-        snapshot.tracks[0].scene_silenced = true;
+        Arc::make_mut(&mut snapshot.tracks[0]).scene_silenced = true;
         let mut clock = SnapshotSequencerClock::new(48_000);
 
         let triggers = clock.process_chunk(12_000, &snapshot, &state);

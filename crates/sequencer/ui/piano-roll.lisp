@@ -30,6 +30,8 @@
       (= event.type :nudge-selection)
       (= event.type :move-items-absolute)
       (= event.type :resize-item-absolute)
+      (= event.type :finish-move-items)
+      (= event.type :finish-resize-items)
       (= event.type :finish-create-item)))
 
 (def piano-roll-event-num (event key fallback)

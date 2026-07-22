@@ -45,20 +45,13 @@
         (do
           (fx-set-effect-value fx freq-p (get event :freq))
           (fx-set-effect-value fx q-p (get event :q)))
-        (if (seq-has-selection?)
-          (seq-set-effect-plock-pair
-            (get fx :slot-idx)
-            (get freq-p :idx) (get event :freq)
-            (get q-p :idx) (get event :q))
-          (if (= (get event :type) :change-band)
-            (seq-set-effect-param-pair-live
-              (get fx :slot-idx)
-              (get freq-p :idx) (get event :freq)
-              (get q-p :idx) (get event :q))
-            (seq-set-effect-param-pair
-              (get fx :slot-idx)
-              (get freq-p :idx) (get event :freq)
-              (get q-p :idx) (get event :q))))))
+        (host-command
+          (if (seq-has-selection?) "set-effect-plock-batch" "set-effect-param-batch")
+          (dict :slot-idx (get fx :slot-idx)
+                :updates (list
+                  (dict :param-idx (get freq-p :idx) :value (get event :freq))
+                  (dict :param-idx (get q-p :idx) :value (get event :q)))
+                :commit (= (get event :type) :commit-band)))))
     nil))
 
 (def builtin-fx-str8-delay-sync-button (fx p)

@@ -597,6 +597,69 @@ impl App {
         }
     }
 
+    pub(super) fn push_bus_volume(&self, bus: crate::sequencer::BusId) {
+        let Some(channel) = self.buses.iter().find(|channel| channel.id == bus) else {
+            return;
+        };
+        let Some(nodes) = self.graph.bus_node_ids.iter().find(|nodes| nodes.id == bus) else {
+            return;
+        };
+        unsafe {
+            crate::audiograph::params_push_wrapper(
+                self.graph.lg.0,
+                crate::audiograph::ParamMsg {
+                    idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+                    logical_id: nodes.volume_id as u64,
+                    fvalue: crate::mixer_volume::fader_to_gain(channel.volume),
+                },
+            );
+        }
+    }
+
+    pub(super) fn push_bus_mute(&self, bus: crate::sequencer::BusId) {
+        let Some(channel) = self.buses.iter().find(|channel| channel.id == bus) else {
+            return;
+        };
+        let Some(nodes) = self.graph.bus_node_ids.iter().find(|nodes| nodes.id == bus) else {
+            return;
+        };
+        unsafe {
+            crate::audiograph::params_push_wrapper(
+                self.graph.lg.0,
+                crate::audiograph::ParamMsg {
+                    idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTE,
+                    logical_id: nodes.volume_id as u64,
+                    fvalue: if channel.mute { 1.0 } else { 0.0 },
+                },
+            );
+        }
+    }
+
+    pub(super) fn push_bus_solo_mutes(&self) {
+        let has_solo = self.buses.iter().any(|bus| bus.solo);
+        for channel in &self.buses {
+            let Some(nodes) = self
+                .graph
+                .bus_node_ids
+                .iter()
+                .find(|nodes| nodes.id == channel.id)
+            else {
+                continue;
+            };
+            let muted_by_solo = has_solo && !channel.solo;
+            unsafe {
+                crate::audiograph::params_push_wrapper(
+                    self.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        idx: crate::effects::stereo_panner::STEREO_PANNER_PARAM_MUTED_BY_SOLO,
+                        logical_id: nodes.volume_id as u64,
+                        fvalue: if muted_by_solo { 1.0 } else { 0.0 },
+                    },
+                );
+            }
+        }
+    }
+
     pub(super) fn push_master_volume(&self) {
         let volume = f32::from_bits(self.state.transport.master_volume.load(Ordering::Relaxed));
         if let Some(nodes) = self
@@ -785,6 +848,7 @@ impl App {
                                         track,
                                         idx: self.ui.dropdown_cursor,
                                         default_limit,
+                                        script_name: None,
                                     },
                                 );
                             }
@@ -870,17 +934,26 @@ impl App {
             let Some(&param_idx) = synth_indices.get(self.ui.instrument_param_cursor - 1) else {
                 return;
             };
-            let slot = &self.state.pattern.instrument_slots[self.ui.cursor_track];
             if self.has_selection() {
-                for step in self.selected_steps() {
-                    slot.set_plock(step, param_idx, val);
-                }
+                apply_command(
+                    self,
+                    AppCommand::SetInstrumentPlockMulti {
+                        track: self.ui.cursor_track,
+                        steps: self.selected_steps(),
+                        param_idx,
+                        value: val,
+                    },
+                );
             } else {
-                slot.defaults.set(param_idx, val);
-                self.send_instrument_param(self.ui.cursor_track, param_idx, val);
-                self.mark_track_sound_dirty(self.ui.cursor_track);
+                apply_command(
+                    self,
+                    AppCommand::SetInstrumentParam {
+                        track: self.ui.cursor_track,
+                        param_idx,
+                        value: val,
+                    },
+                );
             }
-            self.state.publish_scheduler_snapshot();
             return;
         }
         if self.ui.effect_tab == EffectTab::Mod {
@@ -905,10 +978,6 @@ impl App {
         let val = self.ui.dropdown_cursor as f32;
         let param_idx = self.ui.effect_param_cursor;
 
-        let slot = match self.current_slot() {
-            Some(s) => s,
-            None => return,
-        };
         let Some(slot_idx) = self.selected_effect_slot() else {
             return;
         };
@@ -918,29 +987,34 @@ impl App {
         let Some(param_desc) = desc.params.get(param_idx) else {
             return;
         };
-        if matches!(
-            param_desc.host_control,
-            Some(crate::effects::HostControl::FxSidechain { .. })
-        ) {
-            self.apply_effect_sidechain_selection(
-                self.ui.cursor_track,
-                slot_idx,
-                param_idx,
-                self.ui.dropdown_cursor,
-            );
-            slot.defaults.set(param_idx, val);
-            self.state.publish_scheduler_snapshot();
-            return;
-        }
-
         if self.has_selection() {
-            for step in self.selected_steps() {
-                slot.set_plock(step, param_idx, val);
+            if matches!(
+                param_desc.host_control,
+                Some(crate::effects::HostControl::FxSidechain { .. })
+            ) {
+                return;
             }
+            apply_command(
+                self,
+                AppCommand::SetEffectPlockMulti {
+                    track: self.ui.cursor_track,
+                    steps: self.selected_steps(),
+                    slot_idx,
+                    param_idx,
+                    value: val,
+                },
+            );
         } else {
-            slot.defaults.set(param_idx, val);
+            apply_command(
+                self,
+                AppCommand::SetEffectParam {
+                    track: self.ui.cursor_track,
+                    slot_idx,
+                    param_idx,
+                    value: val,
+                },
+            );
         }
-        self.state.publish_scheduler_snapshot();
     }
 }
 

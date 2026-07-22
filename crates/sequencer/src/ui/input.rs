@@ -1,14 +1,14 @@
 use super::*;
 use eseqlisp::widget_render::number_picker::{
-    NumberPickerEditOutcome, clear_number_picker_edit_state,
-    handle_number_picker_edit_key_for_widget, number_picker_edit_state,
+    clear_number_picker_edit_state, handle_number_picker_edit_key_for_widget,
+    number_picker_edit_state, NumberPickerEditOutcome,
 };
 
 #[derive(Clone, Debug)]
 pub(crate) struct HeldKeyboardNote {
     key: char,
     transpose: f32,
-    step_at_press: usize,
+    positions: Vec<(usize, sequencer::sequencer::RecordPosition)>,
     press_time: Instant,
     tracks: Vec<usize>,
 }
@@ -78,6 +78,43 @@ fn widget_captures_text_input(node: &eseqlisp::layout::LayoutNode) -> bool {
 
 fn active_buffer_accepts_global_ui_shortcuts(editor: &Editor) -> bool {
     matches!(editor.active_buffer().view_mode, ViewMode::UiOnly)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SequencerHistoryShortcut {
+    Undo,
+    Redo,
+}
+
+pub(crate) fn sequencer_history_shortcut(
+    editor: &Editor,
+    key: &crossterm::event::KeyEvent,
+) -> Option<SequencerHistoryShortcut> {
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+    if !matches!(key.kind, KeyEventKind::Press)
+        || !matches!(key.code, KeyCode::Char('z' | 'Z'))
+        || editor.minibuffer_prompt().is_some()
+        || editor.prompt_text().is_some()
+        || !active_buffer_accepts_global_ui_shortcuts(editor)
+        || focused_widget_captures_text_input(editor)
+    {
+        return None;
+    }
+
+    #[cfg(target_os = "macos")]
+    let primary = KeyModifiers::SUPER;
+    #[cfg(not(target_os = "macos"))]
+    let primary = KeyModifiers::CONTROL;
+
+    if !key.modifiers.contains(primary) || key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+    Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
+        SequencerHistoryShortcut::Redo
+    } else {
+        SequencerHistoryShortcut::Undo
+    })
 }
 
 fn global_sequencer_navigation_available(editor: &Editor) -> bool {
@@ -613,7 +650,7 @@ fn sync_soft_step_param_commit(
 
 fn commit_soft_step_param_edit(
     editor: &mut Editor,
-    state: &Arc<SequencerState>,
+    app: &mut tui::App,
     current_track: &Arc<AtomicUsize>,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     target: &SoftStepParamEditTarget,
@@ -621,27 +658,48 @@ fn commit_soft_step_param_edit(
 ) -> bool {
     match &target.kind {
         SoftStepParamEditKind::StepParam(param) => {
-            state.pattern.step_data[target.track].set(target.step, *param, value as f32);
-            state.publish_scheduler_snapshot();
-            sync_soft_step_param_commit(editor, state, expanded_step_projection, target, *param);
+            if tui::try_apply_command(
+                app,
+                tui::AppCommand::SetStepParam {
+                    track: target.track,
+                    step: target.step,
+                    param: *param,
+                    value: value as f32,
+                },
+            )
+            .is_err()
+            {
+                return false;
+            }
+            sync_soft_step_param_commit(
+                editor,
+                &app.state,
+                expanded_step_projection,
+                target,
+                *param,
+            );
             true
         }
         SoftStepParamEditKind::ProcessLane {
             instance_id,
             inlet_name,
         } => {
-            if !state.set_process_lane_value(
-                target.track,
-                *instance_id,
-                inlet_name.clone(),
-                target.step,
-                value as f32,
-            ) {
+            let result = app.apply_recorded_scene_structure_mutation(
+                "Edit process lane",
+                |app| app.state.set_process_lane_value(
+                    target.track,
+                    *instance_id,
+                    inlet_name.clone(),
+                    target.step,
+                    value as f32,
+                ).then_some(()).ok_or_else(|| "Process lane target is missing or unchanged".to_string()),
+            );
+            if result.is_err() {
                 return false;
             }
             sync_soft_process_lane_commit(
                 editor,
-                state,
+                &app.state,
                 current_track,
                 expanded_step_projection,
                 target,
@@ -762,7 +820,7 @@ fn starts_unarmed_number_picker_edit(key: &crossterm::event::KeyEvent) -> bool {
 pub(crate) fn handle_metal_soft_step_param_key(
     editor: &mut Editor,
     key: &crossterm::event::KeyEvent,
-    state: &Arc<SequencerState>,
+    app: &mut tui::App,
     current_track: &Arc<AtomicUsize>,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     edit: &mut SoftStepParamEdit,
@@ -782,7 +840,7 @@ pub(crate) fn handle_metal_soft_step_param_key(
         let pending_edit_key = number_picker_pending_edit_key(key);
         if pending_edit_key {
             if let (Some(target), Some(widget_id)) = (
-                current_soft_step_param_target(editor, state, current_track),
+                current_soft_step_param_target(editor, &app.state, current_track),
                 current_step_param_number_picker_id(editor),
             ) {
                 if number_picker_edit_state(widget_id).editing {
@@ -806,7 +864,7 @@ pub(crate) fn handle_metal_soft_step_param_key(
         if !edit.is_active() && !starts_unarmed_number_picker_edit(key) {
             return false;
         }
-        let Some(target) = current_soft_step_param_target(editor, state, current_track) else {
+        let Some(target) = current_soft_step_param_target(editor, &app.state, current_track) else {
             return false;
         };
         let Some(widget_id) = current_step_param_number_picker_id(editor) else {
@@ -826,7 +884,7 @@ pub(crate) fn handle_metal_soft_step_param_key(
     let Some(widget_id) = edit.widget_id else {
         return false;
     };
-    let Some(spec) = soft_step_param_edit_spec(state, &target) else {
+    let Some(spec) = soft_step_param_edit_spec(&app.state, &target) else {
         edit.clear();
         editor.mark_needs_redraw();
         return true;
@@ -855,7 +913,7 @@ pub(crate) fn handle_metal_soft_step_param_key(
         Some(NumberPickerEditOutcome::Commit(value)) => {
             if !commit_soft_step_param_edit(
                 editor,
-                state,
+                app,
                 current_track,
                 expanded_step_projection,
                 &target,
@@ -908,7 +966,7 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
     current_track: &Arc<AtomicUsize>,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     step_clipboard: &Arc<Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>>,
-    ui_epoch: &AtomicUsize,
+    _ui_epoch: &AtomicUsize,
 ) -> bool {
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
@@ -1083,20 +1141,12 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                     && !modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
             {
                 let command = if editor.active_buffer().name == "*sequencer*" {
-                    "(seqv-select-all-current-track-steps)"
+                    "seqv-select-all-current-track-steps"
                 } else {
-                    "(select-all-steps)"
+                    "select-all-steps"
                 };
-                let _ = editor.runtime_mut().eval_str(command);
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "selected-steps",
-                    build_selection_value(selected_steps),
-                );
-                editor.runtime_mut().run_reactive_cycle();
+                let _ = editor.runtime_mut().invoke_global(command, Vec::new());
                 editor.refresh_runtime_side_effects();
-                editor.refresh_visible_layouts_for_buffer_named("*metal*");
-                editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
                 editor.mark_needs_redraw();
                 return true;
             }
@@ -1235,43 +1285,23 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                     Some(step) => step,
                     None => return true,
                 };
-                let clipboard = {
-                    let guard = step_clipboard.lock().unwrap();
-                    guard.clone()
-                };
-                let Some((source_track, clipboard)) = clipboard else {
+                if step_clipboard.lock().unwrap().is_none() {
                     return true;
-                };
+                }
                 let track = current_track.load(Ordering::Relaxed);
-                let preserve_audio_plocks = source_track == track;
-                let num_steps = state.pattern.track_params[track].get_num_steps();
-                let mut applied_count = 0usize;
-                for (offset, snapshot) in &clipboard {
-                    let dest = dest_start + offset;
-                    if dest >= num_steps {
-                        continue;
-                    }
-                    if !snapshot.active && state.pattern.patterns[track].is_active(dest) {
-                        continue;
-                    }
-                    let sanitized = if preserve_audio_plocks {
-                        snapshot.clone()
-                    } else {
-                        snapshot.without_audio_plocks()
-                    };
-                    state.restore_step_snapshot(track, dest, &sanitized);
-                    applied_count += 1;
-                }
-                if applied_count > 0 {
-                    state.publish_scheduler_snapshot();
-                    ui_epoch.fetch_add(1, Ordering::Relaxed);
-                    editor.mark_needs_redraw();
-                }
-                editor.handle_host_event(HostEvent::Status(format!(
-                    "Pasted {} step{}",
-                    applied_count,
-                    if applied_count == 1 { "" } else { "s" }
-                )));
+                let mut payload = HashMap::new();
+                payload.insert(
+                    "track".to_string(),
+                    Rc::new(RefCell::new(Value::Number(track as f64))),
+                );
+                payload.insert(
+                    "dest-start".to_string(),
+                    Rc::new(RefCell::new(Value::Number(dest_start as f64))),
+                );
+                editor.runtime_mut().enqueue_host_command(HostCommand::Custom {
+                    name: "paste-steps".to_string(),
+                    payload: Value::Map(payload),
+                });
                 return true;
             }
             _ => {}
@@ -1320,6 +1350,35 @@ impl RecordingKeyOutcome {
     }
 }
 
+/// Convert a captured local position to its recorded step and per-note delay.
+/// Coarser grids are expressed in beats and then converted through the
+/// track's timebase, which keeps recording quantization independent from the
+/// global transport resolution.
+fn quantized_record_position(
+    step: usize,
+    phase: f32,
+    num_steps: usize,
+    timebase: sequencer::sequencer::Timebase,
+    quantize: sequencer::record_quantize::RecordQuantize,
+) -> (usize, f32) {
+    let num_steps = num_steps.max(1);
+    let phase = phase.clamp(0.0, 1.0);
+    match quantize {
+        sequencer::record_quantize::RecordQuantize::Off => (step % num_steps, phase),
+        sequencer::record_quantize::RecordQuantize::Sixteenth => {
+            ((step + usize::from(phase >= 0.5)) % num_steps, 0.0)
+        }
+        _ => {
+            let grid_beats = quantize
+                .grid_beats()
+                .expect("non-off record quantization must define a grid");
+            let grid_steps = (grid_beats / timebase.step_beats(num_steps)).max(1.0e-9);
+            let snapped = ((step as f64 + phase as f64) / grid_steps).round() * grid_steps;
+            (snapped.round().rem_euclid(num_steps as f64) as usize, 0.0)
+        }
+    }
+}
+
 /// Intercept keyboard events for live recording.
 pub(crate) fn handle_recording_key(
     key: &crossterm::event::KeyEvent,
@@ -1328,7 +1387,6 @@ pub(crate) fn handle_recording_key(
     recording: &Arc<AtomicBool>,
     keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
     keyboard_octave: &Arc<std::sync::atomic::AtomicI32>,
-    current_track: &Arc<AtomicUsize>,
     held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
     ui_epoch: &Arc<AtomicUsize>,
 ) -> RecordingKeyOutcome {
@@ -1365,11 +1423,25 @@ pub(crate) fn handle_recording_key(
             let octave = keyboard_octave.load(Ordering::Relaxed);
             let transpose = (note + octave) as f32;
             let mut pressed_tracks = Vec::new();
+            let press_time = Instant::now();
+            let mut positions = Vec::new();
 
             // Send note-on to audio thread for all armed tracks
             for (track, a) in armed.iter().enumerate() {
                 if *a {
                     pressed_tracks.push(track);
+                    let position = state
+                        .record_position_at_instant(track, press_time)
+                        .unwrap_or_else(|| sequencer::sequencer::RecordPosition {
+                            step: state.transport.track_playheads[track].load(Ordering::Relaxed)
+                                as usize,
+                            phase: f32::from_bits(
+                                state.transport.track_playhead_phases[track]
+                                    .load(Ordering::Relaxed),
+                            )
+                            .clamp(0.0, 1.0),
+                        });
+                    positions.push((track, position));
                     let _ = keyboard_tx.send(KeyboardTrigger {
                         track,
                         transpose,
@@ -1379,14 +1451,11 @@ pub(crate) fn handle_recording_key(
                 }
             }
 
-            // Record the step at press time
-            let ct = current_track.load(Ordering::Relaxed);
-            let playhead = state.transport.track_playheads[ct].load(Ordering::Relaxed) as usize;
             held.push(HeldKeyboardNote {
                 key: c,
                 transpose,
-                step_at_press: playhead,
-                press_time: Instant::now(),
+                positions,
+                press_time,
                 tracks: pressed_tracks,
             });
             RecordingKeyOutcome::Consumed
@@ -1411,31 +1480,41 @@ pub(crate) fn handle_recording_key(
                 }
 
                 if recording.load(Ordering::Relaxed) && state.is_playing() {
-                    let armed = record_armed.lock().unwrap();
                     let bpm = state.transport.bpm.load(Ordering::Relaxed) as f64;
                     let secs_per_step = 60.0 / bpm / 4.0;
                     let hold_secs = note.press_time.elapsed().as_secs_f64();
                     let duration_steps = (hold_secs / secs_per_step).max(0.15).min(64.0) as f32;
                     let mut recorded = false;
 
-                    for (track, a) in armed.iter().enumerate() {
-                        if !*a {
-                            continue;
+                    let quantize = sequencer::record_quantize::RecordQuantize::from_atomic(
+                        state.transport.record_quantize.load(Ordering::Relaxed) as u8,
+                    );
+                    for (track, position) in &note.positions {
+                        let num_steps = state.pattern.track_params[*track].get_num_steps();
+                        let (local_step, delay) = quantized_record_position(
+                            position.step,
+                            position.phase,
+                            num_steps,
+                            state.pattern.track_params[*track].get_timebase(),
+                            quantize,
+                        );
+                        if !state.pattern.patterns[*track].is_active(local_step) {
+                            state.pattern.patterns[*track].toggle_step(local_step);
                         }
-                        let num_steps = state.pattern.track_params[track].get_num_steps();
-                        let local_step = note.step_at_press % num_steps;
-                        if !state.pattern.patterns[track].is_active(local_step) {
-                            state.pattern.patterns[track].toggle_step(local_step);
-                        }
-                        state.pattern.chord_data[track].add_note(local_step, note.transpose);
-                        let first_note = state.pattern.chord_data[track].get(local_step, 0);
-                        state.pattern.step_data[track].set(
+                        state.pattern.chord_data[*track].add_note_with_timing(
+                            local_step,
+                            note.transpose,
+                            duration_steps,
+                            delay,
+                        );
+                        let first_note = state.pattern.chord_data[*track].get(local_step, 0);
+                        state.pattern.step_data[*track].set(
                             local_step,
                             StepParam::Transpose,
                             first_note,
                         );
-                        state.pattern.step_data[track].set(local_step, StepParam::Velocity, 1.0);
-                        state.pattern.step_data[track].set(
+                        state.pattern.step_data[*track].set(local_step, StepParam::Velocity, 1.0);
+                        state.pattern.step_data[*track].set(
                             local_step,
                             StepParam::Duration,
                             duration_steps,
@@ -1458,22 +1537,23 @@ pub(crate) fn handle_recording_key(
 #[cfg(test)]
 mod live_keyboard_tests {
     use super::{
-        ExpandedStepProjectionRegistry, ExpandedStepViewport, HeldKeyboardNote,
-        PROCESS_LANE_MODE_OFFSET, SoftStepParamEdit, build_selection_value,
-        current_step_param_number_picker_id, handle_metal_command_shortcut,
+        build_selection_value, current_step_param_number_picker_id, handle_metal_command_shortcut,
         handle_metal_soft_step_param_key, handle_number_picker_edit_key_for_widget,
-        held_note_for_key, note_from_key,
+        held_note_for_key, note_from_key, quantized_record_position,
+        sequencer_history_shortcut, ExpandedStepProjectionRegistry, ExpandedStepViewport,
+        HeldKeyboardNote, SequencerHistoryShortcut, SoftStepParamEdit, PROCESS_LANE_MODE_OFFSET,
     };
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use eseqlisp::HostCommand;
     use eseqlisp::editor::ViewMode;
     use eseqlisp::mode::BufferMode;
     use eseqlisp::vm::Value;
     use eseqlisp::widget_render::WidgetKeyEvent;
+    use eseqlisp::HostCommand;
     use eseqlisp::{Editor, EditorConfig, Runtime};
-    use sequencer::sequencer::{SequencerState, StepParam, StepSnapshot};
+    use sequencer::record_quantize::RecordQuantize;
+    use sequencer::sequencer::{RecordPosition, SequencerState, StepParam, StepSnapshot, Timebase};
     use std::cell::RefCell;
     use std::collections::HashSet;
     use std::rc::Rc;
@@ -1481,12 +1561,77 @@ mod live_keyboard_tests {
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
+    fn soft_edit_test_app(state: Arc<SequencerState>) -> sequencer::tui::App {
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = sequencer::tui::App::new(
+            state,
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::tui::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = sequencer::sequencer::TrackRegistry::for_legacy_track_count(1)
+            .expect("test track registry");
+        app
+    }
+
+    #[test]
+    fn global_sequencer_history_shortcuts_only_capture_ui_buffers() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        let primary = if cfg!(target_os = "macos") {
+            KeyModifiers::SUPER
+        } else {
+            KeyModifiers::CONTROL
+        };
+
+        assert_eq!(
+            sequencer_history_shortcut(
+                &editor,
+                &KeyEvent::new(KeyCode::Char('z'), primary),
+            ),
+            None,
+            "editable source buffers retain their own undo shortcut",
+        );
+
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        assert_eq!(
+            sequencer_history_shortcut(
+                &editor,
+                &KeyEvent::new(KeyCode::Char('z'), primary),
+            ),
+            Some(SequencerHistoryShortcut::Undo),
+        );
+        assert_eq!(
+            sequencer_history_shortcut(
+                &editor,
+                &KeyEvent::new(KeyCode::Char('Z'), primary | KeyModifiers::SHIFT),
+            ),
+            Some(SequencerHistoryShortcut::Redo),
+        );
+    }
+
     #[test]
     fn held_note_lookup_is_case_insensitive_for_release_matching() {
         let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
             key: 'a',
             transpose: 0.0,
-            step_at_press: 0,
+            positions: vec![(
+                0,
+                RecordPosition {
+                    step: 0,
+                    phase: 0.0,
+                },
+            )],
             press_time: Instant::now(),
             tracks: vec![0],
         }]));
@@ -1499,6 +1644,38 @@ mod live_keyboard_tests {
     fn live_note_map_uses_lowercase_keys() {
         assert_eq!(note_from_key('a'), Some(0));
         assert_eq!(note_from_key('A'), None);
+    }
+
+    #[test]
+    fn record_quantize_off_preserves_phase_as_per_note_delay() {
+        assert_eq!(
+            quantized_record_position(3, 0.37, 16, Timebase::Sixteenth, RecordQuantize::Off),
+            (3, 0.37)
+        );
+    }
+
+    #[test]
+    fn sixteenth_record_quantize_rounds_to_nearest_step() {
+        assert_eq!(
+            quantized_record_position(3, 0.49, 16, Timebase::Sixteenth, RecordQuantize::Sixteenth),
+            (3, 0.0)
+        );
+        assert_eq!(
+            quantized_record_position(3, 0.50, 16, Timebase::Sixteenth, RecordQuantize::Sixteenth),
+            (4, 0.0)
+        );
+    }
+
+    #[test]
+    fn coarse_record_quantize_snaps_and_wraps_the_pattern() {
+        assert_eq!(
+            quantized_record_position(5, 0.7, 16, Timebase::Sixteenth, RecordQuantize::Quarter),
+            (4, 0.0)
+        );
+        assert_eq!(
+            quantized_record_position(15, 0.9, 16, Timebase::Sixteenth, RecordQuantize::Quarter),
+            (0, 0.0)
+        );
     }
 
     #[test]
@@ -2553,20 +2730,10 @@ mod live_keyboard_tests {
             editor.runtime_mut().eval_str("select-all-count").unwrap(),
             Some(eseqlisp::vm::Value::Number(1.0))
         );
-        let selected_value = editor
-            .runtime_mut()
-            .eval_str("SEQ.selected-steps")
-            .unwrap()
-            .expect("selected steps reactive value");
-        let Value::List(items) = selected_value else {
-            panic!("selected steps should be a list");
-        };
-        assert!(
-            items
-                .iter()
-                .take(16)
-                .all(|item| matches!(*item.borrow(), Value::Bool(true))),
-            "Cmd+A should synchronously publish the selected-step reactive list"
+        assert_eq!(
+            *selected_steps.lock().unwrap(),
+            (0..16).collect::<HashSet<_>>(),
+            "Cmd+A should select every current-track step; the native's UI invalidation owns the reactive projection",
         );
     }
 
@@ -3102,6 +3269,7 @@ mod live_keyboard_tests {
             .expect("sequencer number picker should lay out");
 
         let state = Arc::new(SequencerState::new(1, vec![]));
+        let mut app = soft_edit_test_app(Arc::clone(&state));
         let current_track = Arc::new(AtomicUsize::new(0));
         let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
         expanded_step_projection.set_viewport(ExpandedStepViewport {
@@ -3123,7 +3291,7 @@ mod live_keyboard_tests {
                 handle_metal_soft_step_param_key(
                     &mut editor,
                     &key,
-                    &state,
+                    &mut app,
                     &current_track,
                     &expanded_step_projection,
                     &mut edit,
@@ -3174,6 +3342,7 @@ mod live_keyboard_tests {
     #[test]
     fn sequencer_soft_number_entry_edits_current_process_lane_step() {
         let state = Arc::new(SequencerState::new(1, vec![]));
+        let mut app = soft_edit_test_app(Arc::clone(&state));
         let current_track = Arc::new(AtomicUsize::new(0));
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         editor.set_layout_viewport(80, 20);
@@ -3253,7 +3422,7 @@ mod live_keyboard_tests {
                 handle_metal_soft_step_param_key(
                     &mut editor,
                     &key,
-                    &state,
+                    &mut app,
                     &current_track,
                     &expanded_step_projection,
                     &mut edit,
@@ -3390,6 +3559,7 @@ mod live_keyboard_tests {
         }
 
         let state = Arc::new(SequencerState::new(1, vec![]));
+        let mut app = soft_edit_test_app(Arc::clone(&state));
         let current_track = Arc::new(AtomicUsize::new(0));
         let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
         expanded_step_projection.set_viewport(ExpandedStepViewport {
@@ -3428,7 +3598,7 @@ mod live_keyboard_tests {
             handle_metal_soft_step_param_key(
                 &mut editor,
                 &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-                &state,
+                &mut app,
                 &current_track,
                 &expanded_step_projection,
                 &mut edit,

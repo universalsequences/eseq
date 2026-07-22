@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use crate::effects::reverb;
 use crate::effects::{
@@ -592,6 +593,16 @@ impl App {
     }
 
     pub(super) fn set_reverb_param(&mut self, cursor: usize, value: f32) {
+        apply_command(
+            self,
+            AppCommand::SetReverbParam {
+                param_idx: cursor,
+                value,
+            },
+        );
+    }
+
+    pub(super) fn set_reverb_param_unrecorded(&mut self, cursor: usize, value: f32) {
         let clamped = value.clamp(0.0, 1.0);
         let param_idx = match cursor {
             0 => {
@@ -665,7 +676,6 @@ impl App {
             let old = slot.defaults.get(param_idx);
             let inc = param_desc.increment(old);
             let new_val = param_desc.clamp(old + direction * inc);
-            self.apply_effect_sidechain_selection(track, slot_idx, param_idx, new_val as usize);
             apply_command(
                 self,
                 AppCommand::SetEffectParam {
@@ -1478,14 +1488,13 @@ impl App {
                 } else {
                     vec![drag.track]
                 };
-                for track in tracks {
-                    apply_command(
-                        self,
-                        AppCommand::SetTrackVolume {
-                            track,
-                            value: volume,
-                        },
-                    );
+                let commands = tracks
+                    .into_iter()
+                    .map(|track| AppCommand::SetTrackVolume { track, value: volume })
+                    .collect::<Vec<_>>();
+                if let Err(error) = super::edit::apply_recorded_track_params_batch(self, &commands) {
+                    self.editor.status_message =
+                        Some((format!("Command failed: {error:?}"), Instant::now()));
                 }
             }
             ParamMouseDragTarget::TrackParam { row_idx } => {
@@ -1494,14 +1503,24 @@ impl App {
                 match row_idx {
                     super::TP_ATTACK => {
                         let ms = (sdv + dx as f32 * 5.0).clamp(0.0, 500.0);
-                        for track in tracks {
-                            apply_command(self, AppCommand::SetTrackAttack { track, ms });
+                        let commands = tracks
+                            .into_iter()
+                            .map(|track| AppCommand::SetTrackAttack { track, ms })
+                            .collect::<Vec<_>>();
+                        if let Err(error) = super::edit::apply_recorded_track_params_batch(self, &commands) {
+                            self.editor.status_message =
+                                Some((format!("Command failed: {error:?}"), Instant::now()));
                         }
                     }
                     super::TP_RELEASE => {
                         let ms = (sdv + dx as f32 * 10.0).clamp(0.0, 2000.0);
-                        for track in tracks {
-                            apply_command(self, AppCommand::SetTrackRelease { track, ms });
+                        let commands = tracks
+                            .into_iter()
+                            .map(|track| AppCommand::SetTrackRelease { track, ms })
+                            .collect::<Vec<_>>();
+                        if let Err(error) = super::edit::apply_recorded_track_params_batch(self, &commands) {
+                            self.editor.status_message =
+                                Some((format!("Command failed: {error:?}"), Instant::now()));
                         }
                     }
                     super::TP_SWING => {
@@ -1520,20 +1539,35 @@ impl App {
                     }
                     super::TP_VOLUME => {
                         let value = (sdv + dx as f32 * 0.01).clamp(0.0, 1.0);
-                        for track in tracks {
-                            apply_command(self, AppCommand::SetTrackVolume { track, value });
+                        let commands = tracks
+                            .into_iter()
+                            .map(|track| AppCommand::SetTrackVolume { track, value })
+                            .collect::<Vec<_>>();
+                        if let Err(error) = super::edit::apply_recorded_track_params_batch(self, &commands) {
+                            self.editor.status_message =
+                                Some((format!("Command failed: {error:?}"), Instant::now()));
                         }
                     }
                     super::TP_PAN => {
                         let value = (sdv + dx as f32 * 0.01).clamp(-1.0, 1.0);
-                        for track in tracks {
-                            apply_command(self, AppCommand::SetTrackPan { track, value });
+                        let commands = tracks
+                            .into_iter()
+                            .map(|track| AppCommand::SetTrackPan { track, value })
+                            .collect::<Vec<_>>();
+                        if let Err(error) = super::edit::apply_recorded_track_params_batch(self, &commands) {
+                            self.editor.status_message =
+                                Some((format!("Command failed: {error:?}"), Instant::now()));
                         }
                     }
                     super::TP_SEND => {
                         let value = (sdv + dx as f32 * 0.01).clamp(0.0, 1.0);
-                        for track in tracks {
-                            apply_command(self, AppCommand::SetTrackSend { track, value });
+                        let commands = tracks
+                            .into_iter()
+                            .map(|track| AppCommand::SetTrackSend { track, value })
+                            .collect::<Vec<_>>();
+                        if let Err(error) = super::edit::apply_recorded_track_params_batch(self, &commands) {
+                            self.editor.status_message =
+                                Some((format!("Command failed: {error:?}"), Instant::now()));
                         }
                     }
                     super::TP_MASTER => {
@@ -1551,8 +1585,13 @@ impl App {
                 if row_idx == super::AC_LIMIT {
                     let value = (drag.start_display_value + dx as f32).max(0.0);
                     let tracks = self.selected_tracks();
-                    for track in tracks {
-                        apply_command(self, AppCommand::SetTrackAccumLimit { track, value });
+                    let commands = tracks
+                        .into_iter()
+                        .map(|track| AppCommand::SetTrackAccumLimit { track, value })
+                        .collect::<Vec<_>>();
+                    if let Err(error) = super::edit::apply_recorded_track_params_batch(self, &commands) {
+                        self.editor.status_message =
+                            Some((format!("Command failed: {error:?}"), Instant::now()));
                     }
                 }
             }

@@ -618,8 +618,9 @@
             :on-click (lambda (info) (param-macro-map fx p))
             body)))
       body)
-    (if (or (rack-macro-owner-definition-for fx p)
-        (param-macro-owner-definition-for fx p))
+    (if (and (not (param-mods-open? fx))
+        (or (rack-macro-owner-definition-for fx p)
+            (param-macro-owner-definition-for fx p)))
       (subtree :key (str key "-macro-owned")
         (box :debug-name "macro-param-owned-wrapper"
           :background-color :transparent

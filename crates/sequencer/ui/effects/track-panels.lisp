@@ -157,9 +157,7 @@
           :border-width (if def-chip 1 0)
           :border-color c)
         (label (fx-plock-chip-label chip)
-          :font-size 8.6 :color (if current :black :dim) :bg :transparent)
-        (label (str (get chip :count))
-          :font-size 8.6 :color (if current :black :dark-gray) :bg :transparent)))))
+          :font-size 8.6 :color (if current :black :dim) :bg :transparent)))))
 
 (def fx-plock-domain-title (domain)
   (if (= domain "inst")
@@ -286,15 +284,6 @@
                  "No locks")
           :font-size 9 :color :dim :bg :transparent)))))
 
-(def fx-step-selected-count ()
-  (len (filter (lambda (selected) selected) SEQ.selected-steps)))
-
-(def fx-step-selection-title ()
-  (let ((count (fx-step-selected-count)))
-    (if (> count 0)
-      (str count " steps")
-      (str "step " (+ (current-step) 1)))))
-
 (def fx-step-param-value (mode)
   (let ((values (seqv-current-param-values mode))
         (step (current-step)))
@@ -314,6 +303,9 @@
         (seqv-param-keyword mode)
         (seqv-step-param-value mode value)))))
 
+(def fx-step-set-sound (label)
+  (fx-step-set-param 3 (seqv-drum-sound-transpose-for-label SEQ.current-track label)))
+
 (def fx-step-param-min (mode)
   (if (= mode 3) -48
     (if (= mode 1) 0
@@ -329,7 +321,7 @@
     (label (seqv-param-name mode) :font-size 8 :color :dim :bg :transparent)
     (number-picker
       :key (str "fx-step-param-" key)
-      :value (fx-step-param-value mode)
+      :value (bind-seq (str "fx-step-value-" key))
       :min (fx-step-param-min mode)
       :max (fx-step-param-max mode)
       :decimals (seqv-param-decimals mode)
@@ -339,6 +331,19 @@
       :on-change (lambda (v) (fx-step-set-param mode v))
       :width width
       :height 1.15)))
+
+(def fx-step-sound-picker ()
+  (v-stack :align :center :gap 0.24
+    (label "Sound" :font-size 8 :color :dim :bg :transparent)
+    (if (> (seqv-drum-sound-count SEQ.current-track) 0)
+      (dropdown
+        :key "fx-step-param-sound"
+        :value (seqv-drum-sound-label-for-transpose SEQ.current-track (fx-step-param-value 3))
+        :options (seqv-drum-sound-labels SEQ.current-track)
+        :on-change (lambda (label) (fx-step-set-sound label))
+        :width 8.8 :height 1.15 :font-size 8.2)
+      (box :key "fx-step-param-sound-empty" :width 8.8 :height 1.15
+        (label "No drum pads" :font-size 8 :color :dim :bg :transparent)))))
 
 (def fx-step-track-badge ()
   (let ((track SEQ.current-track)
@@ -367,10 +372,20 @@
       :border-color :mixer-strip-border    (v-stack :gap 0.55
         (h-stack :gap 0.45 :align :start
           (fx-step-track-badge)
-          ;(label "step" :font-size 10 :color :white :bg :transparent)
-          (label (fx-step-selection-title) :font-size 8 :color :dim :bg :transparent))
+          (h-stack :key "fx-step-selection-summary" :gap 0.15 :align :center
+            (number-label :key "fx-step-cursor-label"
+              :value (bind-seq "fx-step-cursor-number")
+              :prefix "step " :decimals 0 :width 3.3
+              :font-size 8 :color :dim :bg :transparent)
+            (label "·" :font-size 8 :color :dim :bg :transparent)
+            (number-label :key "fx-step-selection-count-label"
+              :value (bind-seq "fx-step-selection-count")
+              :suffix " selected" :decimals 0 :width 5.0
+              :font-size 8 :color :dim :bg :transparent)))
         (h-stack :gap 0.55 :align :center
-          (fx-step-param-picker 3 "transpose" 4.2)
+          (if (seqv-track-drum-rack? SEQ.current-track)
+            (fx-step-sound-picker)
+            (fx-step-param-picker 3 "transpose" 4.2))
           (fx-step-param-picker 0 "velocity" 4.2)
           (fx-step-param-picker 1 "duration" 4.2))))))
 

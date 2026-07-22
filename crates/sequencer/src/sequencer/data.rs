@@ -1150,7 +1150,7 @@ impl ChordData {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChordSnapshot {
     pub steps: Vec<Vec<f32>>,
     pub durations: Vec<Vec<f32>>,

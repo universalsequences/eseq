@@ -57,7 +57,7 @@
               (label "LFO" :font-size 9.0 :width 2.4 :color :dim :bg :transparent)
               (if lfo-amt-p (builtin-fx-filter-mini-percent fx "amt" lfo-amt-p) (box :width 0 :height 0))
               (if lfo-sync-p
-                (dropdown :value (builtin-fx-filter-sync-label lfo-sync-p)
+                (dropdown :value (builtin-fx-filter-sync-label fx lfo-sync-p)
                   :options '("free" "sync")
                   :on-change (lambda (v) (fx-set-effect-value fx lfo-sync-p (if (= v "sync") 1 0)))
                   :plock-active (if (param-plock-active? fx lfo-sync-p) 1 0)

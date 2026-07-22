@@ -119,12 +119,13 @@
   :width 4 :height 3
   :paint-margin 1
   :state (active plocked selected)
+  :animates true
   :bindable (active plocked selected)
   :shader
-  (let ((sel-y (if (= selected 1) (* 0.03 (cos (* 3 itime))) 0)))
+  (let ((sel-y (if (= selected 1) (* 0.03 (cos (* 1 itime))) 0)))
     (sdf/translate 0 sel-y
       (sdf/layer
-        (sdf/fill (+ (* 0.001 (smoothstep 0 0.1 (* y x))) (sdf/fill-rounded-rect -0.01 0.85))
+        (sdf/fill (+ (* (if (= selected 1) (* sel-y 1) 0.001) (smoothstep 0 0.1 (* y x))) (sdf/fill-rounded-rect -0.01 0.85))
           (material
             :lighting
             (lighting :edge-min -0.25 :edge-max 0.15
@@ -146,19 +147,21 @@
 (defwidget tick
   :width 1.5 :height 1.5
   :state (active plocked selected)
+  :bindable (active plocked selected)
+  :animates true
   :shader
-  (let ((sel-y (if (= selected 1) (* 0.1 (cos (* 3 itime))) 0)))
+  (let ((sel-y (if (= selected 1) (* 0.01 (cos (* .03 itime))) 0)))
     (sdf/translate 0 sel-y
       (sdf/layer
-        (sdf/fill (sdf/circle 1)
+        (sdf/fill (sdf/circle (+ 1 (* sel-y 100)))
           (material
             :lighting (lighting :edge-min -0.35 :edge-max 0.5
               :light (vec3 0.0 -1.0 1.5) :shininess 32.0)
             :color
             (* (if (= active 1) 1 0.3)
-               (aqua-color
-                 (rgba 0.3 0.3 0.85 1.0)
-                 (rgba 0.90 0.50 0.82 1.0)))))))))
+              (aqua-color
+                (rgba 0.3 0.3 0.85 1.0)
+                (rgba 0.90 0.50 0.82 1.0)))))))))
 
 (defwidget page-playhead-dot
   :width 0.7 :height 0.7

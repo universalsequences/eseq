@@ -108,3 +108,32 @@ A tuning change is complete only when the exact user action is faster, its visib
 result appears without an unrelated event forcing a redraw, targeted regressions
 pass, and the probe includes the final render work. Report any remaining excluded
 work or uncertainty explicitly.
+
+## Sequencer step-interaction probe
+
+The project-92 probe exercises a 10-track, 64-step sequencer through the real
+mouse/key handlers, host history application, UI invalidations, reactive update,
+tiled-frame construction, and retained Metal update:
+
+```sh
+cargo test -p sequencer --bin metal_seq \
+  tests::project_92_step_interactions_end_to_end_perf \
+  --release -- --exact --ignored --nocapture
+```
+
+It measures one-step selection, Cmd+A, a one-cell drag of 16 selected steps, and
+one paint-drag toggle tick. The checked-in pre-optimization medians are 8.251 ms,
+7.773 ms, 106.412 ms, and 21.020 ms respectively. The probe asserts every median
+remains at least 10x faster than its recorded baseline.
+
+The important ownership boundaries discovered by this probe are:
+
+- gesture-only Lisp variables must not be `defstate`; making cursor/drag scratch
+  state globally reactive flushes unrelated effects on every pointer event;
+- sequencer cells bind to per-track/per-step scalar fields, so selection and
+  paint updates dirty only the affected retained widgets;
+- multi-step mutation uses one batch invalidation and one selection delta rather
+  than rebuilding the visible state of every track;
+- scheduler publication recaptures the complete edited track and shares immutable
+  snapshots for untouched tracks, preserving same-frame step and device-p-lock
+  correctness without recapturing the whole project.

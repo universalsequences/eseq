@@ -1,6 +1,6 @@
 use super::*;
 use eseqlisp::runtime::ReactiveSetResult;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -245,6 +245,18 @@ pub(crate) fn track_step_active_field(track: usize, step: usize) -> String {
     format!("seq-track-step-active-{track}-{step}")
 }
 
+pub(crate) fn drum_lane_step_active_field(track: usize, pad_note: i32, step: usize) -> String {
+    format!("drum-lane-step-active-{track}-{pad_note}-{step}")
+}
+
+pub(crate) fn drum_lane_step_selected_field(track: usize, pad_note: i32, step: usize) -> String {
+    format!("drum-lane-step-selected-{track}-{pad_note}-{step}")
+}
+
+pub(crate) fn drum_lane_step_duration_field(track: usize, pad_note: i32, step: usize) -> String {
+    format!("drum-lane-step-duration-{track}-{pad_note}-{step}")
+}
+
 /// Registry field caching a hex digest of all four per-step binding lanes for
 /// a track. When it is unchanged, the per-step field writes are skipped
 /// entirely; single-step sync paths invalidate it by writing Nil.
@@ -258,6 +270,18 @@ pub(crate) fn track_step_duration_field(track: usize, step: usize) -> String {
 
 pub(crate) fn track_step_plocked_field(track: usize, step: usize) -> String {
     format!("seq-track-step-plocked-{track}-{step}")
+}
+
+pub(crate) fn track_step_plock_kind_field(track: usize, step: usize) -> String {
+    format!("seq-track-step-plock-kind-{track}-{step}")
+}
+
+pub(crate) fn track_step_variant_color_field(
+    track: usize,
+    step: usize,
+    channel: char,
+) -> String {
+    format!("seq-track-step-variant-{channel}-{track}-{step}")
 }
 
 pub(crate) fn track_step_selected_field(track: usize, step: usize) -> String {
@@ -1950,6 +1974,7 @@ fn sync_all_track_step_binding_fields_inner(
         let mut duration_mask = [0u64; WORDS];
         let mut plocked_mask = [0u64; WORDS];
         let mut selected_mask = [0u64; WORDS];
+        let render_values = plock_variant_step_render_values(state, track);
         let mut max_reach = f64::NEG_INFINITY;
         for step in 0..MAX_STEPS {
             let word = step / 64;
@@ -1989,6 +2014,13 @@ fn sync_all_track_step_binding_fields_inner(
             for word in mask.iter() {
                 use std::fmt::Write as _;
                 let _ = write!(rev, "{word:016x}");
+            }
+        }
+        for render in &render_values {
+            use std::fmt::Write as _;
+            let _ = write!(rev, "{:02x}", render.kind);
+            for channel in render.color {
+                let _ = write!(rev, "{:08x}", channel.to_bits());
             }
         }
         let rev_changed = rt
@@ -2047,6 +2079,20 @@ fn sync_all_track_step_binding_fields_inner(
             if let Some(profile) = profile.as_deref_mut() {
                 profile.selected_elapsed += started.expect("profile timer").elapsed();
                 profile.selected_sets.note(result);
+            }
+
+            let render = render_values[step];
+            let _ = rt.set_reactive(
+                "SEQ",
+                &track_step_plock_kind_field(track, step),
+                Value::Number(render.kind as f64),
+            );
+            for (channel, value) in ['r', 'g', 'b'].into_iter().zip(render.color) {
+                let _ = rt.set_reactive(
+                    "SEQ",
+                    &track_step_variant_color_field(track, step, channel),
+                    Value::Number(value as f64),
+                );
             }
 
             // Expanded-step param controls use the seqv-slot-param-* projection fields.
@@ -2265,6 +2311,10 @@ pub(crate) fn rack_slot_value_field(
     param: sequencer::sequencer::RackSlotParam,
 ) -> String {
     format!("track-{track}-rack-slot-{slot_idx}-{}", param.name())
+}
+
+pub(crate) fn rack_slot_selected_field(track: usize, slot_idx: usize) -> String {
+    format!("track-{track}-rack-slot-{slot_idx}-selected")
 }
 
 pub(crate) fn rack_slot_instrument_param_value_field(
@@ -2671,8 +2721,7 @@ pub(crate) fn sync_rack_slot_control_value_field(
     };
     let value = if matches!(
         param,
-        sequencer::sequencer::RackSlotParam::Mute
-            | sequencer::sequencer::RackSlotParam::Solo
+        sequencer::sequencer::RackSlotParam::Mute | sequencer::sequencer::RackSlotParam::Solo
     ) {
         Value::Bool(value > 0.5)
     } else {
@@ -3601,6 +3650,14 @@ fn sync_all_track_sequencer_state_inner(
         "track-transposes",
         build_all_track_param_lists_value(state, app, StepParam::Transpose),
     );
+    rt.set_reactive("SEQ", "track-drum-racks", build_track_drum_racks_value(app));
+    rt.set_reactive(
+        "SEQ",
+        "track-drum-sounds",
+        build_all_track_drum_sounds_value(app),
+    );
+    sync_all_rack_slot_selection_binding_fields(rt, app);
+    sync_all_drum_lane_step_binding_fields(rt, state, app);
     if let Some(profile) = profile.as_deref_mut() {
         profile.track_transposes = started.expect("profile timer").elapsed();
     }
@@ -3681,6 +3738,79 @@ pub(crate) fn build_param_list(
         })
         .collect();
     Value::List(items)
+}
+
+pub(crate) fn fx_step_param_value_field(param: StepParam) -> Option<&'static str> {
+    match param {
+        StepParam::Velocity => Some("fx-step-value-velocity"),
+        StepParam::Duration => Some("fx-step-value-duration"),
+        StepParam::Transpose => Some("fx-step-value-transpose"),
+        _ => None,
+    }
+}
+
+pub(crate) fn fx_step_cursor_from_runtime(rt: &Runtime) -> usize {
+    match rt.global_value("cursor-step") {
+        Some(Value::Number(step)) if step >= 0.0 => step as usize,
+        _ => 0,
+    }
+}
+
+/// Refresh the fixed-size step-parameter strip without rerunning its Lisp
+/// effect. Every consumer is a retained numeric binding, so cursor and
+/// selection changes stay on the targeted widget path.
+pub(crate) fn sync_fx_step_cursor_binding_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+    cursor_step: usize,
+    selected_step: Option<usize>,
+    selected_count: usize,
+) -> bool {
+    if track >= state.active_track_count() {
+        return false;
+    }
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .max(1)
+        .min(MAX_STEPS);
+    let cursor_step = cursor_step.min(num_steps.saturating_sub(1));
+    let parameter_step = selected_step
+        .unwrap_or(cursor_step)
+        .min(num_steps.saturating_sub(1));
+    let mut dirty = rt
+        .set_reactive(
+            "SEQ",
+            "fx-step-cursor-number",
+            Value::Number((cursor_step + 1) as f64),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "fx-step-selection-count",
+            Value::Number(selected_count as f64),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
+            "fx-step-parameter-step",
+            Value::Number(parameter_step as f64),
+        )
+        .effects_dirty;
+    for param in [StepParam::Velocity, StepParam::Duration, StepParam::Transpose] {
+        let field = fx_step_param_value_field(param)
+            .expect("step parameter strip field should exist");
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                field,
+                Value::Number(state.pattern.step_data[track].get(parameter_step, param) as f64),
+            )
+            .effects_dirty;
+    }
+    dirty
 }
 
 pub(crate) fn sync_step_param_lists(rt: &mut Runtime, state: &Arc<SequencerState>, track: usize) {
@@ -3952,6 +4082,13 @@ pub(crate) fn sync_track_name_state(
         "track-instrument-types",
         build_track_instrument_types(app),
     );
+    rt.set_reactive("SEQ", "track-drum-racks", build_track_drum_racks_value(app));
+    rt.set_reactive(
+        "SEQ",
+        "track-drum-sounds",
+        build_all_track_drum_sounds_value(app),
+    );
+    sync_all_rack_slot_selection_binding_fields(rt, app);
     rt.set_reactive(
         "SEQ",
         "track-mod-output-available",
@@ -3962,10 +4099,9 @@ pub(crate) fn sync_track_name_state(
         "track-instrument-run-modes",
         build_track_instrument_run_modes(app),
     );
-    if *track_names == app.tracks {
-        return;
+    if *track_names != app.tracks {
+        *track_names = app.tracks.clone();
     }
-    *track_names = app.tracks.clone();
     rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
     rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
     rt.set_reactive("SEQ", "track-colors", build_track_colors(app));
@@ -4374,6 +4510,14 @@ pub(crate) fn sync_track_mixer_state(
         "track-instrument-types",
         build_track_instrument_types(app),
     );
+    rt.set_reactive("SEQ", "track-drum-racks", build_track_drum_racks_value(app));
+    rt.set_reactive(
+        "SEQ",
+        "track-drum-sounds",
+        build_all_track_drum_sounds_value(app),
+    );
+    sync_all_rack_slot_selection_binding_fields(rt, app);
+    sync_all_drum_lane_step_binding_fields(rt, state, app);
     rt.set_reactive(
         "SEQ",
         "track-mod-output-available",
@@ -4488,6 +4632,8 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-collapsed", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-pattern-cells", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-drum-racks", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-drum-sounds", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mod-output-available", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-bus-sends", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mutes", Value::List(vec![]));
@@ -4725,6 +4871,67 @@ pub(crate) fn read_track_peak_levels(
     pan_ids: &[i32],
 ) -> Vec<f64> {
     read_panner_peak_levels(lg, pan_ids)
+}
+
+pub(crate) fn rack_slot_peak_field(track: usize, slot_idx: usize) -> String {
+    format!("rack-slot-peak-{track}-{slot_idx}")
+}
+
+/// Per-track, per-slot peak levels read from each rack slot's panner node.
+/// Tracks without a rack yield an empty inner vec.
+pub(crate) fn read_rack_slot_peak_levels(
+    lg: sequencer::audiograph::LiveGraphPtr,
+    app: &tui::App,
+) -> Vec<Vec<f64>> {
+    app.graph
+        .track_node_ids
+        .iter()
+        .map(|track_nodes| {
+            track_nodes
+                .rack_slots
+                .iter()
+                .map(|nodes| read_panner_peak_level(lg, nodes.slot_pan_id))
+                .collect()
+        })
+        .collect()
+}
+
+pub(crate) fn sync_rack_slot_peak_field_delta(
+    rt: &mut Runtime,
+    previous: &[Vec<f64>],
+    levels: &[Vec<f64>],
+) -> bool {
+    let mut effects_dirty = false;
+    for (track, slots) in levels.iter().enumerate() {
+        let prev_slots = previous.get(track);
+        for (slot_idx, &level) in slots.iter().enumerate() {
+            let changed = prev_slots
+                .and_then(|prev| prev.get(slot_idx))
+                .is_none_or(|&old_level| old_level != level);
+            if changed {
+                effects_dirty |= rt
+                    .set_reactive(
+                        "SEQ",
+                        &rack_slot_peak_field(track, slot_idx),
+                        Value::Number(level),
+                    )
+                    .effects_dirty;
+            }
+        }
+        // Zero out slots that disappeared so stale meters don't stick.
+        if let Some(prev) = prev_slots {
+            for slot_idx in slots.len()..prev.len() {
+                effects_dirty |= rt
+                    .set_reactive(
+                        "SEQ",
+                        &rack_slot_peak_field(track, slot_idx),
+                        Value::Number(0.0),
+                    )
+                    .effects_dirty;
+            }
+        }
+    }
+    effects_dirty
 }
 
 pub(crate) fn read_bus_peak_levels(
@@ -5104,6 +5311,17 @@ pub(crate) fn sync_track_topology_state(
         "record-armed",
         build_record_armed_value(&record_armed.lock().unwrap()),
     );
+    let (selected_step, selected_step_count) = {
+        let selected = selected_steps.lock().unwrap();
+        (selected.iter().copied().min(), selected.len())
+    };
+    rt.set_reactive(
+        "SEQ",
+        "fx-step-selection-count",
+        Value::Number(selected_step_count as f64),
+    );
+    rt.set_reactive("SEQ", "fx-step-cursor-number", Value::Number(1.0));
+    rt.set_reactive("SEQ", "fx-step-parameter-step", Value::Number(0.0));
 
     if app.tracks.is_empty() {
         sync_playhead_fields(rt, 0, 1);
@@ -5141,6 +5359,8 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "track-durations", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-auxas", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-transposes", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-drum-racks", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-drum-sounds", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-pans", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-syncs", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-delays", Value::List(vec![]));
@@ -5152,10 +5372,27 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "track-ids", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-plocks", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-plock-variants", Value::List(vec![]));
+        for param in [StepParam::Velocity, StepParam::Duration, StepParam::Transpose] {
+            rt.set_reactive(
+                "SEQ",
+                fx_step_param_value_field(param)
+                    .expect("step parameter strip field should exist"),
+                Value::Number(0.0),
+            );
+        }
         return;
     }
 
     sync_all_track_sequencer_state(rt, state, app, current_track_idx, selected_steps);
+    let cursor_step = fx_step_cursor_from_runtime(rt);
+    sync_fx_step_cursor_binding_fields(
+        rt,
+        state,
+        current_track_idx,
+        cursor_step,
+        selected_step,
+        selected_step_count,
+    );
 
     sync_playhead_fields(
         rt,
@@ -5187,6 +5424,13 @@ pub(crate) fn sync_track_topology_state(
         "SEQ",
         "instrument-panel",
         build_instrument_panel_value(app, current_track_idx, selected_steps),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "fx-step-display-step",
+        displayed_plock_step(state, current_track_idx, selected_plock_step(selected_steps))
+            .map(|step| Value::Number(step as f64))
+            .unwrap_or(Value::Number(-1.0)),
     );
     sync_fx_param_binding_fields(rt, app, state, current_track_idx, selected_steps);
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
@@ -7920,7 +8164,7 @@ pub(crate) fn build_instrument_panel_value(
     );
     def_map.insert(
         "display".to_string(),
-        Rc::new(RefCell::new(Value::String("def".to_string()))),
+        Rc::new(RefCell::new(Value::String("base".to_string()))),
     );
     def_map.insert(
         "count".to_string(),
@@ -8399,6 +8643,347 @@ fn drum_rack_pad_bank_label(bank_start: i32) -> String {
     )
 }
 
+fn drum_rack_uses_pad_notes(app: &tui::App, track: usize) -> bool {
+    app.state
+        .pattern
+        .rack_tracks
+        .lock()
+        .unwrap()
+        .get(track)
+        .and_then(Option::as_ref)
+        .is_some_and(|rack| rack.routing == sequencer::sequencer::RackRouting::ByPitch)
+}
+
+pub(crate) fn build_track_drum_racks_value(app: &tui::App) -> Value {
+    Value::List(
+        (0..app.tracks.len())
+            .map(|track| value_cell(Value::Bool(drum_rack_uses_pad_notes(app, track))))
+            .collect(),
+    )
+}
+
+/// The sequencer treats a drum-rack transpose as the pad note that routes to
+/// a slot. Keep this display mapping in one place so the pad grid, expanded
+/// sequencer, compact sequencer, and step inspector name the same sound.
+pub(crate) struct DrumRackSoundOption {
+    pub(crate) pad_note: i32,
+    slot_idx: usize,
+    name: String,
+    pad_label: String,
+    label: String,
+    short_label: String,
+}
+
+fn drum_rack_sound_short_label(name: &str) -> String {
+    let letters = name
+        .chars()
+        .filter(|character| character.is_alphabetic())
+        .take(3)
+        .collect::<String>();
+    if letters.is_empty() {
+        name.chars()
+            .filter(|character| !character.is_whitespace())
+            .take(3)
+            .collect()
+    } else {
+        letters
+    }
+}
+
+pub(crate) fn drum_rack_sound_options(app: &tui::App, track: usize) -> Vec<DrumRackSoundOption> {
+    let rack = app
+        .state
+        .pattern
+        .rack_tracks
+        .lock()
+        .unwrap()
+        .get(track)
+        .cloned()
+        .flatten();
+    let Some(rack) = rack else {
+        return Vec::new();
+    };
+    if rack.routing != sequencer::sequencer::RackRouting::ByPitch {
+        return Vec::new();
+    }
+    let mut options = rack
+        .slots
+        .iter()
+        .enumerate()
+        .filter_map(|(slot_idx, slot)| {
+            let pad_note = slot.pad_note?;
+            let name = instrument_display_name(&rack_slot_raw_name(app, slot_idx, slot));
+            let pad_label = drum_rack_pad_label(pad_note);
+            Some(DrumRackSoundOption {
+                pad_note,
+                slot_idx,
+                label: format!("{pad_label} · {name}"),
+                short_label: drum_rack_sound_short_label(&name),
+                name,
+                pad_label,
+            })
+        })
+        .collect::<Vec<_>>();
+    options.sort_by_key(|sound| sound.pad_note);
+    options
+}
+
+fn drum_rack_sound_value(track: usize, option: DrumRackSoundOption) -> Rc<RefCell<Value>> {
+    let mut value = HashMap::new();
+    value.insert(
+        "transpose".to_string(),
+        value_cell(Value::Number(option.pad_note as f64)),
+    );
+    value.insert(
+        "slot-idx".to_string(),
+        value_cell(Value::Number(option.slot_idx as f64)),
+    );
+    insert_string_prop(
+        &mut value,
+        "gain-field",
+        rack_slot_value_field(
+            track,
+            option.slot_idx,
+            sequencer::sequencer::RackSlotParam::Gain,
+        ),
+    );
+    insert_string_prop(
+        &mut value,
+        "mute-field",
+        rack_slot_value_field(
+            track,
+            option.slot_idx,
+            sequencer::sequencer::RackSlotParam::Mute,
+        ),
+    );
+    insert_string_prop(
+        &mut value,
+        "solo-field",
+        rack_slot_value_field(
+            track,
+            option.slot_idx,
+            sequencer::sequencer::RackSlotParam::Solo,
+        ),
+    );
+    insert_string_prop(
+        &mut value,
+        "peak-field",
+        rack_slot_peak_field(track, option.slot_idx),
+    );
+    insert_string_prop(
+        &mut value,
+        "selected-field",
+        rack_slot_selected_field(track, option.slot_idx),
+    );
+    insert_string_prop(&mut value, "name", option.name);
+    insert_string_prop(&mut value, "pad-label", option.pad_label);
+    insert_string_prop(&mut value, "label", option.label);
+    insert_string_prop(&mut value, "short-label", option.short_label);
+    Rc::new(RefCell::new(Value::Map(value)))
+}
+
+pub(crate) fn build_all_track_drum_sounds_value(app: &tui::App) -> Value {
+    Value::List(
+        (0..app.tracks.len())
+            .map(|track| {
+                let sounds = drum_rack_sound_options(app, track)
+                    .into_iter()
+                    .map(|option| drum_rack_sound_value(track, option))
+                    .collect();
+                value_cell(Value::List(sounds))
+            })
+            .collect(),
+    )
+}
+
+/// Publishes the rack's global slot selection for drum-lane widgets without
+/// rebuilding the sequencer tree. The selected identity for a drum rack is a
+/// pad note, so resolve it through the rack snapshot before lighting a slot.
+pub(crate) fn sync_all_rack_slot_selection_binding_fields(
+    rt: &mut Runtime,
+    app: &tui::App,
+) -> bool {
+    let racks = app.state.pattern.rack_tracks.lock().unwrap();
+    let mut dirty = false;
+    for (track, rack) in racks.iter().enumerate() {
+        let Some(rack) = rack.as_ref() else {
+            continue;
+        };
+        let selected_slot = app.selected_rack_slot_index_for_rack(track, rack);
+        for slot_idx in 0..rack.slots.len() {
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &rack_slot_selected_field(track, slot_idx),
+                    Value::Bool(Some(slot_idx) == selected_slot),
+                )
+                .effects_dirty;
+        }
+    }
+    dirty
+}
+
+pub(crate) fn drum_lane_step_active(
+    state: &Arc<SequencerState>,
+    track: usize,
+    pad_note: i32,
+    step: usize,
+) -> bool {
+    if track >= state.pattern.patterns.len()
+        || step >= MAX_STEPS
+        || !state.pattern.patterns[track].is_active(step)
+    {
+        return false;
+    }
+    let count = state.pattern.chord_data[track].count(step);
+    if count == 0 {
+        return state.pattern.step_data[track]
+            .get(step, StepParam::Transpose)
+            .round() as i32
+            == pad_note;
+    }
+    (0..count)
+        .any(|voice| state.pattern.chord_data[track].get(step, voice).round() as i32 == pad_note)
+}
+
+pub(crate) fn drum_lane_step_duration_covered(
+    state: &Arc<SequencerState>,
+    track: usize,
+    pad_note: i32,
+    target_step: usize,
+) -> bool {
+    if track >= state.pattern.patterns.len() || target_step >= MAX_STEPS {
+        return false;
+    }
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .min(MAX_STEPS);
+    target_step < num_steps
+        && (0..=target_step).any(|source_step| {
+            state
+                .drum_lane_step_duration(track, source_step, pad_note)
+                .is_some_and(|duration| duration > (target_step - source_step) as f32)
+        })
+}
+
+pub(crate) fn sync_drum_lane_step_binding_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &tui::App,
+    track: usize,
+    only_step: Option<usize>,
+) -> bool {
+    if track >= app.tracks.len() {
+        return false;
+    }
+    let sounds = drum_rack_sound_options(app, track);
+    if sounds.is_empty() {
+        return false;
+    }
+    let mut registered_fields = match rt.global_value("SEQ") {
+        Some(Value::Map(fields)) => fields.keys().cloned().collect::<HashSet<_>>(),
+        _ => HashSet::new(),
+    };
+    let steps = only_step.map_or(0..MAX_STEPS, |step| {
+        step..step.saturating_add(1).min(MAX_STEPS)
+    });
+    let mut dirty = false;
+    for sound in sounds {
+        for step in steps.clone() {
+            let selected_field = drum_lane_step_selected_field(track, sound.pad_note, step);
+            if registered_fields.insert(selected_field.clone()) {
+                dirty |= rt
+                    .set_reactive("SEQ", &selected_field, Value::Bool(false))
+                    .effects_dirty;
+            }
+            let duration_field = drum_lane_step_duration_field(track, sound.pad_note, step);
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &duration_field,
+                    Value::Bool(drum_lane_step_duration_covered(
+                        state,
+                        track,
+                        sound.pad_note,
+                        step,
+                    )),
+                )
+                .effects_dirty;
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &drum_lane_step_active_field(track, sound.pad_note, step),
+                    Value::Bool(drum_lane_step_active(state, track, sound.pad_note, step)),
+                )
+                .effects_dirty;
+        }
+    }
+    dirty
+}
+
+pub(crate) fn sync_drum_lane_step_binding_fields_for_steps(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &tui::App,
+    track: usize,
+    steps: &[usize],
+) -> bool {
+    if track >= app.tracks.len() || steps.is_empty() {
+        return false;
+    }
+    let sounds = drum_rack_sound_options(app, track);
+    if sounds.is_empty() {
+        return false;
+    }
+    let mut registered_fields = match rt.global_value("SEQ") {
+        Some(Value::Map(fields)) => fields.keys().cloned().collect::<HashSet<_>>(),
+        _ => HashSet::new(),
+    };
+    let mut dirty = false;
+    for sound in sounds {
+        for &step in steps.iter().filter(|step| **step < MAX_STEPS) {
+            let selected_field = drum_lane_step_selected_field(track, sound.pad_note, step);
+            if registered_fields.insert(selected_field.clone()) {
+                dirty |= rt
+                    .set_reactive("SEQ", &selected_field, Value::Bool(false))
+                    .effects_dirty;
+            }
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &drum_lane_step_duration_field(track, sound.pad_note, step),
+                    Value::Bool(drum_lane_step_duration_covered(
+                        state,
+                        track,
+                        sound.pad_note,
+                        step,
+                    )),
+                )
+                .effects_dirty;
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &drum_lane_step_active_field(track, sound.pad_note, step),
+                    Value::Bool(drum_lane_step_active(state, track, sound.pad_note, step)),
+                )
+                .effects_dirty;
+        }
+    }
+    dirty
+}
+
+pub(crate) fn sync_all_drum_lane_step_binding_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &tui::App,
+) -> bool {
+    let mut dirty = false;
+    for track in 0..app.tracks.len() {
+        dirty |= sync_drum_lane_step_binding_fields(rt, state, app, track, None);
+    }
+    dirty
+}
+
 fn drum_rack_pad_bank_value(bank_start: i32, selected_bank_start: i32) -> Rc<RefCell<Value>> {
     let mut bank_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
     bank_map.insert(
@@ -8493,7 +9078,9 @@ struct RackUiModMetadata {
     source_param_idx: Option<usize>,
     depth_param_idx: usize,
     source_slot: f32,
+    source_value_field: Option<String>,
     depth_value: f32,
+    depth_value_field: String,
     depth_min: f32,
     depth_max: f32,
     depth_unit: Option<String>,
@@ -8522,10 +9109,14 @@ fn insert_rack_mod_metadata(
                 "source-slot".to_string(),
                 value_cell(Value::Number(meta.source_slot as f64)),
             );
+            if let Some(field) = &meta.source_value_field {
+                insert_string_prop(&mut target, "source-value-field", field);
+            }
             target.insert(
                 "depth".to_string(),
                 value_cell(Value::Number(meta.depth_value as f64)),
             );
+            insert_string_prop(&mut target, "depth-value-field", &meta.depth_value_field);
             target.insert(
                 "depth-min".to_string(),
                 value_cell(Value::Number(meta.depth_min as f64)),
@@ -8736,7 +9327,22 @@ fn build_selected_rack_slot_instrument_value(
                                 .map(|source_desc| source_desc.stored_to_user(source_current))
                         })
                         .unwrap_or(source_current),
+                    source_value_field: target.source_param_idx.map(|source_param_idx| {
+                        let source_desc = &desc.params[source_param_idx];
+                        rack_slot_instrument_param_value_field(
+                            track,
+                            slot_idx,
+                            source_param_idx,
+                            &source_desc.name,
+                        )
+                    }),
                     depth_value: depth_desc.stored_to_user(depth_current),
+                    depth_value_field: rack_slot_instrument_param_value_field(
+                        track,
+                        slot_idx,
+                        target.depth_param_idx,
+                        &depth_desc.name,
+                    ),
                     depth_min,
                     depth_max,
                     depth_unit: target.depth_unit.clone(),
@@ -9094,7 +9700,24 @@ fn build_rack_slot_effect_value(
                                 .map(|source| source.stored_to_user(source_current))
                         })
                         .unwrap_or(source_current),
+                    source_value_field: target.source_param_idx.map(|source_idx| {
+                        let source = &descriptor.params[source_idx];
+                        rack_slot_effect_param_value_field(
+                            track,
+                            rack_slot,
+                            effect_slot,
+                            source_idx,
+                            &source.name,
+                        )
+                    }),
                     depth_value: depth_desc.stored_to_user(depth_current),
+                    depth_value_field: rack_slot_effect_param_value_field(
+                        track,
+                        rack_slot,
+                        effect_slot,
+                        target.depth_param_idx,
+                        &depth_desc.name,
+                    ),
                     depth_min: target.depth_min,
                     depth_max: target.depth_max,
                     depth_unit: target.depth_unit.clone(),
@@ -10243,39 +10866,49 @@ pub(crate) fn load_instrument_preset_into_track(
         .cloned()
         .ok_or_else(|| "Instrument descriptor unavailable".to_string())?;
 
-    {
-        let slot = &app.state.pattern.instrument_slots[track];
-        for (param_idx, param) in desc.params.iter().enumerate() {
-            let value = preset
-                .params
-                .get(&param.name)
-                .copied()
-                .unwrap_or(param.default);
-            let clamped = param.clamp(value);
-            slot.defaults.set(param_idx, clamped);
-            app.send_instrument_param(track, param_idx, clamped);
-        }
-        sequencer::effects::restore_key_locks_by_param_name(slot, &desc, &preset.key_locks);
-    }
-
-    app.state.pattern.instrument_base_note_offsets[track]
-        .store(preset.base_note_offset.to_bits(), Ordering::Relaxed);
-    app.state.schedule_mod_resync();
-    app.state.publish_scheduler_snapshot();
     let engine_id = app.graph.track_engine_ids.get(track).and_then(|id| *id);
-    if let Some(meta) = app
-        .state
-        .pattern
-        .track_sound_state
-        .lock()
-        .unwrap()
-        .get_mut(track)
-    {
-        meta.engine_id = engine_id;
-        meta.loaded_preset = Some(preset.name.clone());
-        meta.dirty = false;
-    }
-    Ok(())
+    let preset_label = preset.name.clone();
+    sequencer::tui::edit::apply_recorded_instrument_values_mutation(
+        app,
+        track,
+        format!("Load preset '{preset_label}'"),
+        move |app| {
+            let slot = &app.state.pattern.instrument_slots[track];
+            for (param_idx, param) in desc.params.iter().enumerate() {
+                let value = preset
+                    .params
+                    .get(&param.name)
+                    .copied()
+                    .unwrap_or(param.default);
+                let clamped = param.clamp(value);
+                slot.defaults.set(param_idx, clamped);
+                app.send_instrument_param(track, param_idx, clamped);
+            }
+            sequencer::effects::restore_key_locks_by_param_name(
+                slot,
+                &desc,
+                &preset.key_locks,
+            );
+            app.state.pattern.instrument_base_note_offsets[track]
+                .store(preset.base_note_offset.to_bits(), Ordering::Relaxed);
+            app.state.schedule_mod_resync();
+            if let Some(meta) = app
+                .state
+                .pattern
+                .track_sound_state
+                .lock()
+                .unwrap()
+                .get_mut(track)
+            {
+                meta.engine_id = engine_id;
+                meta.loaded_preset = Some(preset.name.clone());
+                meta.dirty = false;
+            }
+            Ok(())
+        },
+    )
+    .map(|_| ())
+    .map_err(|error| format!("{error:?}"))
 }
 
 /// Extract the :path string from a host-command payload dict.
@@ -11647,6 +12280,10 @@ pub(crate) fn build_track_plock_variants_value_with_preview(
         Rc::new(RefCell::new(Value::String("def".to_string()))),
     );
     def_map.insert(
+        "display".to_string(),
+        Rc::new(RefCell::new(Value::String("base".to_string()))),
+    );
+    def_map.insert(
         "count".to_string(),
         Rc::new(RefCell::new(Value::Number(0.0))),
     );
@@ -11861,12 +12498,12 @@ pub(crate) fn build_step_has_plocks_from_mask(mask: &[u64; MAX_STEPS / 64]) -> V
 }
 
 #[derive(Clone, Copy, Debug)]
-struct PlockVariantStepRender {
-    kind: u8,
-    color: [f32; 3],
+pub(crate) struct PlockVariantStepRender {
+    pub(crate) kind: u8,
+    pub(crate) color: [f32; 3],
 }
 
-fn plock_variant_step_render_values(
+pub(crate) fn plock_variant_step_render_values(
     state: &Arc<SequencerState>,
     track: usize,
 ) -> Vec<PlockVariantStepRender> {
@@ -12718,6 +13355,30 @@ mod tests {
     }
 
     #[test]
+    fn tick_widget_accepts_reactive_selected_binding() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("APP", vec![("selected", Value::Bool(false))], true);
+
+        let value = runtime
+            .eval_str(
+                r#"
+                  (load "ui/materials.lisp")
+                  (tick :active 1 :plocked 0 :selected (bind "APP" "selected"))
+                "#,
+            )
+            .expect("load materials and construct tick")
+            .expect("tick should return a widget");
+
+        let Value::Map(map) = value else {
+            panic!("tick should return a widget map, got {value:?}");
+        };
+        assert!(matches!(
+            map.get("selected").map(|value| value.borrow().clone()),
+            Some(Value::ReactiveRef { .. })
+        ));
+    }
+
+    #[test]
     fn metal_seq_core_lisp_files_parse() {
         for path in [
             "ui/themes/mac-osx-dark.lisp",
@@ -12857,7 +13518,7 @@ mod tests {
     fn load_keyboard_step_selection_source(runtime: &mut Runtime) {
         let src = std::fs::read_to_string("ui/main.lisp").expect("read ui/main.lisp");
         let start = src
-            .find("(defstate step-key-select-anchor")
+            .find("(def step-key-select-anchor")
             .expect("keyboard step selection source should define anchor");
         let end = src
             .find("(def cursor-toggle")
@@ -12904,6 +13565,30 @@ mod tests {
                     .unwrap()
                     .iter()
                     .any(|selected| *selected),
+            ))
+        });
+
+        let selected_for_lookup = selected.clone();
+        runtime.register_native("seq-step-selected?", move |args, _ctx| {
+            let Some(Value::Number(step)) = args.first() else {
+                return Err("seq-step-selected?: expected step".into());
+            };
+            Ok(Value::Bool(
+                selected_for_lookup.lock().unwrap()[*step as usize],
+            ))
+        });
+
+        let selected_for_indexes = selected.clone();
+        runtime.register_native("seq-selected-step-indexes-native", move |_args, _ctx| {
+            Ok(Value::List(
+                selected_for_indexes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, selected)| **selected)
+                    .map(|(step, _)| Rc::new(RefCell::new(Value::Number(step as f64))))
+                    .collect(),
             ))
         });
 
@@ -12996,10 +13681,12 @@ mod tests {
         let clock = Arc::new(Mutex::new(0.0f64));
         let mut runtime = Runtime::new();
         runtime
-            .eval_str("(defstate cursor-step 0)")
-            .expect("define cursor step");
+            .eval_str(
+                "(do (def cursor-step 0) (def set-cursor-step-value (step) (set! cursor-step step)))",
+            )
+            .expect("define cursor step helpers");
         runtime
-            .eval_str("(defstate step-key-select-anchor nil)")
+            .eval_str("(def step-key-select-anchor nil)")
             .expect("define keyboard anchor");
         runtime
             .eval_str(&format!(
@@ -13041,8 +13728,10 @@ mod tests {
         let toggles = Arc::new(Mutex::new(Vec::new()));
         let mut runtime = Runtime::new();
         runtime
-            .eval_str("(defstate cursor-step 0)")
-            .expect("define cursor step");
+            .eval_str(
+                "(do (def cursor-step 0) (def set-cursor-step-value (step) (set! cursor-step step)))",
+            )
+            .expect("define cursor step helpers");
         runtime
             .eval_str(
                 "(def SEQ (dict :current-track 1 :selected-steps '(false false false false)))",
@@ -16168,7 +16857,7 @@ mod tests {
 
     #[test]
     fn metal_seq_browser_instrument_activation_adds_for_non_swappable_tracks() {
-        for track_type in ["rack", "modulator"] {
+        for track_type in ["modulator"] {
             let mut editor = browser_editor_on_instrument_tab();
             editor
                 .runtime_mut()
@@ -16204,38 +16893,42 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_browser_saved_instrument_activation_replaces_a_sampler_track() {
-        let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_string_list(&["sampler"]),
-        );
+    fn metal_seq_browser_saved_instrument_activation_replaces_flat_or_rack_track() {
+        for track_type in ["sampler", "rack"] {
+            let mut editor = browser_editor_on_instrument_tab();
+            editor
+                .runtime_mut()
+                .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                "track-instrument-types",
+                test_string_list(&[track_type]),
+            );
 
-        editor
-            .runtime_mut()
-            .eval_str(
-                r#"(sbrowser-select-create-item
-                    (dict :kind "instrument" :name "core/drift" :label "Drift"))"#,
-            )
-            .expect("activate saved instrument from a sampler track");
+            editor
+                .runtime_mut()
+                .eval_str(
+                    r#"(sbrowser-select-create-item
+                        (dict :kind "instrument" :name "core/drift" :label "Drift"))"#,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("activate saved instrument from {track_type} track: {error:?}")
+                });
 
-        let commands = editor.drain_host_commands();
-        assert!(matches!(
-            commands.as_slice(),
-            [eseqlisp::host::HostCommand::Custom { name, payload }]
-                if name == "swap-track-instrument"
-                    && matches!(payload, Value::Map(map)
-                        if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(0.0))
-                            && map.get("name").is_some_and(|value| *value.borrow() == Value::String("core/drift".to_string())))
-        ));
-        assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
-            Some(Value::String("instruments".to_string()))
-        );
+            let commands = editor.drain_host_commands();
+            assert!(matches!(
+                commands.as_slice(),
+                [eseqlisp::host::HostCommand::Custom { name, payload }]
+                    if name == "swap-track-instrument"
+                        && matches!(payload, Value::Map(map)
+                            if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(0.0))
+                                && map.get("name").is_some_and(|value| *value.borrow() == Value::String("core/drift".to_string())))
+            ));
+            assert_eq!(
+                editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
+                Some(Value::String("instruments".to_string()))
+            );
+        }
     }
 
     #[test]
@@ -19354,7 +20047,46 @@ mod tests {
         app.tracks = (0..state.active_track_count())
             .map(|track| format!("Track {}", track + 1))
             .collect();
+        app.track_registry = sequencer::sequencer::TrackRegistry::for_legacy_track_count(
+            state.active_track_count(),
+        )
+        .unwrap();
         app
+    }
+
+    #[test]
+    fn track_name_sync_republishes_restored_topology_when_mirror_already_matches() {
+        let state = Arc::new(SequencerState::new(2, vec![]));
+        let app = test_app_for_track_visual_state(state);
+        let mut mirror = app.tracks.clone();
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("track-ids", Value::List(vec![])),
+                ("track-instrument-types", Value::List(vec![])),
+                ("track-drum-racks", Value::List(vec![])),
+                ("track-drum-sounds", Value::List(vec![])),
+                ("track-mod-output-available", Value::List(vec![])),
+                ("track-instrument-run-modes", Value::List(vec![])),
+                ("num-tracks", Value::Number(1.0)),
+                ("track-names", build_track_names(&["Track 1".to_string()])),
+                ("track-colors", Value::List(vec![])),
+                ("track-collapsed", Value::List(vec![])),
+            ],
+            false,
+        );
+
+        sync_track_name_state(&mut runtime, &mut mirror, &app);
+
+        assert_eq!(
+            runtime.eval_str("SEQ.num-tracks").unwrap(),
+            Some(Value::Number(2.0)),
+        );
+        assert_eq!(
+            runtime.eval_str("(len SEQ.track-names)").unwrap(),
+            Some(Value::Number(2.0)),
+        );
     }
 
     fn value_list_maps(value: &Value) -> Vec<HashMap<String, Rc<RefCell<Value>>>> {
@@ -20298,6 +21030,8 @@ mod tests {
             keyboard_tx,
         );
         app.tracks = vec!["Track 1".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.instrument_descriptors = vec![desc];
         app
     }
@@ -21556,6 +22290,8 @@ mod tests {
             keyboard_tx,
         );
         app.tracks = vec!["Instrument Rack".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.track_instrument_types = vec![sequencer::sequencer::InstrumentType::Rack];
         app.graph.instrument_descriptors =
             vec![sequencer::effects::EffectDescriptor::empty_custom_slot()];
@@ -21630,6 +22366,8 @@ mod tests {
             keyboard_tx,
         );
         app.tracks = vec!["Drum Rack".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.track_instrument_types = vec![sequencer::sequencer::InstrumentType::Rack];
         app.graph.instrument_descriptors =
             vec![sequencer::effects::EffectDescriptor::empty_custom_slot()];
@@ -21826,12 +22564,13 @@ mod tests {
     #[test]
     fn rack_sampler_waveform_selection_tracks_live_start_and_end_values() {
         let app = test_app_with_rack_panel();
-        assert!(app
-            .state
-            .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
-                slot.instrument_slot.defaults[2] = 0.57;
-                slot.instrument_slot.defaults[3] = 0.82;
-            },));
+        assert!(
+            app.state
+                .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
+                    slot.instrument_slot.defaults[2] = 0.57;
+                    slot.instrument_slot.defaults[3] = 0.82;
+                },)
+        );
         let selected = Arc::new(Mutex::new(HashSet::new()));
         let panel = build_instrument_panel_value(&app, 0, &selected);
         let Value::List(racks) = &panel else {
@@ -21873,11 +22612,12 @@ mod tests {
             Ok(Some(Value::Number(0.82_f32 as f64)))
         );
 
-        assert!(app
-            .state
-            .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| slot
-                .instrument_slot
-                .defaults[2] = 0.25,));
+        assert!(
+            app.state
+                .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| slot
+                    .instrument_slot
+                    .defaults[2] = 0.25,)
+        );
         sync_rack_slot_instrument_param_value_field(&mut runtime, &app, 0, 0, 2, None);
         assert_eq!(
             runtime.eval_str(&format!("SEQ.{start_field}")),
@@ -22233,14 +22973,31 @@ mod tests {
             }
         }
 
-        let app = test_app_with_rack_panel();
+        let mut app = test_app_with_rack_panel();
         let selected = Arc::new(Mutex::new(HashSet::new()));
-        let rack_panel = build_instrument_panel_value(&app, 0, &selected);
-        let speed_idx = sequencer::effects::EffectDescriptor::builtin_sampler()
+        let sampler_descriptor = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let speed_idx = sampler_descriptor
             .params
             .iter()
             .position(|param| param.name == "speed")
             .expect("sampler descriptor should expose speed");
+        let speed_param = &sampler_descriptor.params[speed_idx];
+        app.map_rack_macro(
+            0,
+            sequencer::sequencer::RackMacroId::from_index(0).expect("macro 1"),
+            sequencer::sequencer::RackMacroMapping {
+                target: sequencer::sequencer::RackMacroTarget::SlotInstrumentParam {
+                    slot: 0,
+                    param: "speed".to_string(),
+                    param_index: speed_idx,
+                },
+                range_min: speed_param.min,
+                range_max: speed_param.max,
+                curve: sequencer::sequencer::RackMacroCurve::Linear,
+            },
+        )
+        .expect("map rack macro to sampler speed");
+        let rack_panel = build_instrument_panel_value(&app, 0, &selected);
         let speed_wrapper_key = format!("sampler-param-{speed_idx}-mod-wrapper");
         let speed_depth_key = format!("sampler-param-{speed_idx}-mod-depth");
         let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
@@ -22402,6 +23159,55 @@ mod tests {
             source_idx, depth_idx,
             "rack modulation source and depth should be distinct params"
         );
+        let depth_param = &sampler_descriptor.params[depth_idx];
+        let depth_value_field =
+            rack_slot_instrument_param_value_field(0, 0, depth_idx, &depth_param.name);
+        let depth_target_expression = format!(
+            r#"
+            (let ((p (nth
+                       (filter |candidate| (= (get candidate :idx) {speed_idx})
+                         (get
+                           (get (nth SEQ.instrument-panel 0) :selected-instrument)
+                           :synth))
+                       0)))
+              (nth
+                (filter |target| (= (get target :depth-idx) {depth_idx})
+                  (get p :mod-targets))
+                0))
+            "#
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str(&format!(
+                "(get {depth_target_expression} :depth-value-field)"
+            )),
+            Ok(Some(Value::String(depth_value_field.clone()))),
+            "rack modulation depth must observe the rack-slot reactive field"
+        );
+
+        let updated_depth = 0.375_f32;
+        let updated_depth_stored =
+            depth_param.clamp(depth_param.user_input_to_stored(updated_depth));
+        assert!(
+            app.state
+                .update_rack_slot_in_all_pattern_snapshots(0, 0, |slot| {
+                    slot.instrument_slot.defaults[depth_idx] = updated_depth_stored;
+                })
+        );
+        sync_rack_slot_instrument_param_value_field(
+            editor.runtime_mut(),
+            &app,
+            0,
+            0,
+            depth_idx,
+            None,
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str(&format!(
+                "(reactive-value (instrument-mod-target-depth {depth_target_expression}))"
+            )),
+            Ok(Some(Value::Number(updated_depth as f64))),
+            "rack custom-UI modulation knobs must redraw from the targeted rack-slot sync"
+        );
 
         editor
             .runtime_mut()
@@ -22442,6 +23248,53 @@ mod tests {
                 panic!("expected set-rack-slot-instrument-param-option host command, got {other:?}")
             }
         }
+
+        let custom_wrapper_probe = format!(
+            r#"
+            (do
+              (set! custom-ui-current-kind "instrument")
+              (let ((p (nth
+                         (filter |candidate| (= (get candidate :idx) {speed_idx})
+                           (get
+                             (get (nth SEQ.instrument-panel 0) :selected-instrument)
+                             :synth))
+                         0)))
+                (not
+                  (string-contains?
+                    (str
+                      (custom-ui-param-mod-wrapper p "rack-custom-mod-wrapper"
+                        (dict :editable-depth true)))
+                    "macro-param-owned-wrapper"))))
+            "#
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str(&custom_wrapper_probe),
+            Ok(Some(Value::Bool(true))),
+            "rack custom-UI controls must not retain the macro-owned pointer guard in modulation-depth mode"
+        );
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                r#"
+                (let ((p (nth
+                           (filter |candidate| (= (get candidate :idx) {speed_idx})
+                             (get
+                               (get (nth SEQ.instrument-panel 0) :selected-instrument)
+                               :synth))
+                           0)))
+                  (param-set-control-value false p 0.5))
+                "#
+            ))
+            .expect("edit rack custom-UI modulation depth");
+        let custom_commands = editor.drain_host_commands();
+        assert!(
+            custom_commands.iter().any(|command| matches!(
+                command,
+                eseqlisp::host::HostCommand::Custom { name, .. }
+                    if name == "set-rack-slot-instrument-param"
+            )),
+            "rack custom-UI depth edit should reach rack-slot parameter routing: {custom_commands:?}"
+        );
     }
 
     #[test]
@@ -23710,6 +24563,116 @@ mod tests {
     }
 
     #[test]
+    fn drum_rack_slot_selection_uses_pad_note_identity() {
+        let mut app = test_app_with_drum_rack_panel(0);
+        let mut rack = app
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(0)
+            .cloned()
+            .flatten()
+            .expect("drum rack fixture");
+        let mut second_slot = rack.slots[0].clone();
+        second_slot.pad_note = Some(12);
+        rack.slots.push(second_slot);
+        app.state
+            .set_rack_track_for_all_pattern_snapshots(0, rack.clone());
+
+        assert!(app.select_rack_slot(0, &rack, 1));
+        assert_eq!(app.rack_selected_pad_note(0), 12);
+        assert_eq!(
+            app.selected_rack_slot_index_for_rack(0, &rack),
+            Some(1),
+            "selecting slot 1 must resolve the C5 pad, not slot index 1 as a pad note"
+        );
+    }
+
+    #[test]
+    fn drum_rack_sound_values_project_hits_into_slot_lanes() {
+        let mut app = test_app_with_drum_rack_panel(0);
+        app.set_rack_selected_pad_note(0, 0);
+        app.state.pattern.chord_data[0].add_note_with_duration(3, 0.0, 1.0);
+        app.state.pattern.patterns[0].set_step_active(3, true);
+        assert_eq!(
+            app.state.set_drum_lane_step_duration(0, 3, 0, 4.0),
+            Some(4.0)
+        );
+
+        assert!(matches!(
+            build_track_drum_racks_value(&app),
+            Value::List(ref tracks) if matches!(*tracks[0].borrow(), Value::Bool(true))
+        ));
+        assert!(matches!(
+            build_track_drum_racks_value(&test_app_with_rack_panel()),
+            Value::List(ref tracks) if matches!(*tracks[0].borrow(), Value::Bool(false))
+        ));
+
+        let sounds = build_all_track_drum_sounds_value(&app);
+        let Value::List(tracks) = sounds else {
+            panic!("drum sound options should be grouped by track");
+        };
+        let Value::List(options) = &*tracks[0].borrow() else {
+            panic!("drum sound options should be a list");
+        };
+        let Value::Map(sound) = &*options[0].borrow() else {
+            panic!("drum sound option should be a map");
+        };
+        assert_eq!(value_map_number(sound, "transpose"), Some(0.0));
+        assert_eq!(value_map_string(sound, "name").as_deref(), Some("DS FM"));
+        assert_eq!(value_map_string(sound, "pad-label").as_deref(), Some("C4"));
+        assert_eq!(
+            value_map_string(sound, "selected-field").as_deref(),
+            Some("track-0-rack-slot-0-selected")
+        );
+        assert_eq!(
+            value_map_string(sound, "label").as_deref(),
+            Some("C4 · DS FM"),
+            "sound names must use the same pad-note and slot display name as the drum-pad UI"
+        );
+        assert_eq!(
+            value_map_string(sound, "short-label").as_deref(),
+            Some("DSF"),
+            "vertical labels should use only the first three letters of the sound name"
+        );
+
+        assert!(drum_lane_step_active(&app.state, 0, 0, 3));
+        assert!(!drum_lane_step_active(&app.state, 0, 1, 3));
+        assert!(!drum_lane_step_active(&app.state, 0, 0, 2));
+        assert!(drum_lane_step_duration_covered(&app.state, 0, 0, 3));
+        assert!(drum_lane_step_duration_covered(&app.state, 0, 0, 6));
+        assert!(!drum_lane_step_duration_covered(&app.state, 0, 0, 7));
+
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], false);
+        sync_drum_lane_step_binding_fields(&mut runtime, &app.state, &app, 0, None);
+        sync_all_rack_slot_selection_binding_fields(&mut runtime, &app);
+        let Some(Value::Map(fields)) = runtime.global_value("SEQ") else {
+            panic!("SEQ should remain a reactive map");
+        };
+        assert!(matches!(
+            fields
+                .get(&drum_lane_step_selected_field(0, 0, 3))
+                .map(|value| value.borrow().clone()),
+            Some(Value::Bool(false))
+        ));
+        assert!(matches!(
+            fields
+                .get(&drum_lane_step_duration_field(0, 0, 3))
+                .map(|value| value.borrow().clone()),
+            Some(Value::Bool(true))
+        ));
+        assert!(matches!(
+            fields
+                .get(&rack_slot_selected_field(0, 0))
+                .map(|value| value.borrow().clone()),
+            Some(Value::Bool(true))
+        ));
+    }
+
+    #[test]
     fn metal_seq_fx_lisp_lays_out_drum_rack_pad_grid() {
         fn drop_meta_number(node: &eseqlisp::layout::LayoutNode, key: &str) -> Option<f64> {
             let Value::Map(map) = node.props.get("drop-meta")? else {
@@ -24192,6 +25155,67 @@ mod tests {
         test_list(values.iter().cloned().map(Value::String).collect())
     }
 
+    fn test_drum_sound(
+        slot_idx: usize,
+        transpose: f64,
+        name: &str,
+        label: &str,
+        short_label: &str,
+    ) -> Value {
+        let mut sound = HashMap::new();
+        sound.insert(
+            "transpose".to_string(),
+            Rc::new(RefCell::new(Value::Number(transpose))),
+        );
+        sound.insert(
+            "slot-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(slot_idx as f64))),
+        );
+        for (key, param) in [
+            ("gain-field", sequencer::sequencer::RackSlotParam::Gain),
+            ("mute-field", sequencer::sequencer::RackSlotParam::Mute),
+            ("solo-field", sequencer::sequencer::RackSlotParam::Solo),
+        ] {
+            sound.insert(
+                key.to_string(),
+                Rc::new(RefCell::new(Value::String(rack_slot_value_field(
+                    0, slot_idx, param,
+                )))),
+            );
+        }
+        sound.insert(
+            "peak-field".to_string(),
+            Rc::new(RefCell::new(Value::String(rack_slot_peak_field(
+                0, slot_idx,
+            )))),
+        );
+        sound.insert(
+            "selected-field".to_string(),
+            Rc::new(RefCell::new(Value::String(rack_slot_selected_field(
+                0, slot_idx,
+            )))),
+        );
+        sound.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String(name.to_string()))),
+        );
+        sound.insert(
+            "pad-label".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                label.split(" · ").next().unwrap_or(label).to_string(),
+            ))),
+        );
+        sound.insert(
+            "label".to_string(),
+            Rc::new(RefCell::new(Value::String(label.to_string()))),
+        );
+        sound.insert(
+            "short-label".to_string(),
+            Rc::new(RefCell::new(Value::String(short_label.to_string()))),
+        );
+        Value::Map(sound)
+    }
+
     fn test_repeated_number_list(value: f64, len: usize) -> Value {
         test_list((0..len).map(|_| Value::Number(value)).collect())
     }
@@ -24552,6 +25576,8 @@ mod tests {
                     "track-transposes",
                     test_list(vec![test_number_list(&[0.0; 16])]),
                 ),
+                ("track-drum-racks", test_bool_list(&[false])),
+                ("track-drum-sounds", test_list(vec![test_list(vec![])])),
                 ("track-pans", test_list(vec![test_number_list(&[0.0; 16])])),
                 ("track-syncs", test_list(vec![test_number_list(&[0.0; 16])])),
                 ("track-plocks", test_list(vec![])),
@@ -24695,6 +25721,8 @@ mod tests {
                 ("transport-playhead", Value::Number(0.0)),
                 ("bpm", Value::Number(120.0)),
                 ("scene-launch-quantize", Value::String("off".to_string())),
+                ("record-quantize", Value::String("1/16".to_string())),
+                ("metronome", Value::Bool(false)),
                 ("queued-scene", Value::Number(-1.0)),
                 ("sampler-playhead", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
@@ -24954,6 +25982,16 @@ mod tests {
             "SEQ",
             "track-transposes",
             test_list(repeated_param_lists(0.0)),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-drum-sounds",
+            test_list((0..track_count).map(|_| test_list(vec![])).collect()),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-drum-racks",
+            test_repeated_bool_list(false, track_count),
         );
         rt.set_reactive("SEQ", "track-pans", test_list(repeated_param_lists(0.0)));
         rt.set_reactive("SEQ", "track-syncs", test_list(repeated_param_lists(0.0)));
@@ -25352,6 +26390,16 @@ mod tests {
         rt.set_reactive("SEQ", "track-durations", test_list(track_durations));
         rt.set_reactive("SEQ", "track-auxas", test_list(track_auxas));
         rt.set_reactive("SEQ", "track-transposes", test_list(track_transposes));
+        rt.set_reactive(
+            "SEQ",
+            "track-drum-sounds",
+            test_list((0..track_count).map(|_| test_list(vec![])).collect()),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-drum-racks",
+            test_repeated_bool_list(false, track_count),
+        );
         rt.set_reactive("SEQ", "track-pans", test_list(track_pans));
         rt.set_reactive("SEQ", "track-syncs", test_list(track_syncs));
         rt.set_reactive("SEQ", "tp-num-steps", Value::Number(step_count as f64));
@@ -28055,6 +29103,24 @@ mod tests {
     #[test]
     fn metal_seq_step_panel_lays_out_cursor_parameter_pickers() {
         let mut editor = full_grid_editor_for_scroll_tests();
+        let mut transposes = [0.0; 16];
+        transposes[2] = 7.0;
+        transposes[3] = -5.0;
+        let mut velocities = [0.0; 16];
+        velocities[2] = 0.75;
+        velocities[3] = 0.3;
+        let mut durations = [1.0; 16];
+        durations[2] = 2.5;
+        durations[3] = 0.75;
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "transposes", test_number_list(&transposes));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "velocities", test_number_list(&velocities));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "durations", test_number_list(&durations));
         editor
             .runtime_mut()
             .eval_str("(set-track-cursor-step 2)")
@@ -28069,6 +29135,7 @@ mod tests {
             .id;
         editor.set_active_buffer(step_id);
         editor.set_layout_viewport(80, 16);
+        editor.runtime_mut().run_reactive_cycle();
         editor.refresh_visible_layouts_for_buffer_named("*step*");
 
         let layout = editor.widget_layout().expect("step panel layout");
@@ -28081,14 +29148,27 @@ mod tests {
             track_badge.props.contains_key("background-color"),
             "step panel track badge should carry the mixer track color"
         );
-        let cursor_label =
-            find_layout_node_by_text(step_params_panel, "step 3").expect("cursor step label");
+        let cursor_label = find_layout_node_by_stable_key(step_params_panel, "fx-step-cursor-label")
+            .expect("cursor step label");
         assert_finite_nonzero_rect(cursor_label, "cursor step label");
+        assert_eq!(layout_prop_number(cursor_label, "value"), Some(3.0));
+        assert_eq!(cursor_label.props.get("prefix"), Some(&Value::String("step ".to_string())));
+        let selection_count = find_layout_node_by_stable_key(
+            step_params_panel,
+            "fx-step-selection-count-label",
+        )
+        .expect("selected-step count label");
+        assert_finite_nonzero_rect(selection_count, "selected-step count label");
+        assert_eq!(layout_prop_number(selection_count, "value"), Some(0.0));
+        assert_eq!(
+            selection_count.props.get("suffix"),
+            Some(&Value::String(" selected".to_string()))
+        );
 
-        for (key, label, expected_min, expected_max) in [
-            ("fx-step-param-transpose", "transpose picker", -48.0, 48.0),
-            ("fx-step-param-velocity", "velocity picker", 0.0, 1.0),
-            ("fx-step-param-duration", "duration picker", 0.0, 128.0),
+        for (key, label, expected_min, expected_max, expected_value) in [
+            ("fx-step-param-transpose", "transpose picker", -48.0, 48.0, 7.0),
+            ("fx-step-param-velocity", "velocity picker", 0.0, 1.0, 0.75),
+            ("fx-step-param-duration", "duration picker", 0.0, 128.0, 2.5),
         ] {
             let picker =
                 find_layout_node_by_stable_key(step_params_panel, key).unwrap_or_else(|| {
@@ -28106,11 +29186,693 @@ mod tests {
                 "{label} max"
             );
             assert_eq!(
+                layout_prop_number(picker, "value"),
+                Some(expected_value),
+                "{label} should read the cursor's retained scalar binding"
+            );
+            assert_eq!(
                 picker.props.get("text-color"),
                 Some(&Value::Keyword("white".to_string())),
                 "{label} should use neutral off-white text"
             );
         }
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(list cursor-step (cursor-num-steps) (current-step))")
+                .unwrap(),
+            Some(test_number_list(&[2.0, 16.0, 2.0])),
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(cursor-right)")
+            .expect("move unselected cursor right");
+        assert_eq!(
+            editor.runtime_mut().eval_str("(current-step)").unwrap(),
+            Some(Value::Number(3.0)),
+        );
+        assert_eq!(layout_prop_number(cursor_label, "value"), Some(4.0));
+        for (key, expected_value) in [
+            ("fx-step-param-transpose", -5.0),
+            ("fx-step-param-velocity", 0.3),
+            ("fx-step-param-duration", 0.75),
+        ] {
+            let picker = find_layout_node_by_stable_key(step_params_panel, key)
+                .unwrap_or_else(|| panic!("{key} after cursor move"));
+            assert_eq!(
+                layout_prop_number(picker, "value"),
+                Some(expected_value),
+                "{key} should follow keyboard cursor movement",
+            );
+        }
+        let edits = Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let edits = Arc::clone(&edits);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-step-param", move |args, _ctx| {
+                    let step = match args.first() {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected cursor step, got {other:?}"),
+                    };
+                    let param = match args.get(1) {
+                        Some(Value::Keyword(param)) => param.clone(),
+                        other => panic!("expected step parameter, got {other:?}"),
+                    };
+                    let value = match args.get(2) {
+                        Some(Value::Number(value)) => *value,
+                        other => panic!("expected parameter value, got {other:?}"),
+                    };
+                    edits.lock().unwrap().push(format!("{step}:{param}:{value}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+        let velocity_on_change = find_layout_node_by_stable_key(
+            step_params_panel,
+            "fx-step-param-velocity",
+        )
+        .and_then(|picker| picker.props.get("on-change"))
+        .cloned()
+        .expect("velocity picker on-change after cursor move");
+        editor
+            .runtime_mut()
+            .invoke(velocity_on_change, vec![Value::Number(0.55)])
+            .expect("edit velocity at keyboard cursor");
+        assert_eq!(
+            edits.lock().unwrap().as_slice(),
+            ["3:velocity:0.55"],
+            "without a selection, the picker must edit the keyboard cursor step",
+        );
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "fx-step-selection-count",
+            Value::Number(9.0),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "fx-step-value-velocity",
+            Value::Number(0.4),
+        );
+        assert_eq!(layout_prop_number(selection_count, "value"), Some(9.0));
+        let velocity = find_layout_node_by_stable_key(step_params_panel, "fx-step-param-velocity")
+            .expect("velocity picker");
+        assert_eq!(
+            layout_prop_number(velocity, "value"),
+            Some(0.4),
+            "retained picker value should update without rebuilding the step panel"
+        );
+    }
+
+    #[test]
+    fn metal_seq_drum_rack_sound_controls_use_named_pads_and_only_write_pad_notes() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["rack"]),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-drum-racks", test_bool_list(&[true]));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-drum-sounds",
+            test_list(vec![test_list(vec![
+                test_drum_sound(0, 0.0, "Kick", "C4 · Kick", "Kic"),
+                test_drum_sound(1, 12.0, "Snare", "C5 · Snare", "Sna"),
+            ])]),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &rack_slot_selected_field(0, 0),
+            Value::Bool(true),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &rack_slot_selected_field(0, 1),
+            Value::Bool(false),
+        );
+        for pad_note in [0, 12] {
+            for step in 0..16 {
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    &drum_lane_step_active_field(0, pad_note, step),
+                    Value::Bool((pad_note == 0 && step == 0) || (pad_note == 12 && step == 4)),
+                );
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    &drum_lane_step_selected_field(0, pad_note, step),
+                    Value::Bool(false),
+                );
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    &drum_lane_step_duration_field(0, pad_note, step),
+                    Value::Bool((pad_note == 0 && step == 0) || (pad_note == 12 && step == 4)),
+                );
+            }
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-step-param", move |args, _ctx| {
+                    let step = match args.first() {
+                        Some(Value::Number(value)) => *value as usize,
+                        other => panic!("expected step number, got {other:?}"),
+                    };
+                    let param = match args.get(1) {
+                        Some(Value::Keyword(value)) => value,
+                        other => panic!("expected step parameter, got {other:?}"),
+                    };
+                    let value = match args.get(2) {
+                        Some(Value::Number(value)) => *value,
+                        other => panic!("expected numeric step parameter value, got {other:?}"),
+                    };
+                    calls
+                        .lock()
+                        .unwrap()
+                        .push(format!("{step}:{param}:{value}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(220, 80);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let compact_layout = editor.widget_layout().expect("compact drum-rack layout");
+        let mut lanes = Vec::new();
+        collect_layout_nodes_by_debug_name(&compact_layout, "seqv-drum-slot-lane", &mut lanes);
+        assert_eq!(lanes.len(), 2, "each occupied pad should render one lane");
+        for (index, lane) in lanes.iter().enumerate() {
+            assert_finite_nonzero_rect(lane, &format!("drum lane {index}"));
+        }
+        assert!(
+            matches!(
+                lanes[0].props.get("selected"),
+                Some(Value::ReactiveRef { field, .. }) if field == &rack_slot_selected_field(0, 0)
+            ),
+            "the selected rack slot should light its sequencer lane through a reactive binding"
+        );
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .invoke(
+                lanes[0]
+                    .props
+                    .get("on-click")
+                    .cloned()
+                    .expect("drum lane slot-selection click"),
+                vec![Value::Nil],
+            )
+            .expect("select drum lane slot");
+        assert!(matches!(
+            editor.drain_host_commands().as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload }]
+                if name == "select-rack-slot"
+                    && matches!(payload, Value::Map(values)
+                        if matches!(values.get("track").map(|value| value.borrow().clone()), Some(Value::Number(track)) if track == 0.0)
+                        && matches!(values.get("slot").map(|value| value.borrow().clone()), Some(Value::Number(slot)) if slot == 0.0))
+        ));
+        assert!(
+            lanes[1].rect.row > lanes[0].rect.row + lanes[0].rect.height,
+            "drum lanes should be separated by a visible vertical gap: {:?}",
+            lanes.iter().map(|lane| lane.rect).collect::<Vec<_>>()
+        );
+        let kick_step =
+            find_layout_node_by_stable_key(&compact_layout, "seqv-drum-lane-step-0-0-0")
+                .expect("the Kick lane should expose its own first step");
+        assert_finite_nonzero_rect(kick_step, "Kick lane first step");
+        for handler in ["on-mouse-down", "on-drag", "on-mouse-up", "on-double-click"] {
+            assert!(
+                kick_step.props.contains_key(handler),
+                "drum lane steps should expose the normal step {handler} interaction"
+            );
+        }
+        let kick_shell = kick_step
+            .children
+            .first()
+            .expect("Kick lane first step shell");
+        assert!(
+            matches!(
+                kick_shell.props.get("selected"),
+                Some(Value::ReactiveRef { .. })
+            ),
+            "lane selection must be a reactive per-pad binding"
+        );
+        assert!(
+            matches!(
+                kick_shell.props.get("duration"),
+                Some(Value::ReactiveRef { .. })
+            ),
+            "lane duration visualization must use a reactive per-pad binding"
+        );
+        let snare_step =
+            find_layout_node_by_stable_key(&compact_layout, "seqv-drum-lane-step-0-12-4")
+                .expect("the Snare lane should expose its own fifth step");
+        assert_finite_nonzero_rect(snare_step, "Snare lane fifth step");
+        let kick_label =
+            find_layout_node_by_stable_key(&compact_layout, "seqv-drum-lane-label-0-0")
+                .expect("the Kick lane should have a slot label on its right");
+        assert_finite_nonzero_rect(kick_label, "Kick lane label");
+        assert_eq!(
+            kick_label.props.get("text"),
+            Some(&Value::String("Kick".to_string()))
+        );
+        assert!(
+            kick_label.rect.col + kick_label.rect.width <= kick_step.rect.col,
+            "the slot label should be placed to the left of the steps"
+        );
+        let kick_mute = find_layout_node_by_stable_key(&compact_layout, "seqv-drum-slot-mute-0-0")
+            .expect("the Kick lane should expose a per-slot mute toggle");
+        assert_finite_nonzero_rect(kick_mute, "Kick lane mute toggle");
+        assert_eq!(
+            kick_mute.props.get("text"),
+            Some(&Value::String("C4".to_string())),
+            "the drum-lane mute control should identify its pad by note"
+        );
+        assert!(
+            matches!(
+                kick_mute.props.get("background-color"),
+                Some(Value::List(items))
+                    if items.len() == 5
+                        && matches!(&*items[0].borrow(), Value::Symbol(name) if name == "rgba")
+                        && matches!(&*items[1].borrow(), Value::Number(value) if (*value - 0.95).abs() < 0.001)
+                        && matches!(&*items[2].borrow(), Value::Number(value) if (*value - 0.48).abs() < 0.001)
+                        && matches!(&*items[3].borrow(), Value::Number(value) if (*value - 0.18).abs() < 0.001)
+                        && matches!(&*items[4].borrow(), Value::Number(value) if (*value - 1.0).abs() < 0.001)
+            ),
+            "an unmuted drum pad should use the enabled mute-control treatment; got {:?}",
+            kick_mute.props.get("background-color")
+        );
+        assert!(
+            kick_mute.rect.col < kick_label.rect.col,
+            "the per-slot mute toggle should sit before the slot name"
+        );
+        let kick_volume =
+            find_layout_node_by_stable_key(&compact_layout, "seqv-drum-slot-volume-0-0")
+                .expect("the Kick lane should expose a per-slot volume control");
+        assert_finite_nonzero_rect(kick_volume, "Kick lane volume control");
+        assert!(
+            kick_volume.rect.col + kick_volume.rect.width <= kick_step.rect.col,
+            "the per-slot volume control should sit before the steps"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-set-param-mode 0 3) (seqv-track-menu-click 0)")
+            .expect("select Sound and expand the drum-rack row");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("expanded drum-rack layout");
+        assert!(
+            find_layout_node_by_text(&layout, "sound").is_some(),
+            "the expanded rack tab should replace tpose with sound"
+        );
+        let slider = find_layout_node_by_stable_key(&layout, "seqv-expanded-step-sound-slider-0-0")
+            .expect("drum-rack Sound mode should render a discrete sound slider");
+        assert_finite_nonzero_rect(slider, "drum-rack sound slider");
+        assert_eq!(layout_prop_number(slider, "min"), Some(0.0));
+        assert_eq!(layout_prop_number(slider, "max"), Some(1.0));
+        assert_eq!(
+            slider.props.get("items"),
+            Some(&test_string_list(&["Kic", "Sna"])),
+            "the vertical slider should show only three-letter sound abbreviations"
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "seqv-expanded-step-sound-label").is_none(),
+            "Sound mode should not render a redundant horizontal full-name label"
+        );
+        assert!(
+            find_layout_node_by_text(&layout, "C4 · Kick").is_none(),
+            "expanded Sound mode should not render the full note-and-name label"
+        );
+
+        editor
+            .runtime_mut()
+            .invoke(
+                slider
+                    .props
+                    .get("on-change")
+                    .cloned()
+                    .expect("sound slider on-change"),
+                vec![Value::Number(1.0)],
+            )
+            .expect("select Snare through the sound slider");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["0:transpose:12"],
+            "the sound slider must translate its discrete index to the selected pad note"
+        );
+
+        let step_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*step*")
+            .expect("step buffer should exist")
+            .id;
+        editor.set_active_buffer(step_id);
+        editor.set_layout_viewport(80, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_visible_layouts_for_buffer_named("*step*");
+        let layout = editor.widget_layout().expect("drum-rack step panel layout");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seqv-track-drum-rack? SEQ.current-track)")
+                .expect("evaluate drum-rack step inspector mode"),
+            Some(Value::Bool(true)),
+            "the test fixture should remain a drum rack when the step panel renders"
+        );
+        let sound_picker = find_layout_node_by_stable_key(&layout, "fx-step-param-sound")
+            .expect("step inspector should expose a named drum sound picker");
+        assert_finite_nonzero_rect(sound_picker, "step inspector drum sound picker");
+        editor
+            .runtime_mut()
+            .invoke(
+                sound_picker
+                    .props
+                    .get("on-change")
+                    .cloned()
+                    .expect("step inspector sound picker on-change"),
+                vec![Value::String("C5 · Snare".to_string())],
+            )
+            .expect("select Snare through the step inspector");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["0:transpose:12", "0:transpose:12"],
+            "the step inspector must write the selected pad note, never a label index"
+        );
+    }
+
+    #[test]
+    fn metal_seq_drum_rack_cmd_a_targets_the_globally_selected_slot() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-drum-racks", test_bool_list(&[true]));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-drum-sounds",
+            test_list(vec![test_list(vec![
+                test_drum_sound(0, 0.0, "Kick", "C4 · Kick", "Kic"),
+                test_drum_sound(1, 12.0, "Snare", "C5 · Snare", "Sna"),
+            ])]),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &rack_slot_selected_field(0, 0),
+            Value::Bool(false),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            &rack_slot_selected_field(0, 1),
+            Value::Bool(true),
+        );
+        let selected_pad_notes = Arc::new(Mutex::new(Vec::new()));
+        {
+            let selected_pad_notes = Arc::clone(&selected_pad_notes);
+            editor.runtime_mut().register_native(
+                "seq-select-all-drum-rack-steps",
+                move |args, _ctx| {
+                    let Some(Value::Number(pad_note)) = args.first() else {
+                        panic!("expected selected pad note, got {args:?}");
+                    };
+                    selected_pad_notes.lock().unwrap().push(*pad_note as i32);
+                    Ok(Value::Number(16.0))
+                },
+            );
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-select-all-current-track-steps)")
+            .expect("Cmd+A drum-rack selection route");
+        assert_eq!(
+            selected_pad_notes.lock().unwrap().as_slice(),
+            [12],
+            "Cmd+A should begin with the globally selected C5 drum slot"
+        );
+    }
+
+    #[test]
+    fn metal_seq_drum_lane_click_and_drag_match_normal_track_gestures() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["rack"]),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-drum-racks", test_bool_list(&[true]));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-drum-sounds",
+            test_list(vec![test_list(vec![test_drum_sound(
+                0,
+                12.0,
+                "Snare",
+                "C5 · Snare",
+                "Sna",
+            )])]),
+        );
+        for step in 0..16 {
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &drum_lane_step_active_field(0, 12, step),
+                Value::Bool(step == 0),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &drum_lane_step_selected_field(0, 12, step),
+                Value::Bool(false),
+            );
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                &drum_lane_step_duration_field(0, 12, step),
+                Value::Bool(step == 0),
+            );
+        }
+
+        let active = Arc::new(Mutex::new(HashSet::from([0usize])));
+        let selected = Arc::new(Mutex::new(HashSet::<usize>::new()));
+        let toggles = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let ranges = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
+        let moves = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
+        let durations = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
+        editor
+            .runtime_mut()
+            .register_native("now-ms", |_args, _ctx| Ok(Value::Number(1_000.0)));
+        {
+            let active = Arc::clone(&active);
+            editor.runtime_mut().register_native(
+                "seq-drum-lane-step-active?",
+                move |args, _ctx| {
+                    let step = match args.get(2) {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected drum step, got {other:?}"),
+                    };
+                    Ok(Value::Bool(active.lock().unwrap().contains(&step)))
+                },
+            );
+        }
+        {
+            let selected = Arc::clone(&selected);
+            editor.runtime_mut().register_native(
+                "seq-drum-lane-step-selected?",
+                move |args, _ctx| {
+                    let step = match args.get(2) {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected drum step, got {other:?}"),
+                    };
+                    Ok(Value::Bool(selected.lock().unwrap().contains(&step)))
+                },
+            );
+        }
+        {
+            let selected = Arc::clone(&selected);
+            editor
+                .runtime_mut()
+                .register_native("seq-drum-lane-has-selection?", move |_args, _ctx| {
+                    Ok(Value::Bool(!selected.lock().unwrap().is_empty()))
+                });
+        }
+        {
+            let active = Arc::clone(&active);
+            let toggles = Arc::clone(&toggles);
+            editor
+                .runtime_mut()
+                .register_native("seq-toggle-drum-lane-step", move |args, _ctx| {
+                    let step = match args.get(2) {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected drum step, got {other:?}"),
+                    };
+                    toggles.lock().unwrap().push(step);
+                    let mut active = active.lock().unwrap();
+                    let enabled = if active.insert(step) {
+                        true
+                    } else {
+                        active.remove(&step);
+                        false
+                    };
+                    Ok(Value::Bool(enabled))
+                });
+        }
+        {
+            let selected = Arc::clone(&selected);
+            let ranges = Arc::clone(&ranges);
+            editor.runtime_mut().register_native(
+                "seq-select-drum-lane-step-range",
+                move |args, _ctx| {
+                    let start = match args.get(2) {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected range start, got {other:?}"),
+                    };
+                    let end = match args.get(3) {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected range end, got {other:?}"),
+                    };
+                    ranges.lock().unwrap().push((start, end));
+                    let mut selected = selected.lock().unwrap();
+                    selected.clear();
+                    selected.extend(start.min(end)..=start.max(end));
+                    Ok(Value::Nil)
+                },
+            );
+        }
+        editor
+            .runtime_mut()
+            .register_native("seq-select-drum-lane-step", |_args, _ctx| Ok(Value::Nil));
+        {
+            let moves = Arc::clone(&moves);
+            editor.runtime_mut().register_native(
+                "seq-move-drum-lane-step-drag",
+                move |args, _ctx| {
+                    let start = match args.get(2) {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected move start, got {other:?}"),
+                    };
+                    let target = match args.get(3) {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected move target, got {other:?}"),
+                    };
+                    moves.lock().unwrap().push((start, target));
+                    Ok(Value::Bool(true))
+                },
+            );
+        }
+        {
+            let durations = Arc::clone(&durations);
+            editor.runtime_mut().register_native(
+                "seq-set-drum-lane-step-duration",
+                move |args, _ctx| {
+                    let step = match args.get(2) {
+                        Some(Value::Number(step)) => *step as usize,
+                        other => panic!("expected duration source, got {other:?}"),
+                    };
+                    let duration = match args.get(3) {
+                        Some(Value::Number(duration)) => *duration as usize,
+                        other => panic!("expected duration, got {other:?}"),
+                    };
+                    durations.lock().unwrap().push((step, duration));
+                    Ok(Value::Number(duration as f64))
+                },
+            );
+        }
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(220, 80);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("drum lane gesture layout");
+        let callback = |step: usize, name: &str| {
+            find_layout_node_by_stable_key(&layout, &format!("seqv-drum-lane-step-0-12-{step}"))
+                .unwrap_or_else(|| panic!("drum lane step {step}"))
+                .props
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| panic!("drum lane step {step} {name}"))
+        };
+        let plain_event = map_value([]);
+        let duration_edge_event = map_value([("sx", Value::Number(0.75))]);
+
+        editor
+            .runtime_mut()
+            .invoke(
+                callback(0, "on-mouse-down"),
+                vec![duration_edge_event.clone()],
+            )
+            .expect("press active drum hit duration edge");
+        editor
+            .runtime_mut()
+            .invoke(callback(3, "on-drag"), vec![duration_edge_event.clone()])
+            .expect("drag drum hit duration edge");
+        editor
+            .runtime_mut()
+            .invoke(callback(3, "on-mouse-up"), vec![duration_edge_event])
+            .expect("release drum hit duration edge");
+        assert_eq!(durations.lock().unwrap().as_slice(), [(0, 1), (0, 4)]);
+        assert!(moves.lock().unwrap().is_empty());
+
+        editor
+            .runtime_mut()
+            .invoke(callback(0, "on-mouse-down"), vec![plain_event.clone()])
+            .expect("press active drum hit");
+        editor
+            .runtime_mut()
+            .invoke(callback(0, "on-mouse-up"), vec![plain_event.clone()])
+            .expect("release active drum hit");
+        assert_eq!(ranges.lock().unwrap().as_slice(), [(0, 0)]);
+        assert!(
+            toggles.lock().unwrap().is_empty(),
+            "clicking an active hit should select it, not toggle it"
+        );
+
+        editor
+            .runtime_mut()
+            .invoke(callback(0, "on-mouse-down"), vec![plain_event.clone()])
+            .expect("press active drum hit for move");
+        editor
+            .runtime_mut()
+            .invoke(callback(3, "on-drag"), vec![plain_event.clone()])
+            .expect("drag active drum hit");
+        editor
+            .runtime_mut()
+            .invoke(callback(3, "on-mouse-up"), vec![plain_event.clone()])
+            .expect("release moved drum hit");
+        assert_eq!(moves.lock().unwrap().as_slice(), [(0, 3)]);
+
+        active.lock().unwrap().clear();
+        selected.lock().unwrap().clear();
+        editor
+            .runtime_mut()
+            .invoke(callback(1, "on-mouse-down"), vec![plain_event.clone()])
+            .expect("paint first empty drum hit");
+        editor
+            .runtime_mut()
+            .invoke(callback(2, "on-drag"), vec![plain_event.clone()])
+            .expect("paint second empty drum hit");
+        editor
+            .runtime_mut()
+            .invoke(callback(2, "on-mouse-up"), vec![plain_event])
+            .expect("release painted drum hits");
+        assert_eq!(toggles.lock().unwrap().as_slice(), [1, 2]);
     }
 
     #[test]
@@ -28277,11 +30039,11 @@ mod tests {
         }
 
         let mut editor = full_grid_editor_for_scroll_tests();
-        set_full_grid_track_count(&mut editor, 2, 16);
+        set_full_grid_track_count(&mut editor, 3, 16);
         editor.runtime_mut().set_reactive(
             "SEQ",
             "track-instrument-types",
-            test_string_list(&["custom", "sampler"]),
+            test_string_list(&["custom", "sampler", "rack"]),
         );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -28332,7 +30094,18 @@ mod tests {
             "sampler rows should accept conversion to a saved instrument"
         );
 
-        editor.set_layout_viewport(180, 40);
+        let rack_row = find_widget_map_by_key(&tree, "sequencer-track-drop-2")
+            .expect("rack sequencer track row");
+        let rack_drop_types = rack_row
+            .get("drop-types")
+            .expect("rack row drop types")
+            .borrow();
+        assert!(
+            value_contains_string(&rack_drop_types, "instrument"),
+            "rack rows should accept replacement by a saved instrument"
+        );
+
+        editor.set_layout_viewport(180, 60);
         editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
         let layout = editor
             .widget_layout()
@@ -28340,16 +30113,19 @@ mod tests {
         let custom_row =
             find_track_drop_target(&layout, 0.0).expect("custom track drop-target layout node");
         assert_finite_nonzero_rect(custom_row, "custom track instrument drop target");
+        let rack_row =
+            find_track_drop_target(&layout, 2.0).expect("rack track drop-target layout node");
+        assert_finite_nonzero_rect(rack_row, "rack track instrument drop target");
     }
 
     #[test]
     fn metal_seq_sequencer_drop_handlers_route_to_existing_host_commands() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        set_full_grid_track_count(&mut editor, 2, 16);
+        set_full_grid_track_count(&mut editor, 3, 16);
         editor.runtime_mut().set_reactive(
             "SEQ",
             "track-instrument-types",
-            test_string_list(&["custom", "custom"]),
+            test_string_list(&["custom", "custom", "rack"]),
         );
         let _ = editor.drain_host_commands();
         editor
@@ -28422,6 +30198,25 @@ mod tests {
                 .unwrap(),
             Some(Value::String("core/triton".to_string()))
         );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(seqv-drop-on-track
+                    (dict :drag-type "instrument"
+                          :payload (dict :kind "instrument" :name "core/drift")
+                          :target (dict :kind "track" :track 2)))"#,
+            )
+            .expect("drop saved instrument on rack sequencer track");
+        let commands = editor.drain_host_commands();
+        assert!(matches!(
+            commands.as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload }]
+                if name == "swap-track-instrument"
+                    && matches!(payload, Value::Map(map)
+                        if map.get("track").is_some_and(|value| *value.borrow() == Value::Number(2.0))
+                            && map.get("name").is_some_and(|value| *value.borrow() == Value::String("core/drift".to_string())))
+        ));
 
         editor
             .runtime_mut()
@@ -29059,6 +30854,120 @@ mod tests {
                 && mixer.width > 0.0
                 && fx.width > 0.0,
             "with samples hidden, mixer/fx should remain visible in the patcher bottom bar; mixer={mixer:?} fx={fx:?}"
+        );
+    }
+
+    #[test]
+    fn click_outside_focused_transport_bpm_picker_blurs_and_restores_dot_shortcut() {
+        use crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                  (def record-toggle-count (state 0))
+                  (def seq-toggle-record () (set! record-toggle-count (+ record-toggle-count 1)))
+                "#,
+            )
+            .expect("install record toggle test hook");
+        editor.refresh_runtime_side_effects();
+
+        let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+        let transport = frame
+            .tiles
+            .iter()
+            .find(|tile| tile.frame.buffer_name == "*transport*")
+            .expect("transport tile")
+            .rect;
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*transport*")"#)
+            .expect("switch to transport");
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("transport layout");
+        fn find_picker(
+            node: &eseqlisp::layout::LayoutNode,
+        ) -> Option<eseqlisp::layout::LayoutNode> {
+            if node.widget_type == "number-picker" {
+                return Some(node.clone());
+            }
+            node.children.iter().find_map(find_picker)
+        }
+        let picker = find_picker(layout.as_ref()).expect("bpm picker");
+        let click_col = transport.col + picker.rect.col + picker.rect.width * 0.5;
+        let click_row = transport.row + picker.rect.row + picker.rect.height * 0.5;
+
+        let mouse = |kind, col: f32, row: f32| MouseEvent {
+            kind,
+            column: col as u16,
+            row: row as u16,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        // Drag on the BPM picker: down + drag + up. This focuses it.
+        editor.handle_tiled_mouse_precise(
+            mouse(MouseEventKind::Down(MouseButton::Left), click_col, click_row),
+            click_col,
+            click_row,
+            0,
+        );
+        editor.handle_tiled_mouse_precise(
+            mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                click_col,
+                click_row + 0.3,
+            ),
+            click_col,
+            click_row + 0.3,
+            0,
+        );
+        editor.handle_tiled_mouse_precise(
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                click_col,
+                click_row + 0.3,
+            ),
+            click_col,
+            click_row + 0.3,
+            0,
+        );
+        assert!(
+            editor.focused_widget_id().is_some(),
+            "dragging the bpm picker should focus it"
+        );
+
+        // Click on the sequencer grid area (another tile, empty space).
+        for (col, row) in [(100.0_f32, 30.0_f32)] {
+            editor.handle_tiled_mouse_precise(
+                mouse(MouseEventKind::Down(MouseButton::Left), col, row),
+                col,
+                row,
+                0,
+            );
+            editor.handle_tiled_mouse_precise(
+                mouse(MouseEventKind::Up(MouseButton::Left), col, row),
+                col,
+                row,
+                0,
+            );
+        }
+        assert_eq!(
+            editor.focused_widget_id(),
+            None,
+            "clicking outside the picker should blur it"
+        );
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("record-toggle-count")
+                .unwrap(),
+            Some(Value::Number(1.0)),
+            "the record shortcut should work after blurring"
         );
     }
 
@@ -30313,6 +32222,76 @@ mod tests {
             }
             other => panic!("expected switch-pattern host command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn metal_seq_transport_record_quantize_and_metronome_controls_are_visible_and_route() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*transport*")"#)
+            .expect("switch to transport buffer");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("transport layout");
+        for debug_name in ["transport-record-quantize", "transport-metronome-toggle"] {
+            let control = find_layout_node_by_debug_name(&layout, debug_name)
+                .unwrap_or_else(|| panic!("{debug_name} control"));
+            assert_finite_nonzero_rect(control, debug_name);
+            assert!(
+                control.rect.col >= layout.rect.col
+                    && control.rect.row >= layout.rect.row
+                    && control.rect.col + control.rect.width <= layout.rect.col + layout.rect.width
+                    && control.rect.row + control.rect.height
+                        <= layout.rect.row + layout.rect.height,
+                "{debug_name} should remain inside transport: control={:?} panel={:?}",
+                control.rect,
+                layout.rect
+            );
+        }
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("SEQ.record-quantize")
+                .unwrap(),
+            Some(Value::String("1/16".to_string()))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("SEQ.metronome").unwrap(),
+            Some(Value::Bool(false))
+        );
+
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(seq-set-record-quantize "1/4")"#)
+            .expect("choose record quantization");
+        let commands = editor.drain_host_commands();
+        assert!(matches!(
+            commands.as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, payload }]
+                if name == "set-record-quantize" && payload == &Value::String("1/4".to_string())
+        ));
+
+        let metronome = find_layout_node_by_debug_name(&layout, "transport-metronome-toggle")
+            .expect("metronome toggle");
+        let callback = metronome
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("metronome callback");
+        editor
+            .runtime_mut()
+            .invoke(
+                callback,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("toggle metronome");
+        let commands = editor.drain_host_commands();
+        assert!(matches!(
+            commands.as_slice(),
+            [eseqlisp::host::HostCommand::Custom { name, .. }] if name == "toggle-metronome"
+        ));
     }
 
     #[test]
@@ -31956,6 +33935,19 @@ mod tests {
         let sampler_strip =
             find_track_drop_target(&layout, 0.0).expect("sampler mixer track drop target");
         assert_accepts_instrument(sampler_strip, "sampler mixer instrument drop target");
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_string_list(&["rack"]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+        let layout = editor.widget_layout().expect("rack mixer layout");
+        let rack_strip =
+            find_track_drop_target(&layout, 0.0).expect("rack mixer track drop target");
+        assert_accepts_instrument(rack_strip, "rack mixer instrument drop target");
     }
 
     #[test]
@@ -33735,6 +35727,102 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_tall_track_partial_relayout_keeps_following_drop_zone_below_track() {
+        let viewport_width = 180;
+        let viewport_height = 20;
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 1, MAX_STEPS);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(viewport_width, viewport_height);
+
+        let initial = eseqlisp::frame::build_render_frame(
+            &mut editor,
+            viewport_width as usize,
+            viewport_height as usize,
+        );
+        let initial_layout = initial
+            .widget_layout
+            .as_ref()
+            .expect("initial tall-track layout");
+        let initial_row = find_layout_node_by_stable_key(initial_layout, "sequencer-track-0")
+            .expect("initial tall track");
+        let initial_row_height = initial_row.rect.height;
+        assert!(
+            initial_row_height > viewport_height as f32,
+            "fixture track must be taller than the viewport: {:?}",
+            initial_row.rect
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-set-track-expanded 0 true)")
+            .expect("expand tall track");
+        editor.refresh_runtime_side_effects();
+        let expanded = eseqlisp::frame::build_render_frame(
+            &mut editor,
+            viewport_width as usize,
+            viewport_height as usize,
+        );
+        let expanded_layout = expanded
+            .widget_layout
+            .as_ref()
+            .expect("expanded tall-track layout");
+        let expanded_row = find_layout_node_by_stable_key(expanded_layout, "sequencer-track-0")
+            .expect("expanded track");
+        assert!(
+            expanded_row.rect.height < initial_row_height,
+            "the expanded one-page editor must be shorter than the 256-step compact grid"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-set-track-expanded 0 false)")
+            .expect("collapse tall track");
+        editor.refresh_runtime_side_effects();
+        let collapsed = eseqlisp::frame::build_render_frame(
+            &mut editor,
+            viewport_width as usize,
+            viewport_height as usize,
+        );
+        let collapsed_layout = collapsed
+            .widget_layout
+            .as_ref()
+            .expect("collapsed tall-track layout");
+        let collapsed_row = find_layout_node_by_stable_key(collapsed_layout, "sequencer-track-0")
+            .expect("collapsed tall track");
+        let drop_zone =
+            find_layout_node_by_stable_key(collapsed_layout, "sequencer-new-track-drop-zone")
+                .expect("new-track drop zone");
+
+        assert!(
+            (collapsed_row.rect.height - initial_row_height).abs() < 0.001,
+            "targeted relayout must restore the full tall-track height; initial={:?} collapsed={:?}",
+            initial_row.rect,
+            collapsed_row.rect
+        );
+        assert!(
+            drop_zone.rect.row >= collapsed_row.rect.row + collapsed_row.rect.height,
+            "the following sibling must start after the tall track; row={:?} drop_zone={:?}",
+            collapsed_row.rect,
+            drop_zone.rect
+        );
+        assert!(
+            collapsed_layout.rect.height >= drop_zone.rect.row + drop_zone.rect.height,
+            "the root must contain the tall track and its following sibling; root={:?} drop_zone={:?}",
+            collapsed_layout.rect,
+            drop_zone.rect
+        );
+    }
+
+    #[test]
     #[ignore = "performance benchmark; run with --ignored --nocapture"]
     fn metal_seq_plain_tab_expand_current_track_perf_10_tracks() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -33768,7 +35856,9 @@ mod tests {
         }
 
         let track_count = 10;
-        let step_count = 16;
+        let step_count = MAX_STEPS;
+        let viewport_width = 180;
+        let viewport_height = 20;
         let warmup_iterations = 3;
         let measured_iterations = 10;
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -33782,8 +35872,24 @@ mod tests {
             .expect("sequencer buffer should exist")
             .id;
         editor.set_active_buffer(sequencer_id);
-        editor.set_layout_viewport(180, 44);
-        let _ = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+        editor.set_layout_viewport(viewport_width, viewport_height);
+        let initial_frame = eseqlisp::frame::build_render_frame(
+            &mut editor,
+            viewport_width as usize,
+            viewport_height as usize,
+        );
+        let initial_layout = initial_frame
+            .widget_layout
+            .as_ref()
+            .expect("initial large-pattern sequencer layout");
+        let initial_track =
+            find_layout_node_by_stable_key(initial_layout, "sequencer-track-0")
+                .expect("initial current track");
+        assert!(
+            initial_track.rect.height > viewport_height as f32,
+            "benchmark must exercise a track taller than its viewport; track={:?} viewport_height={viewport_height}",
+            initial_track.rect
+        );
 
         let state = Arc::new(SequencerState::new(track_count, vec![]));
         let current_track = Arc::new(AtomicUsize::new(0));
@@ -33819,7 +35925,11 @@ mod tests {
             let side_effects_ms = side_effects_start.elapsed().as_secs_f64() * 1000.0;
 
             let frame_start = std::time::Instant::now();
-            let frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
+            let frame = eseqlisp::frame::build_render_frame(
+                &mut editor,
+                viewport_width as usize,
+                viewport_height as usize,
+            );
             let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
             let layout = frame
                 .widget_layout
@@ -33845,7 +35955,7 @@ mod tests {
         }
 
         println!(
-            "plain Tab current-track expand perf: {track_count} tracks, {step_count} steps, {} measured iterations after {} warmups",
+            "plain Tab current-track expand perf: {track_count} tracks, {step_count} steps, viewport {viewport_width}x{viewport_height}, {} measured iterations after {} warmups",
             measured_iterations, warmup_iterations
         );
         summarize(
@@ -34112,6 +36222,22 @@ mod tests {
                 .unwrap(),
             Some(Value::Number(4.0)),
             "arrow movement should move the expanded editor cursor for the current track"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(reactive-get \"SEQV\" \"seqv-track-cursor-1-3\")")
+                .unwrap(),
+            Some(Value::Bool(false)),
+            "arrow movement should clear the previous cursor highlight",
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(reactive-get \"SEQV\" \"seqv-track-cursor-1-4\")")
+                .unwrap(),
+            Some(Value::Bool(true)),
+            "arrow movement should activate the next cursor highlight",
         );
     }
 
@@ -38327,9 +40453,7 @@ mod tests {
         };
         threshold.insert(
             "value-field".to_string(),
-            Rc::new(RefCell::new(Value::String(
-                "test-comp-param-0".to_string(),
-            ))),
+            Rc::new(RefCell::new(Value::String("test-comp-param-0".to_string()))),
         );
         params
     }
@@ -38394,8 +40518,19 @@ mod tests {
             .expect("probe compressor ui")
             .expect("compressor ui probe value");
         for label in [
-            "Sidechain", "SC Filter", "Ratio", "Attack", "Release", "Auto", "Thresh", "Knee",
-            "Makeup", "Peak", "RMS", "Expand", "Dry/Wet",
+            "Sidechain",
+            "SC Filter",
+            "Ratio",
+            "Attack",
+            "Release",
+            "Auto",
+            "Thresh",
+            "Knee",
+            "Makeup",
+            "Peak",
+            "RMS",
+            "Expand",
+            "Dry/Wet",
         ] {
             assert!(
                 value_contains_string(&ui_probe, label),
@@ -38437,9 +40572,7 @@ mod tests {
             display.props.get("threshold")
         );
         let requests =
-            eseqlisp::widget_render::compressor_display::collect_compressor_meter_requests(
-                &layout,
-            );
+            eseqlisp::widget_render::compressor_display::collect_compressor_meter_requests(&layout);
         assert_eq!(
             requests.len(),
             1,

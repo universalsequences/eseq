@@ -4,8 +4,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use eseqlisp::{BufferMode, Editor};
 use sequencer::sample_db::SampleDb;
 use sequencer::sample_import::{
-    ImportSummary, StagedSample, StagedSampleStatus, import_staged_samples, normalize_tags,
-    stage_paths,
+    import_staged_samples, normalize_tags, stage_paths, ImportSummary, StagedSample,
+    StagedSampleStatus,
 };
 
 use eseqlisp::editor::ViewMode;

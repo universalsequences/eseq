@@ -12,13 +12,30 @@
 
 (def sampler-set-start-end (inst start-seconds end-seconds duration)
   (if (> duration 0)
-    (do
-      (fx-set-instrument-value
-        (instrument-target-param-dict inst 2)
-        (* 100 (/ start-seconds duration)))
-      (fx-set-instrument-value
-        (instrument-target-param-dict inst 3)
-        (* 100 (/ end-seconds duration))))))
+    (let ((updates (list
+          (dict :param-idx 2 :value (* 100 (/ start-seconds duration)))
+          (dict :param-idx 3 :value (* 100 (/ end-seconds duration))))))
+      (if (instrument-rack-target? inst)
+        (host-command
+          (if (seq-has-selection?)
+            "set-rack-slot-instrument-plock-batch"
+            "set-rack-slot-instrument-param-batch")
+          (dict :track (get inst :rack-track)
+                :slot (get inst :rack-slot)
+                :updates updates
+                :gesture "sampler-range"
+                :label "Set sampler range"))
+        (host-command
+          (if (instrument-key-lock-authoring-active?)
+            "set-instrument-key-lock-batch"
+            (if (seq-has-selection?)
+              "set-instrument-plock-batch"
+              "set-instrument-param-batch"))
+          (dict :track (get inst :track)
+                :notes instrument-key-lock-selected-notes
+                :updates updates
+                :gesture "sampler-range"
+                :label "Set sampler range"))))))
 
 (def sampler-clamp-start (next-start duration)
   (max 0 (min next-start (max 0 (- duration sampler-view-duration)))))

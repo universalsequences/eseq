@@ -59,14 +59,14 @@ pub fn default_ir_path() -> Option<std::path::PathBuf> {
 }
 
 /// Partitioned-spectrum IR for one channel: K*N reals and K*N imags.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChannelIr {
     pub re: Vec<f32>,
     pub im: Vec<f32>,
 }
 
 /// True-stereo partitioned IR ready to memcpy into the effect's tensors.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StereoIr {
     pub left: ChannelIr,
     pub right: ChannelIr,
@@ -551,6 +551,10 @@ static IR_SLOTS: NodeMap<StereoIrSlots> = std::sync::Mutex::new(std::collections
 static IR_REFS: NodeMap<String> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 /// Human-readable IR name for the UI label per live instance.
 static IR_NAMES: NodeMap<String> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+/// Prepared IR data retained for exact in-session undo/redo without another
+/// filesystem lookup or decode pass.
+static IR_DATA: NodeMap<std::sync::Arc<StereoIr>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// Record the tensor offsets for a live instance.
 pub fn record_ir_slots(node_id: i32, slots: StereoIrSlots) {
@@ -568,13 +572,32 @@ pub fn ir_slots_for(node_id: i32) -> Option<StereoIrSlots> {
 }
 
 /// Remember which IR (reference + display name) an instance currently has.
-pub fn record_ir(node_id: i32, reference: &str, display_name: &str) {
+fn record_ir(node_id: i32, reference: &str, display_name: &str) {
     if let Ok(mut map) = IR_REFS.lock() {
         map.insert(node_id, reference.to_string());
     }
     if let Ok(mut map) = IR_NAMES.lock() {
         map.insert(node_id, display_name.to_string());
     }
+}
+
+pub fn record_prepared_ir(
+    node_id: i32,
+    reference: &str,
+    display_name: &str,
+    ir: std::sync::Arc<StereoIr>,
+) {
+    record_ir(node_id, reference, display_name);
+    if let Ok(mut map) = IR_DATA.lock() {
+        map.insert(node_id, ir);
+    }
+}
+
+pub fn prepared_ir_for(node_id: i32) -> Option<std::sync::Arc<StereoIr>> {
+    IR_DATA
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&node_id).cloned())
 }
 
 /// The persisted IR reference currently loaded for an instance, if any.
@@ -602,6 +625,9 @@ pub fn clear_instance(node_id: i32) {
         map.remove(&node_id);
     }
     if let Ok(mut map) = IR_NAMES.lock() {
+        map.remove(&node_id);
+    }
+    if let Ok(mut map) = IR_DATA.lock() {
         map.remove(&node_id);
     }
 }

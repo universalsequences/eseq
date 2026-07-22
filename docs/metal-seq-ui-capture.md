@@ -32,7 +32,7 @@ Supported track forms are:
 (track :sampler)
 (track :instrument "saved/instrument-name")
 (track :modulator)
-(track :drum-rack)
+(track :drum-rack :samples ("path/to/kick.wav" "path/to/snare.wav"))
 (track :layer-rack :samples ("path/to/layer.wav"))
 ```
 
@@ -40,9 +40,10 @@ Every track accepts an optional display `:name`, `:midi-fx` list, and built-in
 `:audio-fx` list. `:num-steps` sets the initial pattern length from 1 through the
 sequencer's maximum pattern length. A saved instrument goes through the same
 compile/load/init path as an instrument added in the app, so its real custom UI
-can be captured. Layer racks accept a `:samples` list; each path is loaded as a
-sampler layer through the production rack graph path. Sample paths are resolved
-relative to the capture script.
+can be captured. Drum and layer racks accept a `:samples` list through the
+production rack graph path. Drum-rack samples populate consecutive pads
+beginning at the first pad; layer-rack samples are added as broadcast layers.
+Sample paths are resolved relative to the capture script.
 
 From the repository root:
 

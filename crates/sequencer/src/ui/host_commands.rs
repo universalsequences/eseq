@@ -287,7 +287,16 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
         lg_raw,
     } = ctx;
 
+    let groups_before = app.groups.clone();
     add_new_track_to_group(app, idx, group_id);
+    if let Err(error) = app.commit_created_track(idx, "Add instrument track") {
+        app.groups = groups_before;
+        *track_groups.lock().unwrap() = app.groups.clone();
+        editor.handle_host_event(HostEvent::Status(format!(
+            "Error adding instrument track: {error}"
+        )));
+        return;
+    }
     *track_groups.lock().unwrap() = app.groups.clone();
 
     current_track.store(idx, Ordering::Relaxed);
@@ -461,7 +470,7 @@ pub(crate) fn add_new_track_to_group(
         return false;
     }
 
-    app.set_track_output_all_scenes(
+    app.set_track_output_all_scenes_unrecorded(
         track,
         sequencer::sequencer::TrackOutput::Bus(sequencer::sequencer::BusId(bus_id)),
     );

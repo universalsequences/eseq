@@ -1,6 +1,6 @@
 use arrayvec::ArrayVec;
-use cpal::Stream;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::Stream;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,19 +25,19 @@ use crate::sampler::{
     SAMPLER_EVENT_AUX_WARP_SEG_ENVELOPE, SAMPLER_EVENT_AUX_WARP_SEG_LOOP_MODE,
 };
 use crate::scheduled_event::{
-    ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
-    ScheduledInstrumentParam, ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
-    ScheduledInstrumentTensorParam, ScheduledInstrumentTensorParams, ScheduledSamplerParams,
-    resolved_chord_transpose,
+    resolved_chord_transpose, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
+    ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
+    ScheduledInstrumentParams, ScheduledInstrumentTensorParam, ScheduledInstrumentTensorParams,
+    ScheduledSamplerParams,
 };
 use crate::sequencer::{
-    BusId, CustomInstrumentRunMode, InstrumentType, KeyboardTrigger, MAX_INSTRUMENT_ENGINES,
-    MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS, RackRouting, RackSlotParam, RackSlotSnapshot,
-    RackTrackSnapshot, SequencerSnapshot, SequencerState, StepParam, SwingResolution,
-    rack_slot_pool_index, sync_beats,
+    rack_slot_pool_index, sync_beats, BusId, CustomInstrumentRunMode, InstrumentType,
+    KeyboardTrigger, RackRouting, RackSlotParam, RackSlotSnapshot, RackTrackSnapshot,
+    SequencerSnapshot, SequencerState, StepParam, SwingResolution, MAX_INSTRUMENT_ENGINES,
+    MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS,
 };
 use crate::tui::BusGateRuntimeState;
-use crate::voice::{MAX_VOICES, VoicePool};
+use crate::voice::{VoicePool, MAX_VOICES};
 
 pub const FALLBACK_SAMPLE_RATE: u32 = 44_100;
 const CUSTOM_ENGINE_RELEASE_TAIL_SECONDS: f64 = 20.0;
@@ -451,6 +451,44 @@ struct AudioCallbackData {
     trace_callback_counter: u64,
     trace_render_probe_blocks: u32,
     trace_silent_active_callbacks: u32,
+    transport_beats: f64,
+    transport_was_playing: bool,
+    metronome: MetronomeState,
+}
+
+/// Stateful click oscillator. It lives in the callback data so a short click
+/// can span output blocks without allocating or touching the graph.
+#[derive(Clone, Copy, Debug, Default)]
+struct MetronomeState {
+    phase: f64,
+    envelope: f32,
+    decay_per_sample: f32,
+    frequency_hz: f64,
+}
+
+impl MetronomeState {
+    const GAIN: f32 = 0.25;
+    const ENVELOPE_FLOOR: f32 = 1.0e-4;
+
+    fn trigger(&mut self, sample_rate: f64, accented: bool) {
+        self.phase = 0.0;
+        self.envelope = 1.0;
+        self.frequency_hz = if accented { 2_000.0 } else { 1_500.0 };
+        // A 5ms exponential decay reaches the practical silence threshold.
+        self.decay_per_sample = ((Self::ENVELOPE_FLOOR as f64).ln() / (sample_rate * 0.005))
+            .exp()
+            .clamp(0.0, 1.0) as f32;
+    }
+
+    fn sample(&mut self, sample_rate: f64) -> f32 {
+        if self.envelope < Self::ENVELOPE_FLOOR {
+            return 0.0;
+        }
+        let value = (std::f64::consts::TAU * self.phase).sin() as f32 * self.envelope * Self::GAIN;
+        self.phase = (self.phase + self.frequency_hz / sample_rate).fract();
+        self.envelope *= self.decay_per_sample;
+        value
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2670,8 +2708,7 @@ fn for_each_custom_route_lid(
                 == engine_id as u32
         {
             (
-                state.runtime.rack_engine_route_lids[route_idx][voice_idx]
-                    .load(Ordering::Relaxed),
+                state.runtime.rack_engine_route_lids[route_idx][voice_idx].load(Ordering::Relaxed),
                 state.runtime.rack_engine_route_lids_r[route_idx][voice_idx]
                     .load(Ordering::Relaxed),
                 std::array::from_fn(|input| {
@@ -2722,8 +2759,7 @@ fn for_each_custom_voice_route_update(
         }
         for stale_route in MAX_TRACKS..crate::sequencer::MAX_SAMPLER_POOLS {
             if stale_route != route_idx
-                && state.runtime.rack_engine_route_engine_ids[stale_route]
-                    .load(Ordering::Relaxed)
+                && state.runtime.rack_engine_route_engine_ids[stale_route].load(Ordering::Relaxed)
                     == engine_id as u32
             {
                 set_route(stale_route, 0.0);
@@ -3626,6 +3662,42 @@ fn render_chunk(data: &mut AudioCallbackData, output: &mut [f32]) {
     unsafe {
         data.lg
             .process_next_block(output.as_mut_ptr(), nframes as i32);
+    }
+}
+
+/// Mix the transport click after recorder capture. This intentionally keeps
+/// exported master WAVs and all upstream per-track capture paths click-free.
+fn mix_metronome(
+    metronome: &mut MetronomeState,
+    output: &mut [f32],
+    num_channels: usize,
+    sample_rate: f64,
+    block_start_beats: f64,
+    bpm: f64,
+) {
+    if output.is_empty() || num_channels == 0 || bpm <= 0.0 {
+        return;
+    }
+    let nframes = output.len() / num_channels;
+    let beats_per_sample = bpm / (sample_rate * 60.0);
+    let block_end_beats = block_start_beats + nframes as f64 * beats_per_sample;
+    let first_quarter = (block_start_beats - 1.0e-9).ceil().max(0.0) as u64;
+    let mut next_quarter = first_quarter;
+
+    for frame in 0..nframes {
+        let beat = block_start_beats + frame as f64 * beats_per_sample;
+        while (next_quarter as f64) <= beat + 1.0e-9
+            && (next_quarter as f64) < block_end_beats + 1.0e-9
+        {
+            metronome.trigger(sample_rate, next_quarter % 4 == 0);
+            next_quarter += 1;
+        }
+        let click = metronome.sample(sample_rate);
+        if click != 0.0 {
+            for channel in 0..num_channels {
+                output[frame * num_channels + channel] += click;
+            }
+        }
     }
 }
 
@@ -5388,7 +5460,18 @@ fn fire_resolved(
             ),
         }
     };
+    let scheduled_source = scheduled_sampler_params.is_some();
     let sampler_params = scheduled_sampler_params.unwrap_or_else(fallback_sampler_params);
+    if crate::sampler::srange_debug_enabled() {
+        eprintln!(
+            "[srange] trigger dispatch track={} step={} source={} start={} end={}",
+            track_idx,
+            step,
+            if scheduled_source { "scheduled" } else { "fallback" },
+            sampler_params.start_point,
+            sampler_params.end_point,
+        );
+    }
     let attack_ms = sampler_params.attack_ms;
     let release_ms = sampler_params.release_ms;
     let attack_samples = attack_ms * data.sample_rate as f32 / 1000.0;
@@ -6201,6 +6284,23 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     }
     let block_start_sample = data.rendered_samples.load(Ordering::Acquire);
     let block_end_sample = block_start_sample + nframes as u64;
+    let transport_playing = data.state.transport.playing.load(Ordering::Relaxed);
+    if transport_playing && !data.transport_was_playing {
+        data.transport_beats = 0.0;
+        data.metronome = MetronomeState::default();
+    }
+    if transport_playing {
+        // Timestamp at callback entry, before graph work, so the UI can
+        // interpolate between blocks rather than reading a stale playhead.
+        data.state
+            .transport
+            .record_clock
+            .publish(data.transport_beats, callback_start);
+    } else {
+        data.transport_beats = 0.0;
+        data.metronome = MetronomeState::default();
+    }
+    data.transport_was_playing = transport_playing;
     let host_transport_clock = compute_host_transport_clock(data, block_start_sample);
     sync_bus_gate_params(data, block_start_sample);
     sync_instrument_host_clock_params(data, host_transport_clock);
@@ -6669,6 +6769,28 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
 
     data.master_recorder.capture(output);
 
+    if transport_playing
+        && data
+            .state
+            .transport
+            .metronome_enabled
+            .load(Ordering::Relaxed)
+    {
+        let bpm = data.state.transport.bpm.load(Ordering::Relaxed) as f64;
+        mix_metronome(
+            &mut data.metronome,
+            output,
+            data.num_channels,
+            data.sample_rate,
+            data.transport_beats,
+            bpm,
+        );
+    }
+    if transport_playing {
+        let bpm = data.state.transport.bpm.load(Ordering::Relaxed) as f64;
+        data.transport_beats += nframes as f64 * bpm / (data.sample_rate * 60.0);
+    }
+
     // Scan interleaved output for peak levels
     let (peak_l, peak_r) = interleaved_peak(output, data.num_channels);
     data.state
@@ -6814,6 +6936,13 @@ pub fn build_output_stream(
     bus_gate_runtime: Arc<Mutex<Vec<BusGateRuntimeState>>>,
     bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
 ) -> Result<Stream, String> {
+    // CPAL does not expose portable output latency. Use the configured output
+    // block as the sensible default; users can tune this transport value when
+    // their device/OS path has additional latency.
+    state.transport.record_latency_seconds.store(
+        (block_size as f32 / sample_rate.max(1) as f32).to_bits(),
+        Ordering::Release,
+    );
     // Initialize voice pools from state
     let mut voice_pools: Vec<VoicePool> =
         (0..MAX_SAMPLER_POOLS).map(|_| VoicePool::new()).collect();
@@ -6909,6 +7038,9 @@ pub fn build_output_stream(
         trace_callback_counter: 0,
         trace_render_probe_blocks: 0,
         trace_silent_active_callbacks: 0,
+        transport_beats: 0.0,
+        transport_was_playing: false,
+        metronome: MetronomeState::default(),
     };
     crate::scheduler::spawn_scheduler_thread(
         Arc::clone(&cb_data.state),
@@ -6988,27 +7120,28 @@ pub fn query_device_config() -> Result<(u32, u16), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::Ordering;
+    use std::sync::Arc;
 
     use super::{
-        ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
-        BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
-        FALLBACK_SAMPLE_RATE, FreePatchTransportRouteState, FreePatchTransportRouteTarget,
-        GateOffEvent, GateOffTarget, OutputDeviceConfig, OutputFormatRange, RackSlotNoteOff,
         apply_rack_macros_at_step, bus_gate_target_at, clear_active_keyboard_note_by_lid,
-        collect_rack_choke_group_voice_releases, free_patch_transport_route_cache_is_fresh,
-        free_patch_transport_route_target, for_each_custom_voice_route_update,
-        instrument_sound_fingerprint,
-        key_locked_live_instrument_params, mute_group_winner_for_block_events,
-        rack_slot_matches_routing, rack_slot_playback_transpose, resolve_live_instrument_defaults,
+        collect_rack_choke_group_voice_releases, for_each_custom_voice_route_update,
+        free_patch_transport_route_cache_is_fresh, free_patch_transport_route_target,
+        instrument_sound_fingerprint, key_locked_live_instrument_params, mix_metronome,
+        mute_group_winner_for_block_events, rack_slot_matches_routing,
+        rack_slot_playback_transpose, resolve_live_instrument_defaults,
         resolve_live_keyboard_transpose, resolve_snapshot_instrument_defaults,
         resolved_chord_transpose, resolved_slot_param_value, sampler_warp_runtime,
         select_output_channels, select_output_config, store_active_keyboard_note,
         swing_delay_samples, take_active_keyboard_note, track_accepts_scheduled_trigger,
+        ActiveKeyboardNote, ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent,
+        BlockEventKind, ChopEvent, CountdownEvent, CountdownEventKind, CustomEnginePool,
+        FreePatchTransportRouteState, FreePatchTransportRouteTarget, GateOffEvent, GateOffTarget,
+        MetronomeState, OutputDeviceConfig, OutputFormatRange, RackSlotNoteOff,
+        FALLBACK_SAMPLE_RATE,
     };
     use crate::accumulator::{AccumulatorRuntimeState, ResolvedStep};
-    use crate::analysis::{OnsetTableShared, pack_ptr};
+    use crate::analysis::{pack_ptr, OnsetTableShared};
     use crate::effects::{
         EffectDescriptor, EffectSlotSnapshot, EffectSlotState, ParamDescriptor, ParamKind,
         ParamScaling, TensorParamDescriptor,
@@ -7018,15 +7151,27 @@ mod tests {
         ScheduledInstrumentParams, ScheduledInstrumentTensorParams, ScheduledSamplerParams,
     };
     use crate::sequencer::{
-        CustomInstrumentRunMode, InstrumentType, RackMacroCurve, RackMacroMapping, RackMacroTarget,
-        RackRouting, RackSlotParam, RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot,
-        SequencerState, SwingResolution, TrackSoundState, default_rack_macros,
+        default_rack_macros, CustomInstrumentRunMode, InstrumentType, RackMacroCurve,
+        RackMacroMapping, RackMacroTarget, RackRouting, RackSlotParam, RackSlotParamPlocks,
+        RackSlotSnapshot, RackTrackSnapshot, SequencerState, SwingResolution, TrackSoundState,
     };
     use crate::voice::VoicePool;
 
-    fn active_keyboard_notes_fixture()
-    -> [[Option<ActiveKeyboardNote>; crate::voice::MAX_VOICES]; crate::sequencer::MAX_TRACKS] {
+    fn active_keyboard_notes_fixture(
+    ) -> [[Option<ActiveKeyboardNote>; crate::voice::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
+    {
         [[None; crate::voice::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
+    }
+
+    #[test]
+    fn metronome_mix_emits_a_click_at_a_quarter_boundary() {
+        let mut output = vec![0.0; 128 * 2];
+        let mut metronome = MetronomeState::default();
+        mix_metronome(&mut metronome, &mut output, 2, 48_000.0, 0.0, 120.0);
+        assert!(
+            output.iter().any(|sample| sample.abs() > 1.0e-6),
+            "a metronome block starting on a beat should contain a click"
+        );
     }
 
     #[test]
@@ -8094,18 +8239,13 @@ mod tests {
         let state = SequencerState::new(2, Vec::new());
         let engine_id = 4;
         let voice_idx = 3;
-        let rack_route = crate::sequencer::rack_slot_pool_index(0, 0)
-            .expect("rack route identity");
-        state.runtime.engine_route_lids[engine_id][voice_idx][1]
-            .store(201, Ordering::Relaxed);
-        state.runtime.engine_route_lids_r[engine_id][voice_idx][1]
-            .store(202, Ordering::Relaxed);
+        let rack_route = crate::sequencer::rack_slot_pool_index(0, 0).expect("rack route identity");
+        state.runtime.engine_route_lids[engine_id][voice_idx][1].store(201, Ordering::Relaxed);
+        state.runtime.engine_route_lids_r[engine_id][voice_idx][1].store(202, Ordering::Relaxed);
         state.runtime.rack_engine_route_engine_ids[rack_route]
             .store(engine_id as u32, Ordering::Relaxed);
-        state.runtime.rack_engine_route_lids[rack_route][voice_idx]
-            .store(101, Ordering::Relaxed);
-        state.runtime.rack_engine_route_lids_r[rack_route][voice_idx]
-            .store(102, Ordering::Relaxed);
+        state.runtime.rack_engine_route_lids[rack_route][voice_idx].store(101, Ordering::Relaxed);
+        state.runtime.rack_engine_route_lids_r[rack_route][voice_idx].store(102, Ordering::Relaxed);
 
         let mut updates = Vec::new();
         for_each_custom_voice_route_update(

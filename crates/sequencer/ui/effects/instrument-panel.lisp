@@ -465,8 +465,13 @@
     (bind-seq (get slot field-prop))
     (get slot prop)))
 
+;; Only used for mute/solo flags. bind-seq is a float binding (bools arrive as
+;; 1.0/0.0) and `not` doesn't negate numbers, so normalize to a real boolean.
 (def rack-slot-display-scalar (slot prop field-prop)
-  (reactive-value (rack-slot-display-value slot prop field-prop)))
+  (let ((field (get slot field-prop)))
+    (if field
+      (> (reactive-value (bind-seq field)) 0.5)
+      (get slot prop))))
 
 (def rack-slot-row (slot)
   (let ((delete-target (rack-slot-delete-target? slot))

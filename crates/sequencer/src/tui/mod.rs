@@ -34,6 +34,8 @@ use crate::track_color::TrackColor;
 mod browser;
 mod cirklon;
 pub mod command;
+pub mod edit;
+pub mod history;
 mod draw;
 mod effect_params;
 mod effects;
@@ -50,6 +52,7 @@ mod synth;
 pub use browser::BrowserNode;
 #[allow(unused_imports)]
 pub use command::{apply_command, AppCommand};
+pub use edit::try_apply_command;
 pub use draw::draw;
 
 const BAR_HEIGHT: usize = 8;
@@ -180,7 +183,8 @@ enum CompileTarget {
     Effect {
         name: String,
         slot_idx: usize,
-        track: usize,
+        track: crate::sequencer::TrackId,
+        expected_node_id: u32,
     },
     Instrument {
         name: String,
@@ -860,6 +864,9 @@ pub struct UiState {
 
 pub struct App {
     pub state: Arc<SequencerState>,
+    pub track_registry: crate::sequencer::TrackRegistry,
+    pub device_registry: DeviceIdentityRegistry,
+    pub history: history::UndoManager<history::EditPatch>,
     pub macro_engine: crate::macro_engine::MacroEngine,
     scene_macro_runtime: HashMap<crate::macro_engine::MacroId, SceneMacroRuntime>,
     pub tracks: Vec<String>,
@@ -883,6 +890,502 @@ pub struct App {
     pub master_recorder: Arc<MasterRecorder>,
     pub sample_analysis: AnalysisService,
     pub pending_recording_take: Option<RecordingTake>,
+    recording_history: Option<RecordingHistoryTransaction>,
+}
+
+struct RecordingHistoryTransaction {
+    before: crate::sequencer::ProjectScenes,
+    changed: bool,
+}
+
+#[derive(Default)]
+pub struct DeviceIdentityRegistry {
+    next_id: u64,
+    audio_effects: HashMap<(crate::sequencer::TrackId, usize), crate::sequencer::EffectInstanceId>,
+    audio_effect_locations:
+        HashMap<crate::sequencer::EffectInstanceId, (crate::sequencer::TrackId, usize)>,
+    bus_audio_effects:
+        HashMap<(crate::sequencer::BusId, usize), crate::sequencer::EffectInstanceId>,
+    bus_audio_effect_locations:
+        HashMap<crate::sequencer::EffectInstanceId, (crate::sequencer::BusId, usize)>,
+    rack_audio_effects:
+        HashMap<(crate::sequencer::RackSlotId, usize), crate::sequencer::EffectInstanceId>,
+    rack_audio_effect_locations:
+        HashMap<crate::sequencer::EffectInstanceId, (crate::sequencer::RackSlotId, usize)>,
+    midi_effects: HashMap<(crate::sequencer::TrackId, usize), crate::sequencer::MidiFxInstanceId>,
+    midi_effect_locations:
+        HashMap<crate::sequencer::MidiFxInstanceId, (crate::sequencer::TrackId, usize)>,
+    rack_slots: HashMap<(crate::sequencer::TrackId, usize), crate::sequencer::RackSlotId>,
+    rack_slot_locations:
+        HashMap<crate::sequencer::RackSlotId, (crate::sequencer::TrackId, usize)>,
+}
+
+impl DeviceIdentityRegistry {
+    fn observe(&mut self, id: u64) {
+        self.next_id = self.next_id.max(id);
+    }
+    fn allocate(&mut self) -> u64 {
+        self.next_id = self.next_id.checked_add(1).expect("device instance id exhausted");
+        self.next_id
+    }
+
+    pub(crate) fn allocate_effect_instance(&mut self) -> crate::sequencer::EffectInstanceId {
+        crate::sequencer::EffectInstanceId(self.allocate())
+    }
+
+    pub(crate) fn audio_effect(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        slot: usize,
+    ) -> crate::sequencer::EffectInstanceId {
+        if let Some(id) = self.audio_effects.get(&(track, slot)).copied() {
+            return id;
+        }
+        let id = crate::sequencer::EffectInstanceId(self.allocate());
+        self.audio_effects.insert((track, slot), id);
+        self.audio_effect_locations.insert(id, (track, slot));
+        id
+    }
+
+    pub(crate) fn audio_effect_location(
+        &self,
+        id: crate::sequencer::EffectInstanceId,
+    ) -> Option<(crate::sequencer::TrackId, usize)> {
+        self.audio_effect_locations.get(&id).copied()
+    }
+
+    pub(crate) fn audio_effect_chain(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        slots: impl IntoIterator<Item = usize>,
+    ) -> Vec<crate::sequencer::EffectInstanceId> {
+        slots
+            .into_iter()
+            .map(|slot| self.audio_effect(track, slot))
+            .collect()
+    }
+
+    pub(crate) fn bind_audio_effect_chain(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        first_slot: usize,
+        instances: &[crate::sequencer::EffectInstanceId],
+    ) -> Result<(), String> {
+        for id in instances {
+            self.observe(id.0);
+        }
+        let end_slot = first_slot
+            .checked_add(crate::lisp_host::MAX_CUSTOM_FX)
+            .ok_or_else(|| "audio-effect chain range overflow".to_string())?;
+        let retained = self
+            .audio_effects
+            .iter()
+            .filter(|((owner, slot), _)| {
+                *owner != track || *slot < first_slot || *slot >= end_slot
+            })
+            .map(|(location, id)| (*location, *id))
+            .collect::<Vec<_>>();
+        if instances.iter().enumerate().any(|(index, id)| instances[..index].contains(id)) {
+            return Err("audio-effect chain contains a duplicate stable identity".to_string());
+        }
+        for id in instances {
+            if self.bus_audio_effect_locations.contains_key(id)
+                || self.rack_audio_effect_locations.contains_key(id)
+            {
+                return Err(format!(
+                    "effect instance {} is already bound to a bus device",
+                    id.0
+                ));
+            }
+            if let Some((owner, slot)) = self.audio_effect_locations.get(id).copied() {
+                if owner != track || slot < first_slot || slot >= end_slot {
+                    return Err(format!(
+                        "audio-effect instance {} is already bound to another device",
+                        id.0
+                    ));
+                }
+            }
+        }
+        self.audio_effects.clear();
+        self.audio_effect_locations.clear();
+        for (location, id) in retained {
+            self.audio_effects.insert(location, id);
+            self.audio_effect_locations.insert(id, location);
+        }
+        for (offset, id) in instances.iter().copied().enumerate() {
+            let location = (track, first_slot + offset);
+            self.audio_effects.insert(location, id);
+            self.audio_effect_locations.insert(id, location);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bus_audio_effect(
+        &mut self,
+        bus: crate::sequencer::BusId,
+        slot: usize,
+    ) -> crate::sequencer::EffectInstanceId {
+        if let Some(id) = self.bus_audio_effects.get(&(bus, slot)).copied() {
+            return id;
+        }
+        let id = crate::sequencer::EffectInstanceId(self.allocate());
+        self.bus_audio_effects.insert((bus, slot), id);
+        self.bus_audio_effect_locations.insert(id, (bus, slot));
+        id
+    }
+
+    pub(crate) fn bus_audio_effect_location(
+        &self,
+        id: crate::sequencer::EffectInstanceId,
+    ) -> Option<(crate::sequencer::BusId, usize)> {
+        self.bus_audio_effect_locations.get(&id).copied()
+    }
+
+    pub(crate) fn bind_bus_audio_effect_chain(
+        &mut self,
+        bus: crate::sequencer::BusId,
+        instances: &[crate::sequencer::EffectInstanceId],
+    ) -> Result<(), String> {
+        for id in instances {
+            self.observe(id.0);
+        }
+        if instances.iter().enumerate().any(|(index, id)| instances[..index].contains(id)) {
+            return Err("bus effect chain contains a duplicate stable identity".to_string());
+        }
+        for id in instances {
+            if self.audio_effect_locations.contains_key(id)
+                || self.rack_audio_effect_locations.contains_key(id)
+            {
+                return Err(format!(
+                    "effect instance {} is already bound to a track device",
+                    id.0
+                ));
+            }
+            if let Some((owner, _)) = self.bus_audio_effect_locations.get(id).copied() {
+                if owner != bus {
+                    return Err(format!(
+                        "effect instance {} is already bound to another bus",
+                        id.0
+                    ));
+                }
+            }
+        }
+        let retained = self
+            .bus_audio_effects
+            .iter()
+            .filter(|((owner, _), _)| *owner != bus)
+            .map(|(location, id)| (*location, *id))
+            .collect::<Vec<_>>();
+        self.bus_audio_effects.clear();
+        self.bus_audio_effect_locations.clear();
+        for (location, id) in retained {
+            self.bus_audio_effects.insert(location, id);
+            self.bus_audio_effect_locations.insert(id, location);
+        }
+        for (slot, id) in instances.iter().copied().enumerate() {
+            self.bus_audio_effects.insert((bus, slot), id);
+            self.bus_audio_effect_locations.insert(id, (bus, slot));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn rack_audio_effect(
+        &mut self,
+        rack_slot: crate::sequencer::RackSlotId,
+        slot: usize,
+    ) -> crate::sequencer::EffectInstanceId {
+        if let Some(id) = self.rack_audio_effects.get(&(rack_slot, slot)).copied() {
+            return id;
+        }
+        let id = crate::sequencer::EffectInstanceId(self.allocate());
+        self.rack_audio_effects.insert((rack_slot, slot), id);
+        self.rack_audio_effect_locations.insert(id, (rack_slot, slot));
+        id
+    }
+
+    pub(crate) fn rack_audio_effect_location(
+        &self,
+        id: crate::sequencer::EffectInstanceId,
+    ) -> Option<(crate::sequencer::RackSlotId, usize)> {
+        self.rack_audio_effect_locations.get(&id).copied()
+    }
+
+    pub(crate) fn bind_rack_audio_effect_chain(
+        &mut self,
+        rack_slot: crate::sequencer::RackSlotId,
+        instances: &[crate::sequencer::EffectInstanceId],
+    ) -> Result<(), String> {
+        for id in instances {
+            self.observe(id.0);
+        }
+        if instances.iter().enumerate().any(|(index, id)| instances[..index].contains(id)) {
+            return Err("rack-slot effect chain contains a duplicate stable identity".to_string());
+        }
+        for id in instances {
+            if self.audio_effect_locations.contains_key(id)
+                || self.bus_audio_effect_locations.contains_key(id)
+            {
+                return Err(format!(
+                    "effect instance {} is already bound to another device domain",
+                    id.0
+                ));
+            }
+            if let Some((owner, _)) = self.rack_audio_effect_locations.get(id).copied() {
+                if owner != rack_slot {
+                    return Err(format!(
+                        "effect instance {} is already bound to another rack slot",
+                        id.0
+                    ));
+                }
+            }
+        }
+        let retained = self.rack_audio_effects.iter()
+            .filter(|((owner, _), _)| *owner != rack_slot)
+            .map(|(location, id)| (*location, *id))
+            .collect::<Vec<_>>();
+        self.rack_audio_effects.clear();
+        self.rack_audio_effect_locations.clear();
+        for (location, id) in retained {
+            self.rack_audio_effects.insert(location, id);
+            self.rack_audio_effect_locations.insert(id, location);
+        }
+        for (slot, id) in instances.iter().copied().enumerate() {
+            self.rack_audio_effects.insert((rack_slot, slot), id);
+            self.rack_audio_effect_locations.insert(id, (rack_slot, slot));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn midi_effect(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        slot: usize,
+    ) -> crate::sequencer::MidiFxInstanceId {
+        if let Some(id) = self.midi_effects.get(&(track, slot)).copied() {
+            return id;
+        }
+        let id = crate::sequencer::MidiFxInstanceId(self.allocate());
+        self.midi_effects.insert((track, slot), id);
+        self.midi_effect_locations.insert(id, (track, slot));
+        id
+    }
+
+    pub(crate) fn midi_effect_location(
+        &self,
+        id: crate::sequencer::MidiFxInstanceId,
+    ) -> Option<(crate::sequencer::TrackId, usize)> {
+        self.midi_effect_locations.get(&id).copied()
+    }
+
+    pub(crate) fn midi_effect_chain(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        slot_count: usize,
+    ) -> Vec<crate::sequencer::MidiFxInstanceId> {
+        (0..slot_count)
+            .map(|slot| self.midi_effect(track, slot))
+            .collect()
+    }
+
+    pub(crate) fn bind_midi_effect_chain(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        instances: &[crate::sequencer::MidiFxInstanceId],
+    ) -> Result<(), String> {
+        for id in instances {
+            self.observe(id.0);
+        }
+        if instances.iter().enumerate().any(|(index, id)| instances[..index].contains(id)) {
+            return Err("MIDI-FX chain contains a duplicate stable identity".to_string());
+        }
+        let retained = self
+            .midi_effects
+            .iter()
+            .filter(|((owner, _), _)| *owner != track)
+            .map(|(location, id)| (*location, *id))
+            .collect::<Vec<_>>();
+        for id in instances {
+            if self
+                .midi_effect_locations
+                .get(id)
+                .is_some_and(|(owner, _)| *owner != track)
+            {
+                return Err(format!(
+                    "MIDI-FX instance {} is already bound to another track",
+                    id.0
+                ));
+            }
+        }
+        self.midi_effects.clear();
+        self.midi_effect_locations.clear();
+        for (location, id) in retained {
+            self.midi_effects.insert(location, id);
+            self.midi_effect_locations.insert(id, location);
+        }
+        for (slot, id) in instances.iter().copied().enumerate() {
+            let location = (track, slot);
+            self.midi_effects.insert(location, id);
+            self.midi_effect_locations.insert(id, location);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn insert_midi_effect_identity(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        slot: usize,
+        old_len: usize,
+    ) -> Result<crate::sequencer::MidiFxInstanceId, String> {
+        let mut instances = self.midi_effect_chain(track, old_len);
+        let id = crate::sequencer::MidiFxInstanceId(self.allocate());
+        instances.insert(slot.min(instances.len()), id);
+        self.bind_midi_effect_chain(track, &instances)?;
+        Ok(id)
+    }
+
+    pub(crate) fn remove_midi_effect_identity(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        slot: usize,
+        old_len: usize,
+    ) -> Result<crate::sequencer::MidiFxInstanceId, String> {
+        let mut instances = self.midi_effect_chain(track, old_len);
+        if slot >= instances.len() {
+            return Err("MIDI-FX identity removal is out of range".to_string());
+        }
+        let removed = instances.remove(slot);
+        self.bind_midi_effect_chain(track, &instances)?;
+        Ok(removed)
+    }
+
+    pub(crate) fn move_midi_effect_identity(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        source: usize,
+        target: usize,
+        len: usize,
+    ) -> Result<(), String> {
+        let mut instances = self.midi_effect_chain(track, len);
+        if source >= instances.len() || target >= instances.len() {
+            return Err("MIDI-FX identity move is out of range".to_string());
+        }
+        let id = instances.remove(source);
+        instances.insert(target, id);
+        self.bind_midi_effect_chain(track, &instances)
+    }
+
+    pub(crate) fn rack_slot(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        slot: usize,
+    ) -> crate::sequencer::RackSlotId {
+        if let Some(id) = self.rack_slots.get(&(track, slot)).copied() {
+            return id;
+        }
+        let id = crate::sequencer::RackSlotId(self.allocate());
+        self.rack_slots.insert((track, slot), id);
+        self.rack_slot_locations.insert(id, (track, slot));
+        id
+    }
+
+    pub(crate) fn rack_slot_location(
+        &self,
+        id: crate::sequencer::RackSlotId,
+    ) -> Option<(crate::sequencer::TrackId, usize)> {
+        self.rack_slot_locations.get(&id).copied()
+    }
+
+    pub(crate) fn bind_rack_slot(
+        &mut self,
+        track: crate::sequencer::TrackId,
+        slot: usize,
+        id: crate::sequencer::RackSlotId,
+    ) -> Result<(), String> {
+        self.observe(id.0);
+        if let Some((owner, owner_slot)) = self.rack_slot_locations.get(&id).copied() {
+            if owner != track || owner_slot != slot {
+                return Err(format!("rack-slot instance {} is already bound", id.0));
+            }
+        }
+        if let Some(previous) = self.rack_slots.insert((track, slot), id) {
+            self.rack_slot_locations.remove(&previous);
+        }
+        self.rack_slot_locations.insert(id, (track, slot));
+        Ok(())
+    }
+
+    pub(crate) fn clear_rack_track(&mut self, track: crate::sequencer::TrackId) {
+        let removed = self.rack_slots.iter()
+            .filter(|((owner, _), _)| *owner == track)
+            .map(|(location, id)| (*location, *id))
+            .collect::<Vec<_>>();
+        for (location, rack_slot) in removed {
+            self.rack_slots.remove(&location);
+            self.rack_slot_locations.remove(&rack_slot);
+            let effects = self.rack_audio_effects.iter()
+                .filter(|((owner, _), _)| *owner == rack_slot)
+                .map(|(effect_location, id)| (*effect_location, *id))
+                .collect::<Vec<_>>();
+            for (effect_location, effect_id) in effects {
+                self.rack_audio_effects.remove(&effect_location);
+                self.rack_audio_effect_locations.remove(&effect_id);
+            }
+        }
+    }
+
+    pub(crate) fn clear_track(&mut self, track: crate::sequencer::TrackId) {
+        let audio_effects = self.audio_effects.iter()
+            .filter(|((owner, _), _)| *owner == track)
+            .map(|(location, id)| (*location, *id))
+            .collect::<Vec<_>>();
+        for (location, id) in audio_effects {
+            self.audio_effects.remove(&location);
+            self.audio_effect_locations.remove(&id);
+        }
+        let midi_effects = self.midi_effects.iter()
+            .filter(|((owner, _), _)| *owner == track)
+            .map(|(location, id)| (*location, *id))
+            .collect::<Vec<_>>();
+        for (location, id) in midi_effects {
+            self.midi_effects.remove(&location);
+            self.midi_effect_locations.remove(&id);
+        }
+        self.clear_rack_track(track);
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.audio_effects.clear();
+        self.audio_effect_locations.clear();
+        self.bus_audio_effects.clear();
+        self.bus_audio_effect_locations.clear();
+        self.rack_audio_effects.clear();
+        self.rack_audio_effect_locations.clear();
+        self.midi_effects.clear();
+        self.midi_effect_locations.clear();
+        self.rack_slots.clear();
+        self.rack_slot_locations.clear();
+    }
+}
+
+#[cfg(test)]
+mod device_identity_registry_tests {
+    use super::DeviceIdentityRegistry;
+    use crate::effects::BUILTIN_SLOT_COUNT;
+    use crate::sequencer::{BusId, EffectInstanceId, TrackId};
+
+    #[test]
+    fn persisted_device_identities_advance_future_allocation() {
+        let mut registry = DeviceIdentityRegistry::default();
+        registry.bind_audio_effect_chain(
+            TrackId(1),
+            BUILTIN_SLOT_COUNT,
+            &[EffectInstanceId(100)],
+        ).unwrap();
+
+        let allocated = registry.bus_audio_effect(BusId::DEFAULT_A, 0);
+
+        assert_eq!(allocated, EffectInstanceId(101));
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1125,6 +1628,30 @@ impl App {
         if let Some(selected) = self.rack_selected_slots.get_mut(track) {
             *selected = slot_idx;
         }
+    }
+
+    /// Select a physical rack slot while preserving each rack routing mode's
+    /// selection identity. Broadcast racks select by slot index; drum racks
+    /// select by the slot's pad note so sparse pad assignments stay correct.
+    pub fn select_rack_slot(
+        &mut self,
+        track: usize,
+        rack: &RackTrackSnapshot,
+        slot_idx: usize,
+    ) -> bool {
+        let Some(slot) = rack.slots.get(slot_idx) else {
+            return false;
+        };
+        match rack.routing {
+            RackRouting::Broadcast => self.set_rack_selected_slot(track, slot_idx),
+            RackRouting::ByPitch => {
+                let Some(pad_note) = slot.pad_note else {
+                    return false;
+                };
+                self.set_rack_selected_pad_note(track, pad_note);
+            }
+        }
+        true
     }
 
     pub fn rack_selected_pad_note(&self, track: usize) -> i32 {
@@ -1469,6 +1996,9 @@ impl App {
 
         let mut app = Self {
             state,
+            track_registry: crate::sequencer::TrackRegistry::default(),
+            device_registry: DeviceIdentityRegistry::default(),
+            history: history::UndoManager::default(),
             macro_engine: crate::macro_engine::MacroEngine::default(),
             scene_macro_runtime: HashMap::new(),
             tracks: Vec::new(),
@@ -1593,6 +2123,7 @@ impl App {
             master_recorder,
             sample_analysis: AnalysisService::new(),
             pending_recording_take: None,
+            recording_history: None,
             graph: GraphState {
                 lg,
                 track_node_ids: Vec::new(),
@@ -1883,6 +2414,8 @@ impl App {
             Ok(Ok(result)) => {
                 self.agent_panel.pending_request = None;
                 let tool_count = result.tool_outcomes.len();
+                let history_checkpoint = self.history.clone();
+                let history_checkpoint_len = self.history.undo_len();
                 let routed_intent = result
                     .pending_actions
                     .iter()
@@ -1892,10 +2425,21 @@ impl App {
                     .into_iter()
                     .map(|action| self.apply_agent_action(action))
                     .collect::<Vec<_>>();
-                let action_errors = action_results
+                let mut action_errors = action_results
                     .iter()
                     .filter_map(|result| result.as_ref().err().cloned())
                     .collect::<Vec<_>>();
+                if action_errors.is_empty() {
+                    edit::squash_history_since(
+                        self,
+                        history_checkpoint_len,
+                        "Agent authoring edit",
+                    );
+                } else if let Err(error) = edit::rollback_history_to(self, history_checkpoint) {
+                    action_errors.push(format!(
+                        "Agent edit rollback failed: {error:?}"
+                    ));
+                }
                 self.record_agent_tool_outcomes(&result.tool_outcomes, Some(&action_results));
                 if !result.text.trim().is_empty() {
                     self.agent_panel.transcript.push(AgentTranscriptEntry {
@@ -2259,7 +2803,7 @@ impl App {
                 let previous_source = crate::lisp_host::load_effect_source(&name).ok();
                 crate::lisp_host::save_effect(&name, &source)
                     .map_err(|error| format!("Failed to save effect '{}': {error}", name))?;
-                if let Err(error) = self.load_saved_effect_to_slot_sync(track, slot_idx, &name) {
+                if let Err(error) = self.load_saved_effect_to_slot_recorded(track, slot_idx, &name) {
                     self.restore_effect_source(&name, previous_source.as_deref())?;
                     return Err(error);
                 }

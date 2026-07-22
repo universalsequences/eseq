@@ -1,36 +1,278 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use crate::effects::{
-    EffectDescriptor, EffectSlotSnapshot, EffectSlotState, HostControl, MAX_SLOT_PARAMS,
+    EffectDescriptor, EffectSlotSnapshot, EffectSlotState, EffectSlotValuesSnapshot, HostControl,
+    MAX_SLOT_PARAMS,
 };
 use crate::graph::{GraphVisualizationSnapshot, ProjectGraphOverrides};
 use crate::neural::{
-    NeuralVisualizationSnapshot, ProjectNeuralNetwork,
-    remap_neural_network_routes_after_track_delete,
+    remap_neural_network_routes_after_track_delete, NeuralVisualizationSnapshot,
+    ProjectNeuralNetwork,
 };
 use crate::plock_variants::{
-    PlockVariantAssignment, PlockVariantDomain, PlockVariantKey, PlockVariantRegistry,
     live_track_key_lock_variant_key, live_track_key_lock_variant_keys, live_track_variant_key,
-    live_track_variant_keys,
+    live_track_variant_keys, PlockVariantAssignment, PlockVariantDomain, PlockVariantKey,
+    PlockVariantRegistry,
 };
 use crate::voice::MAX_VOICES;
 
 use super::data::{
-    ChordData, ChordSnapshot, CustomInstrumentRunMode, DEFAULT_BPM, EXT_MOD_INPUT_COUNT,
-    InstrumentType, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_STEPS,
-    MAX_TRACKS, ModConnection, NUM_PARAMS, RackRouting, StepData, StepParam, SwingPLockData,
-    SwingResolution, SwingResolutionPLockData, TRACK_PATTERN_WORDS, Timebase, TimebasePLockData,
-    TrackParams, TrackParamsSnapshot, TrackPattern, TrackSoundState,
+    sync_beats, ChordData, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, ModConnection,
+    RackRouting, StepData, StepParam, SwingPLockData, SwingResolution, SwingResolutionPLockData,
+    Timebase, TimebasePLockData, TrackParams, TrackParamsSnapshot, TrackPattern, TrackSoundState,
+    DEFAULT_BPM, EXT_MOD_INPUT_COUNT, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS, MAX_SAMPLER_POOLS,
+    MAX_STEPS, MAX_TRACKS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
-use super::snapshot::SequencerSnapshot;
+use super::snapshot::{SequencerSnapshot, SequencerTransportSnapshot};
 use super::{BusId, TrackOutput};
 
-#[derive(Clone)]
+/// Stable logical identity for a sequencer track.
+///
+/// Dense track indices remain the runtime addressing scheme, but authoring
+/// references that must survive reordering use this id instead.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TrackId(pub u64);
+
+impl TrackId {
+    pub const MIN: Self = Self(1);
+
+    pub fn new(value: u64) -> Option<Self> {
+        (value != 0).then_some(Self(value))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EffectInstanceId(pub u64);
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MidiFxInstanceId(pub u64);
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RackSlotId(pub u64);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrackRegistryError {
+    InvalidId(TrackId),
+    DuplicateId(TrackId),
+    IndexOutOfRange { index: usize, len: usize },
+    IdExhausted,
+}
+
+/// Bidirectional mapping between stable track ids and dense runtime indices.
+#[derive(Clone, Debug)]
+pub struct TrackRegistry {
+    order: Vec<TrackId>,
+    index_by_id: HashMap<TrackId, usize>,
+    next_id: u64,
+}
+
+impl Default for TrackRegistry {
+    fn default() -> Self {
+        Self {
+            order: Vec::new(),
+            index_by_id: HashMap::new(),
+            next_id: TrackId::MIN.0,
+        }
+    }
+}
+
+impl TrackRegistry {
+    pub fn for_legacy_track_count(track_count: usize) -> Result<Self, TrackRegistryError> {
+        let count = u64::try_from(track_count).map_err(|_| TrackRegistryError::IdExhausted)?;
+        if count == u64::MAX {
+            return Err(TrackRegistryError::IdExhausted);
+        }
+        Self::from_ids((1..=count).map(TrackId))
+    }
+
+    pub fn from_ids(ids: impl IntoIterator<Item = TrackId>) -> Result<Self, TrackRegistryError> {
+        let order = ids.into_iter().collect::<Vec<_>>();
+        let mut index_by_id = HashMap::with_capacity(order.len());
+        let mut max_id = 0u64;
+        for (index, id) in order.iter().copied().enumerate() {
+            if id.0 == 0 {
+                return Err(TrackRegistryError::InvalidId(id));
+            }
+            if index_by_id.insert(id, index).is_some() {
+                return Err(TrackRegistryError::DuplicateId(id));
+            }
+            max_id = max_id.max(id.0);
+        }
+        let next_id = max_id.checked_add(1).unwrap_or(0);
+        Ok(Self {
+            order,
+            index_by_id,
+            next_id,
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    pub fn ids(&self) -> &[TrackId] {
+        &self.order
+    }
+
+    pub fn id_at(&self, index: usize) -> Option<TrackId> {
+        self.order.get(index).copied()
+    }
+
+    pub fn index_of(&self, id: TrackId) -> Option<usize> {
+        self.index_by_id.get(&id).copied()
+    }
+
+    pub fn can_allocate(&self) -> bool {
+        self.next_id != 0
+    }
+
+    pub fn allocate_at(&mut self, index: usize) -> Result<TrackId, TrackRegistryError> {
+        if index > self.order.len() {
+            return Err(TrackRegistryError::IndexOutOfRange {
+                index,
+                len: self.order.len(),
+            });
+        }
+        let id = TrackId::new(self.next_id).ok_or(TrackRegistryError::IdExhausted)?;
+        self.next_id = self.next_id.checked_add(1).unwrap_or(0);
+        self.order.insert(index, id);
+        self.reindex_from(index);
+        Ok(id)
+    }
+
+    pub fn allocate(&mut self) -> Result<TrackId, TrackRegistryError> {
+        self.allocate_at(self.order.len())
+    }
+
+    pub fn remove(&mut self, id: TrackId) -> Option<usize> {
+        let index = self.index_by_id.remove(&id)?;
+        self.order.remove(index);
+        self.reindex_from(index);
+        Some(index)
+    }
+
+    pub fn replace_at(
+        &mut self,
+        index: usize,
+        replacement: TrackId,
+    ) -> Result<TrackId, TrackRegistryError> {
+        if replacement.0 == 0 {
+            return Err(TrackRegistryError::InvalidId(replacement));
+        }
+        let Some(current) = self.order.get(index).copied() else {
+            return Err(TrackRegistryError::IndexOutOfRange {
+                index,
+                len: self.order.len(),
+            });
+        };
+        if current == replacement {
+            return Ok(current);
+        }
+        if self.index_by_id.contains_key(&replacement) {
+            return Err(TrackRegistryError::DuplicateId(replacement));
+        }
+        self.order[index] = replacement;
+        self.index_by_id.remove(&current);
+        self.index_by_id.insert(replacement, index);
+        if replacement.0 >= self.next_id && self.next_id != 0 {
+            self.next_id = replacement.0.checked_add(1).unwrap_or(0);
+        }
+        Ok(current)
+    }
+
+    pub fn move_to(&mut self, id: TrackId, target: usize) -> Result<(), TrackRegistryError> {
+        if target >= self.order.len() {
+            return Err(TrackRegistryError::IndexOutOfRange {
+                index: target,
+                len: self.order.len(),
+            });
+        }
+        let source = self
+            .index_of(id)
+            .ok_or(TrackRegistryError::InvalidId(id))?;
+        if source == target {
+            return Ok(());
+        }
+        self.order.remove(source);
+        self.order.insert(target, id);
+        self.reindex_from(source.min(target));
+        Ok(())
+    }
+
+    fn reindex_from(&mut self, start: usize) {
+        for (index, id) in self.order.iter().copied().enumerate().skip(start) {
+            self.index_by_id.insert(id, index);
+        }
+    }
+}
+
+#[cfg(test)]
+mod track_registry_tests {
+    use super::{TrackId, TrackRegistry, TrackRegistryError};
+
+    #[test]
+    fn stable_track_ids_resolve_after_dense_reordering_and_deletion() {
+        let mut registry = TrackRegistry::default();
+        let first = registry.allocate().expect("allocate first track id");
+        let second = registry.allocate().expect("allocate second track id");
+        let third = registry.allocate().expect("allocate third track id");
+
+        registry.move_to(third, 0).expect("move third track");
+        assert_eq!(registry.ids(), &[third, first, second]);
+        assert_eq!(registry.index_of(first), Some(1));
+        assert_eq!(registry.index_of(third), Some(0));
+
+        assert_eq!(registry.remove(first), Some(1));
+        assert_eq!(registry.ids(), &[third, second]);
+        assert_eq!(registry.index_of(second), Some(1));
+        assert_eq!(registry.index_of(first), None);
+    }
+
+    #[test]
+    fn imported_track_ids_are_validated_and_new_ids_never_reuse_existing_values() {
+        assert!(matches!(
+            TrackRegistry::from_ids([TrackId(1), TrackId(1)]),
+            Err(TrackRegistryError::DuplicateId(TrackId(1)))
+        ));
+        assert!(matches!(
+            TrackRegistry::from_ids([TrackId(0)]),
+            Err(TrackRegistryError::InvalidId(TrackId(0)))
+        ));
+
+        let mut registry = TrackRegistry::from_ids([TrackId(8), TrackId(3)])
+            .expect("import unique nonzero ids");
+        assert_eq!(registry.allocate().expect("allocate after import"), TrackId(9));
+
+        let legacy = TrackRegistry::for_legacy_track_count(3)
+            .expect("assign deterministic ids to legacy tracks");
+        assert_eq!(legacy.ids(), &[TrackId(1), TrackId(2), TrackId(3)]);
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct StepSlotPlocks {
     pub params: Vec<Option<f32>>,
+    pub tensor_params: Vec<Option<Vec<f32>>>,
+}
+
+impl StepSlotPlocks {
+    fn clear(&mut self) {
+        self.params.fill(None);
+        self.tensor_params.fill(None);
+    }
 }
 
 pub const RACK_SLOT_PARAM_COUNT: usize = 6;
@@ -321,7 +563,7 @@ impl Default for RackSlotParamPlocks {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BusPatternSnapshot {
     pub id: BusId,
     pub gate_sequence: BusGateSequence,
@@ -379,7 +621,7 @@ impl BusPatternSnapshot {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BusGateSequence {
     pub steps: [bool; MAX_STEPS],
     pub velocities: [f32; MAX_STEPS],
@@ -451,7 +693,7 @@ impl BusGateSequence {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StepSnapshot {
     pub active: bool,
     pub neural_reset: bool,
@@ -462,36 +704,138 @@ pub struct StepSnapshot {
     pub timebase: Option<Timebase>,
     pub swing: Option<f32>,
     pub swing_resolution: Option<SwingResolution>,
+    pub midi_fx_plocks: Vec<StepSlotPlocks>,
     pub effect_plocks: Vec<StepSlotPlocks>,
     pub instrument_plocks: StepSlotPlocks,
     pub rack_macro_plocks: Vec<Option<f32>>,
     pub rack_slot_param_plocks: Vec<StepSlotPlocks>,
     pub rack_slot_instrument_plocks: Vec<StepSlotPlocks>,
+    pub rack_slot_effect_plocks: Vec<Vec<StepSlotPlocks>>,
 }
+
+pub type StepCellSnapshot = StepSnapshot;
 
 impl StepSnapshot {
     pub fn without_audio_plocks(&self) -> Self {
         let mut snapshot = self.clone();
+        for plocks in &mut snapshot.midi_fx_plocks {
+            plocks.clear();
+        }
         for plocks in &mut snapshot.effect_plocks {
-            for value in &mut plocks.params {
-                *value = None;
-            }
+            plocks.clear();
         }
-        for value in &mut snapshot.instrument_plocks.params {
-            *value = None;
-        }
+        snapshot.instrument_plocks.clear();
         snapshot.rack_macro_plocks.fill(None);
         for plocks in &mut snapshot.rack_slot_param_plocks {
-            for value in &mut plocks.params {
-                *value = None;
-            }
+            plocks.clear();
         }
         for plocks in &mut snapshot.rack_slot_instrument_plocks {
-            for value in &mut plocks.params {
-                *value = None;
+            plocks.clear();
+        }
+        for slot in &mut snapshot.rack_slot_effect_plocks {
+            for plocks in slot {
+                plocks.clear();
             }
         }
         snapshot
+    }
+}
+
+fn capture_live_slot_step_plocks(slot: &EffectSlotState, step: usize) -> StepSlotPlocks {
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    let params = (0..num_params)
+        .map(|param_idx| slot.plocks.get(step, param_idx))
+        .collect();
+    let tensor_params = (0..slot.tensor_params.num_params())
+        .map(|tensor_idx| slot.tensor_params.plock_values(step, tensor_idx))
+        .collect();
+    StepSlotPlocks {
+        params,
+        tensor_params,
+    }
+}
+
+fn capture_snapshot_slot_step_plocks(
+    slot: &EffectSlotSnapshot,
+    step: usize,
+) -> StepSlotPlocks {
+    let params = (0..slot.num_params as usize)
+        .map(|param_idx| {
+            slot.plocks
+                .get(step)
+                .and_then(|row| row.get(param_idx))
+                .copied()
+                .flatten()
+        })
+        .collect();
+    let tensor_params = (0..slot.tensor_params.len())
+        .map(|tensor_idx| slot.tensor_plock_values(step, tensor_idx).map(<[f32]>::to_vec))
+        .collect();
+    StepSlotPlocks {
+        params,
+        tensor_params,
+    }
+}
+
+fn restore_live_slot_step_plocks(
+    slot: &EffectSlotState,
+    step: usize,
+    saved: Option<&StepSlotPlocks>,
+) {
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    for param_idx in 0..num_params {
+        match saved
+            .and_then(|plocks| plocks.params.get(param_idx))
+            .copied()
+            .flatten()
+        {
+            Some(value) => slot.set_plock(step, param_idx, value),
+            None => slot.plocks.clear_param(step, param_idx),
+        }
+    }
+    for tensor_idx in 0..slot.tensor_params.num_params() {
+        let values = saved
+            .and_then(|plocks| plocks.tensor_params.get(tensor_idx))
+            .cloned()
+            .flatten();
+        if values.as_deref().is_none_or(|values| {
+            !slot.tensor_params.set_plock(step, tensor_idx, values)
+        }) {
+            slot.tensor_params.clear_plock(step, tensor_idx);
+        }
+    }
+}
+
+fn restore_snapshot_slot_step_plocks(
+    slot: &mut EffectSlotSnapshot,
+    step: usize,
+    saved: Option<&StepSlotPlocks>,
+) {
+    for param_idx in 0..slot.num_params as usize {
+        match saved
+            .and_then(|plocks| plocks.params.get(param_idx))
+            .copied()
+            .flatten()
+        {
+            Some(value) => {
+                slot.set_plock(step, param_idx, value);
+            }
+            None => {
+                slot.clear_plock(step, param_idx);
+            }
+        }
+    }
+    for tensor_idx in 0..slot.tensor_params.len() {
+        let values = saved
+            .and_then(|plocks| plocks.tensor_params.get(tensor_idx))
+            .cloned()
+            .flatten();
+        let restored = values
+            .map(|values| slot.set_tensor_plock(step, tensor_idx, values))
+            .unwrap_or(false);
+        if !restored {
+            slot.clear_tensor_plock(step, tensor_idx);
+        }
     }
 }
 
@@ -675,7 +1019,161 @@ pub struct RackSlotSnapshot {
     pub sample_id: Option<(i32, String, u32)>,
 }
 
+#[derive(Clone, Debug)]
+pub struct InstrumentDeviceValuesSnapshot {
+    pub slot: EffectSlotValuesSnapshot,
+    pub base_note_offset_bits: u32,
+    pub sound_state: TrackSoundState,
+    pub key_lock_variant_registry: PlockVariantRegistry,
+}
+
+impl InstrumentDeviceValuesSnapshot {
+    pub fn bit_exact_eq(&self, other: &Self) -> bool {
+        self.slot.bit_exact_eq(&other.slot)
+            && self.base_note_offset_bits == other.base_note_offset_bits
+            && self.sound_state.engine_id == other.sound_state.engine_id
+            && self.sound_state.loaded_preset == other.sound_state.loaded_preset
+            && self.sound_state.dirty == other.sound_state.dirty
+            && self.key_lock_variant_registry == other.key_lock_variant_registry
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.slot.retained_bytes()
+            + self
+                .sound_state
+                .loaded_preset
+                .as_ref()
+                .map_or(0, String::capacity)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RackSlotValuesSnapshot {
+    pub base_note_offset_bits: u32,
+    pub choke_group: Option<u8>,
+    pub gain_bits: u32,
+    pub pan_bits: u32,
+    pub mute: bool,
+    pub solo: bool,
+    pub max_polyphony: usize,
+    pub param_plocks: RackSlotParamPlocks,
+    pub instrument_slot: EffectSlotValuesSnapshot,
+    pub effect_slots: Vec<EffectSlotValuesSnapshot>,
+    pub sound_state: TrackSoundState,
+}
+
+impl RackSlotValuesSnapshot {
+    pub fn bit_exact_eq(&self, other: &Self) -> bool {
+        self.base_note_offset_bits == other.base_note_offset_bits
+            && self.choke_group == other.choke_group
+            && self.gain_bits == other.gain_bits
+            && self.pan_bits == other.pan_bits
+            && self.mute == other.mute
+            && self.solo == other.solo
+            && self.max_polyphony == other.max_polyphony
+            && optional_f32_rows_bit_exact_eq(
+                &self.param_plocks.rows,
+                &other.param_plocks.rows,
+            )
+            && self.instrument_slot.bit_exact_eq(&other.instrument_slot)
+            && self.effect_slots.len() == other.effect_slots.len()
+            && self
+                .effect_slots
+                .iter()
+                .zip(&other.effect_slots)
+                .all(|(left, right)| left.bit_exact_eq(right))
+            && self.sound_state.engine_id == other.sound_state.engine_id
+            && self.sound_state.loaded_preset == other.sound_state.loaded_preset
+            && self.sound_state.dirty == other.sound_state.dirty
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.param_plocks.rows.capacity() * std::mem::size_of::<Vec<Option<f32>>>()
+            + self
+                .param_plocks
+                .rows
+                .iter()
+                .map(|row| row.capacity() * std::mem::size_of::<Option<f32>>())
+                .sum::<usize>()
+            + self.instrument_slot.retained_bytes()
+            + self
+                .effect_slots
+                .iter()
+                .map(EffectSlotValuesSnapshot::retained_bytes)
+                .sum::<usize>()
+            + self
+                .sound_state
+                .loaded_preset
+                .as_ref()
+                .map_or(0, String::capacity)
+    }
+}
+
+fn optional_f32_rows_bit_exact_eq(
+    left: &[Vec<Option<f32>>],
+    right: &[Vec<Option<f32>>],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.len() == right.len()
+                && left.iter().zip(right).all(|(left, right)| match (left, right) {
+                    (Some(left), Some(right)) => left.to_bits() == right.to_bits(),
+                    (None, None) => true,
+                    _ => false,
+                })
+        })
+}
+
 impl RackSlotSnapshot {
+    pub fn authoring_values(&self) -> RackSlotValuesSnapshot {
+        RackSlotValuesSnapshot {
+            base_note_offset_bits: self.instrument_base_note_offset.to_bits(),
+            choke_group: self.choke_group,
+            gain_bits: self.gain.to_bits(),
+            pan_bits: self.pan.to_bits(),
+            mute: self.mute,
+            solo: self.solo,
+            max_polyphony: self.max_polyphony,
+            param_plocks: self.param_plocks.clone(),
+            instrument_slot: self.instrument_slot.authoring_values(),
+            effect_slots: self
+                .effect_slots
+                .iter()
+                .map(EffectSlotSnapshot::authoring_values)
+                .collect(),
+            sound_state: self.track_sound_state.clone(),
+        }
+    }
+
+    pub fn apply_authoring_values(
+        &mut self,
+        values: &RackSlotValuesSnapshot,
+    ) -> Result<(), String> {
+        let mut instrument_slot = self.instrument_slot.clone();
+        instrument_slot.apply_authoring_values(&values.instrument_slot)?;
+        if self.effect_slots.len() != values.effect_slots.len() {
+            return Err("rack effect chain changed while replaying history".to_string());
+        }
+        let mut effect_slots = self.effect_slots.clone();
+        for (slot, values) in effect_slots.iter_mut().zip(&values.effect_slots) {
+            slot.apply_authoring_values(values)?;
+        }
+        self.instrument_base_note_offset = f32::from_bits(values.base_note_offset_bits);
+        self.choke_group = values.choke_group;
+        self.gain = f32::from_bits(values.gain_bits);
+        self.pan = f32::from_bits(values.pan_bits);
+        self.mute = values.mute;
+        self.solo = values.solo;
+        self.max_polyphony = values.max_polyphony;
+        self.param_plocks = values.param_plocks.clone();
+        self.instrument_slot = instrument_slot;
+        self.effect_slots = effect_slots;
+        self.track_sound_state = values.sound_state.clone();
+        Ok(())
+    }
+
     pub fn empty_effect_slots() -> Vec<EffectSlotSnapshot> {
         (0..crate::lisp_host::MAX_CUSTOM_FX)
             .map(|_| EffectSlotSnapshot::new_empty())
@@ -778,7 +1276,7 @@ fn replace_rack_slot_source_preserving_controls(
     slot.custom_effect_names = custom_effect_names;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TrackPatternData {
     pub track_bits: [u64; TRACK_PATTERN_WORDS],
     pub neural_reset_bits: [u64; TRACK_PATTERN_WORDS],
@@ -801,6 +1299,69 @@ pub struct TrackPatternData {
     pub project_process_lane_overrides: crate::process::ProjectLaneOverrides,
     pub plock_variant_registry: PlockVariantRegistry,
     pub key_lock_variant_registry: PlockVariantRegistry,
+}
+
+/// Instrument-owned authoring state for one track pattern.  Structural
+/// instrument replacement deliberately resets these fields; keeping them in a
+/// separate snapshot lets undo restore the binding without overwriting notes,
+/// timing, mixer values, or effect state edited by other operations.
+#[derive(Clone, Debug)]
+pub struct TrackInstrumentPatternState {
+    pub instrument_slot: EffectSlotSnapshot,
+    pub instrument_base_note_offset: f32,
+    pub track_sound_state: TrackSoundState,
+    pub sample_id: (i32, String, u32),
+    pub instrument_type: InstrumentType,
+    pub instrument_run_mode: CustomInstrumentRunMode,
+    pub rack_track: Option<RackTrackSnapshot>,
+    pub process_chain: crate::process::TrackProcessChain,
+    pub project_process_lane_overrides: crate::process::ProjectLaneOverrides,
+    pub plock_variant_registry: PlockVariantRegistry,
+    pub key_lock_variant_registry: PlockVariantRegistry,
+}
+
+#[derive(Clone, Debug)]
+pub struct NeuralInstrumentOverrideState {
+    pub scene: usize,
+    pub network: usize,
+    pub neuron: usize,
+    pub entries: Vec<(usize, crate::neural::ProjectParamOverride)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NeuralEffectOverrideState {
+    pub scene: usize,
+    pub network: usize,
+    pub neuron: usize,
+    pub entries: Vec<(usize, crate::neural::ProjectEffectParamOverride)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackEffectBindingStateSnapshot {
+    pub process_chains: Vec<(PatternId, crate::process::TrackProcessChain)>,
+    pub project_process_lane_overrides:
+        Vec<(PatternId, crate::process::ProjectLaneOverrides)>,
+    pub neural_overrides: Vec<NeuralEffectOverrideState>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackInstrumentPatternStateSnapshot {
+    pub live: TrackInstrumentPatternState,
+    pub patterns: Vec<(PatternId, TrackInstrumentPatternState)>,
+    pub neural_overrides: Vec<NeuralInstrumentOverrideState>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RackSlotPatternStateSnapshot {
+    pub slot_index: usize,
+    pub live: RackSlotSnapshot,
+    pub patterns: Vec<(PatternId, RackSlotSnapshot)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RackMacroPatternStateSnapshot {
+    pub live: Vec<RackMacro>,
+    pub patterns: Vec<(PatternId, Vec<RackMacro>)>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -872,6 +1433,220 @@ fn instrument_slot_has_locks(slot: &EffectSlotSnapshot) -> bool {
 }
 
 impl TrackPatternData {
+    fn instrument_state(&self) -> TrackInstrumentPatternState {
+        TrackInstrumentPatternState {
+            instrument_slot: self.instrument_slot.clone(),
+            instrument_base_note_offset: self.instrument_base_note_offset,
+            track_sound_state: self.track_sound_state.clone(),
+            sample_id: self.sample_id.clone(),
+            instrument_type: self.instrument_type,
+            instrument_run_mode: self.instrument_run_mode,
+            rack_track: self.rack_track.clone(),
+            process_chain: self.process_chain.clone(),
+            project_process_lane_overrides: self.project_process_lane_overrides.clone(),
+            plock_variant_registry: self.plock_variant_registry.clone(),
+            key_lock_variant_registry: self.key_lock_variant_registry.clone(),
+        }
+    }
+
+    fn restore_instrument_state(
+        &mut self,
+        state: &TrackInstrumentPatternState,
+        descriptor: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) {
+        let mut instrument_slot = state.instrument_slot.clone();
+        instrument_slot.sync_to_descriptor_with_modulator(
+            descriptor,
+            node_id,
+            modulator_node_id,
+        );
+        self.instrument_slot = instrument_slot;
+        self.instrument_base_note_offset = state.instrument_base_note_offset;
+        self.track_sound_state = state.track_sound_state.clone();
+        self.sample_id = state.sample_id.clone();
+        self.instrument_type = state.instrument_type;
+        self.instrument_run_mode = state.instrument_run_mode;
+        self.rack_track = state.rack_track.clone();
+        self.process_chain = state.process_chain.clone();
+        crate::process::rebind_track_process_chain_instrument_param_ids(
+            &mut self.process_chain,
+            descriptor,
+            &self.instrument_slot,
+        );
+        self.project_process_lane_overrides = state.project_process_lane_overrides.clone();
+        self.plock_variant_registry = state.plock_variant_registry.clone();
+        self.key_lock_variant_registry = state.key_lock_variant_registry.clone();
+    }
+
+    fn capture_step_snapshot(&self, step: usize) -> Option<StepSnapshot> {
+        if step >= MAX_STEPS {
+            return None;
+        }
+        let word = step / 64;
+        let bit = step % 64;
+        let params = *self.step_data.get(step)?;
+        let rack = self.rack_track.as_ref();
+
+        Some(StepSnapshot {
+            active: (self.track_bits[word] >> bit) & 1 == 1,
+            neural_reset: (self.neural_reset_bits[word] >> bit) & 1 == 1,
+            params,
+            chord: self.chord_snapshot.steps.get(step)?.clone(),
+            chord_durations: self.chord_snapshot.durations.get(step)?.clone(),
+            chord_delays: self.chord_snapshot.delays.get(step)?.clone(),
+            timebase: self.timebase_plock_snapshot[step].map(Timebase::from_index),
+            swing: self.swing_plock_snapshot[step].map(f32::from_bits),
+            swing_resolution: self.swing_resolution_plock_snapshot[step]
+                .map(SwingResolution::from_index),
+            midi_fx_plocks: self
+                .midi_fx_slots
+                .iter()
+                .map(|slot| capture_snapshot_slot_step_plocks(slot, step))
+                .collect(),
+            effect_plocks: self
+                .effect_slots
+                .iter()
+                .map(|slot| capture_snapshot_slot_step_plocks(slot, step))
+                .collect(),
+            instrument_plocks: capture_snapshot_slot_step_plocks(
+                &self.instrument_slot,
+                step,
+            ),
+            rack_macro_plocks: rack
+                .map(|rack| {
+                    rack.macros
+                        .iter()
+                        .map(|rack_macro| rack_macro.plocks[step])
+                        .collect()
+                })
+                .unwrap_or_default(),
+            rack_slot_param_plocks: rack
+                .map(|rack| {
+                    rack.slots
+                        .iter()
+                        .map(|slot| StepSlotPlocks {
+                            params: RackSlotParam::ALL
+                                .iter()
+                                .map(|param| slot.param_plocks.get(step, *param))
+                                .collect(),
+                            tensor_params: Vec::new(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            rack_slot_instrument_plocks: rack
+                .map(|rack| {
+                    rack.slots
+                        .iter()
+                        .map(|slot| {
+                            capture_snapshot_slot_step_plocks(&slot.instrument_slot, step)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            rack_slot_effect_plocks: rack
+                .map(|rack| {
+                    rack.slots
+                        .iter()
+                        .map(|slot| {
+                            slot.effect_slots
+                                .iter()
+                                .map(|effect| {
+                                    capture_snapshot_slot_step_plocks(effect, step)
+                                })
+                                .collect()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
+
+    fn restore_step_snapshot(&mut self, step: usize, snapshot: &StepSnapshot) -> bool {
+        if step >= MAX_STEPS
+            || step >= self.step_data.len()
+            || step >= self.chord_snapshot.steps.len()
+            || step >= self.chord_snapshot.durations.len()
+            || step >= self.chord_snapshot.delays.len()
+        {
+            return false;
+        }
+        let word = step / 64;
+        let mask = 1u64 << (step % 64);
+        if snapshot.active {
+            self.track_bits[word] |= mask;
+        } else {
+            self.track_bits[word] &= !mask;
+        }
+        if snapshot.neural_reset {
+            self.neural_reset_bits[word] |= mask;
+        } else {
+            self.neural_reset_bits[word] &= !mask;
+        }
+        self.step_data[step] = snapshot.params;
+
+        self.chord_snapshot.steps[step] = snapshot.chord.clone();
+        self.chord_snapshot.durations[step] = snapshot.chord_durations.clone();
+        self.chord_snapshot.delays[step] = snapshot.chord_delays.clone();
+        self.timebase_plock_snapshot[step] = snapshot.timebase.map(|value| value as u32);
+        self.swing_plock_snapshot[step] = snapshot.swing.map(f32::to_bits);
+        self.swing_resolution_plock_snapshot[step] =
+            snapshot.swing_resolution.map(|value| value as u32);
+
+        for (slot_idx, slot) in self.midi_fx_slots.iter_mut().enumerate() {
+            restore_snapshot_slot_step_plocks(slot, step, snapshot.midi_fx_plocks.get(slot_idx));
+        }
+        for (slot_idx, slot) in self.effect_slots.iter_mut().enumerate() {
+            restore_snapshot_slot_step_plocks(slot, step, snapshot.effect_plocks.get(slot_idx));
+        }
+        restore_snapshot_slot_step_plocks(
+            &mut self.instrument_slot,
+            step,
+            Some(&snapshot.instrument_plocks),
+        );
+
+        if let Some(rack) = self.rack_track.as_mut() {
+            for (macro_idx, rack_macro) in rack.macros.iter_mut().enumerate() {
+                rack_macro.plocks[step] = snapshot
+                    .rack_macro_plocks
+                    .get(macro_idx)
+                    .copied()
+                    .flatten();
+            }
+            for (slot_idx, slot) in rack.slots.iter_mut().enumerate() {
+                let saved_params = snapshot.rack_slot_param_plocks.get(slot_idx);
+                for param in RackSlotParam::ALL {
+                    match saved_params
+                        .and_then(|plocks| plocks.params.get(param.index()))
+                        .copied()
+                        .flatten()
+                    {
+                        Some(value) => slot.param_plocks.set(step, param, value),
+                        None => slot.param_plocks.clear(step, param),
+                    };
+                }
+                restore_snapshot_slot_step_plocks(
+                    &mut slot.instrument_slot,
+                    step,
+                    snapshot.rack_slot_instrument_plocks.get(slot_idx),
+                );
+                for (effect_idx, effect) in slot.effect_slots.iter_mut().enumerate() {
+                    restore_snapshot_slot_step_plocks(
+                        effect,
+                        step,
+                        snapshot
+                            .rack_slot_effect_plocks
+                            .get(slot_idx)
+                            .and_then(|effects| effects.get(effect_idx)),
+                    );
+                }
+            }
+        }
+        true
+    }
+
     fn reset_instrument_source(
         &mut self,
         descriptor: &EffectDescriptor,
@@ -970,30 +1745,7 @@ impl TrackPatternData {
 
         let tp = &state.pattern.track_params[track];
         let snap = &self.track_params;
-        tp.gate.store(snap.gate, Ordering::Relaxed);
-        tp.set_attack_ms(snap.attack_ms);
-        tp.set_release_ms(snap.release_ms);
-        tp.set_swing(snap.swing);
-        tp.set_swing_resolution(snap.swing_resolution);
-        tp.set_num_steps(snap.num_steps);
-        tp.set_volume(snap.volume);
-        tp.set_pan(snap.pan);
-        tp.set_mute(snap.mute);
-        tp.set_solo(snap.solo);
-        tp.set_send(snap.send);
-        tp.set_output(snap.output.clone());
-        tp.set_sends(snap.sends.clone());
-        tp.polyphonic.store(snap.polyphonic, Ordering::Relaxed);
-        tp.set_max_polyphony(snap.max_polyphony);
-        tp.set_timebase(snap.timebase);
-        tp.set_accumulator_idx(snap.accumulator_idx);
-        tp.set_script_accumulator_name(snap.script_accumulator_name.clone());
-        tp.set_midi_fx_chain(snap.midi_fx_chain.clone());
-        tp.set_midi_fx_position(snap.midi_fx_position);
-        tp.set_accum_limit(snap.accum_limit);
-        tp.set_accum_mode(snap.accum_mode);
-        tp.set_fts_scale(snap.fts_scale);
-        tp.set_mute_group(snap.mute_group);
+        restore_track_params_snapshot(tp, snap);
 
         for (slot_idx, slot_snap) in self.effect_slots.iter().enumerate() {
             if slot_idx < state.pattern.effect_chains[track].len() {
@@ -1175,14 +1927,19 @@ impl TrackPatternData {
                     ) as f32;
                 }
                 for step in 0..MAX_STEPS {
-                    if let Some(selection) = slot.plocks[step].get(param_idx).and_then(|v| *v) {
-                        slot.plocks[step][param_idx] =
-                            Some(remap_sidechain_selection_after_track_delete(
-                                owner_track_old,
-                                selection.round().max(0.0) as usize,
-                                deleted_track,
-                                old_track_count,
-                            ) as f32);
+                    let selection = slot.plocks.get(step)
+                        .and_then(|params| params.get(param_idx))
+                        .and_then(|value| *value);
+                    if let (Some(selection), Some(value)) = (
+                        selection,
+                        slot.plocks.get_mut(step).and_then(|params| params.get_mut(param_idx)),
+                    ) {
+                        *value = Some(remap_sidechain_selection_after_track_delete(
+                            owner_track_old,
+                            selection.round().max(0.0) as usize,
+                            deleted_track,
+                            old_track_count,
+                        ) as f32);
                     }
                 }
             }
@@ -1274,6 +2031,20 @@ impl TrackPatternData {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct PatternId(pub u64);
 
+/// Stable logical identity for a project scene.
+///
+/// Scene indices are presentation order and can change when scenes are
+/// inserted, deleted, or reordered. Long-lived authoring references use this
+/// identity instead.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SceneId(pub u64);
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct TrackPatternId {
+    pub track: TrackId,
+    pub pattern: PatternId,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TrackPatternCellView {
     pub pattern_id: PatternId,
@@ -1282,10 +2053,33 @@ pub struct TrackPatternCellView {
     pub overridden: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TrackPatternPool {
     pub patterns: HashMap<PatternId, TrackPatternData>,
     pub next_id: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SceneTrackReferenceState {
+    pub mod_connections: Vec<ModConnection>,
+    pub neural_networks: Vec<ProjectNeuralNetwork>,
+    pub graph_overrides: Vec<ProjectGraphOverrides>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackSidechainPatternState {
+    pub owner_track: usize,
+    pub pattern: PatternId,
+    pub slots: Vec<(usize, EffectSlotSnapshot)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackPatternLaneState {
+    pub pool: TrackPatternPool,
+    pub scene_cells: Vec<Option<PatternId>>,
+    pub track_override: Option<PatternId>,
+    pub scene_references: Vec<SceneTrackReferenceState>,
+    pub sidechains: Vec<TrackSidechainPatternState>,
 }
 
 impl Default for TrackPatternPool {
@@ -1323,8 +2117,9 @@ impl TrackPatternPool {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Scene {
+    pub id: SceneId,
     pub name: String,
     pub cells: Vec<Option<PatternId>>,
     pub bus_patterns: Vec<BusPatternSnapshot>,
@@ -1338,12 +2133,13 @@ pub struct Scene {
     pub project_process_chain: crate::process::TrackProcessChain,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ProjectScenes {
     pub track_pools: Vec<TrackPatternPool>,
     pub scenes: Vec<Scene>,
     pub current_scene: usize,
     pub track_overrides: Vec<Option<PatternId>>,
+    next_scene_id: u64,
 }
 
 impl ProjectScenes {
@@ -1367,6 +2163,7 @@ impl ProjectScenes {
                 }
             }
             scenes.push(Scene {
+                id: SceneId(scene_idx as u64 + 1),
                 name: format!("Scene {}", scene_idx + 1),
                 cells,
                 bus_patterns: Vec::new(),
@@ -1379,6 +2176,7 @@ impl ProjectScenes {
 
         if scenes.is_empty() {
             scenes.push(Scene {
+                id: SceneId(1),
                 name: "Scene 1".to_string(),
                 cells: vec![None; track_count],
                 bus_patterns: Vec::new(),
@@ -1394,11 +2192,23 @@ impl ProjectScenes {
             scenes,
             current_scene: current_scene.min(snapshots.len().saturating_sub(1)),
             track_overrides: vec![None; track_count],
+            next_scene_id: u64::try_from(snapshots.len().max(1))
+                .expect("scene count exceeds stable identity space")
+                .checked_add(1)
+                .expect("scene identity space exhausted"),
         }
     }
 
     pub fn scene_count(&self) -> usize {
         self.scenes.len().max(1)
+    }
+
+    pub fn scene_id(&self, scene_idx: usize) -> Option<SceneId> {
+        self.scenes.get(scene_idx).map(|scene| scene.id)
+    }
+
+    pub fn scene_index(&self, id: SceneId) -> Option<usize> {
+        self.scenes.iter().position(|scene| scene.id == id)
     }
 
     /// Sample ids for a scene without cloning the full track pattern data.
@@ -1854,7 +2664,13 @@ impl ProjectScenes {
                 )
             })
             .unwrap_or_default();
+        let next_id = self.next_scene_id;
+        self.next_scene_id = self
+            .next_scene_id
+            .checked_add(1)
+            .expect("scene identity space exhausted");
         self.scenes.push(Scene {
+            id: SceneId(next_id),
             name: format!("Scene {}", scene_idx + 1),
             cells,
             bus_patterns,
@@ -3008,14 +3824,19 @@ fn remap_snapshot_sidechain_references_after_track_delete(
                     slot.defaults[param_idx] = remapped;
                 }
                 for step in 0..MAX_STEPS {
-                    if let Some(selection) = slot.plocks[step].get(param_idx).and_then(|v| *v) {
-                        slot.plocks[step][param_idx] =
-                            Some(remap_sidechain_selection_after_track_delete(
-                                owner_track,
-                                selection.round().max(0.0) as usize,
-                                deleted_track,
-                                old_track_count,
-                            ) as f32);
+                    let selection = slot.plocks.get(step)
+                        .and_then(|params| params.get(param_idx))
+                        .and_then(|value| *value);
+                    if let (Some(selection), Some(value)) = (
+                        selection,
+                        slot.plocks.get_mut(step).and_then(|params| params.get_mut(param_idx)),
+                    ) {
+                        *value = Some(remap_sidechain_selection_after_track_delete(
+                            owner_track,
+                            selection.round().max(0.0) as usize,
+                            deleted_track,
+                            old_track_count,
+                        ) as f32);
                     }
                 }
             }
@@ -3076,11 +3897,96 @@ pub struct TransportState {
     pub trigger_flash: Vec<AtomicU32>,
     pub num_tracks: AtomicU32,
     pub track_playheads: Vec<AtomicU32>,
+    /// Per-track phase within the active step, normalized to 0.0..=1.0.
+    pub track_playhead_phases: Vec<AtomicU32>,
     /// Per-track sampler playhead as normalized 0.0–1.0 (f32 bits).
     pub sampler_playheads: Vec<AtomicU32>,
     pub active_voice_counts: Vec<AtomicU32>,
     pub playhead_phase: AtomicU32,
+    /// The live-keyboard record quantization mode (`RecordQuantize as u8`).
+    pub record_quantize: AtomicU32,
+    /// Audio output latency compensation used when timestamping keyboard note-ons.
+    pub record_latency_seconds: AtomicU32,
+    /// Monotonic audio-clock anchor published by the audio callback.
+    pub record_clock: RecordClockAnchor,
+    pub metronome_enabled: AtomicBool,
     pub record_quantize_thresh: AtomicU32,
+}
+
+/// Lock-free snapshot of the render clock for wall-clock interpolation on the
+/// UI thread. The sequence counter makes the two payload values atomic as a
+/// pair without placing a mutex on the realtime callback.
+pub struct RecordClockAnchor {
+    sequence: AtomicU64,
+    beats_bits: AtomicU64,
+    timestamp_nanos: AtomicU64,
+}
+
+impl RecordClockAnchor {
+    pub fn new() -> Self {
+        Self {
+            sequence: AtomicU64::new(0),
+            beats_bits: AtomicU64::new(0.0_f64.to_bits()),
+            timestamp_nanos: AtomicU64::new(0),
+        }
+    }
+
+    /// Publish an anchor from the audio callback. The odd/even sequence is a
+    /// standard seqlock protocol; readers retry rather than observing a mixed
+    /// beat/timestamp pair.
+    pub fn publish(&self, beats: f64, timestamp: Instant) {
+        self.sequence.fetch_add(1, Ordering::Release);
+        self.beats_bits
+            .store(beats.max(0.0).to_bits(), Ordering::Relaxed);
+        self.timestamp_nanos
+            .store(record_clock_nanos(timestamp), Ordering::Relaxed);
+        self.sequence.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn sample(&self, timestamp: Instant) -> Option<(f64, Duration)> {
+        for _ in 0..8 {
+            let before = self.sequence.load(Ordering::Acquire);
+            if before & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let beats = f64::from_bits(self.beats_bits.load(Ordering::Relaxed));
+            let anchor_nanos = self.timestamp_nanos.load(Ordering::Relaxed);
+            let after = self.sequence.load(Ordering::Acquire);
+            if before == after {
+                if !beats.is_finite() || anchor_nanos == 0 {
+                    return None;
+                }
+                let now_nanos = record_clock_nanos(timestamp);
+                return Some((
+                    beats,
+                    Duration::from_nanos(now_nanos.saturating_sub(anchor_nanos)),
+                ));
+            }
+        }
+        None
+    }
+}
+
+impl Default for RecordClockAnchor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static RECORD_CLOCK_ORIGIN: OnceLock<Instant> = OnceLock::new();
+
+fn record_clock_nanos(timestamp: Instant) -> u64 {
+    timestamp
+        .saturating_duration_since(*RECORD_CLOCK_ORIGIN.get_or_init(Instant::now))
+        .as_nanos()
+        .min(u64::MAX as u128) as u64
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RecordPosition {
+    pub step: usize,
+    pub phase: f32,
 }
 
 pub struct RuntimeBindingState {
@@ -3236,6 +4142,34 @@ fn capture_track_params_snapshot(track_params: &TrackParams) -> TrackParamsSnaps
     }
 }
 
+fn restore_track_params_snapshot(track_params: &TrackParams, snapshot: &TrackParamsSnapshot) {
+    track_params.gate.store(snapshot.gate, Ordering::Relaxed);
+    track_params.set_attack_ms(snapshot.attack_ms);
+    track_params.set_release_ms(snapshot.release_ms);
+    track_params.set_swing(snapshot.swing);
+    track_params.set_swing_resolution(snapshot.swing_resolution);
+    track_params.set_num_steps(snapshot.num_steps);
+    track_params.set_volume(snapshot.volume);
+    track_params.set_pan(snapshot.pan);
+    track_params.set_mute(snapshot.mute);
+    track_params.set_solo(snapshot.solo);
+    track_params.set_send(snapshot.send);
+    track_params.set_output(snapshot.output.clone());
+    track_params.set_sends(snapshot.sends.clone());
+    track_params.polyphonic.store(snapshot.polyphonic, Ordering::Relaxed);
+    track_params.set_max_polyphony(snapshot.max_polyphony);
+    track_params.set_timebase(snapshot.timebase);
+    track_params.set_accumulator_idx(snapshot.accumulator_idx);
+    track_params.set_script_accumulator_name(snapshot.script_accumulator_name.clone());
+    track_params.set_midi_fx_chain(snapshot.midi_fx_chain.clone());
+    track_params.set_midi_fx_position(snapshot.midi_fx_position);
+    track_params.set_accum_limit(snapshot.accum_limit);
+    track_params.set_accum_mode(snapshot.accum_mode);
+    track_params.set_fts_scale(snapshot.fts_scale);
+    track_params.set_mute_group(snapshot.mute_group);
+    track_params.set_global_transpose(snapshot.global_transpose);
+}
+
 impl SequencerState {
     pub fn capture_current_pattern_snapshot(
         &self,
@@ -3265,6 +4199,8 @@ impl SequencerState {
     }
 
     pub fn new(num_tracks: usize, initial_chains: Vec<Vec<EffectSlotState>>) -> Self {
+        // Initialize the shared monotonic origin off the audio thread.
+        let _ = RECORD_CLOCK_ORIGIN.get_or_init(Instant::now);
         let patterns: Vec<TrackPattern> = (0..MAX_TRACKS).map(|_| TrackPattern::new()).collect();
         let neural_reset_patterns: Vec<TrackPattern> =
             (0..MAX_TRACKS).map(|_| TrackPattern::new()).collect();
@@ -3365,11 +4301,20 @@ impl SequencerState {
                 trigger_flash,
                 num_tracks: AtomicU32::new(num_tracks as u32),
                 track_playheads: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
+                track_playhead_phases: (0..MAX_TRACKS)
+                    .map(|_| AtomicU32::new(0.0_f32.to_bits()))
+                    .collect(),
                 sampler_playheads: (0..MAX_TRACKS)
                     .map(|_| AtomicU32::new(0.0_f32.to_bits()))
                     .collect(),
                 active_voice_counts: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
                 playhead_phase: AtomicU32::new(0.0_f32.to_bits()),
+                record_quantize: AtomicU32::new(
+                    crate::record_quantize::RecordQuantize::DEFAULT as u32,
+                ),
+                record_latency_seconds: AtomicU32::new(0.0_f32.to_bits()),
+                record_clock: RecordClockAnchor::new(),
+                metronome_enabled: AtomicBool::new(false),
                 record_quantize_thresh: AtomicU32::new(0.5_f32.to_bits()),
             },
             runtime: RuntimeBindingState {
@@ -3532,6 +4477,43 @@ impl SequencerState {
         self.current_pattern_index()
     }
 
+    pub(crate) fn current_scene_id(&self) -> Option<SceneId> {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .scene_id(self.current_scene_index())
+    }
+
+    pub(crate) fn scene_index(&self, id: SceneId) -> Option<usize> {
+        self.pattern.scenes.lock().unwrap().scene_index(id)
+    }
+
+    pub(crate) fn effective_track_pattern_id(&self, track: usize) -> Option<PatternId> {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .effective_pattern_id(track)
+    }
+
+    pub(crate) fn live_track_params_snapshot(&self, track: usize) -> Option<TrackParamsSnapshot> {
+        self.pattern
+            .track_params
+            .get(track)
+            .map(capture_track_params_snapshot)
+    }
+
+    pub(crate) fn live_rack_track_snapshot(&self, track: usize) -> Option<RackTrackSnapshot> {
+        self.pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .cloned()
+            .flatten()
+    }
+
     pub fn scene_count(&self) -> usize {
         self.pattern.scenes.lock().unwrap().scene_count()
     }
@@ -3604,6 +4586,58 @@ impl SequencerState {
                     .unwrap_or((-1, String::new(), 44_100))
             })
             .collect()
+    }
+
+    #[doc(hidden)]
+    pub fn capture_project_scenes(&self) -> ProjectScenes {
+        self.pattern.scenes.lock().unwrap().clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_scenes_mut<R>(&self, f: impl FnOnce(&mut ProjectScenes) -> R) -> R {
+        f(&mut self.pattern.scenes.lock().unwrap())
+    }
+
+    pub(crate) fn restore_project_scenes(
+        &self,
+        target: &ProjectScenes,
+    ) -> Result<Vec<(i32, String, u32)>, String> {
+        if target.scenes.is_empty() {
+            return Err("Scene history cannot restore an empty project".to_string());
+        }
+        if target.track_pools.len() != self.active_track_count()
+            || target.track_overrides.len() != self.active_track_count()
+            || target.scenes.iter().any(|scene| scene.cells.len() != self.active_track_count())
+        {
+            return Err("Scene history track topology no longer matches the project".to_string());
+        }
+        if target.current_scene >= target.scenes.len() {
+            return Err("Scene history has an invalid current-scene index".to_string());
+        }
+        let unique_scene_ids = target
+            .scenes
+            .iter()
+            .map(|scene| scene.id)
+            .collect::<HashSet<_>>();
+        if unique_scene_ids.len() != target.scenes.len()
+            || unique_scene_ids.iter().any(|id| id.0 == 0)
+            || target.next_scene_id == 0
+            || unique_scene_ids
+                .iter()
+                .any(|id| id.0 >= target.next_scene_id)
+        {
+            return Err("Scene history contains invalid or duplicate scene identities".to_string());
+        }
+        let _ = self.quantized_launches.cancel_all();
+        *self.pattern.scenes.lock().unwrap() = target.clone();
+        self.pattern.current_pattern.store(target.current_scene as u32, Ordering::Relaxed);
+        self.pattern.num_patterns.store(target.scenes.len() as u32, Ordering::Relaxed);
+        let sample_ids = self.restore_current_pattern_from_repository()
+            .ok_or_else(|| "Scene history could not restore the current scene".to_string())?;
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.schedule_mod_resync();
+        self.publish_scheduler_snapshot();
+        Ok(sample_ids)
     }
 
     pub fn restore_current_pattern_from_repository(&self) -> Option<Vec<(i32, String, u32)>> {
@@ -3971,6 +5005,243 @@ impl SequencerState {
         })
     }
 
+    pub fn capture_track_instrument_pattern_state(
+        &self,
+        track: usize,
+    ) -> Result<TrackInstrumentPatternStateSnapshot, String> {
+        self.validate_instrument_source_reset_target(track)?;
+        let (mut live, patterns, neural_overrides) = {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let pool = scenes
+                .track_pools
+                .get(track)
+                .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+            let effective_id = scenes
+                .effective_pattern_id(track)
+                .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+            let live = pool
+                .patterns
+                .get(&effective_id)
+                .ok_or_else(|| format!("Track {} effective pattern is missing", track + 1))?
+                .instrument_state();
+            let patterns = pool
+                .patterns
+                .iter()
+                .map(|(id, data)| (*id, data.instrument_state()))
+                .collect();
+            let mut neural_overrides = Vec::new();
+            for (scene_idx, scene) in scenes.scenes.iter().enumerate() {
+                for (network_idx, network) in scene.neural_networks.iter().enumerate() {
+                    for (neuron_idx, neuron) in network.neurons.iter().enumerate() {
+                        let entries = neuron
+                            .output_overrides
+                            .instrument
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, value)| value.target_track == track)
+                            .map(|(idx, value)| (idx, value.clone()))
+                            .collect::<Vec<_>>();
+                        if !entries.is_empty() {
+                            neural_overrides.push(NeuralInstrumentOverrideState {
+                                scene: scene_idx,
+                                network: network_idx,
+                                neuron: neuron_idx,
+                                entries,
+                            });
+                        }
+                    }
+                }
+            }
+            (live, patterns, neural_overrides)
+        };
+        live.instrument_slot = EffectSlotSnapshot::capture(&self.pattern.instrument_slots[track]);
+        live.instrument_base_note_offset = f32::from_bits(
+            self.pattern.instrument_base_note_offsets[track].load(Ordering::Relaxed),
+        );
+        live.instrument_run_mode = CustomInstrumentRunMode::from_runtime_flag(
+            self.pattern.instrument_run_modes[track].load(Ordering::Relaxed),
+        );
+        live.track_sound_state = self.pattern.track_sound_state.lock().unwrap()[track].clone();
+        live.rack_track = self.pattern.rack_tracks.lock().unwrap()[track].clone();
+        live.process_chain = self.pattern.process_chains.lock().unwrap()[track].clone();
+        live.project_process_lane_overrides =
+            self.pattern.project_process_lane_overrides.lock().unwrap()[track].clone();
+        live.plock_variant_registry =
+            self.pattern.plock_variant_registries.lock().unwrap()[track].clone();
+        live.key_lock_variant_registry = self.pattern.key_lock_variant_registries.lock().unwrap()
+            [track]
+            .clone();
+
+        Ok(TrackInstrumentPatternStateSnapshot {
+            live,
+            patterns,
+            neural_overrides,
+        })
+    }
+
+    pub fn restore_track_instrument_pattern_state(
+        &self,
+        track: usize,
+        snapshot: &TrackInstrumentPatternStateSnapshot,
+        descriptor: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) -> Result<(), String> {
+        self.validate_track_instrument_pattern_state(track, snapshot, descriptor)?;
+        let mut live = snapshot.live.clone();
+        live.instrument_slot.sync_to_descriptor_with_modulator(
+            descriptor,
+            node_id,
+            modulator_node_id,
+        );
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != snapshot.patterns.len()
+            || snapshot
+                .patterns
+                .iter()
+                .any(|(id, _)| !pool.patterns.contains_key(id))
+        {
+            return Err(format!(
+                "Track {} pattern set changed before instrument history replay",
+                track + 1
+            ));
+        }
+        for (id, state) in &snapshot.patterns {
+            pool.patterns
+                .get_mut(id)
+                .expect("pattern set was validated")
+                .restore_instrument_state(state, descriptor, node_id, modulator_node_id);
+        }
+        for scene in &mut scenes.scenes {
+            for network in &mut scene.neural_networks {
+                for neuron in &mut network.neurons {
+                    neuron
+                        .output_overrides
+                        .instrument
+                        .retain(|value| value.target_track != track);
+                }
+            }
+        }
+        for saved in &snapshot.neural_overrides {
+            let neuron = scenes
+                .scenes
+                .get_mut(saved.scene)
+                .and_then(|scene| scene.neural_networks.get_mut(saved.network))
+                .and_then(|network| network.neurons.get_mut(saved.neuron))
+                .ok_or_else(|| {
+                    format!(
+                        "Track {} neural topology changed before instrument history replay",
+                        track + 1
+                    )
+                })?;
+            for (index, value) in &saved.entries {
+                let index = (*index).min(neuron.output_overrides.instrument.len());
+                let mut value = value.clone();
+                let raw_idx = live
+                    .instrument_slot
+                    .param_node_indices
+                    .get(value.param_index)
+                    .copied()
+                    .unwrap_or(value.param_index as u32);
+                value.param_id = crate::neural::ParamNodeId::from_slot_param(
+                    live.instrument_slot.node_id,
+                    live.instrument_slot.modulator_node_id,
+                    raw_idx,
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "Track {} instrument parameter {} has no live identity",
+                        track + 1,
+                        value.param_index
+                    )
+                })?;
+                neuron
+                    .output_overrides
+                    .instrument
+                    .insert(index, value);
+            }
+        }
+        drop(scenes);
+
+        crate::process::refresh_track_process_chain_binding_param_ids(
+            &mut live.process_chain,
+            Some(descriptor),
+            Some(&live.instrument_slot),
+            &[],
+            &[],
+        );
+        live.instrument_slot.restore(&self.pattern.instrument_slots[track]);
+        self.pattern.instrument_base_note_offsets[track]
+            .store(live.instrument_base_note_offset.to_bits(), Ordering::Relaxed);
+        self.pattern.instrument_run_modes[track]
+            .store(live.instrument_run_mode.runtime_flag(), Ordering::Relaxed);
+        self.runtime.instrument_run_mode_flags[track]
+            .store(live.instrument_run_mode.runtime_flag(), Ordering::Release);
+        self.pattern.track_sound_state.lock().unwrap()[track] = live.track_sound_state;
+        self.pattern.rack_tracks.lock().unwrap()[track] = live.rack_track;
+        self.pattern.process_chains.lock().unwrap()[track] = live.process_chain;
+        self.pattern.project_process_lane_overrides.lock().unwrap()[track] =
+            live.project_process_lane_overrides;
+        self.pattern.plock_variant_registries.lock().unwrap()[track] =
+            live.plock_variant_registry;
+        self.pattern.key_lock_variant_registries.lock().unwrap()[track] =
+            live.key_lock_variant_registry;
+        Ok(())
+    }
+
+    pub fn validate_track_instrument_pattern_state(
+        &self,
+        track: usize,
+        snapshot: &TrackInstrumentPatternStateSnapshot,
+        descriptor: &EffectDescriptor,
+    ) -> Result<(), String> {
+        self.validate_instrument_source_reset_target(track)?;
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != snapshot.patterns.len()
+            || snapshot
+                .patterns
+                .iter()
+                .any(|(id, _)| !pool.patterns.contains_key(id))
+        {
+            return Err(format!(
+                "Track {} pattern set changed before instrument history replay",
+                track + 1
+            ));
+        }
+        for saved in &snapshot.neural_overrides {
+            if scenes
+                .scenes
+                .get(saved.scene)
+                .and_then(|scene| scene.neural_networks.get(saved.network))
+                .and_then(|network| network.neurons.get(saved.neuron))
+                .is_none()
+            {
+                return Err(format!(
+                    "Track {} neural topology changed before instrument history replay",
+                    track + 1
+                ));
+            }
+            if saved.entries.iter().any(|(_, value)| {
+                value.param_index >= descriptor.params.len()
+                    || value.target_track != track
+            }) {
+                return Err(format!(
+                    "Track {} neural instrument override no longer matches its descriptor",
+                    track + 1
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn copy_current_rack_slot_instrument_values_to_all_track_patterns(
         &self,
         track: usize,
@@ -4106,6 +5377,31 @@ impl SequencerState {
                 scenes.scenes[scene_idx].cells[track] = Some(id);
             }
         }
+    }
+
+    /// Seed `sample_id` onto every stored pattern of `track` that has never had
+    /// a real sample chosen (negative buffer id). Patterns with an explicit
+    /// sample keep it. Returns the number of patterns seeded.
+    pub fn seed_unset_pattern_sample_ids(
+        &self,
+        track: usize,
+        sample_id: (i32, String, u32),
+    ) -> usize {
+        if sample_id.0 < 0 {
+            return 0;
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(pool) = scenes.track_pools.get_mut(track) else {
+            return 0;
+        };
+        let mut seeded = 0;
+        for data in pool.patterns.values_mut() {
+            if data.sample_id.0 < 0 {
+                data.sample_id = sample_id.clone();
+                seeded += 1;
+            }
+        }
+        seeded
     }
 
     pub fn set_rack_track_for_all_pattern_snapshots(
@@ -4627,6 +5923,60 @@ impl SequencerState {
         synced_live && synced_current
     }
 
+    pub fn sync_rack_slot_instrument_bindings_for_all_patterns(
+        &self,
+        track: usize,
+        bindings: &[(EffectDescriptor, u32, u32)],
+    ) -> bool {
+        let sync_slots = |slots: &mut [RackSlotSnapshot]| {
+            if slots.len() != bindings.len() {
+                return false;
+            }
+            for (slot, (descriptor, node_id, modulator_node_id)) in
+                slots.iter_mut().zip(bindings.iter())
+            {
+                slot.instrument_slot.sync_to_descriptor_with_modulator(
+                    descriptor,
+                    *node_id,
+                    *modulator_node_id,
+                );
+            }
+            true
+        };
+        let synced_live = self
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get_mut(track)
+            .and_then(Option::as_mut)
+            .is_some_and(|rack| sync_slots(&mut rack.slots));
+        if !synced_live {
+            return false;
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(pool) = scenes.track_pools.get_mut(track) else {
+            return false;
+        };
+        if pool.patterns.values().any(|data| {
+            data.rack_track
+                .as_ref()
+                .is_none_or(|rack| rack.slots.len() != bindings.len())
+        }) {
+            return false;
+        }
+        for data in pool.patterns.values_mut() {
+            sync_slots(
+                &mut data
+                    .rack_track
+                    .as_mut()
+                    .expect("rack topology was validated")
+                    .slots,
+            );
+        }
+        true
+    }
+
     pub fn update_live_rack_slot<F>(&self, track: usize, slot_idx: usize, update: F) -> bool
     where
         F: FnOnce(&mut RackSlotSnapshot),
@@ -4894,6 +6244,265 @@ impl SequencerState {
         true
     }
 
+    pub fn capture_rack_slot_pattern_state(
+        &self,
+        track: usize,
+        slot_index: usize,
+    ) -> Result<RackSlotPatternStateSnapshot, String> {
+        let live = self
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.slots.get(slot_index))
+            .cloned()
+            .ok_or_else(|| format!("Track {} rack slot {} is missing", track + 1, slot_index + 1))?;
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        let mut patterns = Vec::with_capacity(pool.patterns.len());
+        for (pattern_id, data) in &pool.patterns {
+            let slot = data
+                .rack_track
+                .as_ref()
+                .and_then(|rack| rack.slots.get(slot_index))
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "Track {} pattern {:?} has no rack slot {}",
+                        track + 1,
+                        pattern_id,
+                        slot_index + 1
+                    )
+                })?;
+            patterns.push((*pattern_id, slot));
+        }
+        Ok(RackSlotPatternStateSnapshot {
+            slot_index,
+            live,
+            patterns,
+        })
+    }
+
+    pub fn capture_rack_macro_pattern_state(
+        &self,
+        track: usize,
+    ) -> Result<RackMacroPatternStateSnapshot, String> {
+        let live = self.pattern.rack_tracks.lock().unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .map(|rack| rack.macros.clone())
+            .ok_or_else(|| format!("Track {} has no live rack", track + 1))?;
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes.track_pools.get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        let patterns = pool.patterns.iter().map(|(pattern, data)| {
+            data.rack_track.as_ref()
+                .map(|rack| (*pattern, rack.macros.clone()))
+                .ok_or_else(|| format!("Track {} pattern {:?} has no rack", track + 1, pattern))
+        }).collect::<Result<Vec<_>, String>>()?;
+        Ok(RackMacroPatternStateSnapshot { live, patterns })
+    }
+
+    pub fn restore_rack_macro_pattern_state(
+        &self,
+        track: usize,
+        snapshot: &RackMacroPatternStateSnapshot,
+    ) -> Result<(), String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes.track_pools.get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != snapshot.patterns.len()
+            || snapshot.patterns.iter().any(|(pattern, _)| !pool.patterns.contains_key(pattern))
+        {
+            return Err(format!("Track {} rack macro pattern topology changed", track + 1));
+        }
+        for (pattern, macros) in &snapshot.patterns {
+            let rack = pool.patterns.get_mut(pattern)
+                .and_then(|data| data.rack_track.as_mut())
+                .ok_or_else(|| format!("Track {} pattern {:?} has no rack", track + 1, pattern))?;
+            rack.macros.clone_from(macros);
+        }
+        drop(scenes);
+        let mut racks = self.pattern.rack_tracks.lock().unwrap();
+        let rack = racks.get_mut(track).and_then(Option::as_mut)
+            .ok_or_else(|| format!("Track {} has no live rack", track + 1))?;
+        rack.macros.clone_from(&snapshot.live);
+        self.sync_rack_macro_runtime_track(track, Some(rack));
+        Ok(())
+    }
+
+    pub fn restore_rack_slot_effect_pattern_state(
+        &self,
+        track: usize,
+        snapshot: &RackSlotPatternStateSnapshot,
+    ) -> Result<(), String> {
+        self.validate_rack_slot_pattern_state(track, snapshot)?;
+        let copy_effects = |slot: &mut RackSlotSnapshot, saved: &RackSlotSnapshot| {
+            slot.effect_slots.clone_from(&saved.effect_slots);
+            slot.effect_descriptors.clone_from(&saved.effect_descriptors);
+            slot.custom_effect_names.clone_from(&saved.custom_effect_names);
+        };
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes.track_pools.get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        for (pattern, saved) in &snapshot.patterns {
+            let slot = pool.patterns.get_mut(pattern)
+                .and_then(|data| data.rack_track.as_mut())
+                .and_then(|rack| rack.slots.get_mut(snapshot.slot_index))
+                .ok_or_else(|| format!("Track {} pattern {:?} lost rack slot {}", track + 1, pattern, snapshot.slot_index + 1))?;
+            copy_effects(slot, saved);
+        }
+        drop(scenes);
+        let mut racks = self.pattern.rack_tracks.lock().unwrap();
+        let slot = racks.get_mut(track)
+            .and_then(Option::as_mut)
+            .and_then(|rack| rack.slots.get_mut(snapshot.slot_index))
+            .ok_or_else(|| format!("Track {} lost rack slot {}", track + 1, snapshot.slot_index + 1))?;
+        copy_effects(slot, &snapshot.live);
+        Ok(())
+    }
+
+    pub fn restore_rack_slot_pattern_state(
+        &self,
+        track: usize,
+        snapshot: &RackSlotPatternStateSnapshot,
+        descriptor: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) -> Result<(), String> {
+        let sync_slot = |slot: &mut RackSlotSnapshot, saved: &RackSlotSnapshot| {
+            *slot = saved.clone();
+            slot.instrument_slot.sync_to_descriptor_with_modulator(
+                descriptor,
+                node_id,
+                modulator_node_id,
+            );
+        };
+        self.validate_rack_slot_pattern_state(track, snapshot)?;
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != snapshot.patterns.len()
+            || snapshot.patterns.iter().any(|(id, _)| {
+                pool.patterns
+                    .get(id)
+                    .and_then(|data| data.rack_track.as_ref())
+                    .and_then(|rack| rack.slots.get(snapshot.slot_index))
+                    .is_none()
+            })
+        {
+            return Err(format!(
+                "Track {} rack pattern topology changed before history replay",
+                track + 1
+            ));
+        }
+        for (pattern_id, saved) in &snapshot.patterns {
+            let slot = pool
+                .patterns
+                .get_mut(pattern_id)
+                .and_then(|data| data.rack_track.as_mut())
+                .and_then(|rack| rack.slots.get_mut(snapshot.slot_index))
+                .expect("rack pattern topology was validated");
+            sync_slot(slot, saved);
+        }
+        drop(scenes);
+        let mut racks = self.pattern.rack_tracks.lock().unwrap();
+        let slot = racks[track]
+            .as_mut()
+            .and_then(|rack| rack.slots.get_mut(snapshot.slot_index))
+            .expect("live rack topology was validated");
+        sync_slot(slot, &snapshot.live);
+        Ok(())
+    }
+
+    pub fn validate_rack_slot_pattern_state(
+        &self,
+        track: usize,
+        snapshot: &RackSlotPatternStateSnapshot,
+    ) -> Result<(), String> {
+        let racks = self.pattern.rack_tracks.lock().unwrap();
+        if racks
+            .get(track)
+            .and_then(Option::as_ref)
+            .and_then(|rack| rack.slots.get(snapshot.slot_index))
+            .is_none()
+        {
+            return Err(format!(
+                "Track {} rack slot {} disappeared before history replay",
+                track + 1,
+                snapshot.slot_index + 1
+            ));
+        }
+        drop(racks);
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != snapshot.patterns.len()
+            || snapshot.patterns.iter().any(|(id, _)| {
+                pool.patterns
+                    .get(id)
+                    .and_then(|data| data.rack_track.as_ref())
+                    .and_then(|rack| rack.slots.get(snapshot.slot_index))
+                    .is_none()
+            })
+        {
+            return Err(format!(
+                "Track {} rack pattern topology changed before history replay",
+                track + 1
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_rack_slot_append_pattern_state(
+        &self,
+        track: usize,
+        snapshot: &RackSlotPatternStateSnapshot,
+    ) -> Result<(), String> {
+        let racks = self.pattern.rack_tracks.lock().unwrap();
+        let live_len = racks
+            .get(track)
+            .and_then(Option::as_ref)
+            .map(|rack| rack.slots.len())
+            .ok_or_else(|| format!("Track {} has no live rack", track + 1))?;
+        if live_len != snapshot.slot_index {
+            return Err(format!(
+                "Track {} rack has {live_len} slots; history expected {} before append",
+                track + 1,
+                snapshot.slot_index
+            ));
+        }
+        drop(racks);
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != snapshot.patterns.len()
+            || snapshot.patterns.iter().any(|(id, _)| {
+                pool.patterns
+                    .get(id)
+                    .and_then(|data| data.rack_track.as_ref())
+                    .is_none_or(|rack| rack.slots.len() != snapshot.slot_index)
+            })
+        {
+            return Err(format!(
+                "Track {} rack pattern topology changed before slot append replay",
+                track + 1
+            ));
+        }
+        Ok(())
+    }
+
     pub fn insert_effect_slot_in_other_track_patterns(&self, track: usize, slot_idx: usize) {
         let mut scenes = self.pattern.scenes.lock().unwrap();
         scenes.edit_other_track_patterns(track, |data| data.insert_empty_effect_slot(slot_idx));
@@ -4928,6 +6537,43 @@ impl SequencerState {
         scenes.edit_other_track_patterns(track, |data| {
             data.insert_midi_fx_slot(slot_idx, name.clone(), descriptor);
         });
+    }
+
+    pub fn replace_midi_fx_slot_in_all_track_patterns(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        name: String,
+        descriptor: &EffectDescriptor,
+    ) -> Result<(), String> {
+        if track >= self.pattern.track_params.len()
+            || slot_idx >= self.pattern.midi_fx_slots[track].len()
+        {
+            return Err("MIDI-FX replacement target is out of range".to_string());
+        }
+        let mut live_chain = self.pattern.track_params[track].midi_fx_chain();
+        if slot_idx >= live_chain.len() {
+            return Err("MIDI-FX replacement target is empty".to_string());
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.values().any(|data| {
+            slot_idx >= data.track_params.midi_fx_chain.len()
+                || slot_idx >= data.midi_fx_slots.len()
+        }) {
+            return Err("stored MIDI-FX replacement target is missing".to_string());
+        }
+        live_chain[slot_idx] = name.clone();
+        self.pattern.track_params[track].set_midi_fx_chain(live_chain);
+        self.pattern.midi_fx_slots[track][slot_idx].apply_descriptor(descriptor, 0);
+        for data in pool.patterns.values_mut() {
+            data.track_params.midi_fx_chain[slot_idx] = name.clone();
+            data.midi_fx_slots[slot_idx].sync_to_descriptor(descriptor, 0);
+        }
+        Ok(())
     }
 
     pub fn move_midi_fx_slot_in_other_track_patterns(
@@ -4966,13 +6612,22 @@ impl SequencerState {
     /// otherwise per-scene, but a track group is a global concept — its members
     /// must reach the backing bus in every scene, or switching scenes would tear
     /// the group's routing apart (and a saved project would silently lose it).
-    pub fn set_track_output_in_all_track_patterns(&self, track: usize, output: TrackOutput) {
+    pub fn set_track_output_in_all_track_patterns(
+        &self,
+        track: usize,
+        output: TrackOutput,
+    ) -> bool {
         let mut scenes = self.pattern.scenes.lock().unwrap();
+        let mut changed = false;
         if let Some(pool) = scenes.track_pools.get_mut(track) {
             for data in pool.patterns.values_mut() {
-                data.track_params.output = output.clone();
+                if data.track_params.output != output {
+                    data.track_params.output = output.clone();
+                    changed = true;
+                }
             }
         }
+        changed
     }
 
     fn ensure_scene_bus_patterns_len_locked(
@@ -5397,6 +7052,33 @@ impl SequencerState {
     pub fn publish_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
         let snapshot = Arc::new(SequencerSnapshot::capture(self));
         self.publish_scheduler_snapshot_arc(snapshot)
+    }
+
+    /// Publish one complete track through a copy-on-write scheduler snapshot.
+    /// Unchanged tracks keep their existing `Arc`, while the edited track is
+    /// recaptured with its step payloads, device p-locks, and process state.
+    pub fn publish_scheduler_track(&self, track: usize) -> Arc<SequencerSnapshot> {
+        let current = self.scheduler_snapshot.lock().unwrap().clone();
+        if track >= self.active_track_count()
+            || track >= current.tracks.len()
+            || current.tracks.len() != self.active_track_count()
+        {
+            return self.publish_scheduler_snapshot();
+        }
+        let mut next = (*current).clone();
+        let Some(next_track) = SequencerSnapshot::capture_live_track(self, track) else {
+            return self.publish_scheduler_snapshot();
+        };
+        next.tracks[track] = Arc::new(next_track);
+        next.transport = SequencerTransportSnapshot {
+            bpm: self.transport.bpm.load(Ordering::Relaxed),
+            playing: self.transport.playing.load(Ordering::Relaxed),
+            current_pattern: self.current_scene_index(),
+            pattern_epoch: self.transport.pattern_epoch.load(Ordering::Relaxed),
+            topology_epoch: self.transport.topology_epoch.load(Ordering::Relaxed),
+            num_tracks: self.active_track_count(),
+        };
+        self.publish_scheduler_snapshot_arc(Arc::new(next))
     }
 
     /// Replaces the command-thread macro layer and immediately publishes a
@@ -5884,6 +7566,141 @@ impl SequencerState {
     /// the deleted lane disappears from the current pattern and all snapshots in
     /// memory, higher lanes shift down immediately, and the old trailing lane is
     /// cleared so stale state cannot leak back after future restores.
+    pub fn capture_track_pattern_lane_state(
+        &self,
+        track_idx: usize,
+        effect_descriptors: &[Vec<EffectDescriptor>],
+    ) -> Result<TrackPatternLaneState, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes.track_pools.get(track_idx)
+            .cloned()
+            .ok_or_else(|| format!("Track {} has no pattern pool", track_idx + 1))?;
+        let scene_cells = scenes.scenes.iter()
+            .map(|scene| scene.cells.get(track_idx).copied().flatten())
+            .collect();
+        let track_override = scenes.track_overrides.get(track_idx).copied().flatten();
+        let scene_references = scenes.scenes.iter().map(|scene| SceneTrackReferenceState {
+            mod_connections: scene.mod_connections.clone(),
+            neural_networks: scene.neural_networks.clone(),
+            graph_overrides: scene.graph_overrides.clone(),
+        }).collect();
+        let mut sidechains = Vec::new();
+        for (owner_track, owner_pool) in scenes.track_pools.iter().enumerate() {
+            if owner_track == track_idx {
+                continue;
+            }
+            let Some(descriptors) = effect_descriptors.get(owner_track) else {
+                continue;
+            };
+            let sidechain_slots = descriptors.iter().enumerate()
+                .filter(|(_, descriptor)| descriptor.params.iter().any(|param| {
+                    matches!(param.host_control, Some(HostControl::FxSidechain { .. }))
+                }))
+                .map(|(slot, _)| slot)
+                .collect::<Vec<_>>();
+            if sidechain_slots.is_empty() {
+                continue;
+            }
+            for (pattern, data) in &owner_pool.patterns {
+                let slots = sidechain_slots.iter().filter_map(|slot| {
+                    data.effect_slots.get(*slot).cloned().map(|state| (*slot, state))
+                }).collect::<Vec<_>>();
+                if !slots.is_empty() {
+                    sidechains.push(TrackSidechainPatternState {
+                        owner_track,
+                        pattern: *pattern,
+                        slots,
+                    });
+                }
+            }
+        }
+        Ok(TrackPatternLaneState {
+            pool,
+            scene_cells,
+            track_override,
+            scene_references,
+            sidechains,
+        })
+    }
+
+    pub fn replace_appended_track_pattern_lane(
+        &self,
+        snapshot: &TrackPatternLaneState,
+    ) -> Result<usize, String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let track = scenes.track_pools.len().checked_sub(1)
+            .ok_or_else(|| "Cannot restore a track lane into an empty project".to_string())?;
+        scenes.track_pools[track] = snapshot.pool.clone();
+        scenes.track_overrides[track] = snapshot.track_override;
+        if scenes.scenes.len() != snapshot.scene_cells.len() {
+            return Err("Track history scene topology no longer matches the project".to_string());
+        }
+        for (scene, cell) in scenes.scenes.iter_mut().zip(&snapshot.scene_cells) {
+            scene.cells[track] = *cell;
+        }
+        let current = scenes.current_scene;
+        let live = scenes.scene_snapshot(current)
+            .ok_or_else(|| "Current scene is missing during track restore".to_string())?;
+        drop(scenes);
+        live.restore(self);
+        Ok(track)
+    }
+
+    pub fn move_appended_track_pattern_lane_to(
+        &self,
+        target: usize,
+        snapshot: &TrackPatternLaneState,
+    ) -> Result<(), String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let last = scenes.track_pools.len().checked_sub(1)
+            .ok_or_else(|| "Cannot move a track lane in an empty project".to_string())?;
+        if target > last || scenes.scenes.len() != snapshot.scene_references.len() {
+            return Err("Track history topology no longer matches the project".to_string());
+        }
+        let pool = scenes.track_pools.remove(last);
+        scenes.track_pools.insert(target, pool);
+        let track_override = scenes.track_overrides.remove(last);
+        scenes.track_overrides.insert(target, track_override);
+        for ((scene, references), expected_cell) in scenes.scenes.iter_mut()
+            .zip(&snapshot.scene_references)
+            .zip(&snapshot.scene_cells)
+        {
+            let cell = scene.cells.remove(last);
+            scene.cells.insert(target, cell);
+            if scene.cells[target] != *expected_cell {
+                return Err("Restored Track Pattern assignment changed during insertion".to_string());
+            }
+            scene.mod_connections = references.mod_connections.clone();
+            scene.neural_networks = references.neural_networks.clone();
+            scene.graph_overrides = references.graph_overrides.clone();
+        }
+        for saved in &snapshot.sidechains {
+            let Some(data) = scenes.track_pools.get_mut(saved.owner_track)
+                .and_then(|pool| pool.patterns.get_mut(&saved.pattern)) else {
+                return Err(format!(
+                    "Sidechain history target track {} pattern {:?} is missing",
+                    saved.owner_track + 1,
+                    saved.pattern,
+                ));
+            };
+            for (slot, state) in &saved.slots {
+                let Some(target_slot) = data.effect_slots.get_mut(*slot) else {
+                    return Err(format!("Sidechain history effect slot {} is missing", slot + 1));
+                };
+                *target_slot = state.clone();
+            }
+        }
+        let current = scenes.current_scene;
+        let live = scenes.scene_snapshot(current)
+            .ok_or_else(|| "Current scene is missing during track insertion".to_string())?;
+        drop(scenes);
+        live.restore(self);
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.schedule_mod_resync();
+        self.request_all_accumulator_resets();
+        Ok(())
+    }
+
     pub fn remove_track(
         &self,
         track_idx: usize,
@@ -6802,6 +8619,71 @@ impl SequencerState {
     pub fn track_step(&self, track: usize) -> usize {
         self.transport.track_playheads[track].load(Ordering::Relaxed) as usize
     }
+
+    /// Resolve a track-local step and phase from the transport beat clock.
+    /// This mirrors the scheduler's timebase-override and sync-boundary rules
+    /// so live recording does not accidentally use the global 16th-note phase.
+    pub fn record_position_at_beat(&self, track: usize, beats: f64) -> Option<RecordPosition> {
+        if track >= self.active_track_count() || !beats.is_finite() {
+            return None;
+        }
+        let params = &self.pattern.track_params[track];
+        let num_steps = params.get_num_steps().clamp(1, MAX_STEPS);
+        let default_timebase = params.get_timebase();
+        let mut boundaries = [0.0_f64; MAX_STEPS + 1];
+        let mut step_ends = [0.0_f64; MAX_STEPS];
+        let mut accumulated = 0.0_f64;
+        for step in 0..num_steps {
+            let timebase = self.pattern.timebase_plocks[track]
+                .get(step)
+                .unwrap_or(default_timebase);
+            let sync = sync_beats(self.pattern.step_data[track].get(step, StepParam::Sync));
+            if sync > f64::EPSILON {
+                accumulated = (accumulated / sync).ceil() * sync;
+            }
+            boundaries[step] = accumulated;
+            let step_beats = timebase.step_beats(num_steps).max(f64::EPSILON);
+            step_ends[step] = accumulated + step_beats;
+            accumulated += step_beats;
+        }
+        boundaries[num_steps] = accumulated;
+        let initial_sync = sync_beats(self.pattern.step_data[track].get(0, StepParam::Sync));
+        let cycle_beats = if initial_sync > f64::EPSILON {
+            (accumulated / initial_sync).ceil() * initial_sync
+        } else {
+            accumulated
+        }
+        .max(f64::EPSILON);
+        let position = beats.max(0.0) % cycle_beats;
+        let idx = boundaries[..=num_steps].partition_point(|&boundary| boundary <= position);
+        let step = idx.saturating_sub(1).min(num_steps - 1);
+        (position < step_ends[step]).then(|| RecordPosition {
+            step,
+            phase: ((position - boundaries[step]) / (step_ends[step] - boundaries[step]))
+                .clamp(0.0, 1.0) as f32,
+        })
+    }
+
+    /// Interpolate the audio clock at a keyboard press and compensate the
+    /// configured render-ahead latency before resolving a track-local phase.
+    pub fn record_position_at_instant(
+        &self,
+        track: usize,
+        timestamp: Instant,
+    ) -> Option<RecordPosition> {
+        let (anchor_beats, elapsed) = self.transport.record_clock.sample(timestamp)?;
+        let bpm = self.transport.bpm.load(Ordering::Relaxed) as f64;
+        let latency_seconds = f32::from_bits(
+            self.transport
+                .record_latency_seconds
+                .load(Ordering::Relaxed),
+        )
+        .max(0.0) as f64;
+        let beats =
+            anchor_beats + elapsed.as_secs_f64() * bpm / 60.0 - latency_seconds * bpm / 60.0;
+        self.record_position_at_beat(track, beats)
+    }
+
     pub fn is_playing(&self) -> bool {
         self.transport.playing.load(Ordering::Relaxed)
     }
@@ -6821,11 +8703,21 @@ impl SequencerState {
     }
 
     pub fn toggle_play(&self) -> bool {
+        let playing = self.toggle_play_no_publish();
+        self.publish_scheduler_snapshot();
+        playing
+    }
+
+    pub(crate) fn toggle_play_no_publish(&self) -> bool {
         if self.is_playing() {
-            self.stop_playback();
+            self.transport.playing.store(false, Ordering::Relaxed);
+            self.reset_playheads();
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
             false
         } else {
-            self.start_playback();
+            self.reset_playheads();
+            self.transport.playing.store(true, Ordering::Relaxed);
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
             true
         }
     }
@@ -6837,6 +8729,9 @@ impl SequencerState {
             .store(0.0_f32.to_bits(), Ordering::Relaxed);
         for playhead in &self.transport.track_playheads {
             playhead.store(0, Ordering::Relaxed);
+        }
+        for phase in &self.transport.track_playhead_phases {
+            phase.store(0.0_f32.to_bits(), Ordering::Relaxed);
         }
         for playhead in &self.transport.sampler_playheads {
             playhead.store(0.0_f32.to_bits(), Ordering::Relaxed);
@@ -7448,6 +9343,22 @@ impl SequencerState {
         Some(current_scene)
     }
 
+    pub fn rename_scene(&self, scene: usize, name: String) -> bool {
+        let name = name.trim();
+        if name.is_empty() {
+            return false;
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(target) = scenes.scenes.get_mut(scene) else {
+            return false;
+        };
+        if target.name == name {
+            return false;
+        }
+        target.name = name.to_string();
+        true
+    }
+
     pub fn delete_pattern(
         &self,
         num_tracks: usize,
@@ -7553,32 +9464,308 @@ impl SequencerState {
         true
     }
 
-    pub fn toggle_step_and_clear_plocks(&self, track: usize, step: usize) {
+    pub(crate) fn toggle_step_and_clear_plocks_no_publish(&self, track: usize, step: usize) {
         let was_active = self.pattern.patterns[track].is_active(step);
-        self.pattern.patterns[track].toggle_step(step);
         if was_active {
-            for slot in &self.pattern.effect_chains[track] {
-                slot.plocks.clear_step(step);
+            let params: [f32; NUM_PARAMS] = std::array::from_fn(|param_idx| {
+                self.pattern.step_data[track].get(step, StepParam::ALL[param_idx])
+            });
+            self.clear_step_payload_inner(track, step);
+            for param in StepParam::ALL {
+                self.pattern.step_data[track].set(step, param, params[param.index()]);
             }
-            self.pattern.timebase_plocks[track].clear(step);
-            self.pattern.swing_plocks[track].clear(step);
-            self.pattern.swing_resolution_plocks[track].clear(step);
-            self.pattern.neural_reset_patterns[track].clear_step(step);
-            for param_idx in 0..MAX_SLOT_PARAMS {
-                self.pattern.instrument_slots[track]
-                    .plocks
-                    .clear_param(step, param_idx);
+        } else {
+            self.pattern.patterns[track].set_step_active(step, true);
+        }
+    }
+
+    pub fn toggle_step_and_clear_plocks(&self, track: usize, step: usize) {
+        self.toggle_step_and_clear_plocks_no_publish(track, step);
+        self.publish_scheduler_snapshot();
+    }
+
+    fn drum_lane_notes(&self, track: usize, step: usize) -> Vec<(f32, f32, f32)> {
+        if track >= MAX_TRACKS || step >= MAX_STEPS || !self.pattern.patterns[track].is_active(step)
+        {
+            return Vec::new();
+        }
+
+        let step_duration = self.pattern.step_data[track]
+            .get(step, StepParam::Duration)
+            .max(0.0);
+        let step_delay = self.pattern.step_data[track].get(step, StepParam::Delay);
+        let chord_count = self.pattern.chord_data[track].count(step);
+        if chord_count == 0 {
+            return vec![(
+                self.pattern.step_data[track].get(step, StepParam::Transpose),
+                step_duration,
+                step_delay,
+            )];
+        }
+
+        (0..chord_count)
+            .map(|voice| {
+                let duration = self.pattern.chord_data[track].get_duration(step, voice);
+                (
+                    self.pattern.chord_data[track].get(step, voice),
+                    if duration > 0.0 {
+                        duration
+                    } else {
+                        step_duration
+                    },
+                    self.pattern.chord_data[track].get_delay(step, voice),
+                )
+            })
+            .collect()
+    }
+
+    fn write_drum_lane_notes(&self, track: usize, step: usize, mut notes: Vec<(f32, f32, f32)>) {
+        if notes.is_empty() {
+            self.clear_step_payload_inner(track, step);
+            return;
+        }
+
+        notes.sort_by(|left, right| {
+            left.0
+                .partial_cmp(&right.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        self.pattern.chord_data[track].clear_step(step);
+        let max_duration = notes
+            .iter()
+            .map(|(_, duration, _)| *duration)
+            .fold(0.0, f32::max);
+        if notes.len() > 1 {
+            for (note, duration, delay) in &notes {
+                self.pattern.chord_data[track].add_note_with_timing(step, *note, *duration, *delay);
             }
-            self.clear_rack_macro_plocks_for_step(track, step);
-            if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
-                for slot in &mut rack.slots {
-                    slot.param_plocks.clear_step(step);
-                    slot.instrument_slot.clear_step_plocks(step);
+        }
+        self.pattern.step_data[track].set(step, StepParam::Transpose, notes[0].0);
+        self.pattern.step_data[track].set(step, StepParam::Duration, max_duration);
+        self.pattern.step_data[track].set(
+            step,
+            StepParam::Delay,
+            if notes.len() == 1 { notes[0].2 } else { 0.0 },
+        );
+        self.pattern.patterns[track].set_step_active(step, true);
+    }
+
+    pub fn drum_lane_step_duration(&self, track: usize, step: usize, pad_note: i32) -> Option<f32> {
+        self.drum_lane_notes(track, step)
+            .into_iter()
+            .find(|(note, _, _)| note.round() as i32 == pad_note)
+            .map(|(_, duration, _)| duration)
+    }
+
+    /// Set the duration of one drum-pad voice without changing the durations
+    /// of simultaneous hits stored in the same polyphonic step.
+    pub fn set_drum_lane_step_duration(
+        &self,
+        track: usize,
+        step: usize,
+        pad_note: i32,
+        duration: f32,
+    ) -> Option<f32> {
+        let duration = self.set_drum_lane_step_duration_no_publish(
+            track,
+            step,
+            pad_note,
+            duration,
+        )?;
+        self.publish_scheduler_snapshot();
+        Some(duration)
+    }
+
+    pub fn set_drum_lane_step_duration_no_publish(
+        &self,
+        track: usize,
+        step: usize,
+        pad_note: i32,
+        duration: f32,
+    ) -> Option<f32> {
+        if track >= MAX_TRACKS || step >= MAX_STEPS {
+            return None;
+        }
+        let duration = duration.clamp(StepParam::Duration.min(), StepParam::Duration.max());
+        let mut notes = self.drum_lane_notes(track, step);
+        let (_, note_duration, _) = notes
+            .iter_mut()
+            .find(|(note, _, _)| note.round() as i32 == pad_note)?;
+        *note_duration = duration;
+        self.write_drum_lane_notes(track, step, notes);
+        Some(duration)
+    }
+
+    /// Toggle one pitch lane within a polyphonic step. Drum-rack lanes are a
+    /// projection of the existing step/chord representation: a single hit is
+    /// stored in the step transpose field, while simultaneous hits are stored
+    /// in chord data. Removing the final lane clears the complete step payload,
+    /// matching the normal step-toggle behavior.
+    pub fn toggle_drum_lane_step(&self, track: usize, step: usize, pad_note: i32) -> bool {
+        let activated = self.toggle_drum_lane_step_no_publish(track, step, pad_note);
+        self.publish_scheduler_snapshot();
+        activated
+    }
+
+    pub fn toggle_drum_lane_step_no_publish(
+        &self,
+        track: usize,
+        step: usize,
+        pad_note: i32,
+    ) -> bool {
+        if track >= MAX_TRACKS || step >= MAX_STEPS {
+            return false;
+        }
+
+        let transpose = pad_note as f32;
+        let step_duration = self.pattern.step_data[track]
+            .get(step, StepParam::Duration)
+            .max(0.0);
+        let step_delay = self.pattern.step_data[track].get(step, StepParam::Delay);
+        let mut notes = self.drum_lane_notes(track, step);
+
+        let existing = notes
+            .iter()
+            .position(|(note, _, _)| note.round() as i32 == pad_note);
+        let activated = if let Some(index) = existing {
+            notes.remove(index);
+            false
+        } else if notes.len() < MAX_VOICES {
+            notes.push((transpose, step_duration, step_delay));
+            true
+        } else {
+            return false;
+        };
+
+        self.write_drum_lane_notes(track, step, notes);
+        activated
+    }
+
+    /// Move one or more hits in a single drum-pad lane without disturbing
+    /// simultaneous hits belonging to other pads. Destination hits in this
+    /// lane are replaced, matching the overwrite behavior of normal step drag.
+    pub fn move_drum_lane_steps(
+        &self,
+        track: usize,
+        pad_note: i32,
+        steps: &[usize],
+        delta: isize,
+    ) -> bool {
+        let moved = self.move_drum_lane_steps_no_publish(track, pad_note, steps, delta);
+        if moved {
+            self.publish_scheduler_snapshot();
+        }
+        moved
+    }
+
+    pub fn move_drum_lane_steps_no_publish(
+        &self,
+        track: usize,
+        pad_note: i32,
+        steps: &[usize],
+        delta: isize,
+    ) -> bool {
+        if track >= MAX_TRACKS || delta == 0 || steps.is_empty() {
+            return false;
+        }
+        let mut sources = steps.to_vec();
+        sources.sort_unstable();
+        sources.dedup();
+        if sources.iter().any(|step| *step >= MAX_STEPS) {
+            return false;
+        }
+        let destinations = sources
+            .iter()
+            .map(|step| *step as isize + delta)
+            .collect::<Vec<_>>();
+        if destinations
+            .iter()
+            .any(|step| *step < 0 || *step >= MAX_STEPS as isize)
+        {
+            return false;
+        }
+
+        let moved = sources
+            .iter()
+            .filter_map(|step| {
+                let notes = self.drum_lane_notes(track, *step);
+                notes
+                    .iter()
+                    .find(|(note, _, _)| note.round() as i32 == pad_note)
+                    .copied()
+                    .map(|note| {
+                        (
+                            *step,
+                            note,
+                            (notes.len() == 1).then(|| self.capture_step_snapshot(track, *step)),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        if moved.is_empty() {
+            return false;
+        }
+
+        for (step, _, _) in &moved {
+            let notes = self
+                .drum_lane_notes(track, *step)
+                .into_iter()
+                .filter(|(note, _, _)| note.round() as i32 != pad_note)
+                .collect();
+            self.write_drum_lane_notes(track, *step, notes);
+        }
+        for (step, note, exclusive_snapshot) in moved {
+            let destination = (step as isize + delta) as usize;
+            let mut notes = self
+                .drum_lane_notes(track, destination)
+                .into_iter()
+                .filter(|(existing, _, _)| existing.round() as i32 != pad_note)
+                .collect::<Vec<_>>();
+            if notes.is_empty() {
+                if let Some(snapshot) = exclusive_snapshot {
+                    self.restore_step_snapshot_inner(track, destination, &snapshot);
+                    continue;
                 }
             }
-            self.pattern.chord_data[track].clear_step(step);
+            notes.push(note);
+            self.write_drum_lane_notes(track, destination, notes);
         }
-        self.publish_scheduler_snapshot();
+        true
+    }
+
+    /// Clear selected hits from one drum-pad lane while retaining every other
+    /// pad hit and the shared payload of steps that remain active.
+    pub fn clear_drum_lane_steps(&self, track: usize, pad_note: i32, steps: &[usize]) -> usize {
+        let cleared = self.clear_drum_lane_steps_no_publish(track, pad_note, steps);
+        if cleared > 0 {
+            self.publish_scheduler_snapshot();
+        }
+        cleared
+    }
+
+    pub fn clear_drum_lane_steps_no_publish(
+        &self,
+        track: usize,
+        pad_note: i32,
+        steps: &[usize],
+    ) -> usize {
+        if track >= MAX_TRACKS {
+            return 0;
+        }
+        let mut cleared = 0;
+        for step in steps.iter().copied().filter(|step| *step < MAX_STEPS) {
+            let notes = self.drum_lane_notes(track, step);
+            let retained = notes
+                .iter()
+                .copied()
+                .filter(|(note, _, _)| note.round() as i32 != pad_note)
+                .collect::<Vec<_>>();
+            if retained.len() != notes.len() {
+                self.write_drum_lane_notes(track, step, retained);
+                cleared += 1;
+            }
+        }
+        cleared
     }
 
     pub fn capture_step_snapshot(&self, track: usize, step: usize) -> StepSnapshot {
@@ -7597,23 +9784,22 @@ impl SequencerState {
             chord_delays.push(self.pattern.chord_data[track].get_delay(step, note_idx));
         }
 
-        let mut effect_plocks = Vec::with_capacity(self.pattern.effect_chains[track].len());
-        for slot in &self.pattern.effect_chains[track] {
-            let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
-            let mut params = Vec::with_capacity(num_params);
-            for param_idx in 0..num_params {
-                params.push(slot.plocks.get(step, param_idx));
-            }
-            effect_plocks.push(StepSlotPlocks { params });
-        }
-
-        let instrument_slot = &self.pattern.instrument_slots[track];
-        let instrument_param_count = instrument_slot.num_params.load(Ordering::Relaxed) as usize;
-        let mut instrument_plocks = Vec::with_capacity(instrument_param_count);
-        for param_idx in 0..instrument_param_count {
-            instrument_plocks.push(instrument_slot.plocks.get(step, param_idx));
-        }
-        let (rack_macro_plocks, rack_slot_param_plocks, rack_slot_instrument_plocks) = self
+        let midi_fx_plocks = self.pattern.midi_fx_slots[track]
+            .iter()
+            .map(|slot| capture_live_slot_step_plocks(slot, step))
+            .collect();
+        let effect_plocks = self.pattern.effect_chains[track]
+            .iter()
+            .map(|slot| capture_live_slot_step_plocks(slot, step))
+            .collect();
+        let instrument_plocks =
+            capture_live_slot_step_plocks(&self.pattern.instrument_slots[track], step);
+        let (
+            rack_macro_plocks,
+            rack_slot_param_plocks,
+            rack_slot_instrument_plocks,
+            rack_slot_effect_plocks,
+        ) = self
             .pattern
             .rack_tracks
             .lock()
@@ -7634,28 +9820,28 @@ impl SequencerState {
                             .iter()
                             .map(|param| slot.param_plocks.get(step, *param))
                             .collect();
-                        StepSlotPlocks { params }
+                        StepSlotPlocks {
+                            params,
+                            tensor_params: Vec::new(),
+                        }
                     })
                     .collect();
                 let instrument_params = rack
                     .slots
                     .iter()
+                    .map(|slot| capture_snapshot_slot_step_plocks(&slot.instrument_slot, step))
+                    .collect();
+                let effect_params = rack
+                    .slots
+                    .iter()
                     .map(|slot| {
-                        let num_params = slot.instrument_slot.num_params as usize;
-                        let params = (0..num_params)
-                            .map(|param_idx| {
-                                slot.instrument_slot
-                                    .plocks
-                                    .get(step)
-                                    .and_then(|step_plocks| step_plocks.get(param_idx))
-                                    .copied()
-                                    .flatten()
-                            })
-                            .collect();
-                        StepSlotPlocks { params }
+                        slot.effect_slots
+                            .iter()
+                            .map(|effect| capture_snapshot_slot_step_plocks(effect, step))
+                            .collect()
                     })
                     .collect();
-                (macro_plocks, slot_params, instrument_params)
+                (macro_plocks, slot_params, instrument_params, effect_params)
             })
             .unwrap_or_default();
 
@@ -7669,17 +9855,1271 @@ impl SequencerState {
             timebase: self.pattern.timebase_plocks[track].get(step),
             swing: self.pattern.swing_plocks[track].get(step),
             swing_resolution: self.pattern.swing_resolution_plocks[track].get(step),
+            midi_fx_plocks,
             effect_plocks,
-            instrument_plocks: StepSlotPlocks {
-                params: instrument_plocks,
-            },
+            instrument_plocks,
             rack_macro_plocks,
             rack_slot_param_plocks,
             rack_slot_instrument_plocks,
+            rack_slot_effect_plocks,
         }
     }
 
-    fn clear_step_payload_inner(&self, track: usize, step: usize) {
+    /// Capture step cells from one stable Track Pattern target.
+    ///
+    /// The live lanes are authoritative only when `pattern_id` is currently
+    /// effective. Inactive targets are read directly from their pattern pool.
+    pub(crate) fn capture_pattern_step_cells(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        steps: &[usize],
+    ) -> Result<(Vec<StepSnapshot>, PlockVariantRegistry), String> {
+        if steps.iter().any(|step| *step >= MAX_STEPS) {
+            return Err("step target is out of range".to_string());
+        }
+        let is_effective = {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+            if !is_effective {
+                let data = scenes
+                    .track_pools
+                    .get(track)
+                    .and_then(|pool| pool.get(pattern_id))
+                    .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+                let cells = steps
+                    .iter()
+                    .map(|step| {
+                        data.capture_step_snapshot(*step)
+                            .ok_or_else(|| "stored step target is out of range".to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok((cells, data.plock_variant_registry.clone()));
+            }
+            is_effective
+        };
+
+        if is_effective {
+            if track >= self.pattern.patterns.len() {
+                return Err("live track target no longer exists".to_string());
+            }
+            let cells = steps
+                .iter()
+                .map(|step| self.capture_step_snapshot(track, *step))
+                .collect();
+            let registry = self
+                .pattern
+                .plock_variant_registries
+                .lock()
+                .unwrap()
+                .get(track)
+                .cloned()
+                .ok_or_else(|| "live p-lock variant registry is missing".to_string())?;
+            Ok((cells, registry))
+        } else {
+            unreachable!("inactive Track Pattern capture returned while holding repository")
+        }
+    }
+
+    pub(crate) fn capture_pattern_num_steps(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+    ) -> Result<usize, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+            return self
+                .pattern
+                .track_params
+                .get(track)
+                .map(TrackParams::get_num_steps)
+                .ok_or_else(|| "live track target no longer exists".to_string());
+        }
+        scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.get(pattern_id))
+            .map(|data| data.track_params.num_steps)
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())
+    }
+
+    pub(crate) fn capture_pattern_track_params(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+    ) -> Result<TrackParamsSnapshot, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+            return self
+                .pattern
+                .track_params
+                .get(track)
+                .map(capture_track_params_snapshot)
+                .ok_or_else(|| "live track target no longer exists".to_string());
+        }
+        scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.get(pattern_id))
+            .map(|data| data.track_params.clone())
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())
+    }
+
+    pub(crate) fn restore_pattern_track_params_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        snapshot: &TrackParamsSnapshot,
+    ) -> Result<bool, String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let data = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(pattern_id))
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+        data.track_params = snapshot.clone();
+        if is_effective {
+            let live = self
+                .pattern
+                .track_params
+                .get(track)
+                .ok_or_else(|| "live track target no longer exists".to_string())?;
+            restore_track_params_snapshot(live, snapshot);
+        }
+        Ok(is_effective)
+    }
+
+    pub(crate) fn capture_pattern_instrument_base_note_offset(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+    ) -> Result<f32, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+            return self
+                .pattern
+                .instrument_base_note_offsets
+                .get(track)
+                .map(|value| f32::from_bits(value.load(Ordering::Relaxed)))
+                .ok_or_else(|| "live track target no longer exists".to_string());
+        }
+        scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.get(pattern_id))
+            .map(|data| data.instrument_base_note_offset)
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())
+    }
+
+    pub(crate) fn restore_pattern_instrument_base_note_offset_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        value: f32,
+    ) -> Result<bool, String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let data = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(pattern_id))
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+        data.instrument_base_note_offset = value;
+        if is_effective {
+            self.pattern
+                .instrument_base_note_offsets
+                .get(track)
+                .ok_or_else(|| "live track target no longer exists".to_string())?
+                .store(value.to_bits(), Ordering::Relaxed);
+        }
+        Ok(is_effective)
+    }
+
+    pub(crate) fn capture_pattern_instrument_device_values(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+    ) -> Result<InstrumentDeviceValuesSnapshot, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+            let slot = self
+                .pattern
+                .instrument_slots
+                .get(track)
+                .ok_or_else(|| "live instrument target no longer exists".to_string())?;
+            let base_note_offset_bits = self
+                .pattern
+                .instrument_base_note_offsets
+                .get(track)
+                .ok_or_else(|| "live instrument base note is missing".to_string())?
+                .load(Ordering::Relaxed);
+            let sound_state = self
+                .pattern
+                .track_sound_state
+                .lock()
+                .unwrap()
+                .get(track)
+                .cloned()
+                .ok_or_else(|| "live instrument sound state is missing".to_string())?;
+            let key_lock_variant_registry = self
+                .pattern
+                .key_lock_variant_registries
+                .lock()
+                .unwrap()
+                .get(track)
+                .cloned()
+                .ok_or_else(|| "live key-lock variant registry is missing".to_string())?;
+            return Ok(InstrumentDeviceValuesSnapshot {
+                slot: EffectSlotSnapshot::capture_authoring_values(slot),
+                base_note_offset_bits,
+                sound_state,
+                key_lock_variant_registry,
+            });
+        }
+        let data = scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.get(pattern_id))
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+        Ok(InstrumentDeviceValuesSnapshot {
+            slot: data.instrument_slot.authoring_values(),
+            base_note_offset_bits: data.instrument_base_note_offset.to_bits(),
+            sound_state: data.track_sound_state.clone(),
+            key_lock_variant_registry: data.key_lock_variant_registry.clone(),
+        })
+    }
+
+    pub(crate) fn restore_pattern_instrument_device_values_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        values: &InstrumentDeviceValuesSnapshot,
+    ) -> Result<bool, String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let data = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(pattern_id))
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+        let mut stored_slot = data.instrument_slot.clone();
+        if let Err(error) = stored_slot.apply_authoring_values(&values.slot) {
+            if !is_effective {
+                return Err(error);
+            }
+            // The pool copy can predate the current instrument descriptor
+            // (older saved project, e.g. the sampler grew params). The values
+            // being applied were captured from the live slot, so reseed the
+            // stored layout from it instead of failing the edit forever.
+            let slot = self
+                .pattern
+                .instrument_slots
+                .get(track)
+                .ok_or_else(|| "live instrument target no longer exists".to_string())?;
+            stored_slot = EffectSlotSnapshot::capture(slot);
+            stored_slot.apply_authoring_values(&values.slot)?;
+        }
+        let live_slot = if is_effective {
+            let slot = self
+                .pattern
+                .instrument_slots
+                .get(track)
+                .ok_or_else(|| "live instrument target no longer exists".to_string())?;
+            let mut snapshot = EffectSlotSnapshot::capture(slot);
+            snapshot.apply_authoring_values(&values.slot)?;
+            Some((slot, snapshot))
+        } else {
+            None
+        };
+
+        data.instrument_slot = stored_slot;
+        data.instrument_base_note_offset = f32::from_bits(values.base_note_offset_bits);
+        data.track_sound_state = values.sound_state.clone();
+        data.key_lock_variant_registry = values.key_lock_variant_registry.clone();
+        if let Some((slot, snapshot)) = live_slot {
+            snapshot.restore(slot);
+            self.pattern
+                .instrument_base_note_offsets
+                .get(track)
+                .ok_or_else(|| "live instrument base note is missing".to_string())?
+                .store(values.base_note_offset_bits, Ordering::Relaxed);
+            *self
+                .pattern
+                .track_sound_state
+                .lock()
+                .unwrap()
+                .get_mut(track)
+                .ok_or_else(|| "live instrument sound state is missing".to_string())? =
+                values.sound_state.clone();
+            *self
+                .pattern
+                .key_lock_variant_registries
+                .lock()
+                .unwrap()
+                .get_mut(track)
+                .ok_or_else(|| "live key-lock variant registry is missing".to_string())? =
+                values.key_lock_variant_registry.clone();
+        }
+        Ok(is_effective)
+    }
+
+    pub(crate) fn capture_pattern_effect_device_values(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        slot_idx: usize,
+    ) -> Result<EffectSlotValuesSnapshot, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+            return self
+                .pattern
+                .effect_chains
+                .get(track)
+                .and_then(|chain| chain.get(slot_idx))
+                .map(EffectSlotSnapshot::capture_authoring_values)
+                .ok_or_else(|| "live effect target no longer exists".to_string());
+        }
+        scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.get(pattern_id))
+            .and_then(|data| data.effect_slots.get(slot_idx))
+            .map(EffectSlotSnapshot::authoring_values)
+            .ok_or_else(|| "Track Pattern effect target no longer exists".to_string())
+    }
+
+    pub(crate) fn capture_track_effect_chain_values(
+        &self,
+        track: usize,
+        first_slot: usize,
+        slot_count: usize,
+    ) -> Result<Vec<(PatternId, Vec<EffectSlotValuesSnapshot>)>, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        let effective = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        pool.patterns
+            .iter()
+            .map(|(pattern, data)| {
+                let slots = if *pattern == effective {
+                    self.pattern
+                        .effect_chains
+                        .get(track)
+                        .ok_or_else(|| "live effect chain is missing".to_string())?
+                        .iter()
+                        .skip(first_slot)
+                        .take(slot_count)
+                        .map(EffectSlotSnapshot::capture_authoring_values)
+                        .collect()
+                } else {
+                    data.effect_slots
+                        .iter()
+                        .skip(first_slot)
+                        .take(slot_count)
+                        .map(EffectSlotSnapshot::authoring_values)
+                        .collect()
+                };
+                Ok((*pattern, slots))
+            })
+            .collect()
+    }
+
+    pub(crate) fn restore_track_effect_chain_values(
+        &self,
+        track: usize,
+        first_slot: usize,
+        descriptors: &[EffectDescriptor],
+        node_ids: &[(u32, u32)],
+        patterns: &[(PatternId, Vec<EffectSlotValuesSnapshot>)],
+    ) -> Result<(), String> {
+        if descriptors.len() != node_ids.len() {
+            return Err("effect-chain descriptor/node layout mismatch".to_string());
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let effective = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != patterns.len()
+            || patterns.iter().any(|(id, _)| !pool.patterns.contains_key(id))
+        {
+            return Err(format!(
+                "Track {} pattern set changed before effect history replay",
+                track + 1
+            ));
+        }
+        for (pattern, values) in patterns {
+            if values.len() != descriptors.len() {
+                return Err("effect-chain pattern layout mismatch".to_string());
+            }
+            let data = pool.patterns.get_mut(pattern).expect("pattern set was validated");
+            for (offset, ((descriptor, (node_id, modulator_node_id)), values)) in descriptors
+                .iter()
+                .zip(node_ids)
+                .zip(values)
+                .enumerate()
+            {
+                let slot = data
+                    .effect_slots
+                    .get_mut(first_slot + offset)
+                    .ok_or_else(|| "stored effect slot is missing".to_string())?;
+                slot.sync_to_descriptor_with_modulator(
+                    descriptor,
+                    *node_id,
+                    *modulator_node_id,
+                );
+                slot.apply_authoring_values(values)?;
+            }
+        }
+        let live_values = patterns
+            .iter()
+            .find(|(pattern, _)| *pattern == effective)
+            .map(|(_, values)| values)
+            .ok_or_else(|| "effective effect pattern is missing from history".to_string())?;
+        let live_chain = self
+            .pattern
+            .effect_chains
+            .get(track)
+            .ok_or_else(|| "live effect chain is missing".to_string())?;
+        for (offset, ((descriptor, (node_id, modulator_node_id)), values)) in descriptors
+            .iter()
+            .zip(node_ids)
+            .zip(live_values)
+            .enumerate()
+        {
+            let slot = live_chain
+                .get(first_slot + offset)
+                .ok_or_else(|| "live effect slot is missing".to_string())?;
+            let mut snapshot = EffectSlotSnapshot::capture(slot);
+            snapshot.sync_to_descriptor_with_modulator(
+                descriptor,
+                *node_id,
+                *modulator_node_id,
+            );
+            snapshot.apply_authoring_values(values)?;
+            snapshot.restore(slot);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn capture_track_effect_binding_state(
+        &self,
+        track: usize,
+    ) -> Result<TrackEffectBindingStateSnapshot, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        let effective = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        let live_chain = self
+            .pattern
+            .process_chains
+            .lock()
+            .unwrap()
+            .get(track)
+            .cloned()
+            .ok_or_else(|| "live process chain is missing".to_string())?;
+        let live_lane_overrides = self
+            .pattern
+            .project_process_lane_overrides
+            .lock()
+            .unwrap()
+            .get(track)
+            .cloned()
+            .ok_or_else(|| "live project process lane overrides are missing".to_string())?;
+        let process_chains = pool
+            .patterns
+            .iter()
+            .map(|(id, data)| {
+                (*id, if *id == effective { live_chain.clone() } else { data.process_chain.clone() })
+            })
+            .collect();
+        let project_process_lane_overrides = pool
+            .patterns
+            .iter()
+            .map(|(id, data)| {
+                (
+                    *id,
+                    if *id == effective {
+                        live_lane_overrides.clone()
+                    } else {
+                        data.project_process_lane_overrides.clone()
+                    },
+                )
+            })
+            .collect();
+        let mut neural_overrides = Vec::new();
+        for (scene_idx, scene) in scenes.scenes.iter().enumerate() {
+            for (network_idx, network) in scene.neural_networks.iter().enumerate() {
+                for (neuron_idx, neuron) in network.neurons.iter().enumerate() {
+                    let entries = neuron
+                        .output_overrides
+                        .effects
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, value)| value.target_track == track)
+                        .map(|(index, value)| (index, value.clone()))
+                        .collect::<Vec<_>>();
+                    if !entries.is_empty() {
+                        neural_overrides.push(NeuralEffectOverrideState {
+                            scene: scene_idx,
+                            network: network_idx,
+                            neuron: neuron_idx,
+                            entries,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(TrackEffectBindingStateSnapshot {
+            process_chains,
+            project_process_lane_overrides,
+            neural_overrides,
+        })
+    }
+
+    pub(crate) fn remap_track_effect_references(
+        &self,
+        track: usize,
+        old_to_new: &[Option<usize>],
+        drop_neural_slots: &[bool],
+        effect_descriptors: &[EffectDescriptor],
+    ) -> Result<(), String> {
+        fn remap_chain(
+            chain: &mut crate::process::TrackProcessChain,
+            old_to_new: &[Option<usize>],
+        ) {
+            for process_slot in &mut chain.slots {
+                for binding in process_slot.bindings.values_mut() {
+                    let Some(crate::process::ParamTarget::EffectParam { slot, .. }) = binding.as_mut() else {
+                        continue;
+                    };
+                    match old_to_new.get(*slot).copied().flatten() {
+                        Some(new_slot) => *slot = new_slot,
+                        None => *binding = None,
+                    }
+                }
+            }
+        }
+
+        let live_effect_slots = self
+            .pattern
+            .effect_chains
+            .get(track)
+            .ok_or_else(|| "live effect chain is missing".to_string())?;
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        for data in pool.patterns.values_mut() {
+            remap_chain(&mut data.process_chain, old_to_new);
+            crate::process::rebind_track_process_chain_effect_param_ids(
+                &mut data.process_chain,
+                effect_descriptors,
+                &data.effect_slots,
+            );
+        }
+        for scene in &mut scenes.scenes {
+            for network in &mut scene.neural_networks {
+                for neuron in &mut network.neurons {
+                    neuron.output_overrides.effects.retain_mut(|value| {
+                        if value.target_track != track {
+                            return true;
+                        }
+                        if drop_neural_slots
+                            .get(value.slot_index)
+                            .copied()
+                            .unwrap_or(true)
+                        {
+                            return false;
+                        }
+                        let Some(new_slot) = old_to_new
+                            .get(value.slot_index)
+                            .copied()
+                            .flatten()
+                        else {
+                            return false;
+                        };
+                        value.slot_index = new_slot;
+                        let Some(slot) = live_effect_slots.get(new_slot) else {
+                            return false;
+                        };
+                        let Some(raw_idx) = slot
+                            .param_node_indices
+                            .get(value.param_index)
+                            .map(|value| value.load(Ordering::Relaxed))
+                        else {
+                            return false;
+                        };
+                        let Some(param_id) = crate::neural::ParamNodeId::from_slot_param(
+                            slot.node_id.load(Ordering::Relaxed),
+                            slot.modulator_node_id.load(Ordering::Relaxed),
+                            raw_idx,
+                        ) else {
+                            return false;
+                        };
+                        value.param_id = param_id;
+                        true
+                    });
+                }
+            }
+        }
+        drop(scenes);
+
+        let mut live_chains = self.pattern.process_chains.lock().unwrap();
+        let live_chain = live_chains
+            .get_mut(track)
+            .ok_or_else(|| "live process chain is missing".to_string())?;
+        remap_chain(live_chain, old_to_new);
+        let live_slots = live_effect_slots
+            .iter()
+            .map(EffectSlotSnapshot::capture)
+            .collect::<Vec<_>>();
+        crate::process::rebind_track_process_chain_effect_param_ids(
+            live_chain,
+            effect_descriptors,
+            &live_slots,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn restore_track_effect_binding_state(
+        &self,
+        track: usize,
+        snapshot: &TrackEffectBindingStateSnapshot,
+        effect_descriptors: &[EffectDescriptor],
+    ) -> Result<(), String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let effective = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != snapshot.process_chains.len()
+            || snapshot.process_chains.iter().any(|(id, _)| !pool.patterns.contains_key(id))
+        {
+            return Err(format!(
+                "Track {} pattern set changed before effect binding replay",
+                track + 1
+            ));
+        }
+        if snapshot.project_process_lane_overrides.len() != snapshot.process_chains.len()
+            || snapshot
+                .project_process_lane_overrides
+                .iter()
+                .any(|(id, _)| !pool.patterns.contains_key(id))
+        {
+            return Err("effect history project-lane pattern set changed".to_string());
+        }
+        let mut live_chain = None;
+        let mut live_lane_overrides = None;
+        for (id, saved_chain) in &snapshot.process_chains {
+            let data = pool.patterns.get_mut(id).expect("pattern set was validated");
+            let mut chain = saved_chain.clone();
+            crate::process::refresh_track_process_chain_binding_param_ids(
+                &mut chain,
+                None,
+                None,
+                effect_descriptors,
+                &data.effect_slots,
+            );
+            data.process_chain = chain.clone();
+            if *id == effective {
+                live_chain = Some(chain);
+            }
+        }
+        for (id, saved) in &snapshot.project_process_lane_overrides {
+            pool.patterns
+                .get_mut(id)
+                .expect("pattern set was validated")
+                .project_process_lane_overrides = saved.clone();
+            if *id == effective {
+                live_lane_overrides = Some(saved.clone());
+            }
+        }
+        for scene in &mut scenes.scenes {
+            for network in &mut scene.neural_networks {
+                for neuron in &mut network.neurons {
+                    neuron
+                        .output_overrides
+                        .effects
+                        .retain(|value| value.target_track != track);
+                }
+            }
+        }
+        let live_slots = self
+            .pattern
+            .effect_chains
+            .get(track)
+            .ok_or_else(|| "live effect chain is missing".to_string())?;
+        for saved in &snapshot.neural_overrides {
+            let neuron = scenes
+                .scenes
+                .get_mut(saved.scene)
+                .and_then(|scene| scene.neural_networks.get_mut(saved.network))
+                .and_then(|network| network.neurons.get_mut(saved.neuron))
+                .ok_or_else(|| {
+                    format!(
+                        "Track {} neural topology changed before effect history replay",
+                        track + 1
+                    )
+                })?;
+            for (index, value) in &saved.entries {
+                let mut value = value.clone();
+                let slot = live_slots
+                    .get(value.slot_index)
+                    .ok_or_else(|| "neural effect slot is out of range".to_string())?;
+                let raw_idx = slot
+                    .param_node_indices
+                    .get(value.param_index)
+                    .map(|value| value.load(Ordering::Relaxed))
+                    .ok_or_else(|| "neural effect parameter is out of range".to_string())?;
+                value.param_id = crate::neural::ParamNodeId::from_slot_param(
+                    slot.node_id.load(Ordering::Relaxed),
+                    slot.modulator_node_id.load(Ordering::Relaxed),
+                    raw_idx,
+                )
+                .ok_or_else(|| "neural effect parameter has no live identity".to_string())?;
+                neuron
+                    .output_overrides
+                    .effects
+                    .insert((*index).min(neuron.output_overrides.effects.len()), value);
+            }
+        }
+        drop(scenes);
+        self.pattern.process_chains.lock().unwrap()[track] = live_chain
+            .ok_or_else(|| "effective process chain is missing from history".to_string())?;
+        self.pattern.project_process_lane_overrides.lock().unwrap()[track] = live_lane_overrides
+            .ok_or_else(|| "effective project process lanes are missing from history".to_string())?;
+        Ok(())
+    }
+
+    pub(crate) fn restore_pattern_effect_device_values_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        slot_idx: usize,
+        values: &EffectSlotValuesSnapshot,
+    ) -> Result<bool, String> {
+        self.restore_pattern_slot_device_values_no_publish(
+            track,
+            pattern_id,
+            slot_idx,
+            values,
+            false,
+        )
+    }
+
+    pub(crate) fn capture_pattern_midi_fx_device_values(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        slot_idx: usize,
+    ) -> Result<EffectSlotValuesSnapshot, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+            return self
+                .pattern
+                .midi_fx_slots
+                .get(track)
+                .and_then(|slots| slots.get(slot_idx))
+                .map(EffectSlotSnapshot::capture_authoring_values)
+                .ok_or_else(|| "live MIDI-FX target no longer exists".to_string());
+        }
+        scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.get(pattern_id))
+            .and_then(|data| data.midi_fx_slots.get(slot_idx))
+            .map(EffectSlotSnapshot::authoring_values)
+            .ok_or_else(|| "Track Pattern MIDI-FX target no longer exists".to_string())
+    }
+
+    pub(crate) fn capture_track_midi_fx_chain_values(
+        &self,
+        track: usize,
+    ) -> Result<Vec<(PatternId, Vec<EffectSlotValuesSnapshot>)>, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        let effective = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        pool.patterns
+            .iter()
+            .map(|(pattern, data)| {
+                let slots = if *pattern == effective {
+                    self.pattern
+                        .midi_fx_slots
+                        .get(track)
+                        .ok_or_else(|| "live MIDI-FX chain is missing".to_string())?
+                        .iter()
+                        .map(EffectSlotSnapshot::capture_authoring_values)
+                        .collect()
+                } else {
+                    data.midi_fx_slots
+                        .iter()
+                        .map(EffectSlotSnapshot::authoring_values)
+                        .collect()
+                };
+                Ok((*pattern, slots))
+            })
+            .collect()
+    }
+
+    pub(crate) fn restore_track_midi_fx_chain_values(
+        &self,
+        track: usize,
+        names: &[String],
+        descriptors: &[EffectDescriptor],
+        patterns: &[(PatternId, Vec<EffectSlotValuesSnapshot>)],
+    ) -> Result<(), String> {
+        if names.len() != descriptors.len() || descriptors.len() > crate::lisp_host::MAX_MIDI_FX_SLOTS {
+            return Err("MIDI-FX history layout is invalid".to_string());
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let effective = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != patterns.len()
+            || patterns.iter().any(|(id, _)| !pool.patterns.contains_key(id))
+        {
+            return Err(format!(
+                "Track {} pattern set changed before MIDI-FX history replay",
+                track + 1
+            ));
+        }
+        for (pattern, values) in patterns {
+            if values.len() != crate::lisp_host::MAX_MIDI_FX_SLOTS {
+                return Err("MIDI-FX pattern layout is invalid".to_string());
+            }
+            let data = pool.patterns.get_mut(pattern).expect("pattern set was validated");
+            data.track_params.midi_fx_chain = names.to_vec();
+            for slot_idx in 0..crate::lisp_host::MAX_MIDI_FX_SLOTS {
+                let descriptor = descriptors
+                    .get(slot_idx)
+                    .cloned()
+                    .unwrap_or_else(EffectDescriptor::empty_custom_slot);
+                let slot = data
+                    .midi_fx_slots
+                    .get_mut(slot_idx)
+                    .ok_or_else(|| "stored MIDI-FX slot is missing".to_string())?;
+                slot.sync_to_descriptor(&descriptor, 0);
+                slot.apply_authoring_values(&values[slot_idx])?;
+            }
+        }
+        let live_values = patterns
+            .iter()
+            .find(|(pattern, _)| *pattern == effective)
+            .map(|(_, values)| values)
+            .ok_or_else(|| "effective MIDI-FX pattern is missing from history".to_string())?;
+        self.pattern.track_params[track].set_midi_fx_chain(names.to_vec());
+        for slot_idx in 0..crate::lisp_host::MAX_MIDI_FX_SLOTS {
+            let descriptor = descriptors
+                .get(slot_idx)
+                .cloned()
+                .unwrap_or_else(EffectDescriptor::empty_custom_slot);
+            let slot = self.pattern.midi_fx_slots[track]
+                .get(slot_idx)
+                .ok_or_else(|| "live MIDI-FX slot is missing".to_string())?;
+            let mut snapshot = EffectSlotSnapshot::capture(slot);
+            snapshot.sync_to_descriptor(&descriptor, 0);
+            snapshot.apply_authoring_values(&live_values[slot_idx])?;
+            snapshot.restore(slot);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn remap_track_midi_fx_references(
+        &self,
+        track: usize,
+        old_to_new: &[Option<usize>],
+    ) -> Result<(), String> {
+        fn remap_chain(
+            chain: &mut crate::process::TrackProcessChain,
+            old_to_new: &[Option<usize>],
+        ) {
+            for process_slot in &mut chain.slots {
+                for binding in process_slot.bindings.values_mut() {
+                    let Some(crate::process::ParamTarget::MidiFxParam { slot, .. }) = binding.as_mut() else {
+                        continue;
+                    };
+                    match old_to_new.get(*slot).copied().flatten() {
+                        Some(new_slot) => *slot = new_slot,
+                        None => *binding = None,
+                    }
+                }
+            }
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        for data in pool.patterns.values_mut() {
+            remap_chain(&mut data.process_chain, old_to_new);
+        }
+        drop(scenes);
+        let mut chains = self.pattern.process_chains.lock().unwrap();
+        let chain = chains
+            .get_mut(track)
+            .ok_or_else(|| "live process chain is missing".to_string())?;
+        remap_chain(chain, old_to_new);
+        Ok(())
+    }
+
+    pub(crate) fn capture_track_process_chains(
+        &self,
+        track: usize,
+    ) -> Result<Vec<(PatternId, crate::process::TrackProcessChain)>, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        let effective = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        let live = self
+            .pattern
+            .process_chains
+            .lock()
+            .unwrap()
+            .get(track)
+            .cloned()
+            .ok_or_else(|| "live process chain is missing".to_string())?;
+        Ok(pool
+            .patterns
+            .iter()
+            .map(|(id, data)| {
+                (*id, if *id == effective { live.clone() } else { data.process_chain.clone() })
+            })
+            .collect())
+    }
+
+    pub(crate) fn restore_track_process_chains(
+        &self,
+        track: usize,
+        saved: &[(PatternId, crate::process::TrackProcessChain)],
+    ) -> Result<(), String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let effective = scenes
+            .effective_pattern_id(track)
+            .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
+        if pool.patterns.len() != saved.len()
+            || saved.iter().any(|(id, _)| !pool.patterns.contains_key(id))
+        {
+            return Err("process pattern set changed before history replay".to_string());
+        }
+        let mut live = None;
+        for (id, chain) in saved {
+            pool.patterns
+                .get_mut(id)
+                .expect("pattern set was validated")
+                .process_chain = chain.clone();
+            if *id == effective {
+                live = Some(chain.clone());
+            }
+        }
+        drop(scenes);
+        self.pattern.process_chains.lock().unwrap()[track] = live
+            .ok_or_else(|| "effective process chain is missing from history".to_string())?;
+        Ok(())
+    }
+
+    pub(crate) fn restore_pattern_midi_fx_device_values_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        slot_idx: usize,
+        values: &EffectSlotValuesSnapshot,
+    ) -> Result<bool, String> {
+        self.restore_pattern_slot_device_values_no_publish(
+            track,
+            pattern_id,
+            slot_idx,
+            values,
+            true,
+        )
+    }
+
+    fn restore_pattern_slot_device_values_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        slot_idx: usize,
+        values: &EffectSlotValuesSnapshot,
+        midi_fx: bool,
+    ) -> Result<bool, String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let data = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(pattern_id))
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+        let stored = if midi_fx {
+            data.midi_fx_slots.get_mut(slot_idx)
+        } else {
+            data.effect_slots.get_mut(slot_idx)
+        }
+        .ok_or_else(|| "stored device target no longer exists".to_string())?;
+        let mut stored_next = stored.clone();
+        stored_next.apply_authoring_values(values)?;
+        let live = if is_effective {
+            let slot = if midi_fx {
+                self.pattern
+                    .midi_fx_slots
+                    .get(track)
+                    .and_then(|slots| slots.get(slot_idx))
+            } else {
+                self.pattern
+                    .effect_chains
+                    .get(track)
+                    .and_then(|slots| slots.get(slot_idx))
+            }
+            .ok_or_else(|| "live device target no longer exists".to_string())?;
+            let mut snapshot = EffectSlotSnapshot::capture(slot);
+            snapshot.apply_authoring_values(values)?;
+            Some((slot, snapshot))
+        } else {
+            None
+        };
+        *stored = stored_next;
+        if let Some((slot, snapshot)) = live {
+            snapshot.restore(slot);
+        }
+        Ok(is_effective)
+    }
+
+    pub(crate) fn capture_pattern_rack_slot_values(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        slot_idx: usize,
+    ) -> Result<RackSlotValuesSnapshot, String> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+            return self
+                .pattern
+                .rack_tracks
+                .lock()
+                .unwrap()
+                .get(track)
+                .and_then(Option::as_ref)
+                .and_then(|rack| rack.slots.get(slot_idx))
+                .map(RackSlotSnapshot::authoring_values)
+                .ok_or_else(|| "live rack slot target no longer exists".to_string());
+        }
+        scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.get(pattern_id))
+            .and_then(|data| data.rack_track.as_ref())
+            .and_then(|rack| rack.slots.get(slot_idx))
+            .map(RackSlotSnapshot::authoring_values)
+            .ok_or_else(|| "Track Pattern rack slot target no longer exists".to_string())
+    }
+
+    pub(crate) fn restore_pattern_rack_slot_values_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        slot_idx: usize,
+        values: &RackSlotValuesSnapshot,
+    ) -> Result<bool, String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let stored = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(pattern_id))
+            .and_then(|data| data.rack_track.as_mut())
+            .and_then(|rack| rack.slots.get_mut(slot_idx))
+            .ok_or_else(|| "Track Pattern rack slot target no longer exists".to_string())?;
+        let mut stored_next = stored.clone();
+        stored_next.apply_authoring_values(values)?;
+        let live_next = if is_effective {
+            let racks = self.pattern.rack_tracks.lock().unwrap();
+            let live = racks
+                .get(track)
+                .and_then(Option::as_ref)
+                .and_then(|rack| rack.slots.get(slot_idx))
+                .ok_or_else(|| "live rack slot target no longer exists".to_string())?;
+            let mut snapshot = live.clone();
+            snapshot.apply_authoring_values(values)?;
+            Some(snapshot)
+        } else {
+            None
+        };
+        *stored = stored_next;
+        if let Some(snapshot) = live_next {
+            let mut racks = self.pattern.rack_tracks.lock().unwrap();
+            let live = racks
+                .get_mut(track)
+                .and_then(Option::as_mut)
+                .and_then(|rack| rack.slots.get_mut(slot_idx))
+                .ok_or_else(|| "live rack slot target no longer exists".to_string())?;
+            *live = snapshot;
+        }
+        Ok(is_effective)
+    }
+
+    pub(crate) fn restore_pattern_num_steps_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        num_steps: usize,
+    ) -> Result<bool, String> {
+        let num_steps = num_steps.clamp(1, MAX_STEPS);
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let data = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(pattern_id))
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+        data.track_params.num_steps = num_steps;
+        if is_effective {
+            self.pattern
+                .track_params
+                .get(track)
+                .ok_or_else(|| "live track target no longer exists".to_string())?
+                .set_num_steps(num_steps);
+        }
+        Ok(is_effective)
+    }
+
+    /// Restore a stable Track Pattern step batch without publishing.
+    ///
+    /// The pool is always updated. The live mirror is updated only if the
+    /// same pattern remains effective, so scene changes cannot redirect replay.
+    pub(crate) fn restore_pattern_step_cells_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        cells: &[(usize, StepSnapshot)],
+        variant_registry: &PlockVariantRegistry,
+    ) -> Result<bool, String> {
+        if cells.iter().any(|(step, _)| *step >= MAX_STEPS) {
+            return Err("step target is out of range".to_string());
+        }
+        let initially_effective = {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            if scenes
+                .track_pools
+                .get(track)
+                .and_then(|pool| pool.get(pattern_id))
+                .is_none()
+            {
+                return Err("Track Pattern target no longer exists".to_string());
+            }
+            scenes.effective_pattern_id(track) == Some(pattern_id)
+        };
+        if initially_effective {
+            self.validate_live_step_cell_target(track)?;
+        }
+        let is_effective = {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+            if is_effective && !initially_effective {
+                return Err("Track Pattern became active during step replay".to_string());
+            }
+            let data = scenes
+                .track_pools
+                .get_mut(track)
+                .and_then(|pool| pool.get_mut(pattern_id))
+                .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+            for (step, snapshot) in cells {
+                if !data.restore_step_snapshot(*step, snapshot) {
+                    return Err("stored step target is out of range".to_string());
+                }
+            }
+            data.plock_variant_registry = variant_registry.clone();
+            is_effective
+        };
+
+        if is_effective {
+            if track >= self.pattern.patterns.len() {
+                return Err("live track target no longer exists".to_string());
+            }
+            for (step, snapshot) in cells {
+                self.restore_step_snapshot_inner(track, *step, snapshot);
+            }
+            let mut registries = self.pattern.plock_variant_registries.lock().unwrap();
+            let registry = registries
+                .get_mut(track)
+                .ok_or_else(|| "live p-lock variant registry is missing".to_string())?;
+            *registry = variant_registry.clone();
+        }
+        Ok(is_effective)
+    }
+
+    fn validate_live_step_cell_target(&self, track: usize) -> Result<(), String> {
+        let lanes = [
+            (self.pattern.patterns.len(), "step active bits"),
+            (
+                self.pattern.neural_reset_patterns.len(),
+                "neural-reset bits",
+            ),
+            (self.pattern.step_data.len(), "step parameter data"),
+            (self.pattern.chord_data.len(), "chord data"),
+            (self.pattern.timebase_plocks.len(), "timebase p-locks"),
+            (self.pattern.swing_plocks.len(), "swing p-locks"),
+            (
+                self.pattern.swing_resolution_plocks.len(),
+                "swing-resolution p-locks",
+            ),
+            (self.pattern.midi_fx_slots.len(), "MIDI-FX slots"),
+            (self.pattern.effect_chains.len(), "audio-effect slots"),
+            (self.pattern.instrument_slots.len(), "instrument slots"),
+        ];
+        if let Some((len, name)) = lanes.into_iter().find(|(len, _)| track >= *len) {
+            return Err(format!(
+                "live track {track} is missing from {name} (length {len})"
+            ));
+        }
+        if track >= self.pattern.rack_tracks.lock().unwrap().len() {
+            return Err("live rack-track lane is missing".to_string());
+        }
+        if track
+            >= self
+                .pattern
+                .plock_variant_registries
+                .lock()
+                .unwrap()
+                .len()
+        {
+            return Err("live p-lock variant registry is missing".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn clear_step_payload_inner(&self, track: usize, step: usize) {
         for param in StepParam::ALL {
             self.pattern.step_data[track].set(step, param, param.default_value());
         }
@@ -7692,20 +11132,39 @@ impl SequencerState {
         self.pattern.swing_plocks[track].clear(step);
         self.pattern.swing_resolution_plocks[track].clear(step);
 
-        for slot in &self.pattern.effect_chains[track] {
+        for slot in &self.pattern.midi_fx_slots[track] {
             slot.plocks.clear_step(step);
+            for tensor_idx in 0..slot.tensor_params.num_params() {
+                slot.tensor_params.clear_plock(step, tensor_idx);
+            }
         }
 
-        for param_idx in 0..MAX_SLOT_PARAMS {
-            self.pattern.instrument_slots[track]
-                .plocks
-                .clear_param(step, param_idx);
+        for slot in &self.pattern.effect_chains[track] {
+            slot.plocks.clear_step(step);
+            for tensor_idx in 0..slot.tensor_params.num_params() {
+                slot.tensor_params.clear_plock(step, tensor_idx);
+            }
+        }
+
+        let instrument_slot = &self.pattern.instrument_slots[track];
+        instrument_slot.plocks.clear_step(step);
+        for tensor_idx in 0..instrument_slot.tensor_params.num_params() {
+            instrument_slot.tensor_params.clear_plock(step, tensor_idx);
         }
         self.clear_rack_macro_plocks_for_step(track, step);
         if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
             for slot in &mut rack.slots {
                 slot.param_plocks.clear_step(step);
                 slot.instrument_slot.clear_step_plocks(step);
+                for tensor_idx in 0..slot.instrument_slot.tensor_params.len() {
+                    slot.instrument_slot.clear_tensor_plock(step, tensor_idx);
+                }
+                for effect in &mut slot.effect_slots {
+                    effect.clear_step_plocks(step);
+                    for tensor_idx in 0..effect.tensor_params.len() {
+                        effect.clear_tensor_plock(step, tensor_idx);
+                    }
+                }
             }
         }
     }
@@ -7713,6 +11172,10 @@ impl SequencerState {
     pub fn clear_step_payload(&self, track: usize, step: usize) {
         self.clear_step_payload_inner(track, step);
         self.publish_scheduler_snapshot();
+    }
+
+    pub fn clear_step_payload_no_publish(&self, track: usize, step: usize) {
+        self.clear_step_payload_inner(track, step);
     }
 
     pub fn reconcile_plock_variant_registry_for_track(
@@ -7820,6 +11283,18 @@ impl SequencerState {
     }
 
     pub fn clear_variant_locks_for_steps(&self, track: usize, steps: &[usize]) -> bool {
+        let changed = self.clear_variant_locks_for_steps_no_publish(track, steps);
+        if changed {
+            self.publish_scheduler_snapshot();
+        }
+        changed
+    }
+
+    pub fn clear_variant_locks_for_steps_no_publish(
+        &self,
+        track: usize,
+        steps: &[usize],
+    ) -> bool {
         if track >= self.pattern.instrument_slots.len() {
             return false;
         }
@@ -7829,7 +11304,6 @@ impl SequencerState {
         }
         if changed {
             let _ = self.reconcile_plock_variant_registry_for_track(track);
-            self.publish_scheduler_snapshot();
         }
         changed
     }
@@ -7840,13 +11314,43 @@ impl SequencerState {
         key: &PlockVariantKey,
         steps: &[usize],
     ) -> bool {
+        let changed = self.stamp_variant_key_to_steps_no_publish(track, key, steps);
+        if changed {
+            self.publish_scheduler_snapshot();
+        }
+        changed
+    }
+
+    pub fn stamp_variant_key_to_steps_no_publish(
+        &self,
+        track: usize,
+        key: &PlockVariantKey,
+        steps: &[usize],
+    ) -> bool {
         let Some(source_step) = self.find_step_with_variant_key(track, key) else {
             return false;
         };
-        self.copy_variant_locks_from_step_to_steps(track, source_step, steps)
+        self.copy_variant_locks_from_step_to_steps_no_publish(track, source_step, steps)
     }
 
     pub fn copy_variant_locks_from_step_to_steps(
+        &self,
+        track: usize,
+        source_step: usize,
+        steps: &[usize],
+    ) -> bool {
+        let changed = self.copy_variant_locks_from_step_to_steps_no_publish(
+            track,
+            source_step,
+            steps,
+        );
+        if changed {
+            self.publish_scheduler_snapshot();
+        }
+        changed
+    }
+
+    pub(crate) fn copy_variant_locks_from_step_to_steps_no_publish(
         &self,
         track: usize,
         source_step: usize,
@@ -7861,7 +11365,6 @@ impl SequencerState {
         }
         if changed {
             let _ = self.reconcile_plock_variant_registry_for_track(track);
-            self.publish_scheduler_snapshot();
         }
         changed
     }
@@ -7977,7 +11480,13 @@ impl SequencerState {
         changed
     }
 
-    fn set_step_param_inner(&self, track: usize, step: usize, param: StepParam, value: f32) {
+    pub(crate) fn set_step_param_inner(
+        &self,
+        track: usize,
+        step: usize,
+        param: StepParam,
+        value: f32,
+    ) {
         let previous = self.pattern.step_data[track].get(step, param);
         self.pattern.step_data[track].set(step, param, value);
 
@@ -8020,7 +11529,12 @@ impl SequencerState {
         self.set_step_param(track, step, param, current + delta);
     }
 
-    fn restore_step_snapshot_inner(&self, track: usize, step: usize, snapshot: &StepSnapshot) {
+    pub(crate) fn restore_step_snapshot_inner(
+        &self,
+        track: usize,
+        step: usize,
+        snapshot: &StepSnapshot,
+    ) {
         for param in StepParam::ALL {
             self.pattern.step_data[track].set(step, param, snapshot.params[param.index()]);
         }
@@ -8051,37 +11565,27 @@ impl SequencerState {
             None => self.pattern.swing_resolution_plocks[track].clear(step),
         }
 
+        for (slot_idx, slot) in self.pattern.midi_fx_slots[track].iter().enumerate() {
+            restore_live_slot_step_plocks(slot, step, snapshot.midi_fx_plocks.get(slot_idx));
+        }
         for (slot_idx, slot) in self.pattern.effect_chains[track].iter().enumerate() {
-            let saved = snapshot.effect_plocks.get(slot_idx);
-            let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
-            for param_idx in 0..num_params {
-                let val = saved
-                    .and_then(|plocks| plocks.params.get(param_idx))
-                    .copied()
-                    .flatten();
-                match val {
-                    Some(val) => slot.set_plock(step, param_idx, val),
-                    None => slot.plocks.clear_param(step, param_idx),
-                }
-            }
+            restore_live_slot_step_plocks(slot, step, snapshot.effect_plocks.get(slot_idx));
         }
 
-        let instrument_slot = &self.pattern.instrument_slots[track];
-        let instrument_param_count = instrument_slot.num_params.load(Ordering::Relaxed) as usize;
-        for param_idx in 0..instrument_param_count {
-            match snapshot
-                .instrument_plocks
-                .params
-                .get(param_idx)
-                .copied()
-                .flatten()
-            {
-                Some(val) => instrument_slot.set_plock(step, param_idx, val),
-                None => instrument_slot.plocks.clear_param(step, param_idx),
-            }
-        }
+        restore_live_slot_step_plocks(
+            &self.pattern.instrument_slots[track],
+            step,
+            Some(&snapshot.instrument_plocks),
+        );
 
         if let Some(Some(rack)) = self.pattern.rack_tracks.lock().unwrap().get_mut(track) {
+            for (macro_idx, rack_macro) in rack.macros.iter_mut().enumerate() {
+                rack_macro.plocks[step] = snapshot
+                    .rack_macro_plocks
+                    .get(macro_idx)
+                    .copied()
+                    .flatten();
+            }
             for (slot_idx, slot) in rack.slots.iter_mut().enumerate() {
                 let saved_params = snapshot.rack_slot_param_plocks.get(slot_idx);
                 for param in RackSlotParam::ALL {
@@ -8099,31 +11603,22 @@ impl SequencerState {
                     }
                 }
 
-                let saved = snapshot.rack_slot_instrument_plocks.get(slot_idx);
-                let num_params = slot.instrument_slot.num_params as usize;
-                for param_idx in 0..num_params {
-                    let value = saved
-                        .and_then(|plocks| plocks.params.get(param_idx))
-                        .copied()
-                        .flatten();
-                    match value {
-                        Some(value) => {
-                            slot.instrument_slot.set_plock(step, param_idx, value);
-                        }
-                        None => {
-                            slot.instrument_slot.clear_plock(step, param_idx);
-                        }
-                    }
+                restore_snapshot_slot_step_plocks(
+                    &mut slot.instrument_slot,
+                    step,
+                    snapshot.rack_slot_instrument_plocks.get(slot_idx),
+                );
+                for (effect_idx, effect) in slot.effect_slots.iter_mut().enumerate() {
+                    restore_snapshot_slot_step_plocks(
+                        effect,
+                        step,
+                        snapshot
+                            .rack_slot_effect_plocks
+                            .get(slot_idx)
+                            .and_then(|effects| effects.get(effect_idx)),
+                    );
                 }
             }
-        }
-        for (macro_idx, value) in snapshot.rack_macro_plocks.iter().copied().enumerate() {
-            let Some(id) = RackMacroId::from_index(macro_idx) else {
-                continue;
-            };
-            self.update_rack_macro_in_current_pattern(track, id, |rack_macro| {
-                rack_macro.plocks[step] = value;
-            });
         }
     }
 
@@ -8132,9 +11627,23 @@ impl SequencerState {
         self.publish_scheduler_snapshot();
     }
 
+    pub fn restore_step_snapshot_no_publish(
+        &self,
+        track: usize,
+        step: usize,
+        snapshot: &StepSnapshot,
+    ) {
+        self.restore_step_snapshot_inner(track, step, snapshot);
+    }
+
     /// Cyclically rotate `steps` (sorted) left (direction < 0) or right (direction > 0).
-    pub fn rotate_steps(&self, track: usize, steps: &[usize], direction: isize) {
-        if steps.len() < 2 {
+    pub(crate) fn rotate_steps_no_publish(
+        &self,
+        track: usize,
+        steps: &[usize],
+        direction: isize,
+    ) {
+        if steps.len() < 2 || direction == 0 {
             return;
         }
         let snapshots: Vec<_> = steps
@@ -8145,17 +11654,31 @@ impl SequencerState {
         for (i, &step) in steps.iter().enumerate() {
             let src = if direction > 0 {
                 // Rotate right: slot i gets content from slot i-1 (last wraps to first)
-                if i == 0 { n - 1 } else { i - 1 }
+                if i == 0 {
+                    n - 1
+                } else {
+                    i - 1
+                }
             } else {
                 // Rotate left: slot i gets content from slot i+1 (first wraps to last)
                 (i + 1) % n
             };
             self.restore_step_snapshot_inner(track, step, &snapshots[src]);
         }
+    }
+
+    pub fn rotate_steps(&self, track: usize, steps: &[usize], direction: isize) {
+        self.rotate_steps_no_publish(track, steps, direction);
         self.publish_scheduler_snapshot();
     }
 
-    pub fn move_step_range(&self, track: usize, lo: usize, hi: usize, new_lo: usize) {
+    pub(crate) fn move_step_range_no_publish(
+        &self,
+        track: usize,
+        lo: usize,
+        hi: usize,
+        new_lo: usize,
+    ) {
         if lo > hi || hi >= MAX_STEPS {
             return;
         }
@@ -8179,10 +11702,14 @@ impl SequencerState {
         for (offset, step) in (new_lo..=new_hi).enumerate() {
             self.restore_step_snapshot_inner(track, step, &snapshots[offset]);
         }
+    }
+
+    pub fn move_step_range(&self, track: usize, lo: usize, hi: usize, new_lo: usize) {
+        self.move_step_range_no_publish(track, lo, hi, new_lo);
         self.publish_scheduler_snapshot();
     }
 
-    pub fn duplicate_track_pattern(&self, track: usize) -> usize {
+    pub(crate) fn duplicate_track_pattern_no_publish(&self, track: usize) -> usize {
         let num_steps = self.pattern.track_params[track].get_num_steps();
         let new_len = (num_steps * 2).min(MAX_STEPS);
         if new_len == num_steps {
@@ -8191,68 +11718,32 @@ impl SequencerState {
 
         for step in num_steps..new_len {
             let src = step - num_steps;
-            let active = self.pattern.patterns[track].is_active(src);
-            self.pattern.patterns[track].set_step_active(step, active);
-            let neural_reset = self.pattern.neural_reset_patterns[track].is_active(src);
-            self.pattern.neural_reset_patterns[track].set_step_active(step, neural_reset);
-        }
-
-        for step in num_steps..new_len {
-            let src = step - num_steps;
-            for param in StepParam::ALL {
-                let val = self.pattern.step_data[track].get(src, param);
-                self.pattern.step_data[track].set(step, param, val);
-            }
-        }
-
-        for slot in &self.pattern.effect_chains[track] {
-            let np = slot.num_params.load(Ordering::Relaxed) as usize;
-            for step in num_steps..new_len {
-                let src = step - num_steps;
-                for p in 0..np {
-                    match slot.plocks.get(src, p) {
-                        Some(val) => slot.set_plock(step, p, val),
-                        None => slot.plocks.clear_param(step, p),
-                    }
-                }
-            }
-        }
-
-        for step in num_steps..new_len {
-            let src = step - num_steps;
-            self.pattern.chord_data[track].copy_step(src, step);
-        }
-
-        for step in num_steps..new_len {
-            let src = step - num_steps;
-            match self.pattern.timebase_plocks[track].get(src) {
-                Some(tb) => self.pattern.timebase_plocks[track].set(step, tb),
-                None => self.pattern.timebase_plocks[track].clear(step),
-            }
-            match self.pattern.swing_plocks[track].get(src) {
-                Some(swing) => self.pattern.swing_plocks[track].set(step, swing),
-                None => self.pattern.swing_plocks[track].clear(step),
-            }
-            match self.pattern.swing_resolution_plocks[track].get(src) {
-                Some(resolution) => {
-                    self.pattern.swing_resolution_plocks[track].set(step, resolution)
-                }
-                None => self.pattern.swing_resolution_plocks[track].clear(step),
-            }
+            let snapshot = self.capture_step_snapshot(track, src);
+            self.restore_step_snapshot_inner(track, step, &snapshot);
         }
 
         self.pattern.track_params[track].set_num_steps(new_len);
+        new_len
+    }
+
+    pub fn duplicate_track_pattern(&self, track: usize) -> usize {
+        let new_len = self.duplicate_track_pattern_no_publish(track);
         self.publish_scheduler_snapshot();
         new_len
     }
 
-    pub fn halve_track_pattern(&self, track: usize) -> usize {
+    pub(crate) fn halve_track_pattern_no_publish(&self, track: usize) -> usize {
         let num_steps = self.pattern.track_params[track].get_num_steps();
         let new_len = (num_steps / 2).max(1);
         if new_len == num_steps {
             return num_steps;
         }
         self.pattern.track_params[track].set_num_steps(new_len);
+        new_len
+    }
+
+    pub fn halve_track_pattern(&self, track: usize) -> usize {
+        let new_len = self.halve_track_pattern_no_publish(track);
         self.publish_scheduler_snapshot();
         new_len
     }
@@ -8522,13 +12013,26 @@ fn copy_snapshot_slot_variant_locks(
 mod tests {
     use super::*;
     use crate::effects::{
-        BUILTIN_SLOT_COUNT, EffectDescriptor, EffectSlotSnapshot, HostControl, ParamDescriptor,
-        ParamKind, ParamScaling,
+        EffectDescriptor, EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind,
+        ParamScaling, TensorParamDescriptor, BUILTIN_SLOT_COUNT,
     };
     use crate::neural::ParamNodeId;
     use crate::plock_variants::{PlockVariantEntry, PlockVariantRegistryEntry};
     use crate::process::{ParamTarget, ProcessInstanceId, TrackProcessSlot};
     use crate::sequencer::ModDestination;
+
+    #[test]
+    fn record_position_uses_the_track_timebase_not_global_sixteenths() {
+        let state = SequencerState::new(1, vec![vec![]]);
+        state.pattern.track_params[0].set_timebase(Timebase::Eighth);
+        assert_eq!(
+            state.record_position_at_beat(0, 0.75),
+            Some(RecordPosition {
+                step: 1,
+                phase: 0.5,
+            })
+        );
+    }
 
     #[test]
     fn active_notes_merge_scheduled_expirations_with_live_note_state() {
@@ -9096,11 +12600,10 @@ mod tests {
             );
             assert!(slot.plocks.iter().flatten().all(Option::is_none));
             assert!(slot.key_locks.is_empty());
-            assert!(
-                slot.tensor_params
-                    .iter()
-                    .all(|tensor| tensor.plocks.is_empty())
-            );
+            assert!(slot
+                .tensor_params
+                .iter()
+                .all(|tensor| tensor.plocks.is_empty()));
             assert_eq!(actual.instrument_types[0], InstrumentType::Custom);
             assert_eq!(actual.sample_ids[0], (-1, String::new(), 44_100));
             assert_eq!(
@@ -9114,13 +12617,11 @@ mod tests {
             let variants = &actual.plock_variant_registries[0];
             assert_eq!(variants.entries.len(), 1);
             assert_eq!(variants.entries[0].name.as_deref(), Some("effect identity"));
-            assert!(
-                variants.entries[0]
-                    .key
-                    .entries
-                    .iter()
-                    .all(|entry| entry.domain == PlockVariantDomain::Effect)
-            );
+            assert!(variants.entries[0]
+                .key
+                .entries
+                .iter()
+                .all(|entry| entry.domain == PlockVariantDomain::Effect));
             assert!(actual.key_lock_variant_registries[0].entries.is_empty());
 
             let bindings = &actual.process_chains[0].slots[0].bindings;
@@ -9133,12 +12634,10 @@ mod tests {
                 bindings["survives"],
                 Some(ParamTarget::EffectParam { .. })
             ));
-            assert!(
-                actual.neural_networks[0].neurons[0]
-                    .output_overrides
-                    .instrument
-                    .is_empty()
-            );
+            assert!(actual.neural_networks[0].neurons[0]
+                .output_overrides
+                .instrument
+                .is_empty());
             assert_eq!(
                 actual.neural_networks[0].neurons[0]
                     .output_overrides
@@ -9207,6 +12706,44 @@ mod tests {
             assert_eq!(snapshot.instrument_slots[0].node_id, 800);
             assert_eq!(snapshot.instrument_slots[0].modulator_node_id, 801);
         }
+    }
+
+    #[test]
+    fn seeding_unset_sample_ids_fills_only_patterns_without_a_real_sample() {
+        let snapshots = (0..3)
+            .map(|scene| {
+                let mut snapshot = sample_pattern_snapshot(1);
+                snapshot.track_bits[0][0] = 10 + scene;
+                snapshot.sample_ids[0] = if scene == 1 {
+                    (7, "kick".to_string(), 44_100)
+                } else {
+                    (-1, String::new(), 44_100)
+                };
+                snapshot
+            })
+            .collect::<Vec<_>>();
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(snapshots, 0);
+
+        let seeded =
+            state.seed_unset_pattern_sample_ids(0, (42, "eight-oh-eight".to_string(), 48_000));
+
+        assert_eq!(seeded, 2);
+        let exported = state.export_pattern_repository();
+        assert_eq!(
+            exported[0].sample_ids[0],
+            (42, "eight-oh-eight".to_string(), 48_000)
+        );
+        assert_eq!(exported[1].sample_ids[0], (7, "kick".to_string(), 44_100));
+        assert_eq!(
+            exported[2].sample_ids[0],
+            (42, "eight-oh-eight".to_string(), 48_000)
+        );
+
+        assert_eq!(
+            state.seed_unset_pattern_sample_ids(0, (-1, String::new(), 44_100)),
+            0
+        );
     }
 
     fn sample_rack_track_snapshot() -> RackTrackSnapshot {
@@ -9295,6 +12832,121 @@ mod tests {
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
         }
+    }
+
+    fn step_tensor_descriptor() -> EffectDescriptor {
+        EffectDescriptor {
+            name: "step tensor fixture".to_string(),
+            params: vec![ParamDescriptor {
+                name: "amount".to_string(),
+                min: 0.0,
+                max: 1.0,
+                default: 0.0,
+                kind: ParamKind::Continuous { unit: None },
+                scaling: ParamScaling::Linear,
+                node_param_idx: 0,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }],
+            input_channels: 2,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: vec![TensorParamDescriptor {
+                name: "matrix".to_string(),
+                shape: vec![2],
+                cell_offset: 1,
+                default: vec![0.0, 0.0],
+                min: 0.0,
+                max: 1.0,
+            }],
+        }
+    }
+
+    #[test]
+    fn step_snapshot_clear_and_restore_cover_every_live_lock_domain() {
+        let descriptor = step_tensor_descriptor();
+        let state = SequencerState::new(
+            1,
+            vec![vec![EffectSlotState::new(&descriptor, 10)]],
+        );
+        let step = 7;
+        state.pattern.midi_fx_slots[0][0].apply_descriptor(&descriptor, 20);
+        state.pattern.instrument_slots[0].apply_descriptor(&descriptor, 30);
+        state.pattern.midi_fx_slots[0][0].set_plock(step, 0, 0.11);
+        state.pattern.midi_fx_slots[0][0]
+            .tensor_params
+            .set_plock(step, 0, &[0.12, 0.13]);
+        state.pattern.effect_chains[0][0].set_plock(step, 0, 0.21);
+        state.pattern.effect_chains[0][0]
+            .tensor_params
+            .set_plock(step, 0, &[0.22, 0.23]);
+        state.pattern.instrument_slots[0].set_plock(step, 0, 0.31);
+        state.pattern.instrument_slots[0]
+            .tensor_params
+            .set_plock(step, 0, &[0.32, 0.33]);
+
+        let mut rack = sample_rack_track_snapshot();
+        rack.macros[0].plocks[step] = Some(0.41);
+        rack.slots[0]
+            .param_plocks
+            .set(step, RackSlotParam::Gain, 0.42);
+        rack.slots[0].instrument_slot = EffectSlotSnapshot::new_default(&descriptor, 40);
+        rack.slots[0].instrument_slot.set_plock(step, 0, 0.43);
+        rack.slots[0]
+            .instrument_slot
+            .set_tensor_plock(step, 0, vec![0.44, 0.45]);
+        rack.slots[0].effect_slots[0] = EffectSlotSnapshot::new_default(&descriptor, 50);
+        rack.slots[0].effect_slots[0].set_plock(step, 0, 0.46);
+        rack.slots[0].effect_slots[0]
+            .set_tensor_plock(step, 0, vec![0.47, 0.48]);
+        state.set_rack_track_for_all_pattern_snapshots(0, rack);
+
+        let captured = state.capture_step_snapshot(0, step);
+        assert_eq!(captured.midi_fx_plocks[0].params[0], Some(0.11));
+        assert_eq!(captured.midi_fx_plocks[0].tensor_params[0], Some(vec![0.12, 0.13]));
+        assert_eq!(captured.effect_plocks[0].tensor_params[0], Some(vec![0.22, 0.23]));
+        assert_eq!(captured.instrument_plocks.tensor_params[0], Some(vec![0.32, 0.33]));
+        assert_eq!(captured.rack_macro_plocks[0], Some(0.41));
+        assert_eq!(captured.rack_slot_instrument_plocks[0].tensor_params[0], Some(vec![0.44, 0.45]));
+        assert_eq!(captured.rack_slot_effect_plocks[0][0].tensor_params[0], Some(vec![0.47, 0.48]));
+
+        state.clear_step_payload(0, step);
+        let cleared = state.capture_step_snapshot(0, step);
+        assert!(cleared.midi_fx_plocks[0].params.iter().all(Option::is_none));
+        assert!(cleared.midi_fx_plocks[0].tensor_params.iter().all(Option::is_none));
+        assert!(cleared.effect_plocks[0].tensor_params.iter().all(Option::is_none));
+        assert!(cleared.instrument_plocks.tensor_params.iter().all(Option::is_none));
+        assert!(cleared.rack_macro_plocks.iter().all(Option::is_none));
+        assert!(cleared.rack_slot_instrument_plocks[0].tensor_params.iter().all(Option::is_none));
+        assert!(cleared.rack_slot_effect_plocks[0][0].tensor_params.iter().all(Option::is_none));
+
+        state.restore_step_snapshot(0, step, &captured);
+        let restored = state.capture_step_snapshot(0, step);
+        assert_eq!(restored.midi_fx_plocks[0].tensor_params[0], Some(vec![0.12, 0.13]));
+        assert_eq!(restored.effect_plocks[0].tensor_params[0], Some(vec![0.22, 0.23]));
+        assert_eq!(restored.instrument_plocks.tensor_params[0], Some(vec![0.32, 0.33]));
+        assert_eq!(restored.rack_macro_plocks[0], Some(0.41));
+        assert_eq!(restored.rack_slot_instrument_plocks[0].tensor_params[0], Some(vec![0.44, 0.45]));
+        assert_eq!(restored.rack_slot_effect_plocks[0][0].tensor_params[0], Some(vec![0.47, 0.48]));
+
+        state.pattern.patterns[0].set_step_active(step, true);
+        state.pattern.step_data[0].set(step, StepParam::Velocity, 0.73);
+        let velocity_bits = state.pattern.step_data[0]
+            .get(step, StepParam::Velocity)
+            .to_bits();
+        state.toggle_step_and_clear_plocks_no_publish(0, step);
+        let toggled_off = state.capture_step_snapshot(0, step);
+        assert!(!toggled_off.active);
+        assert_eq!(toggled_off.params[StepParam::Velocity.index()].to_bits(), velocity_bits);
+        assert!(toggled_off.midi_fx_plocks[0].tensor_params.iter().all(Option::is_none));
+        assert!(toggled_off.effect_plocks[0].tensor_params.iter().all(Option::is_none));
+        assert!(toggled_off.instrument_plocks.tensor_params.iter().all(Option::is_none));
+        assert!(toggled_off.rack_slot_effect_plocks[0][0]
+            .tensor_params
+            .iter()
+            .all(Option::is_none));
     }
 
     #[test]
@@ -9396,6 +13048,108 @@ mod tests {
         let scenes = state.pattern.scenes.lock().unwrap();
         assert_eq!(scenes.scenes[0].cells[0], Some(shared));
         assert_eq!(scenes.scenes[1].cells[0], Some(shared));
+    }
+
+    #[test]
+    fn track_effect_chain_values_restore_each_pattern_by_stable_pattern_id() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let slot_descriptors = vec![EffectDescriptor::default_full_chain()];
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &slot_descriptors),
+                PatternSnapshot::new_default(1, &slot_descriptors),
+            ],
+            0,
+        );
+        let first = state.scene_track_pattern_id(0, 0).unwrap();
+        let second = state.scene_track_pattern_id(1, 0).unwrap();
+        let descriptor = EffectDescriptor::builtin_filter();
+        let mut first_slot = EffectSlotSnapshot::new_default(&descriptor, 901);
+        first_slot.defaults[0] = 0.21;
+        let mut second_slot = EffectSlotSnapshot::new_default(&descriptor, 901);
+        second_slot.defaults[0] = 0.79;
+        let empty = EffectSlotSnapshot::new_empty().authoring_values();
+        let pattern_values = [(first, first_slot.authoring_values()), (second, second_slot.authoring_values())]
+            .into_iter()
+            .map(|(pattern, first_value)| {
+                let mut values = vec![empty.clone(); crate::lisp_host::MAX_CUSTOM_FX];
+                values[0] = first_value;
+                (pattern, values)
+            })
+            .collect::<Vec<_>>();
+        let mut descriptors = vec![descriptor; 1];
+        descriptors.resize_with(
+            crate::lisp_host::MAX_CUSTOM_FX,
+            EffectDescriptor::empty_custom_slot,
+        );
+        let mut nodes = vec![(901, 0)];
+        nodes.resize(crate::lisp_host::MAX_CUSTOM_FX, (0, 0));
+
+        state
+            .restore_track_effect_chain_values(
+                0,
+                BUILTIN_SLOT_COUNT,
+                &descriptors,
+                &nodes,
+                &pattern_values,
+            )
+            .unwrap();
+
+        let captured = state
+            .capture_track_effect_chain_values(
+                0,
+                BUILTIN_SLOT_COUNT,
+                crate::lisp_host::MAX_CUSTOM_FX,
+            )
+            .unwrap();
+        let first_values = captured.iter().find(|(id, _)| *id == first).unwrap();
+        let second_values = captured.iter().find(|(id, _)| *id == second).unwrap();
+        assert_eq!(first_values.1[0].defaults[0], 0.21);
+        assert_eq!(second_values.1[0].defaults[0], 0.79);
+    }
+
+    #[test]
+    fn track_midi_fx_chain_values_restore_each_pattern_by_stable_pattern_id() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let slot_descriptors = vec![EffectDescriptor::default_full_chain()];
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &slot_descriptors),
+                PatternSnapshot::new_default(1, &slot_descriptors),
+            ],
+            0,
+        );
+        let first = state.scene_track_pattern_id(0, 0).unwrap();
+        let second = state.scene_track_pattern_id(1, 0).unwrap();
+        let descriptor = crate::lisp_host::load_midi_fx_descriptor("arp").unwrap();
+        let mut first_slot = EffectSlotSnapshot::new_default(&descriptor, 0);
+        first_slot.defaults[0] = 0.18;
+        let mut second_slot = EffectSlotSnapshot::new_default(&descriptor, 0);
+        second_slot.defaults[0] = 0.83;
+        let empty = EffectSlotSnapshot::new_empty().authoring_values();
+        let pattern_values = [(first, first_slot.authoring_values()), (second, second_slot.authoring_values())]
+            .into_iter()
+            .map(|(pattern, first_value)| {
+                let mut values = vec![empty.clone(); crate::lisp_host::MAX_MIDI_FX_SLOTS];
+                values[0] = first_value;
+                (pattern, values)
+            })
+            .collect::<Vec<_>>();
+
+        state
+            .restore_track_midi_fx_chain_values(
+                0,
+                &["arp".to_string()],
+                &[descriptor],
+                &pattern_values,
+            )
+            .unwrap();
+
+        let captured = state.capture_track_midi_fx_chain_values(0).unwrap();
+        let first_values = captured.iter().find(|(id, _)| *id == first).unwrap();
+        let second_values = captured.iter().find(|(id, _)| *id == second).unwrap();
+        assert_eq!(first_values.1[0].defaults[0], 0.18);
+        assert_eq!(second_values.1[0].defaults[0], 0.83);
     }
 
     #[test]
@@ -9863,11 +13617,9 @@ mod tests {
         initial.slots[0].effect_descriptors[0] = rack_fx.clone();
         initial.slots[0].effect_slots[0] = EffectSlotSnapshot::new_default(&rack_fx, 701);
         initial.slots[0].custom_effect_names[0] = Some("builtin:OTT".to_string());
-        assert!(
-            initial.slots[0]
-                .param_plocks
-                .set(4, RackSlotParam::Gain, 0.25)
-        );
+        assert!(initial.slots[0]
+            .param_plocks
+            .set(4, RackSlotParam::Gain, 0.25));
         state.set_rack_track_for_all_pattern_snapshots(0, initial);
 
         let replacement = RackSlotSnapshot {
@@ -9947,11 +13699,9 @@ mod tests {
         initial.slots[0].mute = true;
         initial.slots[0].solo = false;
         initial.slots[0].max_polyphony = 6;
-        assert!(
-            initial.slots[0]
-                .param_plocks
-                .set(4, RackSlotParam::Gain, 0.25)
-        );
+        assert!(initial.slots[0]
+            .param_plocks
+            .set(4, RackSlotParam::Gain, 0.25));
         state.set_rack_track_for_all_pattern_snapshots(0, initial);
 
         let mut replacement = sample_sampler_rack_slot(321, "replacement", 48_000, 88, Some(9));
@@ -10023,12 +13773,8 @@ mod tests {
         state.restore_current_pattern_from_repository().unwrap();
 
         let descriptor = EffectDescriptor::builtin_sampler();
-        assert!(
-            state.sync_rack_slot_instrument_bindings_for_current_pattern(
-                0,
-                &[(descriptor, 999, 1000)]
-            )
-        );
+        assert!(state
+            .sync_rack_slot_instrument_bindings_for_current_pattern(0, &[(descriptor, 999, 1000)]));
 
         let live = state.pattern.rack_tracks.lock().unwrap()[0]
             .as_ref()
@@ -11636,6 +15382,79 @@ mod tests {
     }
 
     #[test]
+    fn stable_step_cell_restore_updates_inactive_pool_without_redirecting_to_current_scene() {
+        let state = make_state_with_tracks(1);
+        let first = PatternSnapshot::new_default(1, &[]);
+        let second = snapshot_with_active_step(1, 0, 7);
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let first_id = state.scene_track_pattern_id(0, 0).unwrap();
+
+        let (before_cells, before_registry) = state
+            .capture_pattern_step_cells(0, first_id, &[3])
+            .expect("capture active target");
+        state.pattern.patterns[0].set_step_active(3, true);
+        let (after_cells, after_registry) = state
+            .capture_pattern_step_cells(0, first_id, &[3])
+            .expect("capture edited target");
+        state
+            .restore_pattern_step_cells_no_publish(
+                0,
+                first_id,
+                &[(3, after_cells[0].clone())],
+                &after_registry,
+            )
+            .expect("synchronize edited target");
+
+        state
+            .launch_scene(
+                1,
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("track")],
+                &[InstrumentType::Sampler],
+            )
+            .expect("launch second scene");
+        assert!(state.pattern.patterns[0].is_active(7));
+        assert!(!state.pattern.patterns[0].is_active(3));
+
+        let touched_live = state
+            .restore_pattern_step_cells_no_publish(
+                0,
+                first_id,
+                &[(3, before_cells[0].clone())],
+                &before_registry,
+            )
+            .expect("restore inactive target");
+        assert!(!touched_live);
+        assert!(state.pattern.patterns[0].is_active(7));
+
+        state
+            .launch_scene(
+                0,
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("track")],
+                &[InstrumentType::Sampler],
+            )
+            .expect("return to first scene");
+        assert!(!state.pattern.patterns[0].is_active(3));
+        assert!(!state.pattern.patterns[0].is_active(7));
+
+        assert!(state
+            .restore_pattern_step_cells_no_publish(
+                0,
+                first_id,
+                &[(3, after_cells[0].clone())],
+                &after_registry,
+            )
+            .expect("redo active target"));
+        assert!(state.pattern.patterns[0].is_active(3));
+    }
+
+    #[test]
     fn launch_track_pattern_changes_only_requested_track_and_scene_launch_clears_override() {
         let state = make_state_with_tracks(2);
         let first = PatternSnapshot::new_default(2, &[]);
@@ -11804,12 +15623,10 @@ mod tests {
             &names,
             &instrument_types,
         ));
-        assert!(
-            state
-                .track_pattern_cells(0)
-                .into_iter()
-                .any(|cell| cell.pattern_id == shared && cell.active_effective && cell.overridden)
-        );
+        assert!(state
+            .track_pattern_cells(0)
+            .into_iter()
+            .any(|cell| cell.pattern_id == shared && cell.active_effective && cell.overridden));
 
         assert!(state.set_scene_cell(
             0,
@@ -11936,12 +15753,10 @@ mod tests {
         ));
         assert_eq!(state.scene_track_pattern_id(1, 0), None);
         assert!(!state.is_scene_silenced(0));
-        assert!(
-            state
-                .track_pattern_cells(0)
-                .iter()
-                .all(|cell| cell.pattern_id != second_id)
-        );
+        assert!(state
+            .track_pattern_cells(0)
+            .iter()
+            .all(|cell| cell.pattern_id != second_id));
 
         assert!(state.delete_track_pattern(
             0,
@@ -12052,6 +15867,10 @@ mod tests {
         let original_scene_ids = (0..3)
             .map(|scene| state.scene_track_pattern_id(scene, 0).unwrap())
             .collect::<Vec<_>>();
+        let original_stable_scene_ids = {
+            let scenes = state.pattern.scenes.lock().unwrap();
+            scenes.scenes.iter().map(|scene| scene.id).collect::<Vec<_>>()
+        };
         let pool_before = {
             let scenes = state.pattern.scenes.lock().unwrap();
             let mut entries = scenes.track_pools[0]
@@ -12065,6 +15884,18 @@ mod tests {
 
         assert_eq!(state.reorder_scene(0, 2), Some(0));
         assert_eq!(state.current_scene_index(), 0);
+        assert_eq!(
+            state.pattern.scenes.lock().unwrap().scenes
+                .iter()
+                .map(|scene| scene.id)
+                .collect::<Vec<_>>(),
+            vec![
+                original_stable_scene_ids[1],
+                original_stable_scene_ids[2],
+                original_stable_scene_ids[0],
+            ],
+            "stable scene identities must move with scenes rather than stay at an index"
+        );
         assert_eq!(
             (0..3)
                 .map(|scene| state.scene_track_pattern_id(scene, 0).unwrap())
@@ -12093,6 +15924,13 @@ mod tests {
 
         assert_eq!(state.reorder_scene(2, 0), Some(1));
         assert_eq!(state.current_scene_index(), 1);
+        assert_eq!(
+            state.pattern.scenes.lock().unwrap().scenes
+                .iter()
+                .map(|scene| scene.id)
+                .collect::<Vec<_>>(),
+            original_stable_scene_ids
+        );
         assert_eq!(
             (0..3)
                 .map(|scene| state.scene_track_pattern_id(scene, 0).unwrap())
@@ -12124,6 +15962,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             ids_before
         );
+    }
+
+    #[test]
+    fn deleted_scene_identity_is_not_reused_by_a_new_scene() {
+        let snapshots = vec![
+            snapshot_with_active_step(1, 0, 3),
+            snapshot_with_active_step(1, 0, 9),
+        ];
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        let deleted = scenes.scene_id(1).unwrap();
+        assert_eq!(scenes.delete_scene(1), Some(0));
+        let new_scene = scenes.new_scene();
+        assert_ne!(scenes.scene_id(new_scene), Some(deleted));
     }
 
     #[test]
@@ -12386,12 +16237,10 @@ mod tests {
         for step in [1, 3, 5] {
             assert_eq!(live_plocks[step], Some(1.0));
         }
-        assert!(
-            live_plocks
-                .iter()
-                .enumerate()
-                .all(|(step, value)| [1, 3, 5].contains(&step) || value.is_none())
-        );
+        assert!(live_plocks
+            .iter()
+            .enumerate()
+            .all(|(step, value)| [1, 3, 5].contains(&step) || value.is_none()));
     }
 
     #[test]
@@ -13026,6 +16875,107 @@ mod tests {
     }
 
     #[test]
+    fn drum_lane_steps_expand_and_collapse_polyphonic_step_storage() {
+        let state = make_state_with_instrument();
+        let track = 0;
+        let step = 3;
+
+        assert!(state.toggle_drum_lane_step(track, step, 0));
+        assert!(state.pattern.patterns[track].is_active(step));
+        assert_eq!(
+            state.pattern.step_data[track].get(step, StepParam::Transpose),
+            0.0
+        );
+        assert_eq!(state.pattern.chord_data[track].count(step), 0);
+
+        assert!(state.toggle_drum_lane_step(track, step, 12));
+        assert_eq!(state.pattern.chord_data[track].count(step), 2);
+        assert_eq!(state.pattern.chord_data[track].get(step, 0), 0.0);
+        assert_eq!(state.pattern.chord_data[track].get(step, 1), 12.0);
+        assert_eq!(
+            state.set_drum_lane_step_duration(track, step, 0, 4.0),
+            Some(4.0)
+        );
+        assert_eq!(
+            state.set_drum_lane_step_duration(track, step, 12, 2.0),
+            Some(2.0)
+        );
+        assert_eq!(state.drum_lane_step_duration(track, step, 0), Some(4.0));
+        assert_eq!(state.drum_lane_step_duration(track, step, 12), Some(2.0));
+
+        assert!(!state.toggle_drum_lane_step(track, step, 0));
+        assert!(state.pattern.patterns[track].is_active(step));
+        assert_eq!(state.pattern.chord_data[track].count(step), 0);
+        assert_eq!(
+            state.pattern.step_data[track].get(step, StepParam::Transpose),
+            12.0
+        );
+
+        assert!(!state.toggle_drum_lane_step(track, step, 12));
+        assert_step_is_default(&state, track, step);
+    }
+
+    #[test]
+    fn drum_lane_drag_moves_only_the_requested_pad_hits() {
+        let state = make_state_with_instrument();
+        let track = 0;
+
+        assert!(state.toggle_drum_lane_step(track, 2, 0));
+        assert!(state.toggle_drum_lane_step(track, 2, 12));
+        assert!(state.toggle_drum_lane_step(track, 4, 0));
+        assert!(state.toggle_drum_lane_step(track, 6, 12));
+        assert!(state.toggle_drum_lane_step(track, 8, 24));
+        state.pattern.step_data[track].set(8, StepParam::Velocity, 0.42);
+
+        assert!(state.move_drum_lane_steps(track, 0, &[2, 4], 2));
+        assert!(state.move_drum_lane_steps(track, 24, &[8], 2));
+
+        assert!(state.pattern.patterns[track].is_active(2));
+        assert_eq!(state.pattern.chord_data[track].count(2), 0);
+        assert_eq!(
+            state.pattern.step_data[track]
+                .get(2, StepParam::Transpose)
+                .round() as i32,
+            12,
+            "the other pad hit at the source must remain"
+        );
+        assert!(state.pattern.patterns[track].is_active(4));
+        assert_eq!(
+            state.pattern.step_data[track]
+                .get(4, StepParam::Transpose)
+                .round() as i32,
+            0,
+            "the first selected hit should move to step 4"
+        );
+        assert_eq!(state.pattern.chord_data[track].count(6), 2);
+        let notes = (0..2)
+            .map(|voice| state.pattern.chord_data[track].get(6, voice).round() as i32)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            notes,
+            vec![0, 12],
+            "the destination's other pad must remain"
+        );
+        assert!(!state.pattern.patterns[track].is_active(8));
+        assert!(state.pattern.patterns[track].is_active(10));
+        assert_eq!(
+            state.pattern.step_data[track].get(10, StepParam::Velocity),
+            0.42,
+            "a lone hit moved to an empty destination should retain its full step payload"
+        );
+        assert_eq!(state.clear_drum_lane_steps(track, 0, &[6]), 1);
+        assert!(state.pattern.patterns[track].is_active(6));
+        assert_eq!(state.pattern.chord_data[track].count(6), 0);
+        assert_eq!(
+            state.pattern.step_data[track]
+                .get(6, StepParam::Transpose)
+                .round() as i32,
+            12,
+            "deleting a selected lane hit must retain the other pad at that step"
+        );
+    }
+
+    #[test]
     fn published_scheduler_snapshot_reflects_initial_state() {
         let state = SequencerState::new(
             2,
@@ -13101,6 +17051,34 @@ mod tests {
     }
 
     #[test]
+    fn publish_scheduler_track_recaptures_complete_track_and_reuses_other_tracks() {
+        let state = SequencerState::new(
+            2,
+            vec![
+                vec![EffectSlotState::new(&EffectDescriptor::builtin_filter(), 1)],
+                default_empty_effect_chain(),
+            ],
+        );
+        state.pattern.effect_chains[0][0]
+            .apply_descriptor(&EffectDescriptor::builtin_filter(), 1);
+        state.pattern.instrument_slots[0]
+            .apply_descriptor(&EffectDescriptor::builtin_delay(), 2);
+        let before = state.latest_scheduler_snapshot();
+
+        state.pattern.patterns[0].set_step_active(3, true);
+        state.pattern.effect_chains[0][0].set_plock(3, 0, 0.75);
+        state.pattern.instrument_slots[0].set_plock(3, 0, 0.25);
+        state.publish_scheduler_track(0);
+
+        let after = state.latest_scheduler_snapshot();
+        assert!(!Arc::ptr_eq(&before.tracks[0], &after.tracks[0]));
+        assert!(Arc::ptr_eq(&before.tracks[1], &after.tracks[1]));
+        assert!(after.tracks[0].steps[3].active);
+        assert_eq!(after.tracks[0].effect_slots[0].plocks[3][0], Some(0.75));
+        assert_eq!(after.tracks[0].instrument_slot.plocks[3][0], Some(0.25));
+    }
+
+    #[test]
     fn publish_scheduler_snapshot_captures_transport_changes() {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
 
@@ -13159,5 +17137,119 @@ mod tests {
             assert_eq!(slot.node_id.load(Ordering::Relaxed), 0);
             assert_eq!(slot.num_params.load(Ordering::Relaxed), 0);
         }
+    }
+
+    #[test]
+    fn rack_slot_history_snapshot_restores_every_pattern_with_live_binding_ids() {
+        let state = SequencerState::new(1, Vec::new());
+        state.set_rack_track_for_all_pattern_snapshots(0, sample_rack_track_snapshot());
+        {
+            let mut scenes = state.pattern.scenes.lock().unwrap();
+            let source_id = scenes.effective_pattern_id(0).unwrap();
+            let clone = scenes.track_pools[0].get(source_id).unwrap().clone();
+            scenes.track_pools[0].insert(clone);
+        }
+        state.append_rack_slot_for_all_pattern_snapshots(
+            0,
+            RackRouting::Broadcast,
+            sample_sampler_rack_slot(12, "before", 48_000, 77, None),
+        );
+        let snapshot = state.capture_rack_slot_pattern_state(0, 1).unwrap();
+        assert!(state.replace_rack_slot_source_in_current_pattern(
+            0,
+            1,
+            sample_sampler_rack_slot(13, "after", 44_100, 88, None),
+        ));
+        state
+            .restore_rack_slot_pattern_state(
+                0,
+                &snapshot,
+                &EffectDescriptor::builtin_sampler(),
+                901,
+                902,
+            )
+            .unwrap();
+
+        let live = state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .slots[1]
+            .clone();
+        assert_eq!(live.sample_id.as_ref().unwrap().1, "before");
+        assert_eq!(live.instrument_slot.node_id, 901);
+        let scenes = state.pattern.scenes.lock().unwrap();
+        assert!(scenes.track_pools[0].patterns.values().all(|data| {
+            let slot = &data.rack_track.as_ref().unwrap().slots[1];
+            slot.sample_id.as_ref().unwrap().1 == "before"
+                && slot.instrument_slot.node_id == 901
+                && slot.instrument_slot.modulator_node_id == 902
+        }));
+    }
+
+    #[test]
+    fn instrument_pattern_snapshot_restores_all_patterns_live_state_and_neural_overrides() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        {
+            let mut scenes = state.pattern.scenes.lock().unwrap();
+            let first_id = scenes.effective_pattern_id(0).unwrap();
+            let first = scenes.track_pools[0].patterns.get_mut(&first_id).unwrap();
+            first.instrument_base_note_offset = 11.0;
+            let mut second = first.clone();
+            second.instrument_base_note_offset = 22.0;
+            let mut third = first.clone();
+            third.instrument_base_note_offset = 33.0;
+            scenes.track_pools[0].insert(second);
+            scenes.track_pools[0].insert(third);
+            let mut network = crate::neural::ProjectNeuralNetwork::default();
+            network.neurons[0].output_overrides.instrument.push(
+                crate::neural::ProjectParamOverride {
+                    target_track: 0,
+                    param_id: crate::neural::ParamNodeId {
+                        logical_id: 7,
+                        node_param_idx: 0,
+                    },
+                    param_index: 0,
+                    value: 0.625,
+                },
+            );
+            scenes.scenes[0].neural_networks.push(network);
+        }
+        state.pattern.instrument_base_note_offsets[0]
+            .store(99.0_f32.to_bits(), Ordering::Relaxed);
+
+        let snapshot = state.capture_track_instrument_pattern_state(0).unwrap();
+        let descriptor = EffectDescriptor::builtin_sampler();
+        state
+            .reset_sampler_slot_all_patterns(
+                0,
+                &descriptor,
+                42,
+                43,
+                (9, "replacement".to_string(), 48_000),
+            )
+            .unwrap();
+        state
+            .restore_track_instrument_pattern_state(0, &snapshot, &descriptor, 42, 43)
+            .unwrap();
+
+        assert_eq!(
+            f32::from_bits(
+                state.pattern.instrument_base_note_offsets[0].load(Ordering::Relaxed)
+            ),
+            99.0
+        );
+        let scenes = state.pattern.scenes.lock().unwrap();
+        let mut offsets = scenes.track_pools[0]
+            .patterns
+            .values()
+            .map(|pattern| pattern.instrument_base_note_offset)
+            .collect::<Vec<_>>();
+        offsets.sort_by(f32::total_cmp);
+        assert_eq!(offsets, vec![11.0, 22.0, 33.0]);
+        let restored = &scenes.scenes[0].neural_networks[0].neurons[0]
+            .output_overrides
+            .instrument[0];
+        assert_eq!(restored.value, 0.625);
+        assert_eq!(restored.param_id.logical_id, 42);
     }
 }

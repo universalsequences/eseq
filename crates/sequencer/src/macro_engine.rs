@@ -80,6 +80,21 @@ pub struct MacroMapping {
     resolved_key: Option<MacroParamKey>,
 }
 
+#[derive(Clone, Debug)]
+pub struct TrackInstrumentMacroMappings {
+    pub mappings: Vec<(MacroId, Vec<(usize, MacroMapping)>)>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TrackEffectMacroMappings {
+    pub mappings: Vec<(MacroId, Vec<(usize, MacroMapping)>)>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TrackMidiFxMacroMappings {
+    pub mappings: Vec<(MacroId, Vec<(usize, MacroMapping)>)>,
+}
+
 impl MacroMapping {
     pub fn new(
         scope: impl Into<ParamScope>,
@@ -372,6 +387,18 @@ pub struct MacroEngine {
     scene_push: Option<ScenePushOverride>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct MacroConfigurationState {
+    pub macros: Vec<Macro>,
+    pub next_id: MacroId,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackTopologyMacroMappings {
+    pub first_track: usize,
+    pub mappings: Vec<(MacroId, Vec<(usize, MacroMapping)>)>,
+}
+
 impl Default for MacroEngine {
     fn default() -> Self {
         Self {
@@ -385,6 +412,80 @@ impl Default for MacroEngine {
 }
 
 impl MacroEngine {
+    pub fn capture_configuration(&self) -> MacroConfigurationState {
+        MacroConfigurationState {
+            macros: self.macros.clone(),
+            next_id: self.next_id,
+        }
+    }
+
+    pub fn restore_configuration(&mut self, target: &MacroConfigurationState) {
+        let live = self.macros.iter().map(|definition| {
+            (definition.id, (definition.value, definition.last_write_order))
+        }).collect::<HashMap<_, _>>();
+        let allocation_floor = self.next_id;
+        self.macros = target.macros.clone();
+        for definition in &mut self.macros {
+            if let Some((value, write_order)) = live.get(&definition.id) {
+                definition.value = *value;
+                definition.last_write_order = *write_order;
+            }
+        }
+        self.next_id = allocation_floor.max(target.next_id);
+        self.rebuild_ownership();
+    }
+
+    pub fn capture_track_topology_mappings(
+        &self,
+        first_track: usize,
+    ) -> TrackTopologyMacroMappings {
+        TrackTopologyMacroMappings {
+            first_track,
+            mappings: self.macros.iter().filter_map(|definition| {
+                let mappings = definition.mappings.iter().enumerate()
+                    .filter(|(_, mapping)| matches!(mapping.scope, ParamScope::Track(track) if track >= first_track))
+                    .map(|(index, mapping)| (index, mapping.clone()))
+                    .collect::<Vec<_>>();
+                (!mappings.is_empty()).then_some((definition.id, mappings))
+            }).collect(),
+        }
+    }
+
+    pub fn remap_after_track_delete(&mut self, deleted: usize) {
+        for definition in &mut self.macros {
+            definition.mappings.retain_mut(|mapping| match &mut mapping.scope {
+                ParamScope::Track(track) if *track == deleted => false,
+                ParamScope::Track(track) if *track > deleted => {
+                    *track -= 1;
+                    true
+                }
+                ParamScope::Track(_) | ParamScope::Bus(_) => true,
+            });
+        }
+        self.rebuild_ownership();
+    }
+
+    pub fn restore_track_topology_mappings(
+        &mut self,
+        snapshot: &TrackTopologyMacroMappings,
+    ) -> Result<(), MacroEngineError> {
+        for definition in &mut self.macros {
+            definition.mappings.retain(|mapping| {
+                !matches!(mapping.scope, ParamScope::Track(track) if track >= snapshot.first_track)
+            });
+        }
+        for (macro_id, mappings) in &snapshot.mappings {
+            let definition = self.macros.iter_mut()
+                .find(|definition| definition.id == *macro_id)
+                .ok_or(MacroEngineError::UnknownMacro(*macro_id))?;
+            for (index, mapping) in mappings {
+                definition.mappings.insert((*index).min(definition.mappings.len()), mapping.clone());
+            }
+        }
+        self.rebuild_ownership();
+        Ok(())
+    }
+
     pub fn macros(&self) -> &[Macro] {
         &self.macros
     }
@@ -688,6 +789,272 @@ impl MacroEngine {
             self.rebuild_ownership();
         }
         removed
+    }
+
+    pub fn capture_instrument_mappings_for_track(
+        &self,
+        track: usize,
+    ) -> TrackInstrumentMacroMappings {
+        TrackInstrumentMacroMappings {
+            mappings: self
+                .macros
+                .iter()
+                .filter_map(|macro_definition| {
+                    let mappings = macro_definition
+                        .mappings
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, mapping)| {
+                            mapping.scope == ParamScope::Track(track)
+                                && matches!(
+                                    mapping.target,
+                                    ParamTarget::InstrumentParam { .. }
+                                )
+                        })
+                        .map(|(index, mapping)| (index, mapping.clone()))
+                        .collect::<Vec<_>>();
+                    (!mappings.is_empty()).then_some((macro_definition.id, mappings))
+                })
+                .collect(),
+        }
+    }
+
+    pub fn restore_instrument_mappings_for_track(
+        &mut self,
+        track: usize,
+        snapshot: &TrackInstrumentMacroMappings,
+    ) -> Result<(), MacroEngineError> {
+        self.remove_instrument_mappings_for_track(track);
+        for (macro_id, mappings) in &snapshot.mappings {
+            let macro_definition = self
+                .macros
+                .iter_mut()
+                .find(|definition| definition.id == *macro_id)
+                .ok_or(MacroEngineError::UnknownMacro(*macro_id))?;
+            for (index, mapping) in mappings {
+                macro_definition
+                    .mappings
+                    .insert((*index).min(macro_definition.mappings.len()), mapping.clone());
+            }
+        }
+        self.rebuild_ownership();
+        Ok(())
+    }
+
+    pub fn capture_effect_mappings_for_track(&self, track: usize) -> TrackEffectMacroMappings {
+        TrackEffectMacroMappings {
+            mappings: self
+                .macros
+                .iter()
+                .filter_map(|macro_definition| {
+                    let mappings = macro_definition
+                        .mappings
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, mapping)| {
+                            mapping.scope == ParamScope::Track(track)
+                                && matches!(mapping.target, ParamTarget::EffectParam { .. })
+                        })
+                        .map(|(index, mapping)| (index, mapping.clone()))
+                        .collect::<Vec<_>>();
+                    (!mappings.is_empty()).then_some((macro_definition.id, mappings))
+                })
+                .collect(),
+        }
+    }
+
+    pub fn restore_effect_mappings_for_track(
+        &mut self,
+        track: usize,
+        snapshot: &TrackEffectMacroMappings,
+    ) -> Result<(), MacroEngineError> {
+        for macro_definition in &mut self.macros {
+            macro_definition.mappings.retain(|mapping| {
+                mapping.scope != ParamScope::Track(track)
+                    || !matches!(mapping.target, ParamTarget::EffectParam { .. })
+            });
+        }
+        for (macro_id, mappings) in &snapshot.mappings {
+            let macro_definition = self
+                .macros
+                .iter_mut()
+                .find(|definition| definition.id == *macro_id)
+                .ok_or(MacroEngineError::UnknownMacro(*macro_id))?;
+            for (index, mapping) in mappings {
+                macro_definition
+                    .mappings
+                    .insert((*index).min(macro_definition.mappings.len()), mapping.clone());
+            }
+        }
+        self.rebuild_ownership();
+        Ok(())
+    }
+
+    pub fn remap_effect_mappings_for_track(
+        &mut self,
+        track: usize,
+        old_to_new: &[Option<usize>],
+    ) {
+        for macro_definition in &mut self.macros {
+            macro_definition.mappings.retain_mut(|mapping| {
+                if mapping.scope != ParamScope::Track(track) {
+                    return true;
+                }
+                let ParamTarget::EffectParam { slot, .. } = &mut mapping.target else {
+                    return true;
+                };
+                let Some(new_slot) = old_to_new.get(*slot).copied().flatten() else {
+                    return false;
+                };
+                *slot = new_slot;
+                true
+            });
+        }
+        self.rebuild_ownership();
+    }
+
+    pub fn capture_effect_mappings_for_bus(&self, bus: BusId) -> TrackEffectMacroMappings {
+        TrackEffectMacroMappings {
+            mappings: self
+                .macros
+                .iter()
+                .filter_map(|macro_definition| {
+                    let mappings = macro_definition
+                        .mappings
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, mapping)| {
+                            mapping.scope == ParamScope::Bus(bus)
+                                && matches!(mapping.target, ParamTarget::EffectParam { .. })
+                        })
+                        .map(|(index, mapping)| (index, mapping.clone()))
+                        .collect::<Vec<_>>();
+                    (!mappings.is_empty()).then_some((macro_definition.id, mappings))
+                })
+                .collect(),
+        }
+    }
+
+    pub fn restore_effect_mappings_for_bus(
+        &mut self,
+        bus: BusId,
+        snapshot: &TrackEffectMacroMappings,
+    ) -> Result<(), MacroEngineError> {
+        for macro_definition in &mut self.macros {
+            macro_definition.mappings.retain(|mapping| {
+                mapping.scope != ParamScope::Bus(bus)
+                    || !matches!(mapping.target, ParamTarget::EffectParam { .. })
+            });
+        }
+        for (macro_id, mappings) in &snapshot.mappings {
+            let macro_definition = self
+                .macros
+                .iter_mut()
+                .find(|definition| definition.id == *macro_id)
+                .ok_or(MacroEngineError::UnknownMacro(*macro_id))?;
+            for (index, mapping) in mappings {
+                macro_definition
+                    .mappings
+                    .insert((*index).min(macro_definition.mappings.len()), mapping.clone());
+            }
+        }
+        self.rebuild_ownership();
+        Ok(())
+    }
+
+    pub fn remap_effect_mappings_for_bus(
+        &mut self,
+        bus: BusId,
+        old_to_new: &[Option<usize>],
+    ) {
+        for macro_definition in &mut self.macros {
+            macro_definition.mappings.retain_mut(|mapping| {
+                if mapping.scope != ParamScope::Bus(bus) {
+                    return true;
+                }
+                let ParamTarget::EffectParam { slot, .. } = &mut mapping.target else {
+                    return true;
+                };
+                let Some(new_slot) = old_to_new.get(*slot).copied().flatten() else {
+                    return false;
+                };
+                *slot = new_slot;
+                true
+            });
+        }
+        self.rebuild_ownership();
+    }
+
+    pub fn capture_midi_fx_mappings_for_track(&self, track: usize) -> TrackMidiFxMacroMappings {
+        TrackMidiFxMacroMappings {
+            mappings: self
+                .macros
+                .iter()
+                .filter_map(|macro_definition| {
+                    let mappings = macro_definition
+                        .mappings
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, mapping)| {
+                            mapping.scope == ParamScope::Track(track)
+                                && matches!(mapping.target, ParamTarget::MidiFxParam { .. })
+                        })
+                        .map(|(index, mapping)| (index, mapping.clone()))
+                        .collect::<Vec<_>>();
+                    (!mappings.is_empty()).then_some((macro_definition.id, mappings))
+                })
+                .collect(),
+        }
+    }
+
+    pub fn restore_midi_fx_mappings_for_track(
+        &mut self,
+        track: usize,
+        snapshot: &TrackMidiFxMacroMappings,
+    ) -> Result<(), MacroEngineError> {
+        for macro_definition in &mut self.macros {
+            macro_definition.mappings.retain(|mapping| {
+                mapping.scope != ParamScope::Track(track)
+                    || !matches!(mapping.target, ParamTarget::MidiFxParam { .. })
+            });
+        }
+        for (macro_id, mappings) in &snapshot.mappings {
+            let macro_definition = self
+                .macros
+                .iter_mut()
+                .find(|definition| definition.id == *macro_id)
+                .ok_or(MacroEngineError::UnknownMacro(*macro_id))?;
+            for (index, mapping) in mappings {
+                macro_definition
+                    .mappings
+                    .insert((*index).min(macro_definition.mappings.len()), mapping.clone());
+            }
+        }
+        self.rebuild_ownership();
+        Ok(())
+    }
+
+    pub fn remap_midi_fx_mappings_for_track(
+        &mut self,
+        track: usize,
+        old_to_new: &[Option<usize>],
+    ) {
+        for macro_definition in &mut self.macros {
+            macro_definition.mappings.retain_mut(|mapping| {
+                if mapping.scope != ParamScope::Track(track) {
+                    return true;
+                }
+                let ParamTarget::MidiFxParam { slot, .. } = &mut mapping.target else {
+                    return true;
+                };
+                let Some(new_slot) = old_to_new.get(*slot).copied().flatten() else {
+                    return false;
+                };
+                *slot = new_slot;
+                true
+            });
+        }
+        self.rebuild_ownership();
     }
 
     fn mapping_mut(
@@ -1413,6 +1780,44 @@ mod tests {
     }
 
     #[test]
+    fn effect_chain_remap_moves_targets_and_drops_deleted_instances() {
+        let mut engine = MacroEngine::default();
+        let id = engine.create_macro("fx", MacroKind::Mapped).unwrap();
+        let mut moved = effect_target(11);
+        if let ParamTarget::EffectParam { slot, .. } = &mut moved {
+            *slot = 4;
+        }
+        let mut deleted = effect_target(12);
+        if let ParamTarget::EffectParam { slot, .. } = &mut deleted {
+            *slot = 5;
+        }
+        engine
+            .add_mapping(
+                id,
+                MacroMapping::new(0, moved, 0.0, 1.0, MacroCurve::Linear).unwrap(),
+            )
+            .unwrap();
+        engine
+            .add_mapping(
+                id,
+                MacroMapping::new(0, deleted, 0.0, 1.0, MacroCurve::Linear).unwrap(),
+            )
+            .unwrap();
+        let mut old_to_new = (0..8).map(Some).collect::<Vec<_>>();
+        old_to_new[4] = Some(6);
+        old_to_new[5] = None;
+
+        engine.remap_effect_mappings_for_track(0, &old_to_new);
+
+        let mappings = &engine.macro_definition(id).unwrap().mappings;
+        assert_eq!(mappings.len(), 1);
+        assert!(matches!(
+            mappings[0].target,
+            ParamTarget::EffectParam { slot: 6, .. }
+        ));
+    }
+
+    #[test]
     fn delete_releases_its_overrides_without_reusing_ids() {
         let (mut engine, first) = mapped_engine(0.0, 1.0);
         engine.set_value(first, 1.0);
@@ -1476,6 +1881,42 @@ mod tests {
     }
 
     #[test]
+    fn track_topology_mapping_snapshot_restores_deleted_and_shifted_scopes() {
+        let mut engine = MacroEngine::default();
+        let id = engine.create_macro("Topology", MacroKind::Mapped).unwrap();
+        for track in 0..3 {
+            engine.add_mapping(id, MacroMapping::new(
+                track,
+                ParamTarget::RackMacroParam { macro_id: 0 },
+                0.0,
+                1.0,
+                MacroCurve::Linear,
+            ).unwrap()).unwrap();
+        }
+        let snapshot = engine.capture_track_topology_mappings(1);
+
+        engine.remap_after_track_delete(1);
+        assert_eq!(
+            engine.macro_definition(id).unwrap().mappings.iter()
+                .filter_map(|mapping| match mapping.scope {
+                    ParamScope::Track(track) => Some(track),
+                    ParamScope::Bus(_) => None,
+                }).collect::<Vec<_>>(),
+            vec![0, 1],
+        );
+
+        engine.restore_track_topology_mappings(&snapshot).unwrap();
+        assert_eq!(
+            engine.macro_definition(id).unwrap().mappings.iter()
+                .filter_map(|mapping| match mapping.scope {
+                    ParamScope::Track(track) => Some(track),
+                    ParamScope::Bus(_) => None,
+                }).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+        );
+    }
+
+    #[test]
     fn delete_then_ensure_same_key_allocates_a_fresh_id() {
         let mut engine = MacroEngine::default();
         let first = engine.ensure_macro("player/push", "Push").unwrap();
@@ -1493,5 +1934,56 @@ mod tests {
             engine.ensure_macro(" : ", "Invalid"),
             Err(MacroEngineError::InvalidMacroKey)
         );
+    }
+
+    #[test]
+    fn track_instrument_mapping_snapshot_restores_order_without_touching_other_targets() {
+        let mut engine = MacroEngine::default();
+        let id = engine.create_macro("instrument history", MacroKind::Mapped).unwrap();
+        let track_zero = MacroMapping::new_resolved(
+            0,
+            ParamTarget::InstrumentParam {
+                param: "tone".to_string(),
+                param_id: None,
+            },
+            Some(0),
+            0.1,
+            0.9,
+            MacroCurve::Linear,
+        )
+        .unwrap();
+        let effect = MacroMapping::new_resolved(
+            0,
+            effect_target(11),
+            Some(0),
+            0.0,
+            1.0,
+            MacroCurve::Linear,
+        )
+        .unwrap();
+        let track_one = MacroMapping::new_resolved(
+            1,
+            ParamTarget::InstrumentParam {
+                param: "tone".to_string(),
+                param_id: None,
+            },
+            Some(0),
+            0.2,
+            0.8,
+            MacroCurve::Linear,
+        )
+        .unwrap();
+        engine.add_mapping(id, track_zero.clone()).unwrap();
+        engine.add_mapping(id, effect.clone()).unwrap();
+        engine.add_mapping(id, track_one.clone()).unwrap();
+
+        let snapshot = engine.capture_instrument_mappings_for_track(0);
+        assert_eq!(engine.remove_instrument_mappings_for_track(0), 1);
+        engine
+            .restore_instrument_mappings_for_track(0, &snapshot)
+            .unwrap();
+
+        let mappings = &engine.macro_definition(id).unwrap().mappings;
+        assert_eq!(mappings, &[track_zero, effect, track_one]);
     }
 }

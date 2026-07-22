@@ -1478,6 +1478,15 @@ unsafe fn sampler_apply_timeline_event(state: *mut f32, base: usize) -> bool {
     *state.add(STATE_ATTACK_SAMPLES) = aux(SAMPLER_EVENT_AUX_ATTACK_SAMPLES);
     *state.add(STATE_RELEASE_SAMPLES) = aux(SAMPLER_EVENT_AUX_RELEASE_SAMPLES);
     *state.add(STATE_GATE_MODE) = aux(SAMPLER_EVENT_AUX_GATE_MODE);
+    if srange_debug_enabled() {
+        eprintln!(
+            "[srange] NOTE_ON stamp start={} end={} (was start={} end={})",
+            aux(SAMPLER_EVENT_AUX_START_POINT),
+            aux(SAMPLER_EVENT_AUX_END_POINT),
+            *state.add(STATE_START_POINT),
+            *state.add(STATE_END_POINT),
+        );
+    }
     *state.add(STATE_START_POINT) = aux(SAMPLER_EVENT_AUX_START_POINT);
     *state.add(STATE_END_POINT) = aux(SAMPLER_EVENT_AUX_END_POINT);
     *state.add(STATE_REVERSE) = aux(SAMPLER_EVENT_AUX_REVERSE);
@@ -1576,6 +1585,13 @@ unsafe extern "C" fn sampler_process(
     if rendered < nf {
         sampler_process_segment_at(inp, out, rendered, nf - rendered, state, buffers);
     }
+}
+
+/// Debug tracing for the sampler start/end param path; enable with
+/// ESEQ_DEBUG_SRANGE=1.
+pub fn srange_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("ESEQ_DEBUG_SRANGE").is_some())
 }
 
 pub fn sampler_vtable() -> NodeVTable {

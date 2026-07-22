@@ -67,8 +67,8 @@ use sequencer::effects::{ParamKind, ParamScaling};
 use sequencer::engine;
 use sequencer::sequencer::{
     CustomInstrumentRunMode, InstrumentSlotResetSummary, InstrumentType, KeyboardTrigger,
-    MAX_STEPS, MidiFxPosition, PatternId, RackSlotParam, SYNC_RESOLUTIONS, SequencerState,
-    StepParam, SwingResolution, Timebase, TrackOutput, TrackSendSnapshot,
+    MidiFxPosition, PatternId, RackSlotParam, SequencerState, StepParam, SwingResolution, Timebase,
+    TrackId, TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
 };
 use sequencer::tui;
 use std::sync::atomic::AtomicBool;
@@ -219,8 +219,7 @@ enum SavedInstrumentLoadTarget {
         group_id: Option<u64>,
     },
     SwapTrack {
-        requested_track: usize,
-        voice_sum_id: i32,
+        track_id: TrackId,
     },
 }
 
@@ -246,6 +245,7 @@ fn capture_instrument_swap_target(
             }
         }
         Some(InstrumentType::Sampler) => {}
+        Some(InstrumentType::Rack) => {}
         Some(other) => {
             return Err(format!(
                 "Track {} has instrument type {other:?}, which cannot be replaced",
@@ -254,45 +254,22 @@ fn capture_instrument_swap_target(
         }
         None => return Err(format!("Track {} does not exist", track + 1)),
     }
-    let voice_sum_id = app
-        .graph
-        .track_node_ids
-        .get(track)
-        .map(|nodes| nodes.voice_sum_id)
-        .ok_or_else(|| format!("Track {} has no graph nodes", track + 1))?;
+    let track_id = app
+        .track_registry
+        .id_at(track)
+        .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
     Ok(SavedInstrumentLoadTarget::SwapTrack {
-        requested_track: track,
-        voice_sum_id,
+        track_id,
     })
 }
 
 fn resolve_instrument_swap_target(
     app: &tui::App,
-    requested_track: usize,
-    voice_sum_id: i32,
+    track_id: TrackId,
 ) -> Result<usize, String> {
-    let voice_sum_ids = app
-        .graph
-        .track_node_ids
-        .iter()
-        .map(|nodes| nodes.voice_sum_id)
-        .collect::<Vec<_>>();
-    resolve_instrument_swap_target_index(&voice_sum_ids, requested_track, voice_sum_id)
+    app.track_registry
+        .index_of(track_id)
         .ok_or_else(|| "The instrument swap target was removed while loading".to_string())
-}
-
-fn resolve_instrument_swap_target_index(
-    voice_sum_ids: &[i32],
-    requested_track: usize,
-    voice_sum_id: i32,
-) -> Option<usize> {
-    if voice_sum_ids.get(requested_track) == Some(&voice_sum_id) {
-        Some(requested_track)
-    } else {
-        voice_sum_ids
-            .iter()
-            .position(|candidate| *candidate == voice_sum_id)
-    }
 }
 
 fn try_apply_cached_saved_instrument(
@@ -307,10 +284,9 @@ fn try_apply_cached_saved_instrument(
             .try_add_cached_saved_instrument_track_sync(name, source, run_mode)
             .map(|result| result.map(|track| SavedInstrumentLoadApply::Added { track, group_id })),
         SavedInstrumentLoadTarget::SwapTrack {
-            requested_track,
-            voice_sum_id,
+            track_id,
         } => {
-            let track = match resolve_instrument_swap_target(app, requested_track, voice_sum_id) {
+            let track = match resolve_instrument_swap_target(app, track_id) {
                 Ok(track) => track,
                 Err(error) => return Some(Err(error)),
             };
@@ -333,10 +309,9 @@ fn apply_compiled_saved_instrument(
             .add_compiled_saved_instrument_track_sync(name, source, run_mode, result)
             .map(|track| SavedInstrumentLoadApply::Added { track, group_id }),
         SavedInstrumentLoadTarget::SwapTrack {
-            requested_track,
-            voice_sum_id,
+            track_id,
         } => {
-            let track = resolve_instrument_swap_target(app, requested_track, voice_sum_id)?;
+            let track = resolve_instrument_swap_target(app, track_id)?;
             app.swap_track_to_compiled_saved_instrument_sync(track, name, source, run_mode, result)
                 .map(|summary| SavedInstrumentLoadApply::Swapped { summary })
         }
@@ -1297,6 +1272,840 @@ fn map_usize(
     })
 }
 
+fn map_param_updates(
+    map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
+) -> Option<Vec<(usize, f32)>> {
+    let updates = map.get("updates")?;
+    let updates = updates.borrow();
+    let Value::List(items) = &*updates else {
+        return None;
+    };
+    let parsed = items
+        .iter()
+        .map(|item| {
+            let item = item.borrow();
+            let Value::Map(update) = &*item else {
+                return None;
+            };
+            Some((map_usize(update, "param-idx")?, map_number(update, "value")? as f32))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!parsed.is_empty()).then_some(parsed)
+}
+
+fn apply_toggle_step_host_command(
+    app: &mut tui::App,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, usize, usize), String> {
+    let Value::Map(map) = payload else {
+        return Err("step toggle payload was invalid".to_string());
+    };
+    let track = map_usize(map, "track")
+        .ok_or_else(|| "step toggle track was invalid".to_string())?;
+    let step =
+        map_usize(map, "step").ok_or_else(|| "step toggle index was invalid".to_string())?;
+    tui::try_apply_command(app, tui::AppCommand::ToggleStep { track, step })
+        .map(|outcome| (outcome, track, step))
+        .map_err(|error| format!("could not toggle step: {error:?}"))
+}
+
+fn apply_selected_steps_delete(
+    app: &mut tui::App,
+    track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) -> Result<(tui::edit::EditOutcome, Vec<usize>), String> {
+    let mut steps = selected_steps
+        .lock()
+        .unwrap()
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    steps.sort_unstable();
+    let outcome = tui::try_apply_command(
+        app,
+        tui::AppCommand::ClearSteps {
+            track,
+            steps: steps.clone(),
+        },
+    )
+    .map_err(|error| format!("could not delete selected steps: {error:?}"))?;
+    if matches!(outcome, tui::edit::EditOutcome::Applied(_)) {
+        selected_steps.lock().unwrap().clear();
+    }
+    Ok((outcome, steps))
+}
+
+fn apply_step_paste_host_command(
+    app: &mut tui::App,
+    clipboard: &Arc<Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>>,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, usize), String> {
+    let Value::Map(map) = payload else {
+        return Err("step paste payload was invalid".to_string());
+    };
+    let track = map_usize(map, "track")
+        .ok_or_else(|| "step paste track was invalid".to_string())?;
+    let dest_start = map_usize(map, "dest-start")
+        .ok_or_else(|| "step paste destination was invalid".to_string())?;
+    let Some((source_track, clipboard)) = clipboard.lock().unwrap().clone() else {
+        return Ok((tui::edit::EditOutcome::NoOp, track));
+    };
+    let num_steps = app
+        .state
+        .pattern
+        .track_params
+        .get(track)
+        .ok_or_else(|| format!("step paste track {track} was out of range"))?
+        .get_num_steps();
+    tui::try_apply_command(
+        app,
+        tui::AppCommand::PasteSteps {
+            track,
+            source_track,
+            clipboard,
+            dest_start,
+            num_steps,
+        },
+    )
+    .map(|outcome| (outcome, track))
+    .map_err(|error| format!("could not paste steps: {error:?}"))
+}
+
+fn step_param_from_name(name: &str) -> Option<StepParam> {
+    match name.trim_start_matches(':') {
+        "velocity" | "vel" => Some(StepParam::Velocity),
+        "duration" | "dur" => Some(StepParam::Duration),
+        "aux-a" | "aux_a" | "auxa" | "axa" => Some(StepParam::AuxA),
+        "aux-b" | "aux_b" | "auxb" => Some(StepParam::AuxB),
+        "transpose" => Some(StepParam::Transpose),
+        "pan" => Some(StepParam::Pan),
+        "sync" | "syn" => Some(StepParam::Sync),
+        "delay" | "dly" => Some(StepParam::Delay),
+        "speed" => Some(StepParam::Speed),
+        "chop" => Some(StepParam::Chop),
+        _ => None,
+    }
+}
+
+fn apply_step_param_history_host_command(
+    app: &mut tui::App,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, usize, Vec<usize>, StepParam), String> {
+    let Value::Map(map) = payload else {
+        return Err("step parameter payload was invalid".to_string());
+    };
+    let track = map_usize(map, "track")
+        .ok_or_else(|| "step parameter track was invalid".to_string())?;
+    let param = map_string(map, "param")
+        .and_then(|name| step_param_from_name(&name))
+        .ok_or_else(|| "step parameter name was invalid".to_string())?;
+    let value = map_number(map, "value")
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| "step parameter value was invalid".to_string())?
+        as f32;
+    let steps = map_usize_list(map, "steps")
+        .ok_or_else(|| "step parameter targets were invalid".to_string())?;
+    let outcome = tui::edit::apply_recorded_step_mutation(
+        app,
+        track,
+        &steps,
+        "Set step parameter",
+        |app| {
+            for step in &steps {
+                app.state.pattern.step_data[track].set(*step, param, value);
+            }
+            Ok(())
+        },
+    )
+    .map_err(|error| format!("could not set step parameter: {error:?}"))?;
+    Ok((outcome, track, steps, param))
+}
+
+fn apply_move_step_history_host_command(
+    app: &mut tui::App,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, usize, Vec<usize>, Vec<usize>, isize, bool), String> {
+    let Value::Map(map) = payload else {
+        return Err("step move payload was invalid".to_string());
+    };
+    let track = map_usize(map, "track")
+        .ok_or_else(|| "step move track was invalid".to_string())?;
+    let steps = map_usize_list(map, "steps")
+        .ok_or_else(|| "step move targets were invalid".to_string())?;
+    let delta = map_number(map, "delta")
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| "step move delta was invalid".to_string())?
+        .round() as isize;
+    let move_selection = map_bool(map, "move-selection");
+    let num_steps = app
+        .state
+        .pattern
+        .track_params
+        .get(track)
+        .ok_or_else(|| format!("step move track {track} was out of range"))?
+        .get_num_steps()
+        .min(MAX_STEPS);
+    if steps.is_empty()
+        || delta == 0
+        || steps.iter().any(|step| {
+            *step >= num_steps
+                || (*step as isize + delta) < 0
+                || (*step as isize + delta) >= num_steps as isize
+        })
+    {
+        return Err("step move range was invalid".to_string());
+    }
+    let sources = steps
+        .iter()
+        .map(|step| (*step, app.state.capture_step_snapshot(track, *step)))
+        .collect::<Vec<_>>();
+    let mut affected = Vec::new();
+    for (step, snapshot) in &sources {
+        let duration_cells = if snapshot.active {
+            snapshot.params[StepParam::Duration as usize]
+                .max(1.0)
+                .ceil() as usize
+        } else {
+            1
+        };
+        let destination = (*step as isize + delta) as usize;
+        for base in [*step, destination] {
+            affected.extend(base..base.saturating_add(duration_cells).min(num_steps));
+        }
+    }
+    affected.sort_unstable();
+    affected.dedup();
+    let outcome = tui::edit::apply_recorded_step_mutation(
+        app,
+        track,
+        &affected,
+        "Move steps",
+        |app| {
+            for (step, _) in &sources {
+                app.state.clear_step_payload_no_publish(track, *step);
+            }
+            for (step, snapshot) in &sources {
+                app.state.restore_step_snapshot_no_publish(
+                    track,
+                    (*step as isize + delta) as usize,
+                    snapshot,
+                );
+            }
+            Ok(())
+        },
+    )
+    .map_err(|error| format!("could not move steps: {error:?}"))?;
+    Ok((outcome, track, steps, affected, delta, move_selection))
+}
+
+fn apply_slice2_history_host_command(
+    app: &mut tui::App,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, usize), String> {
+    let Value::Map(map) = payload else {
+        return Err("Slice 2 edit payload was invalid".to_string());
+    };
+    let op = map_string(map, "op")
+        .ok_or_else(|| "Slice 2 edit operation was missing".to_string())?;
+    let track = map_usize(map, "track")
+        .ok_or_else(|| "Slice 2 edit track was invalid".to_string())?;
+    let command = match op.as_str() {
+        "duplicate" => tui::AppCommand::DuplicateTrackPattern { track },
+        "halve" => tui::AppCommand::HalveTrackPattern { track },
+        "set-length" => tui::AppCommand::SetTrackNumSteps {
+            track,
+            n: map_usize(map, "value")
+                .ok_or_else(|| "track pattern length was invalid".to_string())?,
+        },
+        "timebase-plock" => tui::AppCommand::SetTimebasePlockMulti {
+            track,
+            steps: map_usize_list(map, "steps")
+                .ok_or_else(|| "timebase p-lock steps were invalid".to_string())?,
+            timebase: Timebase::from_index(
+                map_usize(map, "value")
+                    .ok_or_else(|| "timebase p-lock value was invalid".to_string())?
+                    as u32,
+            ),
+        },
+        "swing-plock" => tui::AppCommand::SetTrackSwingPlockMulti {
+            track,
+            steps: map_usize_list(map, "steps")
+                .ok_or_else(|| "swing p-lock steps were invalid".to_string())?,
+            value: map_number(map, "value")
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| "swing p-lock value was invalid".to_string())?
+                as f32,
+        },
+        "swing-resolution-plock" => tui::AppCommand::SetTrackSwingResolutionPlockMulti {
+            track,
+            steps: map_usize_list(map, "steps")
+                .ok_or_else(|| "swing-resolution p-lock steps were invalid".to_string())?,
+            resolution: SwingResolution::from_index(
+                map_usize(map, "value")
+                    .ok_or_else(|| "swing-resolution p-lock value was invalid".to_string())?
+                    as u32,
+            ),
+        },
+        _ => return Err(format!("unknown Slice 2 edit operation {op}")),
+    };
+    tui::try_apply_command(app, command)
+        .map(|outcome| (outcome, track))
+        .map_err(|error| format!("could not apply Slice 2 edit: {error:?}"))
+}
+
+fn apply_slice3_history_host_command(
+    app: &mut tui::App,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, Option<usize>), String> {
+    let Value::Map(map) = payload else {
+        return Err("Slice 3 edit payload was invalid".to_string());
+    };
+    let op = map_string(map, "op")
+        .ok_or_else(|| "Slice 3 edit operation was missing".to_string())?;
+    let value = || {
+        map_number(map, "value")
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| "Slice 3 edit value was invalid".to_string())
+    };
+    let track = map_usize(map, "track");
+    let track_required = || track.ok_or_else(|| "Slice 3 edit track was invalid".to_string());
+    let command = match op.as_str() {
+        "volume" => tui::AppCommand::SetTrackVolume {
+            track: track_required()?,
+            value: value()? as f32,
+        },
+        "pan" => tui::AppCommand::SetTrackPan {
+            track: track_required()?,
+            value: value()? as f32,
+        },
+        "send" => tui::AppCommand::SetTrackSend {
+            track: track_required()?,
+            value: value()? as f32,
+        },
+        "attack" => tui::AppCommand::SetTrackAttack {
+            track: track_required()?,
+            ms: value()? as f32,
+        },
+        "release" => tui::AppCommand::SetTrackRelease {
+            track: track_required()?,
+            ms: value()? as f32,
+        },
+        "swing" => tui::AppCommand::SetTrackSwing {
+            track: track_required()?,
+            value: value()? as f32,
+        },
+        "toggle-gate" => tui::AppCommand::ToggleTrackGate {
+            track: track_required()?,
+        },
+        "toggle-poly" => tui::AppCommand::ToggleTrackPolyphonic {
+            track: track_required()?,
+        },
+        "toggle-mute" => tui::AppCommand::ToggleTrackMute {
+            track: track_required()?,
+        },
+        "toggle-solo" => tui::AppCommand::ToggleTrackSolo {
+            track: track_required()?,
+        },
+        "max-polyphony" => tui::AppCommand::SetTrackMaxPolyphony {
+            track: track_required()?,
+            value: value()?.round().max(1.0) as usize,
+        },
+        "swing-resolution" => tui::AppCommand::SetTrackSwingResolution {
+            track: track_required()?,
+            resolution: SwingResolution::from_index(value()? as u32),
+        },
+        "timebase" => tui::AppCommand::SetTrackTimebase {
+            track: track_required()?,
+            timebase: Timebase::from_index(value()? as u32),
+        },
+        "fts" => tui::AppCommand::SetTrackFtsScale {
+            track: track_required()?,
+            scale_idx: value()? as usize,
+        },
+        "accumulator" => tui::AppCommand::SetTrackAccumIdx {
+            track: track_required()?,
+            idx: value()? as usize,
+            default_limit: map_number(map, "default-limit").map(|value| value as f32),
+            script_name: map_string(map, "script-name"),
+        },
+        "accum-limit" => tui::AppCommand::SetTrackAccumLimit {
+            track: track_required()?,
+            value: value()? as f32,
+        },
+        "accum-mode" => tui::AppCommand::SetTrackAccumMode {
+            track: track_required()?,
+            mode: value()? as u32,
+        },
+        "mute-group" => tui::AppCommand::SetTrackMuteGroup {
+            track: track_required()?,
+            group: value()?.round().clamp(0.0, 8.0) as u8,
+        },
+        "global-transpose" => tui::AppCommand::SetTrackGlobalTranspose {
+            track: track_required()?,
+            enabled: value()? != 0.0,
+        },
+        "base-note" => tui::AppCommand::SetInstrumentBaseNoteOffset {
+            track: track_required()?,
+            value: value()? as f32,
+        },
+        "master-volume" => tui::AppCommand::SetMasterVolume {
+            value: value()? as f32,
+        },
+        "bpm" => tui::AppCommand::SetBpm {
+            bpm: value()?.round() as u32,
+        },
+        _ => return Err(format!("unknown Slice 3 edit operation {op}")),
+    };
+    tui::try_apply_command(app, command)
+        .map(|outcome| (outcome, track))
+        .map_err(|error| format!("could not apply Slice 3 edit: {error:?}"))
+}
+
+/// Mixer-strip ops stay on the targeted per-track invalidation (Mute/Solo
+/// already fan the effective-mute/color fields out to every track);
+/// everything else falls back to the full whole-track + ui-epoch resync.
+fn slice3_track_mixer_invalidation(payload: &Value) -> Option<TrackMixerInvalidation> {
+    let Value::Map(map) = payload else {
+        return None;
+    };
+    match map_string(map, "op")?.as_str() {
+        "volume" => Some(TrackMixerInvalidation::Volume),
+        "pan" => Some(TrackMixerInvalidation::Pan),
+        "toggle-mute" => Some(TrackMixerInvalidation::Mute),
+        "toggle-solo" => Some(TrackMixerInvalidation::Solo),
+        _ => None,
+    }
+}
+
+/// Bus-fader drags likewise skip the ui-epoch resync; discrete bus ops
+/// (mute/solo toggles) keep it.
+fn bus_mixer_targeted_invalidation(payload: &Value) -> Option<BusMixerInvalidation> {
+    let Value::Map(map) = payload else {
+        return None;
+    };
+    match map_string(map, "op")?.as_str() {
+        "volume" => Some(BusMixerInvalidation::Volume),
+        _ => None,
+    }
+}
+
+fn apply_bus_mixer_history_host_command(
+    app: &mut tui::App,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, usize), String> {
+    let Value::Map(map) = payload else {
+        return Err("Bus mixer edit payload was invalid".to_string());
+    };
+    let op = map_string(map, "op")
+        .ok_or_else(|| "Bus mixer edit operation was missing".to_string())?;
+    let requested_bus_idx = map_usize(map, "bus")
+        .ok_or_else(|| "Bus mixer edit bus was invalid".to_string())?;
+    let bus = map_string(map, "bus-id")
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(sequencer::sequencer::BusId)
+        .ok_or_else(|| "Bus mixer edit stable bus ID was invalid".to_string())?;
+    let bus_idx = app
+        .buses
+        .iter()
+        .position(|channel| channel.id == bus)
+        .ok_or_else(|| {
+            format!(
+                "Bus mixer edit bus {requested_bus_idx} ({}) no longer exists",
+                bus.0,
+            )
+        })?;
+    let command = match op.as_str() {
+        "volume" => tui::AppCommand::SetBusVolume {
+            bus,
+            value: map_number(map, "value")
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| "Bus mixer volume was invalid".to_string())?
+                as f32,
+        },
+        "toggle-mute" => tui::AppCommand::ToggleBusMute { bus },
+        "toggle-solo" => tui::AppCommand::ToggleBusSolo { bus },
+        _ => return Err(format!("Unsupported bus mixer edit operation: {op}")),
+    };
+    tui::try_apply_command(app, command)
+        .map(|outcome| (outcome, bus_idx))
+        .map_err(|error| format!("could not apply bus mixer edit: {error:?}"))
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum DrumLaneHistoryAction {
+    Toggle {
+        track: usize,
+        pad_note: i32,
+        step: usize,
+    },
+    Duration {
+        track: usize,
+        pad_note: i32,
+        step: usize,
+        duration: f32,
+    },
+    Move {
+        track: usize,
+        pad_note: i32,
+        steps: Vec<usize>,
+        delta: isize,
+        move_selection: bool,
+    },
+    Clear {
+        track: usize,
+        pad_note: i32,
+        steps: Vec<usize>,
+    },
+}
+
+impl DrumLaneHistoryAction {
+    fn track(&self) -> usize {
+        match self {
+            Self::Toggle { track, .. }
+            | Self::Duration { track, .. }
+            | Self::Move { track, .. }
+            | Self::Clear { track, .. } => *track,
+        }
+    }
+
+    fn affected_steps(&self) -> Vec<usize> {
+        let mut affected = match self {
+            Self::Toggle { step, .. } | Self::Duration { step, .. } => vec![*step],
+            Self::Clear { steps, .. } => steps.clone(),
+            Self::Move { steps, delta, .. } => {
+                let mut affected = steps.clone();
+                affected.extend(steps.iter().map(|step| (*step as isize + *delta) as usize));
+                affected
+            }
+        };
+        affected.sort_unstable();
+        affected.dedup();
+        affected
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Toggle { .. } => "Toggle drum-lane step",
+            Self::Duration { .. } => "Set drum-lane duration",
+            Self::Move { .. } => "Move drum-lane steps",
+            Self::Clear { .. } => "Delete drum-lane steps",
+        }
+    }
+}
+
+fn map_usize_list(
+    map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    key: &str,
+) -> Option<Vec<usize>> {
+    let cell = map.get(key)?;
+    let Value::List(values) = &*cell.borrow() else {
+        return None;
+    };
+    values
+        .iter()
+        .map(|value| match &*value.borrow() {
+            Value::Number(value)
+                if value.is_finite() && *value >= 0.0 && *value <= usize::MAX as f64 =>
+            {
+                Some(*value as usize)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn parse_drum_lane_history_action(payload: &Value) -> Result<DrumLaneHistoryAction, String> {
+    let Value::Map(map) = payload else {
+        return Err("drum-lane edit payload was invalid".to_string());
+    };
+    let op = map_string(map, "op")
+        .ok_or_else(|| "drum-lane edit operation was missing".to_string())?;
+    let track = map_usize(map, "track")
+        .ok_or_else(|| "drum-lane edit track was invalid".to_string())?;
+    let pad_note = map_number(map, "pad-note")
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| "drum-lane pad note was invalid".to_string())?
+        .round() as i32;
+    match op.as_str() {
+        "toggle" => Ok(DrumLaneHistoryAction::Toggle {
+            track,
+            pad_note,
+            step: map_usize(map, "step")
+                .ok_or_else(|| "drum-lane step was invalid".to_string())?,
+        }),
+        "duration" => Ok(DrumLaneHistoryAction::Duration {
+            track,
+            pad_note,
+            step: map_usize(map, "step")
+                .ok_or_else(|| "drum-lane step was invalid".to_string())?,
+            duration: map_number(map, "duration")
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| "drum-lane duration was invalid".to_string())?
+                as f32,
+        }),
+        "move" => Ok(DrumLaneHistoryAction::Move {
+            track,
+            pad_note,
+            steps: map_usize_list(map, "steps")
+                .ok_or_else(|| "drum-lane move steps were invalid".to_string())?,
+            delta: map_number(map, "delta")
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| "drum-lane move delta was invalid".to_string())?
+                .round() as isize,
+            move_selection: map_bool(map, "move-selection"),
+        }),
+        "clear" => Ok(DrumLaneHistoryAction::Clear {
+            track,
+            pad_note,
+            steps: map_usize_list(map, "steps")
+                .ok_or_else(|| "drum-lane clear steps were invalid".to_string())?,
+        }),
+        _ => Err(format!("unknown drum-lane history operation {op}")),
+    }
+}
+
+fn apply_drum_lane_history_host_command(
+    app: &mut tui::App,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, DrumLaneHistoryAction), String> {
+    let action = parse_drum_lane_history_action(payload)?;
+    let track = action.track();
+    if track >= app.state.active_track_count() {
+        return Err(format!("drum-lane track {track} was out of range"));
+    }
+    let affected = action.affected_steps();
+    if affected.is_empty() || affected.iter().any(|step| *step >= MAX_STEPS) {
+        return Err("drum-lane affected steps were invalid".to_string());
+    }
+    let label = action.label();
+    let mutation = action.clone();
+    let outcome = tui::edit::apply_recorded_step_mutation(
+        app,
+        track,
+        &affected,
+        label,
+        |app| {
+            match &mutation {
+                DrumLaneHistoryAction::Toggle {
+                    pad_note, step, ..
+                } => {
+                    app.state.toggle_drum_lane_step_no_publish(track, *step, *pad_note);
+                }
+                DrumLaneHistoryAction::Duration {
+                    pad_note,
+                    step,
+                    duration,
+                    ..
+                } => {
+                    app.state.set_drum_lane_step_duration_no_publish(
+                        track,
+                        *step,
+                        *pad_note,
+                        *duration,
+                    );
+                }
+                DrumLaneHistoryAction::Move {
+                    pad_note,
+                    steps,
+                    delta,
+                    ..
+                } => {
+                    app.state.move_drum_lane_steps_no_publish(
+                        track,
+                        *pad_note,
+                        steps,
+                        *delta,
+                    );
+                }
+                DrumLaneHistoryAction::Clear {
+                    pad_note, steps, ..
+                } => {
+                    app.state.clear_drum_lane_steps_no_publish(track, *pad_note, steps);
+                }
+            }
+            Ok(())
+        },
+    )
+    .map_err(|error| format!("could not apply drum-lane edit: {error:?}"))?;
+    Ok((outcome, action))
+}
+
+fn apply_piano_roll_history_host_command(
+    app: &mut tui::App,
+    selection: &Arc<Mutex<HashSet<u64>>>,
+    move_state: &Arc<Mutex<Option<PianoRollMoveState>>>,
+    clipboard: &PianoRollClipboard,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, String, usize), String> {
+    let Value::Map(map) = payload else {
+        return Err("piano-roll edit payload was invalid".to_string());
+    };
+    let track = map_usize(map, "track")
+        .ok_or_else(|| "piano-roll edit track was invalid".to_string())?;
+    if track >= app.state.active_track_count() {
+        return Err(format!("piano-roll edit track {track} was out of range"));
+    }
+    let action = map
+        .get("action")
+        .map(|value| value.borrow().clone())
+        .ok_or_else(|| "piano-roll edit action was missing".to_string())?;
+    let plan = piano_roll_history_plan(&app.state, track, &action, clipboard)?
+        .ok_or_else(|| "piano-roll action is not recordable at this boundary".to_string())?;
+    let mut status = None;
+    let outcome = tui::edit::apply_recorded_step_mutation(
+        app,
+        track,
+        &plan.steps,
+        plan.label,
+        |app| {
+            status = Some(
+                apply_piano_roll_action_with_clipboard(
+                    &app.state,
+                    track,
+                    selection,
+                    move_state,
+                    clipboard,
+                    &action,
+                )
+                .map_err(tui::edit::EditError::ReplayFailed)?,
+            );
+            Ok(())
+        },
+    )
+    .map_err(|error| format!("could not apply piano-roll edit: {error:?}"))?;
+    Ok((
+        outcome,
+        status.unwrap_or_else(|| "piano-roll edit made no change".to_string()),
+        track,
+    ))
+}
+
+struct ActivePianoRollHistoryGesture {
+    kind: PianoRollDragKind,
+    track: usize,
+    transaction: tui::edit::StepGestureTransaction,
+}
+
+fn piano_roll_host_action(payload: &Value) -> Result<(usize, Value), String> {
+    let Value::Map(map) = payload else {
+        return Err("piano-roll gesture payload was invalid".to_string());
+    };
+    let track = map_usize(map, "track")
+        .ok_or_else(|| "piano-roll gesture track was invalid".to_string())?;
+    let action = map
+        .get("action")
+        .map(|value| value.borrow().clone())
+        .ok_or_else(|| "piano-roll gesture action was missing".to_string())?;
+    Ok((track, action))
+}
+
+fn apply_piano_roll_gesture_update(
+    app: &mut tui::App,
+    selection: &Arc<Mutex<HashSet<u64>>>,
+    move_state: &Arc<Mutex<Option<PianoRollMoveState>>>,
+    active: &mut Option<ActivePianoRollHistoryGesture>,
+    payload: &Value,
+) -> Result<(String, usize), String> {
+    let (track, action) = piano_roll_host_action(payload)?;
+    if track >= app.state.active_track_count() {
+        return Err(format!("piano-roll gesture track {track} was out of range"));
+    }
+    let Some(PianoRollGestureCommand::Update(kind)) = piano_roll_gesture_command(&action) else {
+        return Err("piano-roll gesture update action was invalid".to_string());
+    };
+    if active
+        .as_ref()
+        .is_some_and(|gesture| gesture.kind != kind || gesture.track != track)
+    {
+        let previous = active.take().expect("active gesture disappeared");
+        previous
+            .transaction
+            .rollback(app)
+            .map_err(|error| format!("could not roll back interrupted gesture: {error:?}"))?;
+        *move_state.lock().unwrap() = None;
+    }
+    let touched = piano_roll_gesture_touched_steps(&app.state, track, move_state, &action)?;
+    if active.is_none() {
+        let label = match kind {
+            PianoRollDragKind::Move => "Move piano-roll notes",
+            PianoRollDragKind::Resize => "Resize piano-roll notes",
+        };
+        *active = Some(ActivePianoRollHistoryGesture {
+            kind,
+            track,
+            transaction: tui::edit::StepGestureTransaction::begin(app, track, &touched, label)
+                .map_err(|error| format!("could not begin piano-roll gesture: {error:?}"))?,
+        });
+    } else if let Err(error) = active
+        .as_mut()
+        .expect("active gesture disappeared")
+        .transaction
+        .capture_additional_steps(app, &touched)
+    {
+        let gesture = active.take().expect("active gesture disappeared");
+        let rollback = gesture.transaction.rollback(app);
+        *move_state.lock().unwrap() = None;
+        return match rollback {
+            Ok(()) => Err(format!("could not extend piano-roll gesture: {error:?}")),
+            Err(rollback_error) => Err(format!(
+                "could not extend piano-roll gesture: {error:?}; rollback failed: {rollback_error:?}"
+            )),
+        };
+    }
+    let status = match apply_piano_roll_action(
+        &app.state,
+        track,
+        selection,
+        move_state,
+        &action,
+    ) {
+        Ok(status) => status,
+        Err(error) => {
+            let gesture = active.take().expect("active gesture disappeared");
+            let rollback = gesture.transaction.rollback(app);
+            *move_state.lock().unwrap() = None;
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "{error}; gesture rollback failed: {rollback_error:?}"
+                )),
+            };
+        }
+    };
+    app.state.publish_scheduler_snapshot();
+    Ok((status, track))
+}
+
+fn finish_piano_roll_gesture(
+    app: &mut tui::App,
+    move_state: &Arc<Mutex<Option<PianoRollMoveState>>>,
+    active: &mut Option<ActivePianoRollHistoryGesture>,
+    payload: &Value,
+) -> Result<(tui::edit::EditOutcome, usize), String> {
+    let (track, action) = piano_roll_host_action(payload)?;
+    let Some(PianoRollGestureCommand::Finish(kind)) = piano_roll_gesture_command(&action) else {
+        return Err("piano-roll gesture finish action was invalid".to_string());
+    };
+    let Some(gesture) = active.take() else {
+        *move_state.lock().unwrap() = None;
+        return Ok((tui::edit::EditOutcome::NoOp, track));
+    };
+    if gesture.kind != kind || gesture.track != track {
+        gesture
+            .transaction
+            .rollback(app)
+            .map_err(|error| format!("could not roll back mismatched gesture: {error:?}"))?;
+        *move_state.lock().unwrap() = None;
+        return Err("piano-roll gesture finished with a different edit kind".to_string());
+    }
+    *move_state.lock().unwrap() = None;
+    gesture
+        .transaction
+        .commit(app)
+        .map(|outcome| (outcome, track))
+        .map_err(|error| format!("could not commit piano-roll gesture: {error:?}"))
+}
+
 fn map_u32(map: &std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<u32> {
     map_number(map, key).and_then(|value| {
         (value.is_finite() && value >= 0.0 && value <= u32::MAX as f64).then_some(value as u32)
@@ -1484,7 +2293,8 @@ fn refresh_instrument_panel_reactive(
     let selected_step = selected_plock_step(selected_steps);
     let display_step = displayed_plock_step(&app.state, track, selected_step);
     let rt = editor.runtime_mut();
-    let mut dirty = rt
+    let mut dirty = sync_all_rack_slot_selection_binding_fields(rt, app);
+    dirty |= rt
         .set_reactive(
             "SEQ",
             "instrument-panel",
@@ -1654,7 +2464,16 @@ fn apply_rack_macro_host_command(
                         .is_some_and(Option::is_some)
                 })
             };
-            if !app.set_rack_macro_plocks(track, id, &steps, value) {
+            let outcome = tui::try_apply_command(
+                app,
+                tui::AppCommand::SetRackMacroPlockMulti {
+                    track,
+                    steps,
+                    macro_idx: id.index(),
+                    value,
+                },
+            );
+            if !outcome.is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp) {
                 return false;
             }
             refresh_rack_macro_plock_reactive(
@@ -1760,6 +2579,7 @@ fn sync_single_step_param_binding(
     step: usize,
     param: StepParam,
     current_track_idx: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
 ) -> bool {
     let Some((current_field, _, mode)) = step_param_fields(param) else {
@@ -1785,6 +2605,15 @@ fn sync_single_step_param_binding(
         dirty |= rt
             .set_reactive_list_index("SEQ", current_field, step, Value::Number(value as f64))
             .effects_dirty;
+        let parameter_step = selected_plock_step(selected_steps)
+            .unwrap_or_else(|| fx_step_cursor_from_runtime(rt));
+        if parameter_step == step {
+            if let Some(field) = fx_step_param_value_field(param) {
+                dirty |= rt
+                    .set_reactive("SEQ", field, Value::Number(value as f64))
+                    .effects_dirty;
+            }
+        }
     }
     for viewport in expanded_step_projection.viewports_for_track(track) {
         if let Some(slot) = visible_slot_for_step(viewport, step) {
@@ -2011,7 +2840,29 @@ fn sync_single_step_structural_bindings(
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
 ) -> bool {
-    if track >= app.tracks.len() || step >= MAX_STEPS {
+    sync_step_batch_structural_bindings(
+        rt,
+        state,
+        app,
+        track,
+        &[step],
+        current_track_idx,
+        selected_steps,
+        expanded_step_projection,
+    )
+}
+
+fn sync_step_batch_structural_bindings(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &tui::App,
+    track: usize,
+    steps: &[usize],
+    current_track_idx: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+) -> bool {
+    if track >= app.tracks.len() || steps.is_empty() {
         return false;
     }
     // Direct per-step writes bypass the per-track lane digest used by
@@ -2021,86 +2872,92 @@ fn sync_single_step_structural_bindings(
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
         .min(MAX_STEPS);
-    let visible = step < num_steps;
     let selected = selected_steps.lock().unwrap();
     let mut dirty = false;
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            &track_step_active_field(track, step),
-            Value::Bool(visible && state.pattern.patterns[track].is_active(step)),
-        )
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            &track_step_duration_field(track, step),
-            Value::Bool(visible && track_step_duration_covered(state, track, step)),
-        )
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            &track_step_plocked_field(track, step),
-            Value::Bool(
-                visible && track_step_has_plock(state, track, &app.graph.effect_descriptors, step),
-            ),
-        )
-        .effects_dirty;
-    let step_plock_kinds = build_step_plock_kinds(state, track);
-    let step_variant_r = build_step_variant_color_channel(state, track, 0);
-    let step_variant_g = build_step_variant_color_channel(state, track, 1);
-    let step_variant_b = build_step_variant_color_channel(state, track, 2);
-    dirty |= rt
-        .set_reactive_list_index(
-            "SEQ",
-            "track-step-plock-kinds",
-            track,
-            step_plock_kinds.clone(),
-        )
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive_list_index("SEQ", "track-step-variant-r", track, step_variant_r.clone())
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive_list_index("SEQ", "track-step-variant-g", track, step_variant_g.clone())
-        .effects_dirty;
-    dirty |= rt
-        .set_reactive_list_index("SEQ", "track-step-variant-b", track, step_variant_b.clone())
-        .effects_dirty;
-    if track == current_track_idx {
-        dirty |= rt
-            .set_reactive("SEQ", "step-plock-kinds", step_plock_kinds)
-            .effects_dirty;
-        dirty |= rt
-            .set_reactive("SEQ", "step-variant-r", step_variant_r)
-            .effects_dirty;
-        dirty |= rt
-            .set_reactive("SEQ", "step-variant-g", step_variant_g)
-            .effects_dirty;
-        dirty |= rt
-            .set_reactive("SEQ", "step-variant-b", step_variant_b)
-            .effects_dirty;
-    }
-    dirty |= rt
-        .set_reactive(
-            "SEQ",
-            &track_step_selected_field(track, step),
-            Value::Bool(visible && track == current_track_idx && selected.contains(&step)),
-        )
-        .effects_dirty;
-    for viewport in expanded_step_projection.viewports_for_track(track) {
-        if let Some(slot) = visible_slot_for_step(viewport, step) {
-            dirty |= sync_expanded_step_slot(
-                rt,
-                state,
-                app,
-                &selected,
-                current_track_idx,
-                viewport,
-                slot,
-            );
+    let render_values = plock_variant_step_render_values(state, track);
+    for &step in steps {
+        if step >= MAX_STEPS {
+            continue;
         }
+        let visible = step < num_steps;
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_step_active_field(track, step),
+                Value::Bool(visible && state.pattern.patterns[track].is_active(step)),
+            )
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_step_duration_field(track, step),
+                Value::Bool(visible && track_step_duration_covered(state, track, step)),
+            )
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_step_plocked_field(track, step),
+                Value::Bool(
+                    visible
+                        && track_step_has_plock(
+                            state,
+                            track,
+                            &app.graph.effect_descriptors,
+                            step,
+                        ),
+                ),
+            )
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_step_selected_field(track, step),
+                Value::Bool(visible && track == current_track_idx && selected.contains(&step)),
+            )
+            .effects_dirty;
+        let render = render_values[step];
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_step_plock_kind_field(track, step),
+                Value::Number(render.kind as f64),
+            )
+            .effects_dirty;
+        for (channel, value) in ['r', 'g', 'b'].into_iter().zip(render.color) {
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &track_step_variant_color_field(track, step, channel),
+                    Value::Number(value as f64),
+                )
+                .effects_dirty;
+        }
+        for viewport in expanded_step_projection.viewports_for_track(track) {
+            if let Some(slot) = visible_slot_for_step(viewport, step) {
+                dirty |= sync_expanded_step_slot(
+                    rt,
+                    state,
+                    app,
+                    &selected,
+                    current_track_idx,
+                    viewport,
+                    slot,
+                );
+            }
+        }
+    }
+    dirty |= sync_drum_lane_step_binding_fields_for_steps(rt, state, app, track, steps);
+    if track == current_track_idx {
+        let cursor_step = fx_step_cursor_from_runtime(rt);
+        dirty |= sync_fx_step_cursor_binding_fields(
+            rt,
+            state,
+            track,
+            cursor_step,
+            selected.iter().copied().min(),
+            selected.len(),
+        );
     }
     dirty
 }
@@ -2128,6 +2985,33 @@ fn sync_track_duration_span_binding_fields(
     dirty
 }
 
+fn sync_drum_lane_duration_span_binding_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &tui::App,
+    track: usize,
+    start_step: usize,
+) -> bool {
+    let mut dirty = false;
+    for sound in drum_rack_sound_options(app, track) {
+        for step in start_step.min(MAX_STEPS)..MAX_STEPS {
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &drum_lane_step_duration_field(track, sound.pad_note, step),
+                    Value::Bool(drum_lane_step_duration_covered(
+                        state,
+                        track,
+                        sound.pad_note,
+                        step,
+                    )),
+                )
+                .effects_dirty;
+        }
+    }
+    dirty
+}
+
 fn sync_step_selection_bindings(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -2137,13 +3021,22 @@ fn sync_step_selection_bindings(
     current_track_idx: usize,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     changed_steps: &[usize],
+    sync_legacy_list: bool,
 ) -> bool {
     let _ = rt.set_reactive("SEQ", &track_step_binding_rev_field(track), Value::Nil);
     let selected = selected_steps.lock().unwrap();
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
         .min(MAX_STEPS);
-    let mut dirty = false;
+    let cursor_step = fx_step_cursor_from_runtime(rt);
+    let mut dirty = sync_fx_step_cursor_binding_fields(
+        rt,
+        state,
+        track,
+        cursor_step,
+        selected.iter().copied().min(),
+        selected.len(),
+    );
     for &step in changed_steps {
         if step >= MAX_STEPS {
             continue;
@@ -2156,9 +3049,11 @@ fn sync_step_selection_bindings(
                 Value::Bool(is_selected),
             )
             .effects_dirty;
-        dirty |= rt
-            .set_reactive_list_index("SEQ", "selected-steps", step, Value::Bool(is_selected))
-            .effects_dirty;
+        if sync_legacy_list {
+            dirty |= rt
+                .set_reactive_list_index("SEQ", "selected-steps", step, Value::Bool(is_selected))
+                .effects_dirty;
+        }
     }
     if let Some(app) = app {
         for viewport in expanded_step_projection.viewports_for_track(track) {
@@ -2228,6 +3123,19 @@ fn sync_track_plocks_for_neural_selection(
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
 ) -> bool {
+    if selection.is_empty()
+        && selected_plock_step(selected_steps).is_some_and(|step| {
+            !track_step_has_plock(state, track, &app.graph.effect_descriptors, step)
+        })
+    {
+        let mut dirty = rt
+            .set_reactive("SEQ", "track-plocks", Value::List(Vec::new()))
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive("SEQ", "track-plock-variants", Value::List(Vec::new()))
+            .effects_dirty;
+        return dirty;
+    }
     let mut dirty = rt
         .set_reactive(
             "SEQ",
@@ -2364,8 +3272,14 @@ fn record_selected_neural_instrument_plock(
     track: usize,
     param_idx: usize,
     value: f32,
-) -> (BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>, bool) {
+) -> (
+    BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
+    bool,
+    Option<sequencer::sequencer::ProjectScenes>,
+) {
     let neural_selection = selected_neural_neurons.lock().unwrap().clone();
+    let history_before = (!neural_selection.is_empty())
+        .then(|| state.capture_project_scenes());
     let wrote_neural_plock = write_selected_neural_instrument_plock(
         editor,
         state,
@@ -2374,7 +3288,11 @@ fn record_selected_neural_instrument_plock(
         param_idx,
         value,
     );
-    (neural_selection, wrote_neural_plock)
+    (
+        neural_selection,
+        wrote_neural_plock,
+        history_before.filter(|_| wrote_neural_plock),
+    )
 }
 
 fn write_selected_neural_instrument_plock(
@@ -2408,8 +3326,14 @@ fn record_selected_neural_effect_plock(
     slot_idx: usize,
     param_idx: usize,
     value: f32,
-) -> (BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>, bool) {
+) -> (
+    BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
+    bool,
+    Option<sequencer::sequencer::ProjectScenes>,
+) {
     let neural_selection = selected_neural_neurons.lock().unwrap().clone();
+    let history_before = (!neural_selection.is_empty())
+        .then(|| state.capture_project_scenes());
     let wrote_neural_plock = write_selected_neural_effect_plock(
         editor,
         state,
@@ -2419,7 +3343,11 @@ fn record_selected_neural_effect_plock(
         param_idx,
         value,
     );
-    (neural_selection, wrote_neural_plock)
+    (
+        neural_selection,
+        wrote_neural_plock,
+        history_before.filter(|_| wrote_neural_plock),
+    )
 }
 
 fn write_selected_neural_effect_plock(
@@ -2540,6 +3468,72 @@ fn sync_effect_param_authoring_display(editor: &mut Editor, sync: EffectParamDis
     flush_reactive_display_edit(editor, ui_dirty);
 }
 
+fn sync_instrument_param_batch_display(
+    editor: &mut Editor,
+    app: &tui::App,
+    state: &Arc<SequencerState>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
+    track: usize,
+    param_indices: &[usize],
+    display_step: Option<usize>,
+    plocks_changed: bool,
+) {
+    let mut ui_dirty = false;
+    if plocks_changed {
+        ui_dirty |= sync_instrument_plock_presence_fields(
+            editor.runtime_mut(),
+            state,
+            &app.graph.effect_descriptors,
+            track,
+            selected_steps,
+        );
+    }
+    for &param_idx in param_indices {
+        ui_dirty |= sync_instrument_param_value_field_with_neural_selection(
+            editor.runtime_mut(),
+            app,
+            track,
+            param_idx,
+            display_step,
+            Some(selection),
+        );
+    }
+    if param_indices.iter().any(|param_idx| *param_idx == 2 || *param_idx == 3) {
+        ui_dirty |= sync_sampler_selection_time_fields(
+            editor.runtime_mut(),
+            app,
+            track,
+            display_step,
+        );
+    }
+    flush_reactive_display_edit(editor, ui_dirty);
+}
+
+fn sync_effect_param_batch_display(
+    editor: &mut Editor,
+    app: &tui::App,
+    selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
+    track: usize,
+    slot_idx: usize,
+    param_indices: &[usize],
+    display_step: Option<usize>,
+) {
+    let mut ui_dirty = false;
+    for &param_idx in param_indices {
+        ui_dirty |= sync_track_effect_param_value_field_with_neural_selection(
+            editor.runtime_mut(),
+            app,
+            track,
+            slot_idx,
+            param_idx,
+            display_step,
+            Some(selection),
+        );
+    }
+    flush_reactive_display_edit(editor, ui_dirty);
+}
+
 fn flush_reactive_display_edit(editor: &mut Editor, dirty: bool) {
     if dirty {
         editor.runtime_mut().run_reactive_cycle();
@@ -2654,9 +3648,10 @@ fn apply_ui_invalidations(
         mixer_visible,
     } = ctx;
 
-    let mut needs_reactive_cycle = true;
+    let mut needs_reactive_cycle = false;
     let mut bus_state_pulled = false;
     let active_track_count = state.active_track_count().min(app.tracks.len());
+    let legacy_step_grid_visible = editor_has_visible_buffer(editor, "*metal*");
     let rt = editor.runtime_mut();
 
     for invalidation in invalidations {
@@ -2669,6 +3664,7 @@ fn apply_ui_invalidations(
             | UiInvalidation::Pattern(PatternInvalidation::TrackLength { track })
             | UiInvalidation::Pattern(PatternInvalidation::TrackTiming { track })
             | UiInvalidation::Step { track, .. }
+            | UiInvalidation::StepBatch { track, .. }
             | UiInvalidation::StepSelection { track, .. }
             | UiInvalidation::ExpandedStepViewport { track, .. }
             | UiInvalidation::TrackMixer { track, .. }
@@ -2793,12 +3789,15 @@ fn apply_ui_invalidations(
                         step,
                         param.to_step_param(),
                         current_track_idx,
+                        selected_steps,
                         expanded_step_projection,
                     );
                 }
                 StepInvalidation::DurationSpan => {
                     needs_reactive_cycle |=
                         sync_track_duration_span_binding_fields(rt, state, track, step);
+                    needs_reactive_cycle |=
+                        sync_drum_lane_duration_span_binding_fields(rt, state, app, track, step);
                 }
                 StepInvalidation::Active
                 | StepInvalidation::Payload
@@ -2816,6 +3815,18 @@ fn apply_ui_invalidations(
                     );
                 }
             },
+            UiInvalidation::StepBatch { track, steps } => {
+                needs_reactive_cycle |= sync_step_batch_structural_bindings(
+                    rt,
+                    state,
+                    app,
+                    track,
+                    &steps,
+                    current_track_idx,
+                    selected_steps,
+                    expanded_step_projection,
+                );
+            }
             UiInvalidation::StepSelection {
                 track,
                 changed_steps,
@@ -2829,10 +3840,25 @@ fn apply_ui_invalidations(
                     current_track_idx,
                     expanded_step_projection,
                     &changed_steps,
+                    legacy_step_grid_visible,
                 );
                 if track == current_track_idx {
                     if fx_visible {
-                        let _ = sync_track_plocks_for_neural_selection(
+                        let next_display = displayed_plock_step(
+                            state,
+                            track,
+                            selected_plock_step(selected_steps),
+                        );
+                        let previous_display = match rt.global_value("SEQ") {
+                            Some(Value::Map(fields)) => fields
+                                .get("fx-step-display-step")
+                                .and_then(|value| match &*value.borrow() {
+                                    Value::Number(step) if *step >= 0.0 => Some(*step as usize),
+                                    _ => None,
+                                }),
+                            _ => None,
+                        };
+                        needs_reactive_cycle |= sync_track_plocks_for_neural_selection(
                             rt,
                             app,
                             state,
@@ -2840,12 +3866,43 @@ fn apply_ui_invalidations(
                             selected_steps,
                             selected_neural_neurons,
                         );
-                        needs_reactive_cycle = true;
+                        let display_values_can_differ = !selected_neural_neurons.is_empty()
+                            || previous_display.is_some_and(|step| {
+                                track_step_has_plock(
+                                    state,
+                                    track,
+                                    &app.graph.effect_descriptors,
+                                    step,
+                                )
+                            })
+                            || next_display.is_some_and(|step| {
+                                track_step_has_plock(
+                                    state,
+                                    track,
+                                    &app.graph.effect_descriptors,
+                                    step,
+                                )
+                            });
+                        if display_values_can_differ {
+                            needs_reactive_cycle |= sync_track_selection_param_binding_fields(
+                                rt,
+                                state,
+                                track,
+                                selected_steps,
+                            );
+                            needs_reactive_cycle |=
+                                sync_fx_param_binding_fields(rt, app, state, track, selected_steps);
+                        }
+                        needs_reactive_cycle |= rt
+                            .set_reactive(
+                                "SEQ",
+                                "fx-step-display-step",
+                                next_display
+                                    .map(|step| Value::Number(step as f64))
+                                    .unwrap_or(Value::Number(-1.0)),
+                            )
+                            .effects_dirty;
                     }
-                    needs_reactive_cycle |=
-                        sync_track_selection_param_binding_fields(rt, state, track, selected_steps);
-                    needs_reactive_cycle |=
-                        sync_fx_param_binding_fields(rt, app, state, track, selected_steps);
                 }
             }
             UiInvalidation::ExpandedStepViewport { track: _, track_id } => {
@@ -2934,7 +3991,10 @@ fn apply_ui_invalidations(
                 }
                 TrackMixerInvalidation::Collapsed => {
                     let collapsed = track_collapsed.lock().unwrap().clone();
-                    app.replace_track_collapsed(collapsed);
+                    if let Err(error) = app.apply_recorded_track_collapsed(collapsed) {
+                        *track_collapsed.lock().unwrap() = app.track_collapsed.clone();
+                        eprintln!("Could not change track collapse state: {error}");
+                    }
                     needs_reactive_cycle |= rt
                         .set_reactive("SEQ", "track-collapsed", build_track_collapsed(app))
                         .effects_dirty;
@@ -3266,9 +4326,11 @@ fn load_or_convert_sampler_track(
     let instrument_type = app.graph.track_instrument_types[track];
     if !matches!(
         instrument_type,
-        InstrumentType::Sampler | InstrumentType::Custom
+        InstrumentType::Sampler | InstrumentType::Custom | InstrumentType::Rack
     ) {
-        return Err("Samples can only replace sampler or custom instrument tracks".to_string());
+        return Err(
+            "Samples can only replace sampler, custom instrument, or rack tracks".to_string(),
+        );
     }
     if instrument_type == InstrumentType::Sampler && path.is_none() {
         return Ok(SamplerTrackLoadResult {
@@ -3295,29 +4357,59 @@ fn load_or_convert_sampler_track(
         )
     };
 
-    let reset_summary = if instrument_type == InstrumentType::Sampler {
-        app.graph_controller()
-            .send_sample_to_all_voices(track, new_buffer_id, sample_rate);
-        app.graph.track_buffer_ids[track] = new_buffer_id;
-        app.graph.track_sample_rates[track] = sample_rate;
-        app.tracks[track] = new_name.clone();
-        None
-    } else {
-        Some(app.graph_controller().convert_custom_track_to_sampler(
-            track,
-            new_buffer_id,
-            sample_rate,
-            &new_name,
-        )?)
-    };
-    if let Some(path) = resolved_path {
-        app.register_loaded_sample_path(&new_name, new_buffer_id, path.clone());
-        if track < app.sampler_paths.len() {
-            app.sampler_paths[track] = Some(path);
-        }
-    }
-    app.reset_sampler_bpm_for_analysis(track);
-    app.publish_sampler_analysis_runtime(track);
+    let history_path = resolved_path.clone();
+    let reset_summary = app.apply_recorded_instrument_binding_mutation(
+        track,
+        "Replace instrument",
+        |app| {
+            let reset_summary = match instrument_type {
+                InstrumentType::Sampler => {
+                    app.graph_controller()
+                        .send_sample_to_all_voices(track, new_buffer_id, sample_rate);
+                    app.graph.track_buffer_ids[track] = new_buffer_id;
+                    app.graph.track_sample_rates[track] = sample_rate;
+                    app.tracks[track] = new_name.clone();
+                    app.state.seed_unset_pattern_sample_ids(
+                        track,
+                        (new_buffer_id, new_name.clone(), sample_rate),
+                    );
+                    None
+                }
+                InstrumentType::Custom => Some(
+                    app.graph_controller().convert_custom_track_to_sampler(
+                        track,
+                        new_buffer_id,
+                        sample_rate,
+                        &new_name,
+                    )?,
+                ),
+                InstrumentType::Rack => {
+                    let summary = app.graph_controller().replace_rack_track_with_sampler(
+                        track,
+                        new_buffer_id,
+                        sample_rate,
+                        &new_name,
+                    )?;
+                    Some(summary)
+                }
+                other => {
+                    return Err(format!(
+                        "Track {} has instrument type {other:?}, which cannot load a sample",
+                        track + 1
+                    ));
+                }
+            };
+            if let Some(path) = history_path.as_ref() {
+                app.register_loaded_sample_path(&new_name, new_buffer_id, path.clone());
+                if track < app.sampler_paths.len() {
+                    app.sampler_paths[track] = Some(path.clone());
+                }
+            }
+            app.reset_sampler_bpm_for_analysis(track);
+            app.publish_sampler_analysis_runtime(track);
+            Ok(reset_summary)
+        },
+    )?;
     reset_sampler_waveform_view(editor);
     if let Some(track_name) = track_names.get_mut(track) {
         *track_name = new_name.clone();
@@ -3651,10 +4743,10 @@ fn apply_compiled_effect_edit_session(
 ) -> Result<(), String> {
     match session.target {
         EffectEditTarget::Track { track, slot } => {
-            app.apply_compiled_effect_to_slot_sync(result, name, slot, track)
+            app.apply_compiled_effect_to_slot_recorded(result, name, slot, track)
         }
         EffectEditTarget::Bus { bus, slot } => {
-            app.apply_compiled_bus_effect_to_slot_sync(bus, slot, name, result)
+            app.apply_compiled_bus_effect_to_slot_recorded(bus, slot, name, result)
         }
     }
 }
@@ -3811,7 +4903,11 @@ fn apply_agent_draft_to_effect_slot(
     let previous_source = sequencer::lisp_host::load_effect_source(&effect_name).ok();
     let previous_ui = sequencer::lisp_host::load_effect_ui_source(&effect_name).ok();
     save_effect_with_ui_rollback(&effect_name, &draft.dsp_source, &draft.ui_source)?;
-    if let Err(error) = app.load_saved_effect_to_slot_sync(track_index, slot_index, &effect_name) {
+    if let Err(error) = app.load_saved_effect_to_slot_recorded(
+        track_index,
+        slot_index,
+        &effect_name,
+    ) {
         restore_effect_files(
             &effect_name,
             previous_source.as_deref(),
@@ -4036,7 +5132,11 @@ fn finalize_agent_effect(
             return Err("The applied effect artifact target track no longer exists.".to_string());
         }
         if let Err(error) =
-            app.load_saved_effect_to_slot_sync(target.track_index, target.slot_index, &final_name)
+            app.load_saved_effect_to_slot_recorded(
+                target.track_index,
+                target.slot_index,
+                &final_name,
+            )
         {
             let _ = std::fs::remove_dir_all(&final_dir);
             return Err(format!("Failed to load finalized effect: {error}"));
@@ -4106,18 +5206,745 @@ fn agent_generation_watermark(app: &tui::App) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AGENT_INSTRUMENT_STUB_UI, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
-        FxDeleteChain, NEW_INSTRUMENT_STARTER_DSP, Runtime, StepParam, Value,
+        apply_bus_mixer_history_host_command, apply_drum_lane_history_host_command,
+        apply_piano_roll_gesture_update,
+        apply_piano_roll_history_host_command,
+        apply_selected_steps_delete, apply_slice3_history_host_command,
+        apply_toggle_step_host_command, bus_mixer_targeted_invalidation,
+        slice3_track_mixer_invalidation, BusMixerInvalidation, TrackMixerInvalidation,
         build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
-        escape_lisp_string, instrument_patcher_buffer_source, key_should_reveal_sequencer_track,
-        patcher_layout_sidecar_path_for_dsp, reconciled_track_index,
-        resolve_instrument_swap_target_index, restore_instrument_patcher_layout_source,
-        should_clear_active_delete_target_for_buffer, show_instrument_patcher_layout_source,
-        show_instrument_patcher_source_layout_source, track_meter_bindings_visible,
+        escape_lisp_string, finish_piano_roll_gesture, instrument_patcher_buffer_source,
+        key_should_reveal_sequencer_track, patcher_layout_sidecar_path_for_dsp,
+        reconciled_track_index,
+        restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
+        show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
+        track_meter_bindings_visible, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
+        FxDeleteChain, Runtime, StepParam, Value, AGENT_INSTRUMENT_STUB_UI,
+        NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::parser::{ASTParser, Parser};
     use std::path::Path;
+
+    fn history_test_app() -> (
+        std::sync::Arc<sequencer::sequencer::SequencerState>,
+        sequencer::tui::App,
+    ) {
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = sequencer::tui::App::new(
+            state.clone(),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::tui::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        (state, app)
+    }
+
+    fn history_value_map(entries: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
+        Value::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| {
+                    (
+                        key.to_string(),
+                        std::rc::Rc::new(std::cell::RefCell::new(value)),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn slice3_mixer_drag_ops_route_to_targeted_track_mixer_invalidation() {
+        let volume = history_value_map([("op", Value::Keyword("volume".to_string()))]);
+        assert_eq!(
+            slice3_track_mixer_invalidation(&volume),
+            Some(TrackMixerInvalidation::Volume)
+        );
+        let pan = history_value_map([("op", Value::Keyword("pan".to_string()))]);
+        assert_eq!(
+            slice3_track_mixer_invalidation(&pan),
+            Some(TrackMixerInvalidation::Pan)
+        );
+        let mute_op = history_value_map([("op", Value::Keyword("toggle-mute".to_string()))]);
+        assert_eq!(
+            slice3_track_mixer_invalidation(&mute_op),
+            Some(TrackMixerInvalidation::Mute)
+        );
+        let solo_op = history_value_map([("op", Value::Keyword("toggle-solo".to_string()))]);
+        assert_eq!(
+            slice3_track_mixer_invalidation(&solo_op),
+            Some(TrackMixerInvalidation::Solo)
+        );
+        // Non-mixer ops keep the whole-track + ui-epoch resync path.
+        let attack = history_value_map([("op", Value::Keyword("attack".to_string()))]);
+        assert_eq!(slice3_track_mixer_invalidation(&attack), None);
+        assert_eq!(slice3_track_mixer_invalidation(&Value::Nil), None);
+
+        assert_eq!(
+            bus_mixer_targeted_invalidation(&volume),
+            Some(BusMixerInvalidation::Volume)
+        );
+        let mute = history_value_map([("op", Value::Keyword("toggle-mute".to_string()))]);
+        assert_eq!(bus_mixer_targeted_invalidation(&mute), None);
+    }
+
+    #[test]
+    fn slice3_host_action_enters_track_parameter_history() {
+        let (state, mut app) = history_test_app();
+        let before = state.pattern.track_params[0].get_volume();
+        let payload = history_value_map([
+            ("op", Value::Keyword("volume".to_string())),
+            ("track", Value::Number(0.0)),
+            ("value", Value::Number(0.25)),
+        ]);
+
+        let (outcome, track) = apply_slice3_history_host_command(&mut app, &payload)
+            .expect("apply Slice 3 host action");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert_eq!(track, Some(0));
+        sequencer::tui::edit::finish_active_gesture(&mut app);
+        assert_eq!(state.pattern.track_params[0].get_volume().to_bits(), 0.25f32.to_bits());
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(state.pattern.track_params[0].get_volume().to_bits(), before.to_bits());
+    }
+
+    #[test]
+    fn bus_mixer_host_action_enters_replayable_history() {
+        let (_state, mut app) = history_test_app();
+        let before = app.buses[1].volume;
+        let payload = history_value_map([
+            ("op", Value::Keyword("volume".to_string())),
+            ("bus", Value::Number(1.0)),
+            ("bus-id", Value::String(app.buses[1].id.0.to_string())),
+            ("value", Value::Number(0.25)),
+        ]);
+
+        let (outcome, bus) = apply_bus_mixer_history_host_command(&mut app, &payload)
+            .expect("apply bus mixer host action");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert_eq!(bus, 1);
+        sequencer::tui::edit::finish_active_gesture(&mut app);
+        assert_eq!(app.buses[1].volume.to_bits(), 0.25f32.to_bits());
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.buses[1].volume.to_bits(), before.to_bits());
+    }
+
+    #[test]
+    fn metal_step_toggle_host_command_creates_replayable_history() {
+        let (state, mut app) = history_test_app();
+        let payload = Value::Map(
+            [
+                ("track", Value::Number(0.0)),
+                ("step", Value::Number(6.0)),
+            ]
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    key.to_string(),
+                    std::rc::Rc::new(std::cell::RefCell::new(value)),
+                )
+            })
+            .collect(),
+        );
+
+        let (outcome, track, step) =
+            apply_toggle_step_host_command(&mut app, &payload).expect("toggle through host seam");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert_eq!((track, step), (0, 6));
+        assert!(state.pattern.patterns[0].is_active(6));
+        assert_eq!(app.history.undo_len(), 1);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(6));
+    }
+
+    #[test]
+    fn metal_selected_step_delete_is_one_replayable_history_entry() {
+        let (state, mut app) = history_test_app();
+        for step in [2, 5] {
+            state.pattern.patterns[0].set_step_active(step, true);
+            state.pattern.step_data[0].set(
+                step,
+                sequencer::sequencer::StepParam::Velocity,
+                step as f32 / 10.0,
+            );
+        }
+        let selected = std::sync::Arc::new(std::sync::Mutex::new(
+            [2_usize, 5].into_iter().collect::<std::collections::HashSet<_>>(),
+        ));
+
+        let (outcome, steps) =
+            apply_selected_steps_delete(&mut app, 0, &selected).expect("delete selected steps");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert_eq!(steps, vec![2, 5]);
+        assert!(selected.lock().unwrap().is_empty());
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(5));
+        assert_eq!(app.history.undo_len(), 1);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(state.pattern.patterns[0].is_active(5));
+        assert_eq!(state.pattern.step_data[0].get(
+            5,
+            sequencer::sequencer::StepParam::Velocity,
+        ), 0.5);
+        assert!(matches!(
+            sequencer::tui::edit::redo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(5));
+    }
+
+    #[test]
+    fn metal_drum_lane_edits_are_individually_replayable() {
+        let (state, mut app) = history_test_app();
+
+        let toggle = history_value_map([
+            ("op", Value::Keyword("toggle".to_string())),
+            ("track", Value::Number(0.0)),
+            ("pad-note", Value::Number(36.0)),
+            ("step", Value::Number(2.0)),
+        ]);
+        apply_drum_lane_history_host_command(&mut app, &toggle)
+            .expect("toggle drum-lane step");
+        assert!(state.pattern.patterns[0].is_active(2));
+
+        let duration = history_value_map([
+            ("op", Value::Keyword("duration".to_string())),
+            ("track", Value::Number(0.0)),
+            ("pad-note", Value::Number(36.0)),
+            ("step", Value::Number(2.0)),
+            ("duration", Value::Number(3.0)),
+        ]);
+        apply_drum_lane_history_host_command(&mut app, &duration)
+            .expect("set drum-lane duration");
+        assert_eq!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
+
+        let move_action = history_value_map([
+            ("op", Value::Keyword("move".to_string())),
+            ("track", Value::Number(0.0)),
+            ("pad-note", Value::Number(36.0)),
+            ("steps", piano_roll_id_list([2])),
+            ("delta", Value::Number(3.0)),
+            ("move-selection", Value::Bool(false)),
+        ]);
+        apply_drum_lane_history_host_command(&mut app, &move_action)
+            .expect("move drum-lane step");
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert_eq!(state.drum_lane_step_duration(0, 5, 36), Some(3.0));
+
+        let clear = history_value_map([
+            ("op", Value::Keyword("clear".to_string())),
+            ("track", Value::Number(0.0)),
+            ("pad-note", Value::Number(36.0)),
+            ("steps", piano_roll_id_list([5])),
+        ]);
+        apply_drum_lane_history_host_command(&mut app, &clear)
+            .expect("clear drum-lane step");
+        assert!(!state.pattern.patterns[0].is_active(5));
+        assert_eq!(app.history.undo_len(), 4);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(state.drum_lane_step_duration(0, 5, 36), Some(3.0));
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_ne!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+
+        for _ in 0..4 {
+            assert!(matches!(
+                sequencer::tui::edit::redo(&mut app),
+                sequencer::tui::history::HistoryReplay::Applied(_)
+            ));
+        }
+        assert!(!state.pattern.patterns[0].is_active(5));
+    }
+
+    #[test]
+    fn metal_piano_roll_create_and_delete_are_individually_replayable() {
+        let (state, mut app) = history_test_app();
+        let selection = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashSet::new(),
+        ));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let clipboard = super::new_piano_roll_clipboard();
+        let create_action = history_value_map([
+            ("type", Value::Keyword("finish-create-item".to_string())),
+            ("start", Value::Number(2.0)),
+            ("end", Value::Number(3.0)),
+            ("lane", Value::Number(48.0)),
+        ]);
+        let create_payload = history_value_map([
+            ("track", Value::Number(0.0)),
+            ("action", create_action),
+        ]);
+
+        let (outcome, _, _) = apply_piano_roll_history_host_command(
+            &mut app,
+            &selection,
+            &move_state,
+            &clipboard,
+            &create_payload,
+        )
+        .expect("create piano-roll note through history seam");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert_eq!(app.history.undo_len(), 1);
+
+        let delete_action = history_value_map([
+            ("type", Value::Keyword("delete-items".to_string())),
+            (
+                "ids",
+                Value::List(vec![std::rc::Rc::new(std::cell::RefCell::new(
+                    Value::Number(super::piano_roll_item_id(2, 0) as f64),
+                ))]),
+            ),
+        ]);
+        let delete_payload = history_value_map([
+            ("track", Value::Number(0.0)),
+            ("action", delete_action),
+        ]);
+        let (outcome, _, _) = apply_piano_roll_history_host_command(
+            &mut app,
+            &selection,
+            &move_state,
+            &clipboard,
+            &delete_payload,
+        )
+        .expect("delete piano-roll note through history seam");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert_eq!(app.history.undo_len(), 2);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(matches!(
+            sequencer::tui::edit::redo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(matches!(
+            sequencer::tui::edit::redo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+    }
+
+    fn piano_roll_gesture_payload(action: Value) -> Value {
+        history_value_map([("track", Value::Number(0.0)), ("action", action)])
+    }
+
+    fn piano_roll_id_list(ids: impl IntoIterator<Item = u64>) -> Value {
+        Value::List(
+            ids.into_iter()
+                .map(|id| {
+                    std::rc::Rc::new(std::cell::RefCell::new(Value::Number(id as f64)))
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn metal_piano_roll_move_drag_coalesces_preview_updates_into_one_entry() {
+        let (state, mut app) = history_test_app();
+        state.pattern.patterns[0].set_step_active(2, true);
+        state.pattern.step_data[0].set(
+            2,
+            sequencer::sequencer::StepParam::Duration,
+            1.0,
+        );
+        let id = super::piano_roll_item_id(2, 0);
+        let selection = std::sync::Arc::new(std::sync::Mutex::new([id].into_iter().collect()));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut active = None;
+        let version_before = state.scheduler_snapshot_version();
+
+        for (destination, lane) in [(4.0, 48.0), (6.0, 41.0)] {
+            let action = history_value_map([
+                ("type", Value::Keyword("move-items-absolute".to_string())),
+                ("ids", piano_roll_id_list([id])),
+                ("anchor-id", Value::Number(id as f64)),
+                ("start", Value::Number(destination)),
+                ("lane", Value::Number(lane)),
+            ]);
+            apply_piano_roll_gesture_update(
+                &mut app,
+                &selection,
+                &move_state,
+                &mut active,
+                &piano_roll_gesture_payload(action),
+            )
+            .expect("preview piano-roll move");
+            assert_eq!(app.history.undo_len(), 0);
+        }
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(4));
+        assert!(state.pattern.patterns[0].is_active(6));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 7.0);
+        assert_eq!(state.scheduler_snapshot_version(), version_before + 2);
+
+        let finish = history_value_map([
+            ("type", Value::Keyword("finish-move-items".to_string())),
+            ("ids", piano_roll_id_list([id])),
+            ("anchor-id", Value::Number(id as f64)),
+        ]);
+        let (outcome, _) = finish_piano_roll_gesture(
+            &mut app,
+            &move_state,
+            &mut active,
+            &piano_roll_gesture_payload(finish),
+        )
+        .expect("finish piano-roll move");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert_eq!(app.history.undo_len(), 1);
+        assert_eq!(state.scheduler_snapshot_version(), version_before + 2);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(6));
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Transpose),
+            0.0,
+        );
+        assert_eq!(state.scheduler_snapshot_version(), version_before + 3);
+        assert!(matches!(
+            sequencer::tui::edit::redo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(state.pattern.patterns[0].is_active(6));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 7.0);
+    }
+
+    #[test]
+    fn metal_piano_roll_multi_note_move_round_trips_every_touched_cell() {
+        let (state, mut app) = history_test_app();
+        for (step, transpose) in [(2, 0.0), (4, 7.0)] {
+            state.pattern.patterns[0].set_step_active(step, true);
+            state.pattern.step_data[0].set(
+                step,
+                sequencer::sequencer::StepParam::Transpose,
+                transpose,
+            );
+            state.pattern.step_data[0].set(
+                step,
+                sequencer::sequencer::StepParam::Duration,
+                1.0,
+            );
+        }
+        let first = super::piano_roll_item_id(2, 0);
+        let second = super::piano_roll_item_id(4, 0);
+        let selection = std::sync::Arc::new(std::sync::Mutex::new(
+            [first, second].into_iter().collect(),
+        ));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut active = None;
+        let move_action = history_value_map([
+            ("type", Value::Keyword("move-items-absolute".to_string())),
+            ("ids", piano_roll_id_list([first, second])),
+            ("anchor-id", Value::Number(first as f64)),
+            ("start", Value::Number(6.0)),
+            ("lane", Value::Number(43.0)),
+        ]);
+        apply_piano_roll_gesture_update(
+            &mut app,
+            &selection,
+            &move_state,
+            &mut active,
+            &piano_roll_gesture_payload(move_action),
+        )
+        .expect("preview multi-note move");
+        let finish = history_value_map([
+            ("type", Value::Keyword("finish-move-items".to_string())),
+            ("ids", piano_roll_id_list([first, second])),
+            ("anchor-id", Value::Number(first as f64)),
+        ]);
+        finish_piano_roll_gesture(
+            &mut app,
+            &move_state,
+            &mut active,
+            &piano_roll_gesture_payload(finish),
+        )
+        .expect("finish multi-note move");
+
+        assert_eq!(app.history.undo_len(), 1);
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(4));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 5.0);
+        assert_eq!(state.pattern.chord_data[0].get(8, 0), 12.0);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Transpose),
+            0.0,
+        );
+        assert_eq!(
+            state.pattern.step_data[0].get(4, sequencer::sequencer::StepParam::Transpose),
+            7.0,
+        );
+        assert!(!state.pattern.patterns[0].is_active(6));
+        assert!(!state.pattern.patterns[0].is_active(8));
+
+        assert!(matches!(
+            sequencer::tui::edit::redo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 5.0);
+        assert_eq!(state.pattern.chord_data[0].get(8, 0), 12.0);
+    }
+
+    #[test]
+    fn metal_piano_roll_nudge_time_and_note_is_replayable() {
+        let (state, mut app) = history_test_app();
+        state.pattern.patterns[0].set_step_active(2, true);
+        state.pattern.step_data[0].set(
+            2,
+            sequencer::sequencer::StepParam::Duration,
+            1.0,
+        );
+        let id = super::piano_roll_item_id(2, 0);
+        let selection = std::sync::Arc::new(std::sync::Mutex::new([id].into_iter().collect()));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let clipboard = super::new_piano_roll_clipboard();
+        let action = history_value_map([
+            ("type", Value::Keyword("nudge-selection".to_string())),
+            ("ids", piano_roll_id_list([id])),
+            ("delta-time", Value::Number(3.0)),
+            ("delta-lane", Value::Number(-5.0)),
+        ]);
+
+        let (outcome, _, _) = apply_piano_roll_history_host_command(
+            &mut app,
+            &selection,
+            &move_state,
+            &clipboard,
+            &piano_roll_gesture_payload(action),
+        )
+        .expect("nudge piano-roll note through history seam");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert_eq!(app.history.undo_len(), 1);
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(state.pattern.patterns[0].is_active(5));
+        assert_eq!(state.pattern.chord_data[0].get(5, 0), 5.0);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(5));
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Transpose),
+            0.0,
+        );
+
+        assert!(matches!(
+            sequencer::tui::edit::redo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(state.pattern.patterns[0].is_active(5));
+        assert_eq!(state.pattern.chord_data[0].get(5, 0), 5.0);
+    }
+
+    #[test]
+    fn metal_piano_roll_paste_is_replayable_with_shared_clipboard() {
+        let (state, mut app) = history_test_app();
+        state.pattern.patterns[0].set_step_active(2, true);
+        state.pattern.step_data[0].set(
+            2,
+            sequencer::sequencer::StepParam::Transpose,
+            4.0,
+        );
+        state.pattern.step_data[0].set(
+            2,
+            sequencer::sequencer::StepParam::Duration,
+            1.5,
+        );
+        let id = super::piano_roll_item_id(2, 0);
+        let selection = std::sync::Arc::new(std::sync::Mutex::new([id].into_iter().collect()));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let clipboard = super::new_piano_roll_clipboard();
+        let copy_action = history_value_map([
+            ("type", Value::Keyword("copy-items".to_string())),
+            ("ids", piano_roll_id_list([id])),
+        ]);
+        super::apply_piano_roll_action_with_clipboard(
+            &state,
+            0,
+            &selection,
+            &move_state,
+            &clipboard,
+            &copy_action,
+        )
+        .expect("copy piano-roll note");
+
+        let paste_action = history_value_map([
+            ("type", Value::Keyword("paste-items".to_string())),
+            ("time", Value::Number(6.0)),
+        ]);
+        let (outcome, _, _) = apply_piano_roll_history_host_command(
+            &mut app,
+            &selection,
+            &move_state,
+            &clipboard,
+            &piano_roll_gesture_payload(paste_action),
+        )
+        .expect("paste piano-roll note through history seam");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert_eq!(app.history.undo_len(), 1);
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(state.pattern.patterns[0].is_active(6));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 4.0);
+        assert_eq!(state.pattern.chord_data[0].get_duration(6, 0), 1.5);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(6));
+
+        assert!(matches!(
+            sequencer::tui::edit::redo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(6));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 4.0);
+    }
+
+    #[test]
+    fn metal_piano_roll_resize_drag_coalesces_preview_updates_into_one_entry() {
+        let (state, mut app) = history_test_app();
+        state.pattern.patterns[0].set_step_active(2, true);
+        state.pattern.step_data[0].set(
+            2,
+            sequencer::sequencer::StepParam::Duration,
+            1.0,
+        );
+        let id = super::piano_roll_item_id(2, 0);
+        let selection = std::sync::Arc::new(std::sync::Mutex::new([id].into_iter().collect()));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut active = None;
+        let version_before = state.scheduler_snapshot_version();
+
+        for time in [4.0, 5.0] {
+            let action = history_value_map([
+                ("type", Value::Keyword("resize-item-absolute".to_string())),
+                ("id", Value::Number(id as f64)),
+                ("ids", piano_roll_id_list([id])),
+                ("edge", Value::Keyword("end".to_string())),
+                ("time", Value::Number(time)),
+            ]);
+            apply_piano_roll_gesture_update(
+                &mut app,
+                &selection,
+                &move_state,
+                &mut active,
+                &piano_roll_gesture_payload(action),
+            )
+            .expect("preview piano-roll resize");
+            assert_eq!(app.history.undo_len(), 0);
+        }
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Duration),
+            3.0,
+        );
+        assert_eq!(state.scheduler_snapshot_version(), version_before + 2);
+
+        let finish = history_value_map([
+            ("type", Value::Keyword("finish-resize-items".to_string())),
+            ("ids", piano_roll_id_list([id])),
+            ("id", Value::Number(id as f64)),
+        ]);
+        let (outcome, _) = finish_piano_roll_gesture(
+            &mut app,
+            &move_state,
+            &mut active,
+            &piano_roll_gesture_payload(finish),
+        )
+        .expect("finish piano-roll resize");
+        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert_eq!(app.history.undo_len(), 1);
+        assert_eq!(state.scheduler_snapshot_version(), version_before + 2);
+
+        assert!(matches!(
+            sequencer::tui::edit::undo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Duration),
+            1.0,
+        );
+        assert!(matches!(
+            sequencer::tui::edit::redo(&mut app),
+            sequencer::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Duration),
+            3.0,
+        );
+    }
 
     #[test]
     fn active_delete_target_buffer_switch_preserves_target_claimed_in_new_buffer() {
@@ -4155,27 +5982,33 @@ mod tests {
     }
 
     #[test]
-    fn pending_instrument_swap_follows_stable_track_shell_identity() {
-        assert_eq!(
-            resolve_instrument_swap_target_index(&[101, 202, 303], 1, 202),
-            Some(1)
-        );
-        assert_eq!(
-            resolve_instrument_swap_target_index(&[202, 303], 1, 202),
-            Some(0),
-            "a track shifted by deletion should still receive its pending swap"
-        );
-        assert_eq!(
-            resolve_instrument_swap_target_index(&[101, 303], 1, 202),
-            None,
-            "a removed target must not redirect the swap to its former index"
-        );
-    }
-
-    #[test]
     fn step_selection_sync_updates_selected_steps_without_deadlocking() {
         let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, Vec::new()));
         state.pattern.track_params[0].set_num_steps(8);
+        state
+            .pattern
+            .step_data[0]
+            .set(3, sequencer::sequencer::StepParam::Velocity, 0.66);
+        state
+            .pattern
+            .step_data[0]
+            .set(3, sequencer::sequencer::StepParam::Duration, 2.5);
+        state
+            .pattern
+            .step_data[0]
+            .set(3, sequencer::sequencer::StepParam::Transpose, 7.0);
+        state
+            .pattern
+            .step_data[0]
+            .set(2, sequencer::sequencer::StepParam::Velocity, 0.72);
+        state
+            .pattern
+            .step_data[0]
+            .set(2, sequencer::sequencer::StepParam::Duration, 1.5);
+        state
+            .pattern
+            .step_data[0]
+            .set(2, sequencer::sequencer::StepParam::Transpose, -4.0);
         let selected_steps = std::sync::Arc::new(std::sync::Mutex::new(
             [2_usize, 3, 4]
                 .into_iter()
@@ -4194,6 +6027,9 @@ mod tests {
             )],
             true,
         );
+        runtime
+            .eval_str("(def cursor-step 3)")
+            .expect("register cursor step");
 
         let expanded_step_projection = std::sync::Arc::new(ExpandedStepProjectionRegistry::new());
         super::sync_step_selection_bindings(
@@ -4205,6 +6041,7 @@ mod tests {
             0,
             &expanded_step_projection,
             &(0..sequencer::sequencer::MAX_STEPS).collect::<Vec<_>>(),
+            true,
         );
 
         assert_eq!(
@@ -4219,6 +6056,24 @@ mod tests {
                 .expect("read selected step"),
             Some(Value::Bool(true))
         );
+        for (field, expected) in [
+            ("fx-step-cursor-number", 4.0),
+            ("fx-step-selection-count", 3.0),
+            ("fx-step-value-velocity", 0.72),
+            ("fx-step-value-duration", 1.5),
+            ("fx-step-value-transpose", -4.0),
+        ] {
+            let value = runtime
+                .eval_str(&format!("SEQ.{field}"))
+                .unwrap_or_else(|error| panic!("read {field}: {error:?}"));
+            let Some(Value::Number(value)) = value else {
+                panic!("{field} should be numeric, got {value:?}");
+            };
+            assert!(
+                (value - expected).abs() < 0.0001,
+                "{field} expected {expected}, got {value}"
+            );
+        }
 
         selected_steps.lock().unwrap().remove(&3);
         super::sync_step_selection_bindings(
@@ -4230,6 +6085,7 @@ mod tests {
             0,
             &expanded_step_projection,
             &[3],
+            true,
         );
         assert_eq!(
             runtime
@@ -4244,6 +6100,54 @@ mod tests {
             Some(Value::Bool(true)),
             "delta sync must preserve selection indexes outside changed_steps"
         );
+    }
+
+    #[test]
+    fn single_step_param_sync_updates_selected_panel_scalar_binding() {
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, Vec::new()));
+        state.pattern.track_params[0].set_num_steps(8);
+        state
+            .pattern
+            .step_data[0]
+            .set(4, sequencer::sequencer::StepParam::Velocity, 0.72);
+        let selected_steps = std::sync::Arc::new(std::sync::Mutex::new(
+            [4, 5, 6, 7].into_iter().collect(),
+        ));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![(
+                "velocities",
+                Value::List(
+                    (0..sequencer::sequencer::MAX_STEPS)
+                        .map(|_| std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.0))))
+                        .collect(),
+                ),
+            )],
+            true,
+        );
+        runtime
+            .eval_str("(def cursor-step 0)")
+            .expect("register cursor step");
+
+        super::sync_single_step_param_binding(
+            &mut runtime,
+            &state,
+            0,
+            4,
+            sequencer::sequencer::StepParam::Velocity,
+            0,
+            &selected_steps,
+            &std::sync::Arc::new(ExpandedStepProjectionRegistry::new()),
+        );
+
+        let value = runtime
+            .eval_str("SEQ.fx-step-value-velocity")
+            .expect("read cursor velocity binding");
+        let Some(Value::Number(value)) = value else {
+            panic!("selected velocity should be numeric, got {value:?}");
+        };
+        assert!((value - 0.72).abs() < 0.0001);
     }
 
     #[test]
@@ -4796,6 +6700,8 @@ mod tests {
             accumulator_names,
             midi_fx_names: _,
             sample_browser: _,
+            piano_roll_clipboard: _,
+            selected_drum_lane_steps: _,
         } = init_runtime(
             &app,
             state.clone(),
@@ -5178,11 +7084,24 @@ mod tests {
             .expect("project 92 rack macro drag probe should pass");
     }
 
+    #[test]
+    #[ignore = "release-mode perf probe: exercises sequencer Cmd+A and real step pointer gestures through host mutation, targeted invalidation, tiled-frame, and retained-render paths"]
+    fn project_92_step_interactions_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-step-interactions-probe".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::StepInteractions))
+            .expect("spawn project 92 step interaction probe")
+            .join()
+            .expect("project 92 step interaction probe should pass");
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Project92UiProbe {
         SceneSwitch,
         EscapeDeselect,
         RackMacroDrag,
+        StepInteractions,
     }
 
     fn project_92_ui_performance_probe_impl(probe: Project92UiProbe) {
@@ -5258,6 +7177,8 @@ mod tests {
             accumulator_names,
             midi_fx_names: _,
             sample_browser: _,
+            piano_roll_clipboard: _,
+            selected_drum_lane_steps: _,
         } = init_runtime(
             &app,
             state.clone(),
@@ -5433,6 +7354,460 @@ mod tests {
         refresh_visible_track_topology_layouts(&mut editor);
         editor.update_tile_rects(180, 70);
         let _ = editor.drain_host_commands();
+
+        if probe == Project92UiProbe::StepInteractions {
+            const TRACK: usize = 0;
+            const STEP_COUNT: usize = 64;
+            const SELECTED_MOVE_STEPS: usize = 16;
+            const WARMUPS: usize = 5;
+            const SAMPLES: usize = 20;
+
+            let sequencer_buffer_id = editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == "*sequencer*")
+                .expect("sequencer buffer should exist")
+                .id;
+            editor.set_active_buffer(sequencer_buffer_id);
+            state.pattern.track_params[TRACK].set_num_steps(STEP_COUNT);
+            for step in 0..STEP_COUNT {
+                state.pattern.patterns[TRACK].set_step_active(step, step < 24);
+            }
+            sync_all_track_sequencer_state(
+                editor.runtime_mut(),
+                &state,
+                &app,
+                TRACK,
+                &selected_steps,
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            editor.update_tile_rects(180, 70);
+
+            let initial_frame =
+                eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+            let initial_seq_frame = initial_frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                .expect("visible initial sequencer frame");
+            let initial_layout = initial_seq_frame
+                .frame
+                .widget_layout
+                .as_ref()
+                .expect("initial sequencer layout");
+            let viewport = eseqlisp::widget_render::WidgetViewport {
+                cell_w: 8.0,
+                cell_h: 16.0,
+                vp_w: 1440.0,
+                vp_h: 1120.0,
+                time_seconds: 0.0,
+                focused_widget_id: initial_seq_frame.frame.focused_widget_id,
+                focused_branch: true,
+                overlay_viewport_bottom: 70.0,
+                scroll_top: initial_seq_frame.frame.widget_scroll_top
+                    + initial_seq_frame.frame.text_scroll_top as f32,
+                scroll_left: initial_seq_frame.frame.widget_layout_scroll_left,
+                inherited_hover: false,
+            };
+            let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                initial_layout,
+                viewport,
+                viewport.scroll_top,
+                70,
+            );
+            let retained_run_indices =
+                eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+            let step_clipboard = Arc::new(Mutex::new(None));
+            let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
+            let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
+            let step_center = |editor: &mut Editor, step: usize| {
+                let layout = editor.widget_layout().expect("sequencer layout");
+                let cell = find_layout_node_by_stable_key(
+                    &layout,
+                    &format!("seqv-step-cell-{TRACK}-{step}"),
+                )
+                .unwrap_or_else(|| panic!("visible sequencer step cell {step}"));
+                (
+                    cell.rect.col + cell.rect.width * 0.5,
+                    cell.rect.row + cell.rect.height * 0.5,
+                    layout.rect.width.ceil().max(1.0) as u16,
+                    layout.rect.height.ceil().max(1.0) as u16,
+                )
+            };
+
+            let apply_pending_step_commands = |editor: &mut Editor, app: &mut tui::App| {
+                for command in editor.drain_host_commands() {
+                    let HostCommand::Custom { name, payload } = command else {
+                        continue;
+                    };
+                    match name.as_str() {
+                        "toggle-step" => {
+                            let (outcome, track, step) =
+                                apply_toggle_step_host_command(app, &payload)
+                                    .expect("apply benchmark step toggle");
+                            assert!(matches!(outcome, tui::edit::EditOutcome::Applied(_)));
+                            selected_steps.lock().unwrap().clear();
+                            ui_invalidations.push(UiInvalidation::StepBatch {
+                                track,
+                                steps: vec![step],
+                            });
+                        }
+                        "move-step-history" => {
+                            let (outcome, track, steps, affected_steps, delta, move_selection) =
+                                apply_move_step_history_host_command(app, &payload)
+                                    .expect("apply benchmark step move");
+                            assert!(matches!(outcome, tui::edit::EditOutcome::Applied(_)));
+                            let moved_steps = steps
+                                .iter()
+                                .map(|step| (*step as isize + delta) as usize)
+                                .collect::<Vec<_>>();
+                            let mut changed_selection = Vec::new();
+                            if move_selection {
+                                let mut selected = selected_steps.lock().unwrap();
+                                let previous = selected.clone();
+                                selected.clear();
+                                selected.extend(moved_steps.iter().copied());
+                                changed_selection = previous
+                                    .symmetric_difference(&selected)
+                                    .copied()
+                                    .collect();
+                                changed_selection.sort_unstable();
+                            }
+                            ui_invalidations.push(UiInvalidation::StepBatch {
+                                track,
+                                steps: affected_steps,
+                            });
+                            if move_selection {
+                                ui_invalidations.push(UiInvalidation::StepSelection {
+                                    track,
+                                    changed_steps: changed_selection,
+                                });
+                            }
+                        }
+                        other => panic!("unexpected benchmark host command {other}"),
+                    }
+                }
+            };
+
+            let neural = selected_neural_neurons.lock().unwrap().clone();
+            let mut finish_visible_update = |editor: &mut Editor, app: &mut tui::App| {
+                let started = Instant::now();
+                let invalidations = ui_invalidations.drain();
+                if !invalidations.is_empty() {
+                    apply_ui_invalidations(
+                        invalidations,
+                        UiInvalidationApplyCtx {
+                            app,
+                            editor,
+                            state: &state,
+                            track_collapsed: &track_collapsed,
+                            bus_state: &bus_state,
+                            current_track_idx: TRACK,
+                            selected_steps: &selected_steps,
+                            selected_neural_neurons: &neural,
+                            piano_roll_selection: &piano_roll_selection,
+                            accumulator_names: &accumulator_names,
+                            cached_track_peak_levels: &cached_track_peak_levels,
+                            cached_bus_peak_levels: &cached_bus_peak_levels,
+                            record_armed: &record_armed,
+                            active_delete_target: &active_delete_target,
+                            active_delete_target_version: &active_delete_target_version,
+                            expanded_step_projection: &expanded_step_projection,
+                            fx_visible,
+                            sequencer_visible: true,
+                            mixer_visible,
+                        },
+                    );
+                }
+                let invalidations_done = Instant::now();
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                let reactive_done = Instant::now();
+                let frame =
+                    eseqlisp::frame::build_tiled_render_frame_borderless(editor, 180, 70);
+                let seq_frame = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                    .expect("visible sequencer frame after benchmark action");
+                let layout = seq_frame
+                    .frame
+                    .widget_layout
+                    .as_ref()
+                    .expect("sequencer layout after benchmark action");
+                let frame_done = Instant::now();
+                let (_, stats) =
+                    eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        layout,
+                        viewport,
+                        viewport.scroll_top,
+                        70,
+                        &mut retained_runs,
+                        &retained_run_indices,
+                        &seq_frame.frame.dirty_widget_ids,
+                    );
+                assert_eq!(stats.missing_previous_runs, 0);
+                assert_eq!(stats.invalid_previous_runs, 0);
+                let retained_done = Instant::now();
+                (
+                    duration_ms(invalidations_done - started),
+                    duration_ms(reactive_done - invalidations_done),
+                    duration_ms(frame_done - reactive_done),
+                    duration_ms(retained_done - frame_done),
+                )
+            };
+
+            let percentile = |samples: &mut Vec<f64>, fraction: f64| {
+                samples.sort_by(|a, b| a.total_cmp(b));
+                let index = ((samples.len() - 1) as f64 * fraction).round() as usize;
+                samples[index]
+            };
+            let mut select_one_samples = Vec::with_capacity(SAMPLES);
+            let mut select_all_samples = Vec::with_capacity(SAMPLES);
+            let mut move_samples = Vec::with_capacity(SAMPLES);
+            let mut toggle_drag_samples = Vec::with_capacity(SAMPLES);
+            let mut select_one_dispatch = Vec::with_capacity(SAMPLES);
+            let mut select_all_dispatch = Vec::with_capacity(SAMPLES);
+            let mut move_dispatch = Vec::with_capacity(SAMPLES);
+            let mut toggle_drag_dispatch = Vec::with_capacity(SAMPLES);
+            let mut move_invalidation = Vec::with_capacity(SAMPLES);
+            let mut move_reactive = Vec::with_capacity(SAMPLES);
+            let mut move_frame = Vec::with_capacity(SAMPLES);
+            let mut move_retained = Vec::with_capacity(SAMPLES);
+
+            for iteration in 0..(WARMUPS + SAMPLES) {
+                selected_steps.lock().unwrap().clear();
+                ui_invalidations.push(UiInvalidation::StepSelection {
+                    track: TRACK,
+                    changed_steps: (0..STEP_COUNT).collect(),
+                });
+                finish_visible_update(&mut editor, &mut app);
+                let (col, row, width, height) = step_center(&mut editor, 8);
+                let started = Instant::now();
+                editor.handle_mouse_precise(
+                    MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: col.floor() as u16,
+                        row: row.floor() as u16,
+                        modifiers: KeyModifiers::SHIFT,
+                    },
+                    0,
+                    0,
+                    width,
+                    height,
+                    col,
+                    row,
+                );
+                apply_pending_step_commands(&mut editor, &mut app);
+                let dispatch_done = Instant::now();
+                finish_visible_update(&mut editor, &mut app);
+                assert_eq!(*selected_steps.lock().unwrap(), HashSet::from([8]));
+                if iteration >= WARMUPS {
+                    select_one_samples.push(duration_ms(started.elapsed()));
+                    select_one_dispatch.push(duration_ms(dispatch_done - started));
+                }
+
+                selected_steps.lock().unwrap().clear();
+                ui_invalidations.push(UiInvalidation::StepSelection {
+                    track: TRACK,
+                    changed_steps: (0..STEP_COUNT).collect(),
+                });
+                finish_visible_update(&mut editor, &mut app);
+                let started = Instant::now();
+                assert!(handle_metal_command_shortcut_with_ui_epoch(
+                    &mut editor,
+                    &crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Char('a'),
+                        KeyModifiers::SUPER,
+                    ),
+                    &state,
+                    &current_track,
+                    &selected_steps,
+                    &step_clipboard,
+                    &ui_epoch,
+                ));
+                let dispatch_done = Instant::now();
+                finish_visible_update(&mut editor, &mut app);
+                assert_eq!(selected_steps.lock().unwrap().len(), STEP_COUNT);
+                if iteration >= WARMUPS {
+                    select_all_samples.push(duration_ms(started.elapsed()));
+                    select_all_dispatch.push(duration_ms(dispatch_done - started));
+                }
+
+                for step in 0..STEP_COUNT {
+                    state.pattern.patterns[TRACK].set_step_active(
+                        step,
+                        step >= 8 && step < 8 + SELECTED_MOVE_STEPS,
+                    );
+                }
+                {
+                    let mut selected = selected_steps.lock().unwrap();
+                    selected.clear();
+                    selected.extend(8..8 + SELECTED_MOVE_STEPS);
+                }
+                ui_invalidations.push(UiInvalidation::Pattern(
+                    PatternInvalidation::WholeTrack { track: TRACK },
+                ));
+                ui_invalidations.push(UiInvalidation::StepSelection {
+                    track: TRACK,
+                    changed_steps: (0..STEP_COUNT).collect(),
+                });
+                finish_visible_update(&mut editor, &mut app);
+                assert_eq!(
+                    editor.runtime_mut().eval_str("(step-selected? 8)").unwrap(),
+                    Some(Value::Bool(true)),
+                    "move fixture must expose step 8 as selected to the gesture Lisp",
+                );
+                assert_eq!(
+                    editor
+                        .runtime_mut()
+                        .eval_str("(seq-track-step-active? 0 8)")
+                        .unwrap(),
+                    Some(Value::Bool(true)),
+                    "move fixture must expose step 8 as active to the gesture Lisp",
+                );
+                assert_eq!(
+                    editor.runtime_mut().eval_str("SEQ.current-track").unwrap(),
+                    Some(Value::Number(0.0)),
+                    "move fixture must target the visible current track",
+                );
+                let (_, _, width, height) = step_center(&mut editor, 8);
+                let (target_col, target_row, _, _) = step_center(&mut editor, 9);
+                // Arm the exact production pointer-down handler with an
+                // explicit left-edge local coordinate. The timed operation is
+                // the subsequent real mouse drag tick; pointer-down is a
+                // precondition and is intentionally outside the sample.
+                editor
+                    .runtime_mut()
+                    .eval_str("(seqv-step-pointer-down 0 8 (dict :sx -1))")
+                    .expect("arm selected-step move gesture");
+                assert_eq!(
+                    editor.runtime_mut().eval_str("step-move-last").unwrap(),
+                    Some(Value::Number(8.0)),
+                    "pointer down on the selected active step must arm move dragging",
+                );
+                let started = Instant::now();
+                editor.handle_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Drag(MouseButton::Left),
+                        target_col.floor() as u16,
+                        target_row.floor() as u16,
+                    ),
+                    0,
+                    0,
+                    width,
+                    height,
+                    target_col,
+                    target_row,
+                );
+                apply_pending_step_commands(&mut editor, &mut app);
+                let dispatch_done = Instant::now();
+                let move_visible_phases = finish_visible_update(&mut editor, &mut app);
+                assert_eq!(
+                    *selected_steps.lock().unwrap(),
+                    (9..9 + SELECTED_MOVE_STEPS).collect::<HashSet<_>>()
+                );
+                if iteration >= WARMUPS {
+                    move_samples.push(duration_ms(started.elapsed()));
+                    move_dispatch.push(duration_ms(dispatch_done - started));
+                    move_invalidation.push(move_visible_phases.0);
+                    move_reactive.push(move_visible_phases.1);
+                    move_frame.push(move_visible_phases.2);
+                    move_retained.push(move_visible_phases.3);
+                }
+                editor
+                    .runtime_mut()
+                    .eval_str("(seqv-step-pointer-up 0 9 (dict :sx -1))")
+                    .expect("finish benchmark selected-step drag");
+
+                selected_steps.lock().unwrap().clear();
+                state.pattern.patterns[TRACK].set_step_active(32, false);
+                state.pattern.patterns[TRACK].set_step_active(33, false);
+                ui_invalidations.push(UiInvalidation::Pattern(
+                    PatternInvalidation::WholeTrack { track: TRACK },
+                ));
+                finish_visible_update(&mut editor, &mut app);
+                let (start_col, start_row, width, height) = step_center(&mut editor, 32);
+                let (target_col, target_row, _, _) = step_center(&mut editor, 33);
+                editor.handle_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Down(MouseButton::Left),
+                        start_col.floor() as u16,
+                        start_row.floor() as u16,
+                    ),
+                    0,
+                    0,
+                    width,
+                    height,
+                    start_col,
+                    start_row,
+                );
+                apply_pending_step_commands(&mut editor, &mut app);
+                finish_visible_update(&mut editor, &mut app);
+                let started = Instant::now();
+                editor.handle_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Drag(MouseButton::Left),
+                        target_col.floor() as u16,
+                        target_row.floor() as u16,
+                    ),
+                    0,
+                    0,
+                    width,
+                    height,
+                    target_col,
+                    target_row,
+                );
+                apply_pending_step_commands(&mut editor, &mut app);
+                let dispatch_done = Instant::now();
+                finish_visible_update(&mut editor, &mut app);
+                assert!(state.pattern.patterns[TRACK].is_active(33));
+                if iteration >= WARMUPS {
+                    toggle_drag_samples.push(duration_ms(started.elapsed()));
+                    toggle_drag_dispatch.push(duration_ms(dispatch_done - started));
+                }
+                editor
+                    .runtime_mut()
+                    .eval_str("(seqv-step-pointer-up 0 33 (dict :sx -1))")
+                    .expect("finish benchmark toggle drag");
+            }
+
+            // Medians recorded by this same release-mode, end-to-end probe on
+            // project 92 before the targeted invalidation work.
+            for (name, reference_ms, samples, dispatch) in [
+                ("select-one", 8.251, &mut select_one_samples, &mut select_one_dispatch),
+                ("cmd-a", 7.773, &mut select_all_samples, &mut select_all_dispatch),
+                ("move-16", 106.412, &mut move_samples, &mut move_dispatch),
+                ("toggle-drag", 21.020, &mut toggle_drag_samples, &mut toggle_drag_dispatch),
+            ] {
+                let median = percentile(samples, 0.50);
+                let dispatch_median = percentile(dispatch, 0.50);
+                eprintln!(
+                    "[project-92-step-{name}] tracks={} steps={} samples={} median_ms={:.3} p95_ms={:.3} speedup={:.1}x dispatch_host_ms={:.3} visible_update_ms={:.3}",
+                    app.tracks.len(),
+                    STEP_COUNT,
+                    SAMPLES,
+                    median,
+                    percentile(samples, 0.95),
+                    reference_ms / median,
+                    dispatch_median,
+                    median - dispatch_median,
+                );
+                assert!(
+                    median <= reference_ms / 10.0,
+                    "{name} median {median:.3} ms did not reach 10x versus the {reference_ms:.3} ms baseline",
+                );
+            }
+            eprintln!(
+                "[project-92-step-move-16-visible-phases] invalidation_ms={:.3} reactive_ms={:.3} frame_ms={:.3} retained_ms={:.3}",
+                percentile(&mut move_invalidation, 0.50),
+                percentile(&mut move_reactive, 0.50),
+                percentile(&mut move_frame, 0.50),
+                percentile(&mut move_retained, 0.50),
+            );
+            return;
+        }
 
         if probe == Project92UiProbe::RackMacroDrag {
             const TRACK: usize = 0;
@@ -5735,13 +8110,12 @@ mod tests {
                 .enumerate()
                 .skip(3)
                 .find_map(|(param_idx, param)| {
-                    let is_haptic_free_continuous = matches!(
-                        param.kind,
-                        sequencer::effects::ParamKind::Continuous { .. }
-                    ) && (param.max - param.min).abs() <= 1.0
-                        && !sequencer::voice_modulator::is_bar_resync_param(
-                            param.node_param_idx,
-                        );
+                    let is_haptic_free_continuous =
+                        matches!(param.kind, sequencer::effects::ParamKind::Continuous { .. })
+                            && (param.max - param.min).abs() <= 1.0
+                            && !sequencer::voice_modulator::is_bar_resync_param(
+                                param.node_param_idx,
+                            );
                     let suffix = format!("-{}", param.name);
                     (is_haptic_free_continuous
                         && find_layout_node_by_stable_key_suffix(initial_fx_layout, &suffix)
@@ -5830,7 +8204,11 @@ mod tests {
                 );
                 let commands = editor.drain_host_commands();
                 let input_done = Instant::now();
-                assert_eq!(commands.len(), 1, "direct rack control commands={commands:?}");
+                assert_eq!(
+                    commands.len(),
+                    1,
+                    "direct rack control commands={commands:?}"
+                );
                 let HostCommand::Custom { name, payload } = &commands[0] else {
                     panic!("direct rack control must emit a custom command: {commands:?}");
                 };
@@ -5902,11 +8280,9 @@ mod tests {
                     );
                 assert_eq!(retained_stats.missing_previous_runs, 0);
                 assert_eq!(retained_stats.invalid_previous_runs, 0);
-                let rendered_wrapper = find_layout_node_by_stable_key_suffix(
-                    fx_layout,
-                    &direct_param_key_suffix,
-                )
-                .expect("rendered direct rack instrument parameter wrapper");
+                let rendered_wrapper =
+                    find_layout_node_by_stable_key_suffix(fx_layout, &direct_param_key_suffix)
+                        .expect("rendered direct rack instrument parameter wrapper");
                 let rendered_control =
                     find_layout_node_by_widget_type(rendered_wrapper, "knob-number")
                         .expect("rendered direct rack instrument knob");
@@ -6660,6 +9036,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         accumulator_names,
         midi_fx_names: _,
         sample_browser,
+        piano_roll_clipboard,
+        selected_drum_lane_steps,
     } = init_runtime(
         &app,
         state.clone(),
@@ -6705,6 +9083,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut scroll_accum_y: f32 = 0.0;
     let mut scroll_accum_x: f32 = 0.0;
     let mut soft_step_param_edit = SoftStepParamEdit::default();
+    let mut piano_roll_history_gesture: Option<ActivePianoRollHistoryGesture> = None;
     let mut lisp_hot_reload_watcher = LispHotReloadWatcher::start(watched_lisp_paths(&editor));
     let mut lisp_hot_reload_source_revision = editor.runtime().lisp_source_revision();
     let mut last_lisp_hot_reload_path_scan = Instant::now();
@@ -6722,6 +9101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pending_effect_cancel_restore: Option<PendingEffectCancelRestore> = None;
     let mut script_draft_session: Option<ScriptDraftSession> = None;
     let mut pending_agentic_bubbles: HashMap<String, PendingAgenticBubble> = HashMap::new();
+    let mut pending_lisp_history_transactions = HashMap::new();
     let mut prev_editor_macro_action: (String, String) = (String::new(), String::new());
     let mut prev_playing = false;
     let mut prev_bpm: u32 = 0;
@@ -6732,10 +9112,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_cpu_load_bits: u32 = u32::MAX;
     let mut prev_peak_l_level = -1.0f64;
     let mut prev_peak_r_level = -1.0f64;
+    let mut prev_recording = false;
     let mut prev_master_recording = false;
     let mut prev_selected_tracks: HashSet<usize> = HashSet::new();
     let mut prev_groups: Vec<sequencer::project::ProjectTrackGroup> = Vec::new();
     let mut prev_track_peak_levels: Vec<f64> = Vec::new();
+    let mut prev_rack_slot_peak_levels: Vec<Vec<f64>> = Vec::new();
     let mut prev_bus_peak_levels: Vec<f64> = Vec::new();
     let mut prev_modulator_phases: Vec<f64> = Vec::new();
     let mut prev_modulator_levels: Vec<f64> = Vec::new();
@@ -6757,6 +9139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cached_peak_l_level = 0.0f64;
     let mut cached_peak_r_level = 0.0f64;
     let mut cached_track_peak_levels = vec![0.0; track_names.len()];
+    let mut cached_rack_slot_peak_levels: Vec<Vec<f64>> = Vec::new();
     let mut cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
     let mut prev_queued_transport_scene: Option<usize> = None;
     let (mut cached_modulator_phases, mut cached_modulator_levels) =
@@ -6774,6 +9157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("metal_seq: entering event loop");
     let mut ui_loop_stats = UiLoopStats::new();
+    let mut pointer_is_down = false;
 
     loop {
         let mut pointer_released_this_loop = false;
@@ -6858,6 +9242,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Instant::now(),
         );
         pull_shared_bus_state(&mut app, &bus_state);
+        let recording_now = recording.load(Ordering::Relaxed);
+        if recording_now != prev_recording {
+            let result = if recording_now {
+                app.begin_recording_take_history().map(|_| None)
+            } else {
+                app.finish_recording_take_history()
+            };
+            if let Err(error) = result {
+                recording.store(false, Ordering::Relaxed);
+                editor.handle_host_event(HostEvent::Error(format!(
+                    "Recording history failed: {error}"
+                )));
+                prev_recording = false;
+            } else {
+                prev_recording = recording_now;
+            }
+        }
         if !app.has_pending_project_load() {
             pull_named_scratch_buffer_into_project(&editor, &mut app);
         }
@@ -6999,6 +9400,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 BackendEvent::Terminal(Event::Key(raw_key)) => {
+                    if raw_key.kind == crossterm::event::KeyEventKind::Release {
+                        tui::edit::finish_active_gesture(&mut app);
+                    }
                     if editor.active_buffer().name == "*sample-import*" {
                         let key = normalize_command_shortcuts(raw_key);
                         if let Some(session) = sample_import_session.as_mut() {
@@ -7040,6 +9444,183 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ImportKeyOutcome::Ignored => {}
                             }
                         }
+                    }
+                    if raw_key.kind == crossterm::event::KeyEventKind::Press {
+                        if raw_key.code == crossterm::event::KeyCode::Esc
+                            && raw_key.modifiers == crossterm::event::KeyModifiers::NONE
+                            && app.history.active_gesture().is_some()
+                        {
+                            match tui::edit::cancel_active_gesture(&mut app) {
+                                Ok(true) => editor.show_transient_message("Parameter edit canceled"),
+                                Ok(false) => {}
+                                Err(error) => editor.handle_host_event(HostEvent::Error(format!(
+                                    "Could not cancel parameter edit: {error:?}"
+                                ))),
+                            }
+                            pending_drag = None;
+                            pointer_is_down = false;
+                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            ui_loop_stats.note_event(event_started.elapsed());
+                            continue;
+                        }
+                        if let Some(gesture) = piano_roll_history_gesture.take() {
+                            let track = gesture.track;
+                            let cancel = raw_key.code == crossterm::event::KeyCode::Esc
+                                && raw_key.modifiers == crossterm::event::KeyModifiers::NONE;
+                            let finalized = if cancel {
+                                gesture
+                                    .transaction
+                                    .rollback(&mut app)
+                                    .map(|()| tui::edit::EditOutcome::NoOp)
+                            } else {
+                                gesture.transaction.commit(&mut app)
+                            };
+                            *piano_roll_move_state.lock().unwrap() = None;
+                            ui_invalidations.push(UiInvalidation::PianoRoll {
+                                track,
+                                change: PianoRollInvalidation::Items,
+                            });
+                            match finalized {
+                                Ok(_) => {
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(error) => {
+                                    editor.handle_host_event(HostEvent::Error(format!(
+                                        "Could not finalize interrupted piano-roll gesture: {error:?}"
+                                    )));
+                                    ui_loop_stats.note_event(event_started.elapsed());
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    if let Some(shortcut) = sequencer_history_shortcut(&editor, &raw_key) {
+                        if recording.load(Ordering::Relaxed) {
+                            recording.store(false, Ordering::Relaxed);
+                            prev_recording = false;
+                            app.ui.recording = false;
+                        }
+                        let track_count_before_replay = app.tracks.len();
+                        let replay = match shortcut {
+                            SequencerHistoryShortcut::Undo => tui::edit::undo(&mut app),
+                            SequencerHistoryShortcut::Redo => tui::edit::redo(&mut app),
+                        };
+                        let message = match replay {
+                            tui::history::HistoryReplay::Applied(result) => {
+                                let topology_changed = app.tracks.len() != track_count_before_replay;
+                                if !topology_changed {
+                                    track_names.clone_from(&app.tracks);
+                                }
+                                let replay_track = if topology_changed {
+                                    app.ui.cursor_track
+                                } else {
+                                    current_track.load(Ordering::Relaxed)
+                                }.min(app.tracks.len().saturating_sub(1));
+                                current_track.store(replay_track, Ordering::Relaxed);
+                                *bus_state.lock().unwrap() = app.buses.clone();
+                                *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
+                                *track_groups.lock().unwrap() = app.groups.clone();
+                                if topology_changed {
+                                    {
+                                        let mut pan_ids = track_pan_ids.lock().unwrap();
+                                        *pan_ids = app.graph.track_node_ids.iter()
+                                            .map(|ids| ids.pan_id)
+                                            .collect();
+                                        push_solo_mutes(lg_raw, &state, &pan_ids);
+                                    }
+                                    cached_track_peak_levels = read_track_peak_levels(
+                                        app.graph.lg,
+                                        &track_pan_ids.lock().unwrap(),
+                                    );
+                                    cached_bus_peak_levels =
+                                        read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+                                    (cached_modulator_phases, cached_modulator_levels) =
+                                        read_modulator_display_values(app.graph.lg, &app);
+                                    last_meter_poll_at = Instant::now();
+                                    *record_armed.lock().unwrap() = app.graph.record_armed.clone();
+                                    *track_groups.lock().unwrap() = app.groups.clone();
+                                }
+                                let rt = editor.runtime_mut();
+                                if topology_changed {
+                                    sync_track_topology_state(
+                                        rt,
+                                        &app,
+                                        &state,
+                                        &mut track_names,
+                                        replay_track,
+                                        &selected_steps,
+                                        &piano_roll_selection,
+                                        &accumulator_names,
+                                        &record_armed,
+                                        &cached_track_peak_levels,
+                                    );
+                                    sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                                    sync_modulator_phase_fields(rt, &cached_modulator_phases);
+                                    sync_modulator_level_fields(rt, &cached_modulator_levels);
+                                    rt.clear_subtree_effects_for_named_target("*sequencer*");
+                                }
+                                sync_bus_mixer_state(rt, &app);
+                                sync_groups_bindings(rt, &app.groups);
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "track-names",
+                                    build_track_names(&track_names),
+                                );
+                                if !app.tracks.is_empty() {
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "instrument-panel",
+                                        build_instrument_panel_value(
+                                            &app,
+                                            replay_track,
+                                            &selected_steps,
+                                        ),
+                                    );
+                                }
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                if topology_changed {
+                                    refresh_visible_track_topology_layouts(&mut editor);
+                                    prev_track_playheads = track_playheads_snapshot(&state, &app);
+                                    prev_track_button_states = track_button_state_snapshot(&state);
+                                }
+                                if !app.buses.is_empty() {
+                                    ui_invalidations.push(UiInvalidation::BusMixer {
+                                        bus: 0,
+                                        change: BusMixerInvalidation::Volume,
+                                    });
+                                }
+                                ui_invalidations.push(UiInvalidation::Pattern(
+                                    PatternInvalidation::AllTracks,
+                                ));
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                match shortcut {
+                                    SequencerHistoryShortcut::Undo => {
+                                        format!("Undid {}", result.label)
+                                    }
+                                    SequencerHistoryShortcut::Redo => {
+                                        format!("Redid {}", result.label)
+                                    }
+                                }
+                            }
+                            tui::history::HistoryReplay::Unavailable => match shortcut {
+                                SequencerHistoryShortcut::Undo => "Nothing to undo".to_string(),
+                                SequencerHistoryShortcut::Redo => "Nothing to redo".to_string(),
+                            },
+                            tui::history::HistoryReplay::Failed(error) => match shortcut {
+                                SequencerHistoryShortcut::Undo => {
+                                    format!("Could not undo: {error:?}")
+                                }
+                                SequencerHistoryShortcut::Redo => {
+                                    format!("Could not redo: {error:?}")
+                                }
+                            },
+                        };
+                        editor.show_transient_message(message);
+                        editor.mark_needs_redraw();
+                        ui_loop_stats.note_event(event_started.elapsed());
+                        continue;
                     }
                     if handle_metal_command_shortcut_with_ui_epoch(
                         &mut editor,
@@ -7107,7 +9688,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if handle_metal_soft_step_param_key(
                         &mut editor,
                         &key,
-                        &state,
+                        &mut app,
                         &current_track,
                         &expanded_step_projection,
                         &mut soft_step_param_edit,
@@ -7128,7 +9709,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &recording,
                             &keyboard_tx,
                             &keyboard_octave,
-                            &current_track,
                             &held_notes,
                             &ui_epoch,
                         )
@@ -7137,6 +9717,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     let intercepted = recording_key_outcome.consumed();
                     if recording_key_outcome.recorded() {
+                        app.mark_recording_take_changed();
                         let ct = current_track.load(Ordering::Relaxed);
                         let rt = editor.runtime_mut();
                         rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
@@ -7164,6 +9745,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 BackendEvent::Terminal(Event::Mouse(mouse)) => {
+                    if matches!(mouse.kind, crossterm::event::MouseEventKind::Down(_)) {
+                        pointer_is_down = true;
+                    }
                     let (precise_col, precise_row) = backend
                         .take_last_precise_mouse()
                         .unwrap_or((mouse.column as f32, mouse.row as f32));
@@ -7176,6 +9760,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if matches!(mouse.kind, crossterm::event::MouseEventKind::Up(_)) {
                             pending_drag = None;
                             pointer_released_this_loop = true;
+                            pointer_is_down = false;
                         }
                         editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
                         backend.set_widget_cursor(editor.widget_cursor());
@@ -7271,8 +9856,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // 1b. Drain host commands (sample browser etc.)
         let host_commands_started = Instant::now();
-        for command in editor.drain_host_commands() {
-            if let HostCommand::Custom { name, payload } = command {
+        let drained_host_commands = editor.drain_host_commands();
+        for command in drained_host_commands {
+            match command {
+                HostCommand::AuthoringTransactionBegin { id, label } => {
+                    pending_lisp_history_transactions.insert(
+                        id,
+                        (label, app.history.clone(), app.history.undo_len()),
+                    );
+                    continue;
+                }
+                HostCommand::AuthoringTransactionEnd { id, success } => {
+                    if let Some((label, checkpoint, checkpoint_len)) =
+                        pending_lisp_history_transactions.remove(&id)
+                    {
+                        if success {
+                            tui::edit::squash_history_since(
+                                &mut app,
+                                checkpoint_len,
+                                label,
+                            );
+                        } else if let Err(error) =
+                            tui::edit::rollback_history_to(&mut app, checkpoint)
+                        {
+                            editor.handle_host_event(HostEvent::Error(format!(
+                                "Lisp authoring rollback failed: {error:?}"
+                            )));
+                        }
+                    }
+                    continue;
+                }
+                HostCommand::Custom { name, payload } => {
                 let _ = current_track_for_app(&mut app, &current_track);
                 match handle_macro_host_command(
                     &name,
@@ -7289,6 +9903,638 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     MacroHostCommandOutcome::NotMacro => {}
                 }
                 match name.as_str() {
+                    "midi-fx-history-action" => {
+                        let Value::Map(ref map) = payload else {
+                            editor.handle_host_event(HostEvent::Error(
+                                "MIDI FX edit failed: invalid payload".to_string(),
+                            ));
+                            continue;
+                        };
+                        let field = |name: &str| map.get(name).map(|cell| cell.borrow().clone());
+                        let op = field("op").and_then(|value| match value {
+                            Value::Keyword(value) | Value::String(value) | Value::Symbol(value) => Some(value),
+                            _ => None,
+                        });
+                        let track = field("track").and_then(|value| match value {
+                            Value::Number(value) if value >= 0.0 => Some(value as usize),
+                            _ => None,
+                        });
+                        let (Some(op), Some(track)) = (op, track) else {
+                            editor.handle_host_event(HostEvent::Error(
+                                "MIDI FX edit failed: missing target".to_string(),
+                            ));
+                            continue;
+                        };
+                        enum MidiFxHistoryMutation {
+                            Chain(Vec<String>),
+                            Position(sequencer::sequencer::MidiFxPosition),
+                        }
+                        let mutation = match op.as_str() {
+                            "set-chain" => match field("value") {
+                                Some(Value::List(values)) => {
+                                    let chain = values.into_iter().map(|value| {
+                                        match &*value.borrow() {
+                                            Value::String(name) => Ok(name.clone()),
+                                            _ => Err("MIDI FX chain contains a non-string name".to_string()),
+                                        }
+                                    }).collect::<Result<Vec<_>, _>>();
+                                    match chain {
+                                        Ok(chain) => MidiFxHistoryMutation::Chain(chain),
+                                        Err(error) => {
+                                            editor.handle_host_event(HostEvent::Error(error));
+                                            continue;
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    editor.handle_host_event(HostEvent::Error(
+                                        "MIDI FX chain is missing".to_string(),
+                                    ));
+                                    continue;
+                                }
+                            },
+                            "set-position" => match field("value") {
+                                Some(Value::Keyword(value)) | Some(Value::String(value))
+                                    if value == "post-accumulator" =>
+                                {
+                                    MidiFxHistoryMutation::Position(
+                                        sequencer::sequencer::MidiFxPosition::PostAccumulator,
+                                    )
+                                }
+                                Some(Value::Keyword(value)) | Some(Value::String(value))
+                                    if value == "pre-accumulator" =>
+                                {
+                                    MidiFxHistoryMutation::Position(
+                                        sequencer::sequencer::MidiFxPosition::PreAccumulator,
+                                    )
+                                }
+                                _ => {
+                                    editor.handle_host_event(HostEvent::Error(
+                                        "MIDI FX position is invalid".to_string(),
+                                    ));
+                                    continue;
+                                }
+                            },
+                            _ => {
+                                editor.handle_host_event(HostEvent::Error(format!(
+                                    "Unknown MIDI FX edit {op}"
+                                )));
+                                continue;
+                            }
+                        };
+                        let Some(params) = app.state.pattern.track_params.get(track) else {
+                            editor.handle_host_event(HostEvent::Error(
+                                "MIDI FX track no longer exists".to_string(),
+                            ));
+                            continue;
+                        };
+                        let unchanged = match &mutation {
+                            MidiFxHistoryMutation::Chain(chain) => params.midi_fx_chain() == *chain,
+                            MidiFxHistoryMutation::Position(position) => {
+                                params.get_midi_fx_position() == *position
+                            }
+                        };
+                        if unchanged {
+                            continue;
+                        }
+                        let result = app.apply_recorded_scene_structure_mutation(
+                            "Edit MIDI FX routing",
+                            |app| {
+                                let params = app.state.pattern.track_params.get(track)
+                                    .ok_or_else(|| "MIDI FX track no longer exists".to_string())?;
+                                match mutation {
+                                    MidiFxHistoryMutation::Chain(chain) => {
+                                        params.set_midi_fx_chain(chain)
+                                    }
+                                    MidiFxHistoryMutation::Position(position) => {
+                                        params.set_midi_fx_position(position)
+                                    }
+                                }
+                                Ok(())
+                            },
+                        );
+                        match result {
+                            Ok(()) => {
+                                state.publish_scheduler_snapshot();
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(format!(
+                                "MIDI FX edit failed: {error}"
+                            ))),
+                        }
+                    }
+                    "process-history-action" => {
+                        let Value::Map(ref map) = payload else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Process edit failed: invalid payload".to_string(),
+                            ));
+                            continue;
+                        };
+                        let field = |name: &str| map.get(name).map(|cell| cell.borrow().clone());
+                        let op = field("op").and_then(|value| match value {
+                            Value::Keyword(value) | Value::String(value) | Value::Symbol(value) => Some(value),
+                            _ => None,
+                        });
+                        let track = field("track").and_then(|value| match value {
+                            Value::Number(value) if value >= 0.0 => Some(value as usize),
+                            _ => None,
+                        });
+                        let instance_id = field("instance-id").and_then(|value| match value {
+                            Value::Number(value) if value >= 0.0 => {
+                                Some(sequencer::process::ProcessInstanceId(value as u64))
+                            }
+                            _ => None,
+                        });
+                        let (Some(op), Some(track), Some(instance_id)) =
+                            (op, track, instance_id)
+                        else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Process edit failed: missing operation target".to_string(),
+                            ));
+                            continue;
+                        };
+                        let result = app.apply_recorded_scene_structure_mutation(
+                            "Edit process chain",
+                            |app| {
+                                let changed = match op.as_str() {
+                                    "set-lane-step" => {
+                                        let inlet = field("inlet").and_then(|value| match value {
+                                            Value::String(value) => Some(value),
+                                            _ => None,
+                                        }).ok_or_else(|| "Process lane inlet is missing".to_string())?;
+                                        let step = field("step").and_then(|value| match value {
+                                            Value::Number(value) if value >= 0.0 => Some(value as usize),
+                                            _ => None,
+                                        }).ok_or_else(|| "Process lane step is missing".to_string())?;
+                                        let value = field("value").and_then(|value| match value {
+                                            Value::Number(value) => Some(value as f32),
+                                            _ => None,
+                                        }).ok_or_else(|| "Process lane value is missing".to_string())?;
+                                        app.state.set_process_lane_value(
+                                            track, instance_id, inlet, step, value,
+                                        )
+                                    }
+                                    "clear-project-lane-override" => {
+                                        let inlet = field("inlet").and_then(|value| match value {
+                                            Value::String(value) => Some(value),
+                                            _ => None,
+                                        }).ok_or_else(|| "Process lane inlet is missing".to_string())?;
+                                        app.state.clear_project_process_lane_override(
+                                            track, instance_id, &inlet,
+                                        )
+                                    }
+                                    "set-inlet" => {
+                                        let inlet = field("inlet").and_then(|value| match value {
+                                            Value::String(value) => Some(value),
+                                            _ => None,
+                                        }).ok_or_else(|| "Process inlet is missing".to_string())?;
+                                        let literal = match field("value")
+                                            .ok_or_else(|| "Process inlet value is missing".to_string())?
+                                        {
+                                            Value::Number(value) => sequencer::process::ProcessLiteral::Number(value),
+                                            Value::Bool(value) => sequencer::process::ProcessLiteral::Bool(value),
+                                            Value::String(value) => sequencer::process::ProcessLiteral::String(value),
+                                            Value::Keyword(value) => sequencer::process::ProcessLiteral::Keyword(value),
+                                            Value::Symbol(value) => sequencer::process::ProcessLiteral::Symbol(value),
+                                            Value::Nil => sequencer::process::ProcessLiteral::Nil,
+                                            _ => return Err("Unsupported process inlet literal".to_string()),
+                                        };
+                                        app.state.set_track_process_inlet_value(
+                                            track, instance_id, &inlet, literal,
+                                        )
+                                    }
+                                    "set-enabled" => {
+                                        let enabled = field("enabled").and_then(|value| match value {
+                                            Value::Bool(value) => Some(value),
+                                            _ => None,
+                                        }).ok_or_else(|| "Process enabled state is missing".to_string())?;
+                                        app.state.set_track_process_slot_enabled(
+                                            track, instance_id, enabled,
+                                        )
+                                    }
+                                    "move-slot" => {
+                                        let before = match field("before-instance-id") {
+                                            Some(Value::Number(value)) if value >= 0.0 => {
+                                                Some(sequencer::process::ProcessInstanceId(value as u64))
+                                            }
+                                            Some(Value::Nil) | None => None,
+                                            _ => return Err("Process move target is invalid".to_string()),
+                                        };
+                                        app.state.move_track_process_slot_before(
+                                            track, instance_id, before,
+                                        )
+                                    }
+                                    "remove-slot" => app.state.remove_track_process_slot(
+                                        track, instance_id,
+                                    ),
+                                    "bind-port" => {
+                                        let port = field("port").and_then(|value| match value {
+                                            Value::String(value) => Some(value),
+                                            _ => None,
+                                        }).ok_or_else(|| "Process port is missing".to_string())?;
+                                        let target = field("target")
+                                            .ok_or_else(|| "Process binding target is missing".to_string())?;
+                                        let target = natives::param_target_from_value(
+                                            &app.state, track, &target,
+                                        )?;
+                                        app.state.set_process_port_binding(
+                                            track, instance_id, &port, target,
+                                        )
+                                    }
+                                    "clear-port-binding" => {
+                                        let port = field("port").and_then(|value| match value {
+                                            Value::String(value) => Some(value),
+                                            _ => None,
+                                        }).ok_or_else(|| "Process port is missing".to_string())?;
+                                        app.state.clear_process_port_binding(
+                                            track, instance_id, &port,
+                                        )
+                                    }
+                                    _ => return Err(format!("Unknown process history operation {op}")),
+                                };
+                                changed.then_some(()).ok_or_else(|| {
+                                    "Process edit target was missing or unchanged".to_string()
+                                })
+                            },
+                        );
+                        match result {
+                            Ok(()) => ui_invalidations.push(UiInvalidation::ProcessChain { track }),
+                            Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                "Process edit failed: {error}"
+                            ))),
+                        }
+                    }
+                    "piano-roll-gesture-update" => {
+                        match apply_piano_roll_gesture_update(
+                            &mut app,
+                            &piano_roll_selection,
+                            &piano_roll_move_state,
+                            &mut piano_roll_history_gesture,
+                            &payload,
+                        ) {
+                            Ok((status, track)) => {
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                ui_invalidations.push(UiInvalidation::PianoRoll {
+                                    track,
+                                    change: PianoRollInvalidation::Items,
+                                });
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.show_transient_message(status);
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "piano-roll-gesture-finish" => {
+                        match finish_piano_roll_gesture(
+                            &mut app,
+                            &piano_roll_move_state,
+                            &mut piano_roll_history_gesture,
+                            &payload,
+                        ) {
+                            Ok((tui::edit::EditOutcome::Applied(result), track)) => {
+                                ui_invalidations.push(UiInvalidation::PianoRoll {
+                                    track,
+                                    change: PianoRollInvalidation::Items,
+                                });
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.show_transient_message(result.label);
+                            }
+                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "Piano-roll gesture was applied without history".to_string(),
+                                ));
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "piano-roll-history-action" => {
+                        match apply_piano_roll_history_host_command(
+                            &mut app,
+                            &piano_roll_selection,
+                            &piano_roll_move_state,
+                            &piano_roll_clipboard,
+                            &payload,
+                        ) {
+                            Ok((outcome, status, track)) => {
+                                if matches!(outcome, tui::edit::EditOutcome::Applied(_)) {
+                                    *auto_follow_override_until.lock().unwrap() =
+                                        Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                    ui_invalidations.push(UiInvalidation::PianoRoll {
+                                        track,
+                                        change: PianoRollInvalidation::Items,
+                                    });
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                                editor.show_transient_message(status);
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "drum-lane-history-action" => {
+                        match apply_drum_lane_history_host_command(&mut app, &payload) {
+                            Ok((tui::edit::EditOutcome::Applied(result), action)) => {
+                                let track = action.track();
+                                let bindings = editor.runtime().reactive_binding_store();
+                                match action {
+                                    DrumLaneHistoryAction::Toggle { .. } => {
+                                        if !selected_steps.lock().unwrap().is_empty() {
+                                            selected_steps.lock().unwrap().clear();
+                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        clear_drum_lane_selection(
+                                            &bindings,
+                                            &mut selected_drum_lane_steps.lock().unwrap(),
+                                        );
+                                    }
+                                    DrumLaneHistoryAction::Move {
+                                        pad_note,
+                                        steps,
+                                        delta,
+                                        move_selection: true,
+                                        ..
+                                    } => {
+                                        let mut selected = selected_drum_lane_steps.lock().unwrap();
+                                        for step in steps {
+                                            let old = DrumLaneStepSelection {
+                                                track,
+                                                pad_note,
+                                                step,
+                                            };
+                                            selected.remove(&old);
+                                            write_drum_lane_selection(&bindings, old, false);
+                                            let new = DrumLaneStepSelection {
+                                                track,
+                                                pad_note,
+                                                step: (step as isize + delta) as usize,
+                                            };
+                                            selected.insert(new);
+                                            write_drum_lane_selection(&bindings, new, true);
+                                        }
+                                    }
+                                    DrumLaneHistoryAction::Clear { .. } => {
+                                        clear_drum_lane_selection(
+                                            &bindings,
+                                            &mut selected_drum_lane_steps.lock().unwrap(),
+                                        );
+                                    }
+                                    DrumLaneHistoryAction::Duration { .. }
+                                    | DrumLaneHistoryAction::Move {
+                                        move_selection: false,
+                                        ..
+                                    } => {}
+                                }
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                ui_invalidations.push(UiInvalidation::Pattern(
+                                    PatternInvalidation::WholeTrack { track },
+                                ));
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.show_transient_message(result.label);
+                            }
+                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "Drum-lane edit was applied without history".to_string(),
+                                ));
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "delete-selected-steps" => {
+                        let track = match &payload {
+                            Value::Map(map) => map_usize(map, "track"),
+                            _ => None,
+                        };
+                        let Some(track) = track else {
+                            editor.handle_host_event(HostEvent::Error(
+                                "Selected-step delete target was invalid".to_string(),
+                            ));
+                            continue;
+                        };
+                        match apply_selected_steps_delete(
+                            &mut app,
+                            track,
+                            &selected_steps,
+                        ) {
+                            Ok((tui::edit::EditOutcome::Applied(_), steps)) => {
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                ui_invalidations.push(UiInvalidation::Pattern(
+                                    PatternInvalidation::WholeTrack { track },
+                                ));
+                                ui_invalidations.push(UiInvalidation::StepSelection {
+                                    track,
+                                    changed_steps: steps,
+                                });
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(_) => {}
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "paste-steps" => {
+                        match apply_step_paste_host_command(&mut app, &step_clipboard, &payload) {
+                            Ok((tui::edit::EditOutcome::Applied(result), track)) => {
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                ui_invalidations.push(UiInvalidation::Pattern(
+                                    PatternInvalidation::WholeTrack { track },
+                                ));
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.show_transient_message(result.label);
+                            }
+                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "Step paste was applied without history".to_string(),
+                                ));
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "set-step-param-history" => {
+                        match apply_step_param_history_host_command(&mut app, &payload) {
+                            Ok((tui::edit::EditOutcome::Applied(result), track, steps, param)) => {
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                for step in steps {
+                                    ui_invalidations.push(UiInvalidation::Step {
+                                        track,
+                                        step,
+                                        change: StepInvalidation::Param(param.into()),
+                                    });
+                                    if param == StepParam::Duration {
+                                        ui_invalidations.push(UiInvalidation::Step {
+                                            track,
+                                            step,
+                                            change: StepInvalidation::DurationSpan,
+                                        });
+                                    }
+                                }
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.show_transient_message(result.label);
+                            }
+                            Ok((tui::edit::EditOutcome::NoOp, ..)) => {}
+                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, ..)) => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "Step parameter edit was applied without history".to_string(),
+                                ));
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "move-step-history" => {
+                        match apply_move_step_history_host_command(&mut app, &payload) {
+                            Ok((tui::edit::EditOutcome::Applied(result), track, steps, affected_steps, delta, move_selection)) => {
+                                let moved_steps = steps
+                                    .iter()
+                                    .map(|step| (*step as isize + delta) as usize)
+                                    .collect::<Vec<_>>();
+                                let mut changed_selection = Vec::new();
+                                if move_selection {
+                                    let mut selected = selected_steps.lock().unwrap();
+                                    let previous = selected.clone();
+                                    selected.clear();
+                                    selected.extend(moved_steps.iter().copied());
+                                    changed_selection = previous
+                                        .symmetric_difference(&selected)
+                                        .copied()
+                                        .collect();
+                                    changed_selection.sort_unstable();
+                                }
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                ui_invalidations.push(UiInvalidation::StepBatch {
+                                    track,
+                                    steps: affected_steps,
+                                });
+                                if move_selection {
+                                    ui_invalidations.push(UiInvalidation::StepSelection {
+                                        track,
+                                        changed_steps: changed_selection,
+                                    });
+                                }
+                                editor.show_transient_message(result.label);
+                            }
+                            Ok((tui::edit::EditOutcome::NoOp, ..)) => {}
+                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, ..)) => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "Step move was applied without history".to_string(),
+                                ));
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "slice2-history-action" => {
+                        match apply_slice2_history_host_command(&mut app, &payload) {
+                            Ok((tui::edit::EditOutcome::Applied(result), track)) => {
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                ui_invalidations.push(UiInvalidation::Pattern(
+                                    PatternInvalidation::WholeTrack { track },
+                                ));
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.show_transient_message(result.label);
+                            }
+                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "Slice 2 edit was applied without history".to_string(),
+                                ));
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "slice3-history-action" => {
+                        match apply_slice3_history_host_command(&mut app, &payload) {
+                            Ok((tui::edit::EditOutcome::Applied(result), track)) => {
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                match (track, slice3_track_mixer_invalidation(&payload)) {
+                                    (Some(track), Some(change)) => {
+                                        ui_invalidations
+                                            .push(UiInvalidation::TrackMixer { track, change });
+                                    }
+                                    (track, None) => {
+                                        if let Some(track) = track {
+                                            ui_invalidations.push(UiInvalidation::Pattern(
+                                                PatternInvalidation::WholeTrack { track },
+                                            ));
+                                        }
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    (None, Some(_)) => {
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                editor.show_transient_message(result.label);
+                            }
+                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "Slice 3 edit was applied without history".to_string(),
+                                ));
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "bus-mixer-history-action" => {
+                        match apply_bus_mixer_history_host_command(&mut app, &payload) {
+                            Ok((tui::edit::EditOutcome::Applied(result), bus)) => {
+                                *bus_state.lock().unwrap() = app.buses.clone();
+                                match bus_mixer_targeted_invalidation(&payload) {
+                                    Some(change) => {
+                                        ui_invalidations
+                                            .push(UiInvalidation::BusMixer { bus, change });
+                                    }
+                                    None => {
+                                        ui_invalidations.push(UiInvalidation::BusMixer {
+                                            bus,
+                                            change: BusMixerInvalidation::Volume,
+                                        });
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                editor.show_transient_message(result.label);
+                            }
+                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "Bus mixer edit was applied without history".to_string(),
+                                ));
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
+                    "toggle-step" => {
+                        match apply_toggle_step_host_command(&mut app, &payload) {
+                            Ok((tui::edit::EditOutcome::Applied(_), track, step)) => {
+                                let mut selection = selected_steps.lock().unwrap();
+                                if !selection.is_empty() {
+                                    selection.clear();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                                drop(selection);
+                                *auto_follow_override_until.lock().unwrap() =
+                                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                                // The targeted Step invalidations were the
+                                // complete pre-undo UI path for toggles; no
+                                // ui_epoch bump so fast toggle-drags skip the
+                                // full resync per step.
+                                ui_invalidations.push(UiInvalidation::StepBatch {
+                                    track,
+                                    steps: vec![step],
+                                });
+                            }
+                            Ok(_) => {}
+                            Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                        }
+                    }
                     "set-scene-launch-quantize" => {
                         let Value::String(label) = payload else {
                             editor.handle_host_event(HostEvent::Error(
@@ -7311,6 +10557,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "scene-launch-quantize",
                             Value::String(quantize.transport_label().to_string()),
                         );
+                        editor.runtime_mut().run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        editor.mark_needs_redraw();
+                    }
+                    "set-record-quantize" => {
+                        let Value::String(label) = payload else {
+                            editor.handle_host_event(HostEvent::Error(
+                                "Record quantization selection was invalid".to_string(),
+                            ));
+                            continue;
+                        };
+                        let Some(quantize) =
+                            sequencer::record_quantize::RecordQuantize::from_transport_label(
+                                &label,
+                            )
+                        else {
+                            editor.handle_host_event(HostEvent::Error(format!(
+                                "Unknown record quantization: {label}"
+                            )));
+                            continue;
+                        };
+                        state
+                            .transport
+                            .record_quantize
+                            .store(quantize as u32, Ordering::Release);
+                        editor.runtime_mut().set_reactive(
+                            "SEQ",
+                            "record-quantize",
+                            Value::String(quantize.transport_label().to_string()),
+                        );
+                        editor.runtime_mut().run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        editor.mark_needs_redraw();
+                    }
+                    "toggle-metronome" => {
+                        let enabled = !state
+                            .transport
+                            .metronome_enabled
+                            .fetch_xor(true, Ordering::AcqRel);
+                        editor
+                            .runtime_mut()
+                            .set_reactive("SEQ", "metronome", Value::Bool(enabled));
                         editor.runtime_mut().run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.mark_needs_redraw();
@@ -7372,7 +10660,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                    "add-track-sampler" => match app.graph_controller().add_blank_sampler_track() {
+                    "add-track-sampler" => match app.graph_controller().add_blank_sampler_track()
+                        .and_then(|idx| {
+                            app.commit_created_track(idx, "Add sampler track")?;
+                            Ok(idx)
+                        }) {
                         Ok(idx) => {
                             current_track.store(idx, Ordering::Relaxed);
                             let new_name = app.tracks[idx].clone();
@@ -7469,6 +10761,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             app.graph_controller().add_empty_rack_track()
                         };
+                        let result = result.and_then(|idx| {
+                            app.commit_created_track(idx, "Add drum rack track")?;
+                            Ok(idx)
+                        });
                         match result {
                             Ok(idx) => {
                                 sync_after_instrument_track_apply(
@@ -7509,6 +10805,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             app.graph_controller().add_empty_layer_rack_track()
                         };
+                        let result = result.and_then(|idx| {
+                            app.commit_created_track(idx, "Add layer rack track")?;
+                            Ok(idx)
+                        });
                         match result {
                             Ok(idx) => {
                                 sync_after_instrument_track_apply(
@@ -7548,7 +10848,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 match app.graph_controller().add_sampler_drum_rack_track(
                                     &path,
                                     sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE,
-                                ) {
+                                ).and_then(|idx| {
+                                    app.commit_created_track(idx, "Add drum rack track")?;
+                                    Ok(idx)
+                                }) {
                                     Ok(idx) => {
                                         sync_after_instrument_track_apply(
                                             &mut app,
@@ -7601,7 +10904,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                 }
                                 let path = Path::new(&path_str);
-                                match app.graph_controller().add_sampler_slot_to_rack(track, path) {
+                                match app.apply_recorded_rack_slot_add(
+                                    track,
+                                    "Add rack sample",
+                                    |app| app.graph_controller().add_sampler_slot_to_rack(track, path),
+                                ) {
                                     Ok(slot_idx) => {
                                         sync_after_instrument_track_apply(
                                             &mut app,
@@ -7659,10 +10966,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         &path_str,
                                     );
                                 }
-                                match app.graph_controller().replace_rack_slot_with_sampler(
+                                match app.apply_recorded_rack_slot_source_replacement(
                                     track,
                                     slot,
-                                    Path::new(&path_str),
+                                    "Replace rack sample",
+                                    |app| app.graph_controller().replace_rack_slot_with_sampler(
+                                        track,
+                                        slot,
+                                        Path::new(&path_str),
+                                    ),
                                 ) {
                                     Ok(()) => {
                                         sync_after_instrument_track_apply(
@@ -7774,7 +11086,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let slot_idx = extract_usize_from_payload(&payload, "slot");
                         match (track, slot_idx) {
                             (Some(track), Some(slot_idx)) => {
-                                match app.graph_controller().delete_rack_slot(track, slot_idx) {
+                                match app.apply_recorded_instrument_binding_mutation(
+                                    track,
+                                    "Delete rack layer",
+                                    |app| app.graph_controller().delete_rack_slot(track, slot_idx),
+                                ) {
                                     Ok(()) => {
                                         refresh_instrument_panel_reactive(
                                             &mut editor,
@@ -7812,11 +11128,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     || sequencer::effects::EffectDescriptor::builtin_insert(&name)
                                         .is_some()
                                     || sequencer::effects::conv_reverb::is_dgen_builtin(&name);
-                                let result = if is_builtin {
-                                    app.add_builtin_rack_slot_effect_sync(track, rack_slot, &name)
-                                } else {
-                                    app.add_rack_slot_effect_sync(track, rack_slot, &name)
-                                };
+                                let result = app.apply_recorded_rack_effect_chain_mutation(
+                                    track,
+                                    rack_slot,
+                                    "Add rack-slot effect",
+                                    |app| if is_builtin {
+                                        app.add_builtin_rack_slot_effect_sync(track, rack_slot, &name)
+                                    } else {
+                                        app.add_rack_slot_effect_sync(track, rack_slot, &name)
+                                    },
+                                );
                                 match result {
                                     Ok(_) => {
                                         refresh_instrument_panel_reactive(
@@ -7846,21 +11167,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let builtin = extract_bool_from_payload(&payload, "builtin");
                         match (track, rack_slot, target_slot, name) {
                             (Some(track), Some(rack_slot), Some(target_slot), Some(name)) => {
-                                let result = if builtin {
-                                    app.insert_builtin_rack_slot_effect_before_slot_sync(
-                                        track,
-                                        rack_slot,
-                                        target_slot,
-                                        &name,
-                                    )
-                                } else {
-                                    app.insert_rack_slot_effect_before_slot_sync(
-                                        track,
-                                        rack_slot,
-                                        target_slot,
-                                        &name,
-                                    )
-                                };
+                                let result = app.apply_recorded_rack_effect_chain_mutation(
+                                    track,
+                                    rack_slot,
+                                    "Insert rack-slot effect",
+                                    |app| if builtin {
+                                        app.insert_builtin_rack_slot_effect_before_slot_sync(
+                                            track,
+                                            rack_slot,
+                                            target_slot,
+                                            &name,
+                                        )
+                                    } else {
+                                        app.insert_rack_slot_effect_before_slot_sync(
+                                            track,
+                                            rack_slot,
+                                            target_slot,
+                                            &name,
+                                        )
+                                    },
+                                );
                                 match result {
                                     Ok(_) => {
                                         refresh_instrument_panel_reactive(
@@ -7888,7 +11214,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let effect_slot = extract_usize_from_payload(&payload, "effect-slot");
                         match (track, rack_slot, effect_slot) {
                             (Some(track), Some(rack_slot), Some(effect_slot)) => match app
-                                .delete_rack_slot_effect_slot(track, rack_slot, effect_slot)
+                                .apply_recorded_rack_effect_chain_mutation(
+                                    track,
+                                    rack_slot,
+                                    "Delete rack-slot effect",
+                                    |app| app.delete_rack_slot_effect_slot(
+                                        track, rack_slot, effect_slot,
+                                    ),
+                                )
                             {
                                 Ok(()) => {
                                     refresh_instrument_panel_reactive(
@@ -7935,11 +11268,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     })
                                 };
                                 if let Some(target_slot) = target_slot {
-                                    match app.move_rack_slot_effect_slot_sync(
+                                    match app.apply_recorded_rack_effect_chain_mutation(
                                         track,
                                         rack_slot,
-                                        source_slot,
-                                        target_slot,
+                                        "Move rack-slot effect",
+                                        |app| app.move_rack_slot_effect_slot_sync(
+                                            track,
+                                            rack_slot,
+                                            source_slot,
+                                            target_slot,
+                                        ),
                                     ) {
                                         Ok(()) => {
                                             refresh_instrument_panel_reactive(
@@ -7980,17 +11318,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Some(param),
                                 Some(value),
                             ) => {
-                                if let Err(error) = app.set_rack_slot_effect_param(
-                                    track,
-                                    rack_slot,
-                                    effect_slot,
-                                    param,
-                                    value,
-                                ) {
-                                    editor.handle_host_event(HostEvent::Status(format!(
-                                        "Error setting rack-slot effect parameter: {error}"
-                                    )));
-                                } else {
+                                let outcome = tui::try_apply_command(
+                                    &mut app,
+                                    tui::AppCommand::SetRackSlotEffectParam {
+                                        track,
+                                        rack_slot_idx: rack_slot,
+                                        effect_slot_idx: effect_slot,
+                                        param_idx: param,
+                                        value,
+                                    },
+                                );
+                                if outcome.is_ok() {
                                     rack_control_snapshot_dirty = true;
                                     if rack_slot_effect_param_needs_panel_rebuild(
                                         &state,
@@ -8022,6 +11360,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             &ui_epoch,
                                         );
                                     }
+                                } else if let Err(error) = outcome {
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Error setting rack-slot effect parameter: {error:?}"
+                                    )));
                                 }
                             }
                             _ => editor.handle_host_event(HostEvent::Status(
@@ -8045,16 +11387,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ) => {
                                 let steps: Vec<usize> =
                                     selected_steps.lock().unwrap().iter().copied().collect();
-                                if let Err(error) = app.set_rack_slot_effect_plocks(
-                                    track,
-                                    rack_slot,
-                                    effect_slot,
-                                    &steps,
-                                    param,
-                                    value,
-                                ) {
+                                let outcome = tui::try_apply_command(
+                                    &mut app,
+                                    tui::AppCommand::SetRackSlotEffectPlockMulti {
+                                        track,
+                                        steps,
+                                        rack_slot_idx: rack_slot,
+                                        effect_slot_idx: effect_slot,
+                                        param_idx: param,
+                                        value,
+                                    },
+                                );
+                                if !outcome
+                                    .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp)
+                                {
                                     editor.handle_host_event(HostEvent::Status(format!(
-                                        "Error setting rack-slot effect parameter locks: {error}"
+                                        "Rack-slot effect parameter locks were not changed"
                                     )));
                                 } else {
                                     rack_control_snapshot_dirty = true;
@@ -8115,22 +11463,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let result = if write_plock {
                                     let steps: Vec<usize> =
                                         selected_steps.lock().unwrap().iter().copied().collect();
-                                    app.set_rack_slot_effect_plock_option(
-                                        track,
-                                        rack_slot,
-                                        effect_slot,
-                                        &steps,
-                                        param_idx,
-                                        &label,
+                                    app.rack_slot_effect_option_value(
+                                        track, rack_slot, effect_slot, param_idx, &label,
                                     )
+                                    .and_then(|value| {
+                                        let outcome = tui::try_apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetRackSlotEffectPlockMulti {
+                                                track,
+                                                steps,
+                                                rack_slot_idx: rack_slot,
+                                                effect_slot_idx: effect_slot,
+                                                param_idx,
+                                                value,
+                                            },
+                                        );
+                                        outcome
+                                            .map_err(|error| format!("{error:?}"))
+                                            .and_then(|outcome| {
+                                                (outcome != tui::edit::EditOutcome::NoOp)
+                                                    .then_some(())
+                                                    .ok_or_else(|| {
+                                                    "Rack-slot effect parameter locks were not changed"
+                                                        .to_string()
+                                                    })
+                                            })
+                                    })
                                 } else {
-                                    app.set_rack_slot_effect_param_option(
-                                        track,
-                                        rack_slot,
-                                        effect_slot,
-                                        param_idx,
-                                        &label,
+                                    app.rack_slot_effect_option_value(
+                                        track, rack_slot, effect_slot, param_idx, &label,
                                     )
+                                    .and_then(|value| {
+                                        tui::try_apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetRackSlotEffectParam {
+                                                track,
+                                                rack_slot_idx: rack_slot,
+                                                effect_slot_idx: effect_slot,
+                                                param_idx,
+                                                value,
+                                            },
+                                        )
+                                        .map(|_| ())
+                                        .map_err(|error| format!("{error:?}"))
+                                    })
                                 };
                                 match result {
                                     Ok(()) => {
@@ -8159,7 +11535,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .or_else(|| current_track_for_app(&mut app, &current_track));
                         match track {
                             Some(track) => {
-                                match app.graph_controller().group_track_to_instrument_rack(track) {
+                                match app.group_track_to_instrument_rack_recorded(track) {
                                     Ok(()) => {
                                         sync_after_instrument_track_apply(
                                             &mut app,
@@ -8329,7 +11705,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                    "add-track-modulator" => match app.graph_controller().add_modulator_track() {
+                    "add-track-modulator" => match app.graph_controller().add_modulator_track()
+                        .and_then(|idx| {
+                            app.commit_created_track(idx, "Add modulator track")?;
+                            Ok(idx)
+                        }) {
                         Ok(idx) => {
                             sync_after_instrument_track_apply(
                                 &mut app,
@@ -8430,9 +11810,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .unwrap_or(path_str.as_str())
                                     .to_string();
                                 let result = if let Some(bus_idx) = bus {
-                                    app.set_conv_reverb_ir_bus(bus_idx, slot, path, &reference)
+                                    app.apply_recorded_bus_effect_value_mutation(
+                                        bus_idx,
+                                        slot,
+                                        "Set bus convolution IR",
+                                        "convolution-ir",
+                                        |app| app.set_conv_reverb_ir_bus(
+                                            bus_idx,
+                                            slot,
+                                            path,
+                                            &reference,
+                                        ),
+                                    )
                                 } else if let Some(track) = track {
-                                    app.set_conv_reverb_ir(track, slot, path, &reference)
+                                    tui::edit::apply_recorded_track_effect_ir_mutation(
+                                        &mut app,
+                                        track,
+                                        slot,
+                                        path,
+                                        &reference,
+                                    )
+                                    .map(|_| ())
+                                    .map_err(|error| format!("{error:?}"))
                                 } else {
                                     Err("need a track or bus".to_string())
                                 };
@@ -8606,9 +12005,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                             }
                             let path = Path::new(&path_str);
+                            let groups_before = app.groups.clone();
                             match app.graph_controller().add_track(path) {
                                 Ok(idx) => {
                                     host_commands::add_new_track_to_group(&mut app, idx, group_id);
+                                    if let Err(error) = app.commit_created_track(idx, "Add sample track") {
+                                        app.groups = groups_before;
+                                        *track_groups.lock().unwrap() = app.groups.clone();
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Error adding track: {error}"
+                                        )));
+                                        continue;
+                                    }
                                     *track_groups.lock().unwrap() = app.groups.clone();
                                     register_waveform_sample(path);
                                     current_track.store(idx, Ordering::Relaxed);
@@ -8965,7 +12373,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             None
                         };
 
-                        match app.graph_controller().delete_track(track) {
+                        match app.delete_track_recorded(track) {
                             Ok(new_idx) => {
                                 if let Some(request_id) = request_id {
                                     state.complete_topology_edit(request_id);
@@ -8992,6 +12400,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     read_modulator_display_values(app.graph.lg, &app);
                                 last_meter_poll_at = Instant::now();
                                 *record_armed.lock().unwrap() = app.graph.record_armed.clone();
+                                *track_groups.lock().unwrap() = app.groups.clone();
 
                                 let rt = editor.runtime_mut();
                                 sync_track_topology_state(
@@ -9349,7 +12758,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "add-track-from-sound" => {
                         let path = extract_path_from_payload(&payload);
                         match path {
-                            Some(path) => match app.add_track_from_sound(Path::new(&path)) {
+                            Some(path) => match app.add_track_from_sound(Path::new(&path))
+                                .and_then(|track| {
+                                    app.commit_created_track(track, "Add Sound track")?;
+                                    Ok(track)
+                                }) {
                                 Ok(track) => {
                                     sync_after_instrument_track_apply(
                                         &mut app,
@@ -9673,14 +13086,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let (Some(track), Some(slot_idx)) =
                                 (map_usize(map, "track"), map_usize(map, "slot"))
                             {
-                                app.set_rack_selected_slot(track, slot_idx);
-                                refresh_instrument_panel_reactive(
-                                    &mut editor,
-                                    &app,
-                                    track,
-                                    &selected_steps,
-                                    &ui_epoch,
-                                );
+                                let rack = {
+                                    app.state
+                                        .pattern
+                                        .rack_tracks
+                                        .lock()
+                                        .unwrap()
+                                        .get(track)
+                                        .cloned()
+                                        .flatten()
+                                };
+                                let selected = rack.is_some_and(|rack| {
+                                    app.select_rack_slot(track, &rack, slot_idx)
+                                });
+                                if selected {
+                                    refresh_instrument_panel_reactive(
+                                        &mut editor,
+                                        &app,
+                                        track,
+                                        &selected_steps,
+                                        &ui_epoch,
+                                    );
+                                }
                             }
                         }
                     }
@@ -9723,7 +13150,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 map_usize(map, "slot"),
                                 map_number(map, "value").map(|value| value as f32),
                             ) {
-                                app.set_rack_slot_gain(track, slot_idx, value);
+                                tui::apply_command(
+                                    &mut app,
+                                    tui::AppCommand::SetRackSlotGain {
+                                        track,
+                                        slot_idx,
+                                        value,
+                                    },
+                                );
                                 rack_control_snapshot_dirty = true;
                                 refresh_rack_direct_param_reactive(
                                     &mut editor,
@@ -9748,7 +13182,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 map_usize(map, "slot"),
                                 map_number(map, "value").map(|value| value as f32),
                             ) {
-                                app.set_rack_slot_pan(track, slot_idx, value);
+                                tui::apply_command(
+                                    &mut app,
+                                    tui::AppCommand::SetRackSlotPan {
+                                        track,
+                                        slot_idx,
+                                        value,
+                                    },
+                                );
                                 rack_control_snapshot_dirty = true;
                                 refresh_rack_direct_param_reactive(
                                     &mut editor,
@@ -9779,6 +13220,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         value: map_bool(map, "value"),
                                     },
                                 );
+                                // Without republishing the scheduler snapshot,
+                                // per-trigger panner pushes clobber the new
+                                // mute with the stale snapshot's value.
+                                rack_control_snapshot_dirty = true;
                                 refresh_rack_direct_param_reactive(
                                     &mut editor,
                                     &app,
@@ -9791,6 +13236,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &selected_steps,
                                     false,
                                     &ui_epoch,
+                                );
+                                // The rack panel's pad/slot dicts carry mute as a
+                                // plain value, so rebuild them or the panel shows
+                                // stale M/S state.
+                                sync_rack_slot_instrument_authoring_display(
+                                    &mut editor,
+                                    &app,
+                                    &state,
+                                    track,
+                                    &selected_steps,
                                 );
                             }
                         }
@@ -9808,6 +13263,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         value: map_bool(map, "value"),
                                     },
                                 );
+                                rack_control_snapshot_dirty = true;
                                 refresh_rack_direct_param_reactive(
                                     &mut editor,
                                     &app,
@@ -9820,6 +13276,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &selected_steps,
                                     false,
                                     &ui_epoch,
+                                );
+                                sync_rack_slot_instrument_authoring_display(
+                                    &mut editor,
+                                    &app,
+                                    &state,
+                                    track,
+                                    &selected_steps,
                                 );
                             }
                         }
@@ -9924,11 +13387,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             {
                                 let steps: Vec<usize> =
                                     selected_steps.lock().unwrap().iter().copied().collect();
-                                for step in steps {
-                                    app.set_rack_slot_param_plock(
-                                        track, slot_idx, step, param, value,
-                                    );
-                                }
+                                tui::apply_command(
+                                    &mut app,
+                                    tui::AppCommand::SetRackSlotParamPlockMulti {
+                                        track,
+                                        slot_idx,
+                                        steps,
+                                        param,
+                                        value,
+                                    },
+                                );
                                 rack_control_snapshot_dirty = true;
                                 refresh_rack_direct_param_reactive(
                                     &mut editor,
@@ -10135,6 +13603,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "set-rack-slot-instrument-param-batch"
+                    | "set-rack-slot-instrument-plock-batch" => {
+                        if let Value::Map(ref map) = payload {
+                            let track = map_usize(map, "track");
+                            let slot_idx = map_usize(map, "slot");
+                            let updates = map_param_updates(map);
+                            if let (Some(track), Some(slot_idx), Some(updates)) =
+                                (track, slot_idx, updates)
+                            {
+                                let steps = map_usize_list(map, "steps").unwrap_or_else(|| {
+                                    selected_steps
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .copied()
+                                        .collect::<Vec<_>>()
+                                });
+                                let commands = rack_slot_snapshot_for_host(&state, track, slot_idx)
+                                    .and_then(|slot| app.rack_slot_instrument_descriptor(&slot))
+                                    .map(|descriptor| {
+                                        updates.into_iter().filter_map(|(param_idx, user_value)| {
+                                            let param = descriptor.params.get(param_idx)?;
+                                            let value = param.clamp(param.user_input_to_stored(user_value));
+                                            Some(if name == "set-rack-slot-instrument-plock-batch" {
+                                                tui::AppCommand::SetRackSlotInstrumentPlockMulti {
+                                                    track,
+                                                    slot_idx,
+                                                    steps: steps.clone(),
+                                                    param_idx,
+                                                    value,
+                                                }
+                                            } else {
+                                                tui::AppCommand::SetRackSlotInstrumentParam {
+                                                    track,
+                                                    slot_idx,
+                                                    param_idx,
+                                                    value,
+                                                }
+                                            })
+                                        }).collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default();
+                                let gesture = map_string(map, "gesture")
+                                    .unwrap_or_else(|| "rack-instrument".to_string());
+                                let label = map_string(map, "label")
+                                    .unwrap_or_else(|| "Set rack instrument parameters".to_string());
+                                let result = if name == "set-rack-slot-instrument-plock-batch" {
+                                    tui::edit::apply_coalesced_device_plock_batch(
+                                        &mut app,
+                                        &commands,
+                                        &gesture,
+                                        &label,
+                                    )
+                                } else {
+                                    tui::edit::apply_coalesced_device_value_batch(
+                                        &mut app,
+                                        &commands,
+                                        &gesture,
+                                        &label,
+                                    )
+                                };
+                                match result {
+                                    Ok(_) => {
+                                        rack_control_snapshot_dirty = true;
+                                        refresh_instrument_panel_reactive(
+                                            &mut editor,
+                                            &app,
+                                            track,
+                                            &selected_steps,
+                                            &ui_epoch,
+                                        );
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Error(
+                                        format!("rack instrument parameter batch failed: {error:?}"),
+                                    )),
+                                }
+                            }
+                        }
+                    }
                     "set-rack-slot-instrument-param" => {
                         if let Value::Map(ref map) = payload {
                             let track = map_usize(map, "track");
@@ -10153,8 +13700,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     {
                                         let stored =
                                             desc.clamp(desc.user_input_to_stored(user_val));
-                                        app.set_rack_slot_instrument_param(
-                                            track, slot_idx, param_idx, stored,
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetRackSlotInstrumentParam {
+                                                track,
+                                                slot_idx,
+                                                param_idx,
+                                                value: stored,
+                                            },
                                         );
                                         rack_control_snapshot_dirty = true;
                                         if param_change_needs_fx_rebuild(&desc) {
@@ -10209,11 +13762,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .iter()
                                             .copied()
                                             .collect();
-                                        for step in steps {
-                                            app.set_rack_slot_instrument_plock(
-                                                track, slot_idx, step, param_idx, stored,
-                                            );
-                                        }
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetRackSlotInstrumentPlockMulti {
+                                                track,
+                                                slot_idx,
+                                                steps,
+                                                param_idx,
+                                                value: stored,
+                                            },
+                                        );
                                         rack_control_snapshot_dirty = true;
                                         if param_change_needs_fx_rebuild(&desc) {
                                             sync_rack_slot_instrument_authoring_display(
@@ -10458,6 +14016,129 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "set-instrument-param-batch"
+                    | "set-instrument-plock-batch"
+                    | "set-instrument-key-lock-batch" => {
+                        if let Value::Map(ref map) = payload {
+                            if let Some(updates) = map_param_updates(map) {
+                                let track = map_usize(map, "track")
+                                    .unwrap_or_else(|| current_track.load(Ordering::Relaxed));
+                                let mut commands = Vec::with_capacity(updates.len());
+                                let steps = map_usize_list(map, "steps").unwrap_or_else(|| {
+                                    selected_steps
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .copied()
+                                        .collect::<Vec<_>>()
+                                });
+                                let notes = map_u8_list(map, "notes").unwrap_or_default();
+                                for (param_idx, user_value) in updates {
+                                    if let Some(desc) = app
+                                        .graph
+                                        .instrument_descriptors
+                                        .get(track)
+                                        .and_then(|descriptor| descriptor.params.get(param_idx))
+                                    {
+                                        let value = desc.clamp(desc.user_input_to_stored(user_value));
+                                        commands.push(if name == "set-instrument-plock-batch" {
+                                            tui::AppCommand::SetInstrumentPlockMulti {
+                                                track,
+                                                steps: steps.clone(),
+                                                param_idx,
+                                                value,
+                                            }
+                                        } else if name == "set-instrument-key-lock-batch" {
+                                            tui::AppCommand::SetInstrumentKeyLockMulti {
+                                                track,
+                                                notes: notes.clone(),
+                                                param_idx,
+                                                value,
+                                            }
+                                        } else {
+                                            tui::AppCommand::SetInstrumentParam {
+                                                track,
+                                                param_idx,
+                                                value,
+                                            }
+                                        });
+                                    }
+                                }
+                                let result = if name == "set-instrument-plock-batch" {
+                                    let gesture = map_string(map, "gesture")
+                                        .unwrap_or_else(|| "instrument-envelope".to_string());
+                                    let label = map_string(map, "label")
+                                        .unwrap_or_else(|| "Set instrument envelope".to_string());
+                                    tui::edit::apply_coalesced_device_plock_batch(
+                                        &mut app,
+                                        &commands,
+                                        &gesture,
+                                        &label,
+                                    )
+                                } else {
+                                    let gesture = map_string(map, "gesture")
+                                        .unwrap_or_else(|| "instrument-envelope".to_string());
+                                    let label = map_string(map, "label")
+                                        .unwrap_or_else(|| "Set instrument envelope".to_string());
+                                    tui::edit::apply_coalesced_device_value_batch(
+                                        &mut app,
+                                        &commands,
+                                        &gesture,
+                                        &label,
+                                    )
+                                };
+                                if result.is_ok() {
+                                    let plocks_changed = name == "set-instrument-plock-batch";
+                                    let display_step = if plocks_changed {
+                                        displayed_plock_step(
+                                            &state,
+                                            track,
+                                            selected_plock_step(&selected_steps),
+                                        )
+                                    } else {
+                                        None
+                                    };
+                                    let param_indices = commands
+                                        .iter()
+                                        .filter_map(|command| match command {
+                                            tui::AppCommand::SetInstrumentParam { param_idx, .. }
+                                            | tui::AppCommand::SetInstrumentPlockMulti {
+                                                param_idx, ..
+                                            }
+                                            | tui::AppCommand::SetInstrumentKeyLockMulti {
+                                                param_idx, ..
+                                            } => Some(*param_idx),
+                                            _ => None,
+                                        })
+                                        .collect::<Vec<_>>();
+                                    let neural_selection =
+                                        selected_neural_neurons.lock().unwrap().clone();
+                                    sync_instrument_param_batch_display(
+                                        &mut editor,
+                                        &app,
+                                        &state,
+                                        &selected_steps,
+                                        &neural_selection,
+                                        track,
+                                        &param_indices,
+                                        display_step,
+                                        plocks_changed,
+                                    );
+                                }
+                                match result {
+                                    Ok(_) if map_bool(map, "commit") => {
+                                        tui::edit::finish_active_gesture(&mut app);
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Ok(_) => {}
+                                    Err(error) => editor.handle_host_event(HostEvent::Error(
+                                        format!("instrument parameter batch failed: {error:?}"),
+                                    )),
+                                }
+                            }
+                        }
+                    }
                     "set-instrument-param" => {
                         if let Value::Map(ref map) = payload {
                             let param_idx =
@@ -10479,7 +14160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .cloned()
                                 {
                                     let stored = desc.clamp(desc.user_input_to_stored(user_val));
-                                    let (neural_selection, wrote_neural_plock) =
+                                    let (neural_selection, wrote_neural_plock, neural_history_before) =
                                         record_selected_neural_instrument_plock(
                                             &mut editor,
                                             &state,
@@ -10488,6 +14169,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             param_idx,
                                             stored,
                                         );
+                                    if let Some(before) = neural_history_before {
+                                        app.commit_applied_scene_structure_mutation(
+                                            before,
+                                            "Edit neural override",
+                                        );
+                                    }
                                     if !wrote_neural_plock {
                                         tui::apply_command(
                                             &mut app,
@@ -10810,6 +14497,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     })
                                     .unwrap_or(default);
                                     let next = desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
+                                    let neural_history_before = (!neural_selection.is_empty())
+                                        .then(|| state.capture_project_scenes());
                                     let wrote_neural_plock = write_selected_neural_instrument_plock(
                                         &mut editor,
                                         &state,
@@ -10818,6 +14507,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         param_idx,
                                         next,
                                     );
+                                    if let Some(before) =
+                                        neural_history_before.filter(|_| wrote_neural_plock)
+                                    {
+                                        app.commit_applied_scene_structure_mutation(
+                                            before,
+                                            "Edit neural override",
+                                        );
+                                    }
                                     if wrote_neural_plock {
                                         sync_instrument_param_authoring_display(
                                             &mut editor,
@@ -10889,6 +14586,117 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "set-effect-param-batch" | "set-effect-plock-batch" => {
+                        if let Value::Map(ref map) = payload {
+                            let slot_idx = map_usize(map, "slot-idx");
+                            if let (Some(slot_idx), Some(updates)) =
+                                (slot_idx, map_param_updates(map))
+                            {
+                                let track = map_usize(map, "track")
+                                    .unwrap_or_else(|| current_track.load(Ordering::Relaxed));
+                                let steps = map_usize_list(map, "steps").unwrap_or_else(|| {
+                                    selected_steps
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .copied()
+                                        .collect::<Vec<_>>()
+                                });
+                                let commands = updates
+                                    .into_iter()
+                                    .filter_map(|(param_idx, value)| {
+                                        let desc = app
+                                            .graph
+                                            .effect_descriptors
+                                            .get(track)?
+                                            .get(slot_idx)?
+                                            .params
+                                            .get(param_idx)?;
+                                        let value = value.clamp(desc.min, desc.max);
+                                        Some(if name == "set-effect-plock-batch" {
+                                            tui::AppCommand::SetEffectPlockMulti {
+                                                track,
+                                                steps: steps.clone(),
+                                                slot_idx,
+                                                param_idx,
+                                                value,
+                                            }
+                                        } else {
+                                            tui::AppCommand::SetEffectParam {
+                                                track,
+                                                slot_idx,
+                                                param_idx,
+                                                value,
+                                            }
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
+                                let result = if name == "set-effect-plock-batch" {
+                                    let gesture = map_string(map, "gesture")
+                                        .unwrap_or_else(|| "effect-curve".to_string());
+                                    let label = map_string(map, "label")
+                                        .unwrap_or_else(|| "Set effect curve".to_string());
+                                    tui::edit::apply_coalesced_device_plock_batch(
+                                        &mut app,
+                                        &commands,
+                                        &gesture,
+                                        &label,
+                                    )
+                                } else {
+                                    tui::edit::apply_coalesced_device_value_batch(
+                                        &mut app,
+                                        &commands,
+                                        "effect-curve",
+                                        "Set effect curve",
+                                    )
+                                };
+                                if result.is_ok() {
+                                    let plocks_changed = name == "set-effect-plock-batch";
+                                    let display_step = if plocks_changed {
+                                        displayed_plock_step(
+                                            &state,
+                                            track,
+                                            selected_plock_step(&selected_steps),
+                                        )
+                                    } else {
+                                        None
+                                    };
+                                    let param_indices = commands
+                                        .iter()
+                                        .filter_map(|command| match command {
+                                            tui::AppCommand::SetEffectParam { param_idx, .. }
+                                            | tui::AppCommand::SetEffectPlockMulti {
+                                                param_idx, ..
+                                            } => Some(*param_idx),
+                                            _ => None,
+                                        })
+                                        .collect::<Vec<_>>();
+                                    let neural_selection =
+                                        selected_neural_neurons.lock().unwrap().clone();
+                                    sync_effect_param_batch_display(
+                                        &mut editor,
+                                        &app,
+                                        &neural_selection,
+                                        track,
+                                        slot_idx,
+                                        &param_indices,
+                                        display_step,
+                                    );
+                                }
+                                match result {
+                                    Ok(_) if map_bool(map, "commit") => {
+                                        tui::edit::finish_active_gesture(&mut app);
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Ok(_) => {}
+                                    Err(error) => editor.handle_host_event(HostEvent::Error(
+                                        format!("effect parameter batch failed: {error:?}"),
+                                    )),
+                                }
+                            }
+                        }
+                    }
                     "set-effect-param" => {
                         if let Value::Map(ref map) = payload {
                             let slot_idx =
@@ -10920,7 +14728,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .as_ref()
                                     .map(|p| value.clamp(p.min, p.max))
                                     .unwrap_or(value);
-                                let (neural_selection, wrote_neural_plock) =
+                                let (neural_selection, wrote_neural_plock, neural_history_before) =
                                     record_selected_neural_effect_plock(
                                         &mut editor,
                                         &state,
@@ -10928,8 +14736,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         track,
                                         slot_idx,
                                         param_idx,
-                                        clamped,
+                                    clamped,
+                                );
+                                if let Some(before) = neural_history_before {
+                                    app.commit_applied_scene_structure_mutation(
+                                        before,
+                                        "Edit neural override",
                                     );
+                                }
                                 if !wrote_neural_plock {
                                     tui::apply_command(
                                         &mut app,
@@ -11021,8 +14835,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let next =
                                                 desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
                                             if selected.is_empty() {
-                                                match app.set_bus_effect_param(
-                                                    bus_idx, slot_idx, param_idx, next,
+                                                match app.apply_recorded_bus_effect_value_mutation(
+                                                    bus_idx,
+                                                    slot_idx,
+                                                    "Set bus effect parameter",
+                                                    format!("param:{param_idx}"),
+                                                    |app| app.set_bus_effect_param(
+                                                        bus_idx, slot_idx, param_idx, next,
+                                                    ),
                                                 ) {
                                                     Ok(()) => {
                                                         app.publish_bus_gate_runtime();
@@ -11047,20 +14867,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         continue;
                                                     }
                                                 }
-                                            } else if let Some(bus) = app.buses.get_mut(bus_idx) {
-                                                if let Some(slot) =
-                                                    bus.effect_slots.get_mut(slot_idx)
-                                                {
-                                                    for step in selected {
-                                                        if step < slot.plocks.len()
-                                                            && param_idx < slot.plocks[step].len()
-                                                        {
-                                                            slot.plocks[step][param_idx] =
-                                                                Some(next);
+                                            } else {
+                                                let result = app.apply_recorded_bus_effect_value_mutation(
+                                                    bus_idx,
+                                                    slot_idx,
+                                                    "Set bus effect p-lock",
+                                                    format!("plock:param:{param_idx}"),
+                                                    |app| {
+                                                        for step in selected {
+                                                            app.set_bus_effect_plock(
+                                                                bus_idx, slot_idx, step, param_idx, next,
+                                                            )?;
                                                         }
-                                                    }
+                                                        Ok(())
+                                                    },
+                                                );
+                                                if result.is_ok() {
                                                     app.publish_bus_gate_runtime();
                                                     *bus_state.lock().unwrap() = app.buses.clone();
+                                                } else if let Err(error) = result {
+                                                    editor.handle_host_event(HostEvent::Status(format!(
+                                                        "Error toggling bus effect p-lock: {error}"
+                                                    )));
                                                 }
                                             }
                                             fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -11093,7 +14921,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let next =
                                                 desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
                                             if selected.is_empty() {
-                                                slot.defaults.set(param_idx, next);
+                                                tui::apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetMidiFxParam {
+                                                        track,
+                                                        slot_idx,
+                                                        param_idx,
+                                                        value: next,
+                                                    },
+                                                );
                                                 if sync_midi_fx_param_value_field(
                                                     editor.runtime_mut(),
                                                     &state,
@@ -11105,11 +14941,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     editor.mark_needs_redraw();
                                                 }
                                             } else {
-                                                for step in selected {
-                                                    slot.set_plock(step, param_idx, next);
-                                                }
+                                                tui::apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetMidiFxPlockMulti {
+                                                        track,
+                                                        steps: selected,
+                                                        slot_idx,
+                                                        param_idx,
+                                                        value: next,
+                                                    },
+                                                );
                                             }
-                                            state.publish_scheduler_snapshot();
                                             fx_epoch.fetch_add(1, Ordering::Relaxed);
                                             ui_epoch.fetch_add(1, Ordering::Relaxed);
                                         }
@@ -11152,6 +14994,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .unwrap_or(desc.default);
                                         let next =
                                             desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
+                                        let neural_history_before = (!neural_selection.is_empty())
+                                            .then(|| state.capture_project_scenes());
                                         let wrote_neural_plock = write_selected_neural_effect_plock(
                                             &mut editor,
                                             &state,
@@ -11161,6 +15005,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             param_idx,
                                             next,
                                         );
+                                        if let Some(before) =
+                                            neural_history_before.filter(|_| wrote_neural_plock)
+                                        {
+                                            app.commit_applied_scene_structure_mutation(
+                                                before,
+                                                "Edit neural override",
+                                            );
+                                        }
                                         if wrote_neural_plock {
                                             sync_effect_param_authoring_display(
                                                 &mut editor,
@@ -11242,15 +15094,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         labels.iter().position(|item| item == &label)
                                     {
                                         let value = selected_idx as f32;
-                                        let (neural_selection, wrote_neural_plock) =
+                                        let (neural_selection, wrote_neural_plock, neural_history_before) =
                                             record_selected_neural_instrument_plock(
                                                 &mut editor,
                                                 &state,
                                                 &selected_neural_neurons,
                                                 track,
                                                 param_idx,
-                                                value,
+                                            value,
+                                        );
+                                        if let Some(before) = neural_history_before {
+                                            app.commit_applied_scene_structure_mutation(
+                                                before,
+                                                "Edit neural override",
                                             );
+                                        }
                                         if !wrote_neural_plock {
                                             tui::apply_command(
                                                 &mut app,
@@ -11304,15 +15162,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .cloned()
                                 {
                                     let stored = desc.clamp(desc.user_input_to_stored(user_val));
-                                    let (neural_selection, wrote_neural_plock) =
+                                    let (neural_selection, wrote_neural_plock, neural_history_before) =
                                         record_selected_neural_instrument_plock(
                                             &mut editor,
                                             &state,
                                             &selected_neural_neurons,
                                             track,
                                             param_idx,
-                                            stored,
+                                        stored,
+                                    );
+                                    if let Some(before) = neural_history_before {
+                                        app.commit_applied_scene_structure_mutation(
+                                            before,
+                                            "Edit neural override",
                                         );
+                                    }
                                     if !wrote_neural_plock {
                                         let steps: Vec<usize> = selected_steps
                                             .lock()
@@ -11451,15 +15315,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         labels.iter().position(|item| item == &label)
                                     {
                                         let value = selected_idx as f32;
-                                        let (neural_selection, wrote_neural_plock) =
+                                        let (neural_selection, wrote_neural_plock, neural_history_before) =
                                             record_selected_neural_instrument_plock(
                                                 &mut editor,
                                                 &state,
                                                 &selected_neural_neurons,
                                                 track,
                                                 param_idx,
-                                                value,
+                                            value,
+                                        );
+                                        if let Some(before) = neural_history_before {
+                                            app.commit_applied_scene_structure_mutation(
+                                                before,
+                                                "Edit neural override",
                                             );
+                                        }
                                         if !wrote_neural_plock {
                                             let steps: Vec<usize> = selected_steps
                                                 .lock()
@@ -11562,25 +15432,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         Some(sequencer::effects::HostControl::FxSidechain { .. })
                                     );
                                     if is_host_sidechain {
-                                        app.apply_effect_sidechain_selection(
-                                            track,
-                                            slot_idx,
-                                            param_idx,
-                                            selected_idx,
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetEffectParam {
+                                                track,
+                                                slot_idx,
+                                                param_idx,
+                                                value: selected_idx as f32,
+                                            },
                                         );
-                                        if let Some(slot) = app
-                                            .state
-                                            .pattern
-                                            .effect_chains
-                                            .get(track)
-                                            .and_then(|chain| chain.get(slot_idx))
-                                        {
-                                            slot.defaults.set(param_idx, selected_idx as f32);
-                                        }
-                                        app.state.publish_scheduler_snapshot();
                                     } else {
                                         let value = selected_idx as f32;
-                                        let (neural_selection, wrote_neural_plock) =
+                                        let (neural_selection, wrote_neural_plock, neural_history_before) =
                                             record_selected_neural_effect_plock(
                                                 &mut editor,
                                                 &state,
@@ -11588,8 +15451,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 track,
                                                 slot_idx,
                                                 param_idx,
-                                                value,
+                                            value,
+                                        );
+                                        if let Some(before) = neural_history_before {
+                                            app.commit_applied_scene_structure_mutation(
+                                                before,
+                                                "Edit neural override",
                                             );
+                                        }
                                         if !wrote_neural_plock {
                                             tui::apply_command(
                                                 &mut app,
@@ -11641,26 +15510,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .iter()
                             .any(|m| app.groups.iter().any(|g| g.members.contains(m)));
                         if members.len() >= 2 && !already_grouped {
-                            let group_index = app.groups.len() + 1;
-                            let bus = app.add_bus_channel(format!("Group {group_index}"));
-                            for &track in &members {
-                                // Route across every scene — group routing is global.
-                                app.set_track_output_all_scenes(track, TrackOutput::Bus(bus));
-                            }
-                            let color = app
-                                .track_colors
-                                .get(members[0])
-                                .map(|c| [c.r, c.g, c.b])
-                                .unwrap_or([0.5, 0.5, 0.5]);
-                            let group_id = app.groups.iter().map(|g| g.id).max().unwrap_or(0) + 1;
-                            app.groups.push(sequencer::project::ProjectTrackGroup {
-                                id: group_id,
-                                name: format!("Group {group_index}"),
-                                color,
-                                collapsed: false,
-                                members: members.clone(),
-                                bus_id: bus.0,
-                            });
+                            let Ok(bus) = app.group_tracks_recorded(members.clone()) else {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Could not group the selected tracks".to_string(),
+                                ));
+                                continue;
+                            };
                             let selected_bus_index = app
                                 .buses
                                 .iter()
@@ -11695,54 +15550,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let track = extract_usize_from_payload(&payload, "track");
                         let gidx = extract_usize_from_payload(&payload, "gidx");
                         if let (Some(track), Some(gidx)) = (track, gidx) {
-                            let target = app.groups.get(gidx).map(|g| (g.id, g.bus_id));
-                            if let Some((target_id, target_bus_id)) = target {
-                                let already = app
-                                    .groups
-                                    .get(gidx)
-                                    .map(|g| g.members.contains(&track))
-                                    .unwrap_or(false);
-                                if track < app.tracks.len() && !already {
-                                    // Source group (other than the target) holding the track.
-                                    let source_id = app
-                                        .groups
-                                        .iter()
-                                        .find(|g| g.id != target_id && g.members.contains(&track))
-                                        .map(|g| g.id);
-                                    // Route the track into the target group's backing bus,
-                                    // across every scene (group routing is global).
-                                    app.set_track_output_all_scenes(
-                                        track,
-                                        TrackOutput::Bus(sequencer::sequencer::BusId(
-                                            target_bus_id,
-                                        )),
-                                    );
-                                    if let Some(g) =
-                                        app.groups.iter_mut().find(|g| g.id == target_id)
-                                    {
-                                        g.members.push(track);
-                                        g.members.sort_unstable();
-                                        g.members.dedup();
-                                    }
-                                    // Remove from the source group; dissolve it (freeing its
-                                    // backing bus) if it would fall below 2 members.
-                                    if let Some(sid) = source_id {
-                                        if let Some(g) = app.groups.iter_mut().find(|g| g.id == sid)
-                                        {
-                                            g.members.retain(|&m| m != track);
-                                        }
-                                        if let Some(idx) =
-                                            app.groups.iter().position(|g| g.id == sid)
-                                        {
-                                            if app.groups[idx].members.len() < 2 {
-                                                let bus = sequencer::sequencer::BusId(
-                                                    app.groups[idx].bus_id,
-                                                );
-                                                app.delete_bus_channel(bus);
-                                                app.groups.remove(idx);
-                                            }
-                                        }
-                                    }
+                            if app.move_track_to_group_recorded(track, gidx).is_ok() {
                                     *bus_state.lock().unwrap() = app.buses.clone();
                                     *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                                     *track_groups.lock().unwrap() = app.groups.clone();
@@ -11753,7 +15561,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
-                                }
                             }
                         }
                     }
@@ -11762,17 +15569,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // group, routing it back to the master mix. Dissolve the
                         // group if it would fall below 2 members.
                         if let Some(track) = extract_usize_from_payload(&payload, "track") {
-                            if let Some(g_idx) =
-                                app.groups.iter().position(|g| g.members.contains(&track))
-                            {
-                                // Route back to the master mix across every scene.
-                                app.set_track_output_all_scenes(track, TrackOutput::Mix);
-                                app.groups[g_idx].members.retain(|&m| m != track);
-                                if app.groups[g_idx].members.len() < 2 {
-                                    let bus = sequencer::sequencer::BusId(app.groups[g_idx].bus_id);
-                                    app.delete_bus_channel(bus);
-                                    app.groups.remove(g_idx);
-                                }
+                            if app.remove_track_from_group_recorded(track).is_ok() {
                                 *bus_state.lock().unwrap() = app.buses.clone();
                                 *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                                 *track_groups.lock().unwrap() = app.groups.clone();
@@ -11875,10 +15672,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 })
                                 .unwrap_or(0);
                             if let (Some(source), Some(destination)) = (source, destination) {
-                                match app.graph_controller().set_mod_route_to_destination(
-                                    source,
-                                    destination,
-                                    input,
+                                match app.apply_recorded_scene_structure_mutation(
+                                    "Connect modulation route",
+                                    |app| app.graph_controller().set_mod_route_to_destination(
+                                        source,
+                                        destination,
+                                        input,
+                                    ),
                                 ) {
                                     Ok(()) => {
                                         let dest_label =
@@ -11940,10 +15740,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 })
                                 .unwrap_or(0);
                             if let (Some(source), Some(destination)) = (source, destination) {
-                                match app.graph_controller().delete_mod_route_to_destination(
-                                    source,
-                                    destination,
-                                    input,
+                                match app.apply_recorded_scene_structure_mutation(
+                                    "Delete modulation route",
+                                    |app| app.graph_controller().delete_mod_route_to_destination(
+                                        source,
+                                        destination,
+                                        input,
+                                    ),
                                 ) {
                                     Ok(()) => {
                                         let dest_label =
@@ -12680,8 +16483,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .and_then(|bus| bus.effect_descriptors.get(slot_idx))
                                     .and_then(|desc| desc.params.get(param_idx))
                                     .cloned();
-                                match app.set_bus_effect_param(bus_idx, slot_idx, param_idx, value)
-                                {
+                                match app.apply_recorded_bus_effect_value_mutation(
+                                    bus_idx,
+                                    slot_idx,
+                                    "Set bus effect parameter",
+                                    format!("param:{param_idx}"),
+                                    |app| app.set_bus_effect_param(
+                                        bus_idx, slot_idx, param_idx, value,
+                                    ),
+                                ) {
                                     Ok(()) => {
                                         app.publish_bus_gate_runtime();
                                         *bus_state.lock().unwrap() = app.buses.clone();
@@ -12730,15 +16540,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             {
                                 let steps: Vec<usize> =
                                     selected_steps.lock().unwrap().iter().copied().collect();
-                                let mut result = Ok(());
-                                for step in steps {
-                                    if let Err(error) = app.set_bus_effect_plock(
-                                        bus_idx, slot_idx, step, param_idx, value,
-                                    ) {
-                                        result = Err(error);
-                                        break;
-                                    }
-                                }
+                                let result = app.apply_recorded_bus_effect_value_mutation(
+                                    bus_idx,
+                                    slot_idx,
+                                    "Set bus effect p-lock",
+                                    format!("plock:param:{param_idx}"),
+                                    |app| {
+                                        for step in steps {
+                                            app.set_bus_effect_plock(
+                                                bus_idx, slot_idx, step, param_idx, value,
+                                            )?;
+                                        }
+                                        Ok(())
+                                    },
+                                );
                                 match result {
                                     Ok(()) => {
                                         app.publish_bus_gate_runtime();
@@ -12791,19 +16606,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .and_then(|param| param.host_control.as_ref()),
                                         Some(sequencer::effects::HostControl::FxSidechain { .. })
                                     );
-                                    if is_host_sidechain {
-                                        app.apply_bus_effect_sidechain_selection(
-                                            bus_idx,
-                                            slot_idx,
-                                            param_idx,
-                                            selected_idx,
-                                        );
-                                    }
-                                    match app.set_bus_effect_param(
+                                    match app.apply_recorded_bus_effect_value_mutation(
                                         bus_idx,
                                         slot_idx,
-                                        param_idx,
-                                        selected_idx as f32,
+                                        "Set bus effect option",
+                                        format!("param:{param_idx}"),
+                                        |app| {
+                                            if is_host_sidechain {
+                                                app.apply_bus_effect_sidechain_selection(
+                                                    bus_idx, slot_idx, param_idx, selected_idx,
+                                                );
+                                            }
+                                            app.set_bus_effect_param(
+                                                bus_idx, slot_idx, param_idx, selected_idx as f32,
+                                            )
+                                        },
                                     ) {
                                         Ok(()) => {
                                             app.publish_bus_gate_runtime();
@@ -12859,19 +16676,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ) {
                                     let steps: Vec<usize> =
                                         selected_steps.lock().unwrap().iter().copied().collect();
-                                    let mut result = Ok(());
-                                    for step in steps {
-                                        if let Err(error) = app.set_bus_effect_plock(
-                                            bus_idx,
-                                            slot_idx,
-                                            step,
-                                            param_idx,
-                                            selected_idx as f32,
-                                        ) {
-                                            result = Err(error);
-                                            break;
-                                        }
-                                    }
+                                    let result = app.apply_recorded_bus_effect_value_mutation(
+                                        bus_idx,
+                                        slot_idx,
+                                        "Set bus effect p-lock option",
+                                        format!("plock:param:{param_idx}"),
+                                        |app| {
+                                            for step in steps {
+                                                app.set_bus_effect_plock(
+                                                    bus_idx,
+                                                    slot_idx,
+                                                    step,
+                                                    param_idx,
+                                                    selected_idx as f32,
+                                                )?;
+                                            }
+                                            Ok(())
+                                        },
+                                    );
                                     match result {
                                         Ok(()) => {
                                             app.publish_bus_gate_runtime();
@@ -12951,25 +16773,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         Some(sequencer::effects::HostControl::FxSidechain { .. })
                                     );
                                     if is_host_sidechain {
-                                        app.apply_effect_sidechain_selection(
-                                            track,
-                                            slot_idx,
-                                            param_idx,
-                                            selected_idx,
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetEffectParam {
+                                                track,
+                                                slot_idx,
+                                                param_idx,
+                                                value: selected_idx as f32,
+                                            },
                                         );
-                                        if let Some(slot) = app
-                                            .state
-                                            .pattern
-                                            .effect_chains
-                                            .get(track)
-                                            .and_then(|chain| chain.get(slot_idx))
-                                        {
-                                            slot.defaults.set(param_idx, selected_idx as f32);
-                                        }
-                                        app.state.publish_scheduler_snapshot();
                                     } else {
                                         let value = selected_idx as f32;
-                                        let (neural_selection, wrote_neural_plock) =
+                                        let (neural_selection, wrote_neural_plock, neural_history_before) =
                                             record_selected_neural_effect_plock(
                                                 &mut editor,
                                                 &state,
@@ -12977,8 +16792,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 track,
                                                 slot_idx,
                                                 param_idx,
-                                                value,
+                                            value,
+                                        );
+                                        if let Some(before) = neural_history_before {
+                                            app.commit_applied_scene_structure_mutation(
+                                                before,
+                                                "Edit neural override",
                                             );
+                                        }
                                         if !wrote_neural_plock {
                                             let steps: Vec<usize> = selected_steps
                                                 .lock()
@@ -13050,14 +16871,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .as_ref()
                                     .map(|p| value.clamp(p.min, p.max))
                                     .unwrap_or(value);
-                                if let Some(slot) = state
+                                if let Some(_slot) = state
                                     .pattern
                                     .midi_fx_slots
                                     .get(track)
                                     .and_then(|slots| slots.get(slot_idx))
                                 {
-                                    slot.defaults.set(param_idx, clamped);
-                                    state.publish_scheduler_snapshot();
+                                    tui::apply_command(
+                                        &mut app,
+                                        tui::AppCommand::SetMidiFxParam {
+                                            track,
+                                            slot_idx,
+                                            param_idx,
+                                            value: clamped,
+                                        },
+                                    );
                                     sync_midi_fx_param_value_field(
                                         editor.runtime_mut(),
                                         &state,
@@ -13103,7 +16931,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .and_then(|desc| desc.params.get(param_idx).cloned())
                                     .map(|p| value.clamp(p.min, p.max))
                                     .unwrap_or(value);
-                                if let Some(slot) = state
+                                if let Some(_slot) = state
                                     .pattern
                                     .midi_fx_slots
                                     .get(track)
@@ -13111,10 +16939,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 {
                                     let steps: Vec<usize> =
                                         selected_steps.lock().unwrap().iter().copied().collect();
-                                    for step in steps {
-                                        slot.set_plock(step, param_idx, clamped);
-                                    }
-                                    state.publish_scheduler_snapshot();
+                                    tui::apply_command(
+                                        &mut app,
+                                        tui::AppCommand::SetMidiFxPlockMulti {
+                                            track,
+                                            steps,
+                                            slot_idx,
+                                            param_idx,
+                                            value: clamped,
+                                        },
+                                    );
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 }
@@ -13146,14 +16980,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .get(slot_idx)
                                     .and_then(|name| midi_fx_option_index(name, param_idx, &label))
                                 {
-                                    if let Some(slot) = state
+                                    if let Some(_slot) = state
                                         .pattern
                                         .midi_fx_slots
                                         .get(track)
                                         .and_then(|slots| slots.get(slot_idx))
                                     {
-                                        slot.defaults.set(param_idx, selected_idx as f32);
-                                        state.publish_scheduler_snapshot();
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetMidiFxParam {
+                                                track,
+                                                slot_idx,
+                                                param_idx,
+                                                value: selected_idx as f32,
+                                            },
+                                        );
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
                                         ui_epoch.fetch_add(1, Ordering::Relaxed);
                                     }
@@ -13186,7 +17027,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .get(slot_idx)
                                     .and_then(|name| midi_fx_option_index(name, param_idx, &label))
                                 {
-                                    if let Some(slot) = state
+                                    if let Some(_slot) = state
                                         .pattern
                                         .midi_fx_slots
                                         .get(track)
@@ -13198,10 +17039,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .iter()
                                             .copied()
                                             .collect();
-                                        for step in steps {
-                                            slot.set_plock(step, param_idx, selected_idx as f32);
-                                        }
-                                        state.publish_scheduler_snapshot();
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetMidiFxPlockMulti {
+                                                track,
+                                                steps,
+                                                slot_idx,
+                                                param_idx,
+                                                value: selected_idx as f32,
+                                            },
+                                        );
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
                                         ui_epoch.fetch_add(1, Ordering::Relaxed);
                                     }
@@ -13268,30 +17115,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     "timebase" => {
                                         let idx = (value.round() as usize)
                                             .min(sequencer::sequencer::Timebase::ALL.len() - 1);
-                                        state.pattern.timebase_plocks[track]
-                                            .set(step, sequencer::sequencer::Timebase::ALL[idx]);
-                                        state.publish_scheduler_snapshot();
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetTimebasePlock {
+                                                track,
+                                                step,
+                                                timebase: Some(
+                                                    sequencer::sequencer::Timebase::ALL[idx],
+                                                ),
+                                            },
+                                        );
                                     }
                                     "swing" => {
-                                        state.pattern.swing_plocks[track].set(step, value);
-                                        state.publish_scheduler_snapshot();
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetTrackSwingPlock {
+                                                track,
+                                                step,
+                                                value: Some(value),
+                                            },
+                                        );
                                     }
                                     "swing-resolution" => {
                                         let idx = (value.round() as usize).min(
                                             sequencer::sequencer::SwingResolution::ALL.len() - 1,
                                         );
-                                        state.pattern.swing_resolution_plocks[track].set(
-                                            step,
-                                            sequencer::sequencer::SwingResolution::ALL[idx],
+                                        tui::apply_command(
+                                            &mut app,
+                                            tui::AppCommand::SetTrackSwingResolutionPlock {
+                                                track,
+                                                step,
+                                                resolution: Some(
+                                                    sequencer::sequencer::SwingResolution::ALL[idx],
+                                                ),
+                                            },
                                         );
-                                        state.publish_scheduler_snapshot();
                                     }
                                     "step-param" => {
                                         if let Some(param_idx) = param_idx {
                                             if let Some(param) =
                                                 sequencer::sequencer::StepParam::ALL.get(param_idx)
                                             {
-                                                state.set_step_param(track, step, *param, value);
+                                                tui::apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetStepParam {
+                                                        track,
+                                                        step,
+                                                        param: *param,
+                                                        value,
+                                                    },
+                                                );
                                             }
                                         }
                                     }
@@ -13306,9 +17179,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             {
                                                 let stored =
                                                     desc.clamp(desc.user_input_to_stored(value));
-                                                state.pattern.instrument_slots[track]
-                                                    .set_plock(step, param_idx, stored);
-                                                state.publish_scheduler_snapshot();
+                                                tui::apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetInstrumentPlock {
+                                                        track,
+                                                        step,
+                                                        param_idx,
+                                                        value: stored,
+                                                    },
+                                                );
                                             }
                                         }
                                     }
@@ -13316,7 +17195,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if let (Some(slot_idx), Some(param_idx)) =
                                             (slot_idx, param_idx)
                                         {
-                                            if let Some(slot) = state
+                                            if let Some(_slot) = state
                                                 .pattern
                                                 .effect_chains
                                                 .get(track)
@@ -13330,8 +17209,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     .and_then(|d| d.params.get(param_idx))
                                                     .map(|p| value.clamp(p.min, p.max))
                                                     .unwrap_or(value);
-                                                slot.set_plock(step, param_idx, clamped);
-                                                state.publish_scheduler_snapshot();
+                                                tui::apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetEffectPlock {
+                                                        track,
+                                                        step,
+                                                        slot_idx,
+                                                        param_idx,
+                                                        value: clamped,
+                                                    },
+                                                );
                                             }
                                         }
                                     }
@@ -13342,10 +17229,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     param_idx,
                                                 )
                                             {
-                                                if app.set_rack_macro_plock(track, id, step, value)
-                                                {
-                                                    state.publish_scheduler_snapshot();
-                                                }
+                                                tui::apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetRackMacroPlockMulti {
+                                                        track,
+                                                        steps: vec![step],
+                                                        macro_idx: id.index(),
+                                                        value,
+                                                    },
+                                                );
                                             }
                                         }
                                     }
@@ -13356,27 +17248,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Some(param_idx),
                                         ) = (rack_slot, slot_idx, param_idx)
                                         {
-                                            if let Err(error) = app.set_rack_slot_effect_plocks(
-                                                track,
-                                                rack_slot,
-                                                effect_slot,
-                                                &[step],
-                                                param_idx,
-                                                value,
-                                            ) {
-                                                editor.handle_host_event(HostEvent::Status(
-                                                    format!(
-                                                    "Error editing rack-slot effect lock: {error}"
-                                                ),
-                                                ));
-                                            }
+                                            tui::apply_command(
+                                                &mut app,
+                                                tui::AppCommand::SetRackSlotEffectPlockMulti {
+                                                    track,
+                                                    steps: vec![step],
+                                                    rack_slot_idx: rack_slot,
+                                                    effect_slot_idx: effect_slot,
+                                                    param_idx,
+                                                    value,
+                                                },
+                                            );
                                         }
                                     }
                                     "midi-fx" => {
                                         if let (Some(slot_idx), Some(param_idx)) =
                                             (slot_idx, param_idx)
                                         {
-                                            if let Some(slot) = state
+                                            if let Some(_slot) = state
                                                 .pattern
                                                 .midi_fx_slots
                                                 .get(track)
@@ -13394,8 +17283,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     })
                                                     .map(|p| value.clamp(p.min, p.max))
                                                     .unwrap_or(value);
-                                                slot.set_plock(step, param_idx, clamped);
-                                                state.publish_scheduler_snapshot();
+                                                tui::apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetMidiFxPlockMulti {
+                                                        track,
+                                                        steps: vec![step],
+                                                        slot_idx,
+                                                        param_idx,
+                                                        value: clamped,
+                                                    },
+                                                );
                                             }
                                         }
                                     }
@@ -13443,11 +17340,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .iter()
                                             .position(|item| *item == label)
                                         {
-                                            state.pattern.timebase_plocks[track].set(
-                                                step,
-                                                sequencer::sequencer::Timebase::ALL[idx],
+                                            tui::apply_command(
+                                                &mut app,
+                                                tui::AppCommand::SetTimebasePlock {
+                                                    track,
+                                                    step,
+                                                    timebase: Some(
+                                                        sequencer::sequencer::Timebase::ALL[idx],
+                                                    ),
+                                                },
                                             );
-                                            state.publish_scheduler_snapshot();
                                         }
                                     }
                                     "swing-resolution" => {
@@ -13456,11 +17358,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 .iter()
                                                 .position(|item| *item == label)
                                         {
-                                            state.pattern.swing_resolution_plocks[track].set(
-                                                step,
-                                                sequencer::sequencer::SwingResolution::ALL[idx],
+                                            tui::apply_command(
+                                                &mut app,
+                                                tui::AppCommand::SetTrackSwingResolutionPlock {
+                                                    track,
+                                                    step,
+                                                    resolution: Some(
+                                                        sequencer::sequencer::SwingResolution::ALL[idx],
+                                                    ),
+                                                },
                                             );
-                                            state.publish_scheduler_snapshot();
                                         }
                                     }
                                     "step-param" => {}
@@ -13487,12 +17394,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     _ => None,
                                                 })
                                             {
-                                                state.pattern.instrument_slots[track].set_plock(
-                                                    step,
-                                                    param_idx,
-                                                    selected_idx as f32,
+                                                tui::apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetInstrumentPlock {
+                                                        track,
+                                                        step,
+                                                        param_idx,
+                                                        value: selected_idx as f32,
+                                                    },
                                                 );
-                                                state.publish_scheduler_snapshot();
                                             }
                                         }
                                     }
@@ -13522,18 +17432,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     _ => None,
                                                 })
                                             {
-                                                if let Some(slot) = state
+                                                if let Some(_slot) = state
                                                     .pattern
                                                     .effect_chains
                                                     .get(track)
                                                     .and_then(|chain| chain.get(slot_idx))
                                                 {
-                                                    slot.set_plock(
-                                                        step,
-                                                        param_idx,
-                                                        selected_idx as f32,
+                                                    tui::apply_command(
+                                                        &mut app,
+                                                        tui::AppCommand::SetEffectPlock {
+                                                            track,
+                                                            step,
+                                                            slot_idx,
+                                                            param_idx,
+                                                            value: selected_idx as f32,
+                                                        },
                                                     );
-                                                    state.publish_scheduler_snapshot();
                                                 }
                                             }
                                         }
@@ -13545,21 +17459,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Some(param_idx),
                                         ) = (rack_slot, slot_idx, param_idx)
                                         {
-                                            if let Err(error) = app
-                                                .set_rack_slot_effect_plock_option(
-                                                    track,
-                                                    rack_slot,
-                                                    effect_slot,
-                                                    &[step],
-                                                    param_idx,
-                                                    &label,
-                                                )
-                                            {
-                                                editor.handle_host_event(HostEvent::Status(
-                                                    format!(
-                                                    "Error editing rack-slot effect lock: {error}"
+                                            match app.rack_slot_effect_option_value(
+                                                track,
+                                                rack_slot,
+                                                effect_slot,
+                                                param_idx,
+                                                &label,
+                                            ) {
+                                                Ok(value) => {
+                                                    tui::apply_command(
+                                                        &mut app,
+                                                        tui::AppCommand::SetRackSlotEffectPlockMulti {
+                                                            track,
+                                                            steps: vec![step],
+                                                            rack_slot_idx: rack_slot,
+                                                            effect_slot_idx: effect_slot,
+                                                            param_idx,
+                                                            value,
+                                                        },
+                                                    );
+                                                }
+                                                Err(error) => editor.handle_host_event(
+                                                    HostEvent::Status(format!(
+                                                        "Error editing rack-slot effect lock: {error}"
+                                                    )),
                                                 ),
-                                                ));
                                             }
                                         }
                                     }
@@ -13596,18 +17520,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     })
                                                 })
                                             {
-                                                if let Some(slot) = state
+                                                if let Some(_slot) = state
                                                     .pattern
                                                     .midi_fx_slots
                                                     .get(track)
                                                     .and_then(|slots| slots.get(slot_idx))
                                                 {
-                                                    slot.set_plock(
-                                                        step,
-                                                        param_idx,
-                                                        selected_idx as f32,
+                                                    tui::apply_command(
+                                                        &mut app,
+                                                        tui::AppCommand::SetMidiFxPlockMulti {
+                                                            track,
+                                                            steps: vec![step],
+                                                            slot_idx,
+                                                            param_idx,
+                                                            value: selected_idx as f32,
+                                                        },
                                                     );
-                                                    state.publish_scheduler_snapshot();
                                                 }
                                             }
                                         }
@@ -13668,17 +17596,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 match target.as_str() {
                                     "timebase" => {
                                         if let Some(step) = step {
-                                            state.pattern.timebase_plocks[track].clear(step);
+                                            changed = tui::try_apply_command(
+                                                &mut app,
+                                                tui::AppCommand::SetTimebasePlock {
+                                                    track,
+                                                    step,
+                                                    timebase: None,
+                                                },
+                                            )
+                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "swing" => {
                                         if let Some(step) = step {
-                                            state.pattern.swing_plocks[track].clear(step);
+                                            changed = tui::try_apply_command(
+                                                &mut app,
+                                                tui::AppCommand::SetTrackSwingPlock {
+                                                    track,
+                                                    step,
+                                                    value: None,
+                                                },
+                                            )
+                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "swing-resolution" => {
                                         if let Some(step) = step {
-                                            state.pattern.swing_resolution_plocks[track].clear(step)
+                                            changed = tui::try_apply_command(
+                                                &mut app,
+                                                tui::AppCommand::SetTrackSwingResolutionPlock {
+                                                    track,
+                                                    step,
+                                                    resolution: None,
+                                                },
+                                            )
+                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "step-param" => {
@@ -13686,33 +17638,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             if let Some(param) =
                                                 sequencer::sequencer::StepParam::ALL.get(param_idx)
                                             {
-                                                state.pattern.step_data[track].set(
-                                                    step,
-                                                    *param,
-                                                    param.default_value(),
-                                                );
+                                                changed = tui::try_apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::SetStepParam {
+                                                        track,
+                                                        step,
+                                                        param: *param,
+                                                        value: param.default_value(),
+                                                    },
+                                                )
+                                                .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                             }
                                         }
                                     }
                                     "instrument" => {
                                         if let (Some(step), Some(param_idx)) = (step, param_idx) {
-                                            state.pattern.instrument_slots[track]
-                                                .plocks
-                                                .clear_param(step, param_idx);
+                                            changed = tui::try_apply_command(
+                                                &mut app,
+                                                tui::AppCommand::ClearInstrumentPlockMulti {
+                                                    track,
+                                                    steps: vec![step],
+                                                    param_idx,
+                                                },
+                                            )
+                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "effect" => {
                                         if let (Some(step), Some(slot_idx), Some(param_idx)) =
                                             (step, slot_idx, param_idx)
                                         {
-                                            if let Some(slot) = state
-                                                .pattern
-                                                .effect_chains
-                                                .get(track)
-                                                .and_then(|chain| chain.get(slot_idx))
-                                            {
-                                                slot.plocks.clear_param(step, param_idx);
-                                            }
+                                            changed = tui::try_apply_command(
+                                                &mut app,
+                                                tui::AppCommand::ClearEffectPlockMulti {
+                                                    track,
+                                                    steps: vec![step],
+                                                    slot_idx,
+                                                    param_idx,
+                                                },
+                                            )
+                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "rack-macro" => {
@@ -13722,11 +17687,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     param_idx,
                                                 )
                                             {
-                                                changed =
-                                                    app.clear_rack_macro_plock(track, id, step);
-                                                if changed {
-                                                    state.publish_scheduler_snapshot();
-                                                }
+                                                changed = tui::try_apply_command(
+                                                    &mut app,
+                                                    tui::AppCommand::ClearRackMacroPlockMulti {
+                                                        track,
+                                                        steps: vec![step],
+                                                        macro_idx: id.index(),
+                                                    },
+                                                )
+                                                .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                             }
                                         }
                                     }
@@ -13738,34 +17707,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Some(param_idx),
                                         ) = (step, rack_slot, slot_idx, param_idx)
                                         {
-                                            changed = state.update_rack_slot_in_current_pattern(
-                                                track,
-                                                rack_slot,
-                                                |slot| {
-                                                    if let Some(effect) =
-                                                        slot.effect_slots.get_mut(effect_slot)
-                                                    {
-                                                        effect.clear_plock(step, param_idx);
-                                                    }
+                                            changed = tui::try_apply_command(
+                                                &mut app,
+                                                tui::AppCommand::ClearRackSlotEffectPlockMulti {
+                                                    track,
+                                                    steps: vec![step],
+                                                    rack_slot_idx: rack_slot,
+                                                    effect_slot_idx: effect_slot,
+                                                    param_idx,
                                                 },
-                                            );
-                                            if changed {
-                                                state.publish_scheduler_snapshot();
-                                            }
+                                            )
+                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "midi-fx" => {
                                         if let (Some(step), Some(slot_idx), Some(param_idx)) =
                                             (step, slot_idx, param_idx)
                                         {
-                                            if let Some(slot) = state
-                                                .pattern
-                                                .midi_fx_slots
-                                                .get(track)
-                                                .and_then(|slots| slots.get(slot_idx))
-                                            {
-                                                slot.plocks.clear_param(step, param_idx);
-                                            }
+                                            changed = tui::try_apply_command(
+                                                &mut app,
+                                                tui::AppCommand::ClearMidiFxPlockMulti {
+                                                    track,
+                                                    steps: vec![step],
+                                                    slot_idx,
+                                                    param_idx,
+                                                },
+                                            )
+                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "neural-instrument" => {
@@ -13776,6 +17744,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Some(param_idx),
                                         ) = (network_id, neuron_idx, target_track, param_idx)
                                         {
+                                            let history_before = state.capture_project_scenes();
                                             match sequencer::lisp_host::clear_neural_instrument_plock_by_network_id(
                                                 &state,
                                                 network_id,
@@ -13783,7 +17752,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 target_track,
                                                 param_idx,
                                             ) {
-                                                Ok(removed) => changed |= removed,
+                                                Ok(removed) => {
+                                                    changed |= removed;
+                                                    if removed {
+                                                        app.commit_applied_scene_structure_mutation(
+                                                            history_before,
+                                                            "Clear neural override",
+                                                        );
+                                                    }
+                                                }
                                                 Err(error) => editor.handle_host_event(
                                                     HostEvent::Status(format!(
                                                         "Error clearing neuron instrument p-lock: {error}"
@@ -13806,6 +17783,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             slot_idx,
                                             param_idx,
                                         ) {
+                                            let history_before = state.capture_project_scenes();
                                             match sequencer::lisp_host::clear_neural_effect_plock_by_network_id(
                                                 &state,
                                                 network_id,
@@ -13814,7 +17792,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 slot_idx,
                                                 param_idx,
                                             ) {
-                                                Ok(removed) => changed |= removed,
+                                                Ok(removed) => {
+                                                    changed |= removed;
+                                                    if removed {
+                                                        app.commit_applied_scene_structure_mutation(
+                                                            history_before,
+                                                            "Clear neural override",
+                                                        );
+                                                    }
+                                                }
                                                 Err(error) => editor.handle_host_event(
                                                     HostEvent::Status(format!(
                                                         "Error clearing neuron effect p-lock: {error}"
@@ -13901,21 +17887,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let track = current_track.load(Ordering::Relaxed);
                             let is_clear = name == "clear-step-variant-locks"
                                 || label.as_deref() == Some("def");
-                            let changed = if is_clear {
-                                state.clear_variant_locks_for_steps(track, &steps)
-                            } else if let Some(label) = label {
+                            let assignment = label.as_ref().and_then(|label| {
                                 state
                                     .plock_variant_registry_snapshot(track)
-                                    .assignment_for_label(&label)
-                                    .is_some_and(|assignment| {
-                                        state.stamp_variant_key_to_steps(
+                                    .assignment_for_label(label)
+                                    .map(|assignment| assignment.key.clone())
+                            });
+                            let outcome = tui::edit::apply_recorded_step_mutation(
+                                &mut app,
+                                track,
+                                &steps,
+                                if is_clear {
+                                    "Clear step variant locks"
+                                } else {
+                                    "Stamp step variant"
+                                },
+                                |app| {
+                                    if is_clear {
+                                        app.state.clear_variant_locks_for_steps_no_publish(
                                             track,
-                                            &assignment.key,
                                             &steps,
-                                        )
-                                    })
-                            } else {
-                                false
+                                        );
+                                    } else if let Some(key) = &assignment {
+                                        app.state.stamp_variant_key_to_steps_no_publish(
+                                            track,
+                                            key,
+                                            &steps,
+                                        );
+                                    }
+                                    Ok(())
+                                },
+                            );
+                            let changed = match outcome {
+                                Ok(tui::edit::EditOutcome::Applied(_)) => true,
+                                Ok(tui::edit::EditOutcome::NoOp) => false,
+                                Ok(tui::edit::EditOutcome::AppliedUnrecorded) => {
+                                    editor.handle_host_event(HostEvent::Error(
+                                        "Variant edit was applied without history".to_string(),
+                                    ));
+                                    false
+                                }
+                                Err(error) => {
+                                    editor.handle_host_event(HostEvent::Error(format!(
+                                        "Could not apply variant edit: {error:?}"
+                                    )));
+                                    false
+                                }
                             };
                             if changed {
                                 fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -13935,7 +17952,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     _ => None,
                                 });
                             if let (Some(bus_idx), Some(effect_name)) = (bus_idx, effect_name) {
-                                match app.add_bus_effect_sync(bus_idx, &effect_name) {
+                                match app.apply_recorded_bus_effect_chain_mutation(
+                                    bus_idx,
+                                    "Add bus effect",
+                                    |app| app.add_bus_effect_sync(bus_idx, &effect_name),
+                                ) {
                                     Ok(slot_idx) => {
                                         app.publish_bus_gate_runtime();
                                         *bus_state.lock().unwrap() = app.buses.clone();
@@ -13979,7 +18000,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     _ => None,
                                 });
                             if let (Some(bus_idx), Some(effect_name)) = (bus_idx, effect_name) {
-                                match app.add_builtin_bus_effect_sync(bus_idx, &effect_name) {
+                                match app.apply_recorded_bus_effect_chain_mutation(
+                                    bus_idx,
+                                    "Add bus effect",
+                                    |app| app.add_builtin_bus_effect_sync(bus_idx, &effect_name),
+                                ) {
                                     Ok(slot_idx) => {
                                         app.publish_bus_gate_runtime();
                                         *bus_state.lock().unwrap() = app.buses.clone();
@@ -14010,10 +18035,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let (Some(bus_idx), Some(slot), Some(effect_name)) =
                             (bus_idx, slot, effect_name)
                         {
-                            match app.insert_builtin_bus_effect_before_slot_sync(
+                            match app.apply_recorded_bus_effect_chain_mutation(
                                 bus_idx,
-                                slot,
-                                &effect_name,
+                                "Insert bus effect",
+                                |app| app.insert_builtin_bus_effect_before_slot_sync(
+                                    bus_idx,
+                                    slot,
+                                    &effect_name,
+                                ),
                             ) {
                                 Ok(slot_idx) => {
                                     app.publish_bus_gate_runtime();
@@ -14043,10 +18072,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let (Some(bus_idx), Some(slot), Some(effect_name)) =
                             (bus_idx, slot, effect_name)
                         {
-                            match app.insert_bus_effect_before_slot_sync(
+                            match app.apply_recorded_bus_effect_chain_mutation(
                                 bus_idx,
-                                slot,
-                                &effect_name,
+                                "Insert bus effect",
+                                |app| app.insert_bus_effect_before_slot_sync(
+                                    bus_idx,
+                                    slot,
+                                    &effect_name,
+                                ),
                             ) {
                                 Ok(slot_idx) => {
                                     app.publish_bus_gate_runtime();
@@ -14133,7 +18166,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let effect_name = effect_name.clone();
                                     let track = current_track.load(Ordering::Relaxed);
                                     app.ui.cursor_track = track;
-                                    match app.add_builtin_effect_sync(track, &effect_name) {
+                                    match app.apply_recorded_track_effect_chain_mutation(
+                                        track,
+                                        "Add audio effect",
+                                        |app| app.add_builtin_effect_sync(track, &effect_name),
+                                    ) {
                                         Ok(slot_idx) => {
                                             let rt = editor.runtime_mut();
                                             rt.set_reactive(
@@ -14187,7 +18224,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             current_track.store(track, Ordering::Relaxed);
                             app.ui.cursor_track = track;
-                            match app.add_builtin_effect_sync(track, &effect_name) {
+                            match app.apply_recorded_track_effect_chain_mutation(
+                                track,
+                                "Add audio effect",
+                                |app| app.add_builtin_effect_sync(track, &effect_name),
+                            ) {
                                 Ok(slot_idx) => {
                                     let rt = editor.runtime_mut();
                                     set_current_track_reactive(rt, app.tracks.len(), track);
@@ -14236,7 +18277,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Value::String(fx_name) = &*cell.borrow() {
                                     let fx_name = fx_name.clone();
                                     let track = current_track.load(Ordering::Relaxed);
-                                    match app.add_midi_fx_to_track_sync(track, &fx_name) {
+                                    match app.apply_recorded_track_midi_fx_chain_mutation(
+                                        track,
+                                        "Add MIDI FX",
+                                        |app| app.add_midi_fx_to_track_sync(track, &fx_name),
+                                    ) {
                                         Ok(slot_idx) => {
                                             let rt = editor.runtime_mut();
                                             rt.set_reactive(
@@ -14288,7 +18333,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             current_track.store(track, Ordering::Relaxed);
                             app.ui.cursor_track = track;
-                            match app.add_midi_fx_to_track_sync(track, &fx_name) {
+                            match app.apply_recorded_track_midi_fx_chain_mutation(
+                                track,
+                                "Add MIDI FX",
+                                |app| app.add_midi_fx_to_track_sync(track, &fx_name),
+                            ) {
                                 Ok(slot_idx) => {
                                     let rt = editor.runtime_mut();
                                     set_current_track_reactive(rt, app.tracks.len(), track);
@@ -14335,10 +18384,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             current_track.store(track, Ordering::Relaxed);
                             app.ui.cursor_track = track;
-                            match app.insert_builtin_effect_before_slot_sync(
+                            match app.apply_recorded_track_effect_chain_mutation(
                                 track,
-                                slot,
-                                &effect_name,
+                                "Insert audio effect",
+                                |app| app.insert_builtin_effect_before_slot_sync(
+                                    track,
+                                    slot,
+                                    &effect_name,
+                                ),
                             ) {
                                 Ok(slot_idx) => {
                                     let rt = editor.runtime_mut();
@@ -14389,10 +18442,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             current_track.store(track, Ordering::Relaxed);
                             app.ui.cursor_track = track;
-                            match app.insert_saved_effect_before_slot_sync(
+                            match app.apply_recorded_track_effect_chain_mutation(
                                 track,
-                                slot,
-                                &effect_name,
+                                "Insert audio effect",
+                                |app| app.insert_saved_effect_before_slot_sync(
+                                    track,
+                                    slot,
+                                    &effect_name,
+                                ),
                             ) {
                                 Ok(slot_idx) => {
                                     let rt = editor.runtime_mut();
@@ -14441,7 +18498,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let (Some(track), Some(slot), Some(fx_name)) = (track, slot, fx_name) {
                             current_track.store(track, Ordering::Relaxed);
                             app.ui.cursor_track = track;
-                            match app.insert_midi_fx_before_slot_sync(track, slot, &fx_name) {
+                            match app.apply_recorded_track_midi_fx_chain_mutation(
+                                track,
+                                "Insert MIDI FX",
+                                |app| app.insert_midi_fx_before_slot_sync(track, slot, &fx_name),
+                            ) {
                                 Ok(slot_idx) => {
                                     let rt = editor.runtime_mut();
                                     set_current_track_reactive(rt, app.tracks.len(), track);
@@ -14493,8 +18554,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             current_track.store(target_track, Ordering::Relaxed);
                             app.ui.cursor_track = target_track;
-                            match app.move_effect_slot_sync(target_track, source_slot, target_slot)
-                            {
+                            match app.apply_recorded_track_effect_chain_mutation(
+                                target_track,
+                                "Move audio effect",
+                                |app| app.move_effect_slot_sync(
+                                    target_track,
+                                    source_slot,
+                                    target_slot,
+                                ),
+                            ) {
                                 Ok(slot_idx) => {
                                     let rt = editor.runtime_mut();
                                     set_current_track_reactive(rt, app.tracks.len(), target_track);
@@ -14598,8 +18666,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             current_track.store(target_track, Ordering::Relaxed);
                             app.ui.cursor_track = target_track;
-                            match app.move_midi_fx_slot_sync(target_track, source_slot, target_slot)
-                            {
+                            match app.apply_recorded_track_midi_fx_chain_mutation(
+                                target_track,
+                                "Move MIDI FX",
+                                |app| app.move_midi_fx_slot_sync(
+                                    target_track,
+                                    source_slot,
+                                    target_slot,
+                                ),
+                            ) {
                                 Ok(slot_idx) => {
                                     let rt = editor.runtime_mut();
                                     set_current_track_reactive(rt, app.tracks.len(), target_track);
@@ -14642,7 +18717,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let source_slot = extract_usize_from_payload(&payload, "source-slot");
                         let target_slot = extract_usize_from_payload(&payload, "target-slot");
                         if let (Some(bus_idx), Some(source_slot)) = (bus_idx, source_slot) {
-                            match app.move_bus_effect_slot_sync(bus_idx, source_slot, target_slot) {
+                            match app.apply_recorded_bus_effect_chain_mutation(
+                                bus_idx,
+                                "Move bus effect",
+                                |app| app.move_bus_effect_slot_sync(bus_idx, source_slot, target_slot),
+                            ) {
                                 Ok(slot_idx) => {
                                     app.publish_bus_gate_runtime();
                                     *bus_state.lock().unwrap() = app.buses.clone();
@@ -14683,7 +18762,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             _ => None,
                         };
                         if let (Some(bus_idx), Some(slot_idx)) = (bus_idx, slot_idx) {
-                            match app.delete_bus_effect_slot(bus_idx, slot_idx) {
+                            match app.apply_recorded_bus_effect_chain_mutation(
+                                bus_idx,
+                                "Delete bus effect",
+                                |app| app.delete_bus_effect_slot(bus_idx, slot_idx),
+                            ) {
                                 Ok(()) => {
                                     app.publish_bus_gate_runtime();
                                     *bus_state.lock().unwrap() = app.buses.clone();
@@ -14722,10 +18805,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
                         let track = current_track.load(Ordering::Relaxed);
-                        match app
-                            .graph_controller()
-                            .delete_custom_effect_slot(track, slot_idx)
-                        {
+                        match app.apply_recorded_track_effect_chain_mutation(
+                            track,
+                            "Delete audio effect",
+                            |app| app.graph_controller().delete_custom_effect_slot(track, slot_idx),
+                        ) {
                             Ok(()) => {
                                 let rt = editor.runtime_mut();
                                 rt.set_reactive(
@@ -14786,7 +18870,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
                         let track = current_track.load(Ordering::Relaxed);
-                        match app.delete_midi_fx_slot(track, slot_idx) {
+                        match app.apply_recorded_track_midi_fx_chain_mutation(
+                            track,
+                            "Delete MIDI FX",
+                            |app| app.delete_midi_fx_slot(track, slot_idx),
+                        ) {
                             Ok(()) => {
                                 let rt = editor.runtime_mut();
                                 rt.set_reactive(
@@ -14837,14 +18925,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )));
                             continue;
                         }
-                        let Some(pattern_id) = app.state.fork_current_track_pattern(
-                            track,
-                            num_tracks,
-                            &app.graph.track_buffer_ids,
-                            &app.graph.track_sample_rates,
-                            &app.tracks,
-                            &app.graph.track_instrument_types,
-                        ) else {
+                        let forked = app.apply_recorded_scene_structure_mutation(
+                            "Fork track pattern",
+                            |app| app.state.fork_current_track_pattern(
+                                track,
+                                num_tracks,
+                                &app.graph.track_buffer_ids,
+                                &app.graph.track_sample_rates,
+                                &app.tracks,
+                                &app.graph.track_instrument_types,
+                            ).ok_or_else(|| format!("Could not fork track {} pattern", track + 1)),
+                        );
+                        let Ok(pattern_id) = forked else {
                             editor.handle_host_event(HostEvent::Status(format!(
                                 "Track pattern fork failed for track {}",
                                 track + 1
@@ -14884,27 +18976,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )));
                             continue;
                         }
-                        let cloned = if let Some(source_id) = source_pattern_id {
-                            app.state.clone_track_pattern_id_into_current_scene(
-                                track,
-                                source_id,
-                                num_tracks,
-                                &app.graph.track_buffer_ids,
-                                &app.graph.track_sample_rates,
-                                &app.tracks,
-                                &app.graph.track_instrument_types,
-                            )
-                        } else {
-                            app.state.clone_current_scene_track_pattern(
-                                track,
-                                num_tracks,
-                                &app.graph.track_buffer_ids,
-                                &app.graph.track_sample_rates,
-                                &app.tracks,
-                                &app.graph.track_instrument_types,
-                            )
-                        };
-                        let Some(pattern_id) = cloned else {
+                        let cloned = app.apply_recorded_scene_structure_mutation(
+                            "Clone track pattern",
+                            |app| {
+                                let cloned = if let Some(source_id) = source_pattern_id {
+                                    app.state.clone_track_pattern_id_into_current_scene(
+                                        track,
+                                        source_id,
+                                        num_tracks,
+                                        &app.graph.track_buffer_ids,
+                                        &app.graph.track_sample_rates,
+                                        &app.tracks,
+                                        &app.graph.track_instrument_types,
+                                    )
+                                } else {
+                                    app.state.clone_current_scene_track_pattern(
+                                        track,
+                                        num_tracks,
+                                        &app.graph.track_buffer_ids,
+                                        &app.graph.track_sample_rates,
+                                        &app.tracks,
+                                        &app.graph.track_instrument_types,
+                                    )
+                                };
+                                cloned.ok_or_else(|| format!(
+                                    "Could not clone track {} pattern", track + 1
+                                ))
+                            },
+                        );
+                        let Ok(pattern_id) = cloned else {
                             editor.handle_host_event(HostEvent::Status(format!(
                                 "Track pattern clone failed for track {}",
                                 track + 1
@@ -14961,15 +19061,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
                         let num_tracks = app.tracks.len();
-                        if !app.state.delete_track_pattern(
-                            track,
-                            PatternId(pattern_id),
-                            num_tracks,
-                            &app.graph.track_buffer_ids,
-                            &app.graph.track_sample_rates,
-                            &app.tracks,
-                            &app.graph.track_instrument_types,
-                        ) {
+                        let deleted = app.apply_recorded_scene_structure_mutation(
+                            "Delete track pattern",
+                            |app| {
+                                if !app.state.delete_track_pattern(
+                                    track,
+                                    PatternId(pattern_id),
+                                    num_tracks,
+                                    &app.graph.track_buffer_ids,
+                                    &app.graph.track_sample_rates,
+                                    &app.tracks,
+                                    &app.graph.track_instrument_types,
+                                ) {
+                                    return Err(format!(
+                                        "Could not delete track {} pattern {}",
+                                        track + 1,
+                                        pattern_id
+                                    ));
+                                }
+                                // The live sample arrays must match the restored
+                                // replacement pattern before the wrapper
+                                // re-snapshots live state into it, or the old
+                                // sample clobbers the pattern's sample_id.
+                                let sample_ids =
+                                    app.state.effective_pattern_sample_ids(num_tracks);
+                                app.graph_controller().apply_sample_ids(&sample_ids);
+                                Ok(())
+                            },
+                        );
+                        if deleted.is_err() {
                             editor.handle_host_event(HostEvent::Status(format!(
                                 "Track pattern delete failed: track {}, pattern {}",
                                 track + 1,
@@ -14977,8 +19097,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )));
                             continue;
                         }
-                        let sample_ids = app.state.effective_pattern_sample_ids(num_tracks);
-                        app.graph_controller().apply_sample_ids(&sample_ids);
                         if let Err(error) = app
                             .graph_controller()
                             .sync_track_instrument_run_modes_from_live_state()
@@ -15027,16 +19145,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
                         let num_tracks = app.tracks.len();
-                        if !app.state.set_scene_cell(
-                            scene,
-                            track,
-                            PatternId(pattern_id),
-                            num_tracks,
-                            &app.graph.track_buffer_ids,
-                            &app.graph.track_sample_rates,
-                            &app.tracks,
-                            &app.graph.track_instrument_types,
-                        ) {
+                        let shared = app.apply_recorded_scene_structure_mutation(
+                            "Assign scene cell",
+                            |app| {
+                                if !app.state.set_scene_cell(
+                                    scene,
+                                    track,
+                                    PatternId(pattern_id),
+                                    num_tracks,
+                                    &app.graph.track_buffer_ids,
+                                    &app.graph.track_sample_rates,
+                                    &app.tracks,
+                                    &app.graph.track_instrument_types,
+                                ) {
+                                    return Err(format!(
+                                        "Could not assign scene {} track {}",
+                                        scene + 1,
+                                        track + 1
+                                    ));
+                                }
+                                // The live sample arrays must match the restored
+                                // pattern before the wrapper re-snapshots live
+                                // state into it, or the old sample clobbers the
+                                // pattern's sample_id.
+                                let sample_ids =
+                                    app.state.effective_pattern_sample_ids(num_tracks);
+                                app.graph_controller().apply_sample_ids(&sample_ids);
+                                Ok(())
+                            },
+                        );
+                        if shared.is_err() {
                             editor.handle_host_event(HostEvent::Status(format!(
                                 "Scene cell share failed: scene {}, track {}, pattern {}",
                                 scene + 1,
@@ -15045,8 +19183,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )));
                             continue;
                         }
-                        let sample_ids = app.state.effective_pattern_sample_ids(num_tracks);
-                        app.graph_controller().apply_sample_ids(&sample_ids);
                         if let Err(error) = app
                             .graph_controller()
                             .sync_track_instrument_run_modes_from_live_state()
@@ -15055,6 +19191,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Some((format!("Scene cell share failed: {error}"), Instant::now()));
                         }
                         app.push_all_restored_defaults();
+                        // Assigning into the current scene live-restores the
+                        // pattern's params + sample; the generic pattern-epoch
+                        // sync covers steps/params/mixer but not the fx and
+                        // instrument-panel bindings, so refresh those here.
+                        if scene == app.state.current_scene_index() {
+                            if editor_has_visible_buffer(&editor, "*fx*") {
+                                let ct = current_track_for_app(&mut app, &current_track)
+                                    .unwrap_or(track);
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "effects",
+                                    build_effects_value(
+                                        &state,
+                                        ct,
+                                        &app.graph.effect_descriptors,
+                                        &selected_steps,
+                                    ),
+                                );
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "midi-effects",
+                                    build_midi_effects_value(&state, ct, &selected_steps),
+                                );
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "instrument-panel",
+                                    build_instrument_panel_value(&app, ct, &selected_steps),
+                                );
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                            } else {
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
                         editor.handle_host_event(HostEvent::Status(format!(
                             "Shared track {} pattern {} into scene {}",
                             track + 1,
@@ -15084,15 +19255,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         };
                         let num_tracks = app.tracks.len();
-                        let Some(pattern_id) = app.state.clear_scene_cell(
-                            scene,
-                            track,
-                            num_tracks,
-                            &app.graph.track_buffer_ids,
-                            &app.graph.track_sample_rates,
-                            &app.tracks,
-                            &app.graph.track_instrument_types,
-                        ) else {
+                        let cleared = app.apply_recorded_scene_structure_mutation(
+                            "Clear scene cell",
+                            |app| app.state.clear_scene_cell(
+                                scene,
+                                track,
+                                num_tracks,
+                                &app.graph.track_buffer_ids,
+                                &app.graph.track_sample_rates,
+                                &app.tracks,
+                                &app.graph.track_instrument_types,
+                            ).ok_or_else(|| format!(
+                                "Could not clear scene {} track {}", scene + 1, track + 1
+                            )),
+                        );
+                        let Ok(pattern_id) = cleared else {
                             editor.handle_host_event(HostEvent::Status(format!(
                                 "Scene cell clear failed: scene {}, track {}",
                                 scene + 1,
@@ -15493,12 +19670,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "rename-scene" => {
+                        let Value::Map(ref map) = payload else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Could not rename scene: invalid payload".to_string(),
+                            ));
+                            continue;
+                        };
+                        let scene = map.get("scene").and_then(|cell| match &*cell.borrow() {
+                            Value::Number(n) if *n >= 0.0 => Some(*n as usize),
+                            _ => None,
+                        });
+                        let name = map.get("name").and_then(|cell| match &*cell.borrow() {
+                            Value::String(name) => Some(name.clone()),
+                            _ => None,
+                        });
+                        let renamed = match (scene, name) {
+                            (Some(scene), Some(name)) => app.apply_recorded_scene_structure_mutation(
+                                "Rename scene",
+                                |app| app.state.rename_scene(scene, name)
+                                    .then_some(())
+                                    .ok_or_else(|| "Scene name or index is invalid".to_string()),
+                            ),
+                            _ => Err("Scene or name is missing".to_string()),
+                        };
+                        match renamed {
+                            Ok(()) => {
+                                let rt = editor.runtime_mut();
+                                sync_pattern_state(rt, &state);
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                "Could not rename scene: {error}"
+                            ))),
+                        }
+                    }
                     "reorder-scene" => {
                         let source = extract_usize_from_payload(&payload, "source");
                         let target = extract_usize_from_payload(&payload, "target");
                         match (source, target) {
                             (Some(source), Some(target)) => {
-                                if app.state.reorder_scene(source, target).is_some() {
+                                let reordered = app.apply_recorded_scene_structure_mutation(
+                                    "Reorder scene",
+                                    |app| app.state.reorder_scene(source, target)
+                                        .ok_or_else(|| "Scene index is out of range".to_string()),
+                                );
+                                if reordered.is_ok() {
                                     let rt = editor.runtime_mut();
                                     sync_pattern_state(rt, &state);
                                     rt.run_reactive_cycle();
@@ -15536,14 +19755,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             editor.handle_host_event(HostEvent::Status(
                                 "Nothing to propagate: only one pattern exists".to_string(),
                             ));
-                        } else if app.state.propagate_track_to_all_patterns(
-                            track,
-                            app.tracks.len(),
-                            &app.graph.track_buffer_ids,
-                            &app.graph.track_sample_rates,
-                            &app.tracks,
-                            &app.graph.track_instrument_types,
-                        ) {
+                        } else if app.apply_recorded_scene_structure_mutation(
+                            "Propagate track pattern",
+                            |app| app.state.propagate_track_to_all_patterns(
+                                track,
+                                app.tracks.len(),
+                                &app.graph.track_buffer_ids,
+                                &app.graph.track_sample_rates,
+                                &app.tracks,
+                                &app.graph.track_instrument_types,
+                            ).then_some(()).ok_or_else(|| format!(
+                                "Could not propagate track {}", track + 1
+                            )),
+                        ).is_ok() {
                             editor.handle_host_event(HostEvent::Status(format!(
                                 "Propagated track {} to {} patterns",
                                 track + 1,
@@ -15558,17 +19782,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "clone-pattern" => {
                         let num_tracks = app.tracks.len();
-                        app.save_current_bus_pattern();
-                        let source_pattern = app.state.current_scene_index();
-                        let new_idx = app.state.clone_pattern(
-                            num_tracks,
-                            &app.graph.track_buffer_ids,
-                            &app.graph.track_sample_rates,
-                            &app.tracks,
-                            &app.graph.track_instrument_types,
+                        let created = app.apply_recorded_scene_structure_mutation(
+                            "Create scene",
+                            |app| {
+                                let source_pattern = app.state.current_scene_index();
+                                let new_idx = app.state.clone_pattern(
+                                    num_tracks,
+                                    &app.graph.track_buffer_ids,
+                                    &app.graph.track_sample_rates,
+                                    &app.tracks,
+                                    &app.graph.track_instrument_types,
+                                );
+                                app.graph_controller().sync_current_pattern_mod_routes();
+                                app.clone_bus_pattern_from_to(source_pattern, new_idx);
+                                Ok(new_idx)
+                            },
                         );
-                        app.graph_controller().sync_current_pattern_mod_routes();
-                        app.clone_bus_pattern_from_to(source_pattern, new_idx);
+                        let Ok(new_idx) = created else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Could not create scene".to_string(),
+                            ));
+                            continue;
+                        };
                         let rt = editor.runtime_mut();
                         sync_pattern_state(rt, &state);
                         sync_bus_mixer_state(rt, &app);
@@ -15582,21 +19817,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "delete-pattern" => {
                         let num_tracks = app.tracks.len();
-                        app.save_current_bus_pattern();
                         let deleted_pattern = app.state.current_scene_index();
-                        if let Some(sample_ids) = app.state.delete_pattern(
-                            num_tracks,
-                            &app.graph.track_buffer_ids,
-                            &app.graph.track_sample_rates,
-                            &app.tracks,
-                            &app.graph.track_instrument_types,
-                        ) {
-                            app.handle_scene_deleted(deleted_pattern);
-                            app.graph_controller().apply_sample_ids(&sample_ids);
-                            app.graph_controller().sync_current_pattern_mod_routes();
-                            app.push_all_restored_defaults();
-                            let new_pattern = app.state.current_scene_index();
-                            app.delete_bus_pattern_at(deleted_pattern, new_pattern);
+                        let deleted = app.apply_recorded_scene_structure_mutation(
+                            "Delete scene",
+                            |app| {
+                                let sample_ids = app.state.delete_pattern(
+                                    num_tracks,
+                                    &app.graph.track_buffer_ids,
+                                    &app.graph.track_sample_rates,
+                                    &app.tracks,
+                                    &app.graph.track_instrument_types,
+                                ).ok_or_else(|| "The last scene cannot be deleted".to_string())?;
+                                app.handle_scene_deleted(deleted_pattern);
+                                app.graph_controller().apply_sample_ids(&sample_ids);
+                                app.graph_controller().sync_current_pattern_mod_routes();
+                                app.push_all_restored_defaults();
+                                let new_pattern = app.state.current_scene_index();
+                                app.delete_bus_pattern_at(deleted_pattern, new_pattern);
+                                Ok(())
+                            },
+                        );
+                        if deleted.is_ok() {
                             let ct = current_track.load(Ordering::Relaxed);
                             let rt = editor.runtime_mut();
                             sync_shared_track_collapsed(&track_collapsed, &app);
@@ -18207,6 +22448,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         )));
                     }
                 }
+                }
+                HostCommand::CompileInstrument { .. } | HostCommand::CompileEffect { .. } => {}
             }
         }
 
@@ -18259,6 +22502,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                         *record_armed.lock().unwrap() = vec![false; track_names.len()];
+                        recording.store(false, Ordering::Relaxed);
+                        prev_recording = false;
                         // Keep the shared bus mirror in sync with the loaded buses,
                         // else pull_shared_bus_state clobbers app.buses (length
                         // mismatch) and drops the group's backing bus from the UI.
@@ -18481,6 +22726,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if pointer_released_this_loop && rack_control_snapshot_dirty {
             state.publish_scheduler_snapshot();
             rack_control_snapshot_dirty = false;
+        }
+        if pointer_released_this_loop {
+            tui::edit::finish_active_gesture(&mut app);
+        } else if !pointer_is_down {
+            tui::edit::finish_active_gesture_if_idle(&mut app);
         }
         ui_loop_stats.note_host_commands(host_commands_started.elapsed());
 
@@ -19159,6 +23409,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
                 cached_track_peak_levels =
                     read_track_peak_levels(app.graph.lg, &track_pan_ids.lock().unwrap());
+                cached_rack_slot_peak_levels = read_rack_slot_peak_levels(app.graph.lg, &app);
                 cached_bus_peak_levels =
                     read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
                 (cached_modulator_phases, cached_modulator_levels) =
@@ -19438,6 +23689,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
                 prev_track_peak_levels = cached_track_peak_levels.clone();
+            }
+            if cached_rack_slot_peak_levels != prev_rack_slot_peak_levels {
+                if track_meter_visible {
+                    needs_reactive_cycle |= sync_rack_slot_peak_field_delta(
+                        editor.runtime_mut(),
+                        &prev_rack_slot_peak_levels,
+                        &cached_rack_slot_peak_levels,
+                    );
+                }
+                prev_rack_slot_peak_levels = cached_rack_slot_peak_levels.clone();
             }
             if cached_bus_peak_levels != prev_bus_peak_levels {
                 if mixer_visible {

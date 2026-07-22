@@ -13,7 +13,7 @@ use crate::process::ParamTarget;
 use crate::project::{
     self, chord_snapshot_from_steps_durations_and_delays, project_file_version, ProjectBusChannel,
     ProjectBusPatternSnapshot, ProjectFile, ProjectMacro, ProjectPattern, ProjectReverbState,
-    ProjectScratchState, ProjectTrack,
+    ProjectScratchState, ProjectTrack, ProjectTrackKind,
 };
 use crate::sequencer::{
     BusGateSequence, BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
@@ -26,7 +26,7 @@ use super::graph::{
 };
 use super::{App, BusChannelState, InputMode, Region, SidebarMode, SidebarTab};
 
-fn resolve_live_macro_target(
+pub(super) fn resolve_live_macro_target(
     state: &crate::sequencer::SequencerState,
     effect_descriptors: &[Vec<EffectDescriptor>],
     instrument_descriptors: &[EffectDescriptor],
@@ -319,124 +319,6 @@ fn default_project_effect_slot(desc: &EffectDescriptor) -> project::ProjectEffec
     }
 }
 
-fn legacy_builtin_slot_has_edits(
-    slot: &project::ProjectEffectSlot,
-    desc: &EffectDescriptor,
-) -> bool {
-    if slot.num_params == 0 {
-        return false;
-    }
-    let num_params = (slot.num_params as usize).min(desc.params.len());
-    for param_idx in 0..num_params {
-        let saved = slot.defaults.get(param_idx).copied().unwrap_or(0.0);
-        if (saved - desc.params[param_idx].default).abs() > 0.0001 {
-            return true;
-        }
-    }
-    slot.plocks
-        .iter()
-        .any(|row| row.iter().take(num_params).any(Option::is_some))
-}
-
-fn migrate_legacy_default_track_effects(project: &mut ProjectFile) {
-    let mut filter_desc = EffectDescriptor::builtin_filter();
-    let mut delay_desc = EffectDescriptor::builtin_delay();
-    if let Some(enabled) = filter_desc
-        .params
-        .iter_mut()
-        .find(|param| param.name == "enabled")
-    {
-        enabled.default = 0.0;
-    }
-    if let Some(enabled) = delay_desc
-        .params
-        .iter_mut()
-        .find(|param| param.name == "enabled")
-    {
-        enabled.default = 0.0;
-    }
-    let legacy_descs = [&filter_desc, &delay_desc];
-    let legacy_names = ["Filter", "Delay"];
-    let max_slots = crate::lisp_host::MAX_CUSTOM_FX;
-
-    for track_idx in 0..project.tracks.len() {
-        let old_custom_len = project
-            .custom_effects
-            .get(track_idx)
-            .map(Vec::len)
-            .unwrap_or_default();
-        let has_legacy_layout = project.patterns.iter().any(|pattern| {
-            pattern
-                .effect_slots
-                .get(track_idx)
-                .map(|slots| slots.len() >= 2 && slots.len() > old_custom_len)
-                .unwrap_or(false)
-        });
-        if !has_legacy_layout {
-            continue;
-        }
-
-        let mut preserve_legacy = [false; 2];
-        for pattern in &project.patterns {
-            let Some(slots) = pattern.effect_slots.get(track_idx) else {
-                continue;
-            };
-            for legacy_idx in 0..2 {
-                if let Some(slot) = slots.get(legacy_idx) {
-                    preserve_legacy[legacy_idx] |=
-                        legacy_builtin_slot_has_edits(slot, legacy_descs[legacy_idx]);
-                }
-            }
-        }
-
-        let old_names = project
-            .custom_effects
-            .get(track_idx)
-            .cloned()
-            .unwrap_or_default();
-        let mut migrated_names = Vec::new();
-        for legacy_idx in 0..2 {
-            if preserve_legacy[legacy_idx] {
-                migrated_names.push(EffectDescriptor::builtin_insert_project_name(
-                    legacy_names[legacy_idx],
-                ));
-            }
-        }
-        migrated_names.extend(old_names);
-        migrated_names.truncate(max_slots);
-        while project.custom_effects.len() <= track_idx {
-            project.custom_effects.push(Vec::new());
-        }
-        project.custom_effects[track_idx] = migrated_names;
-
-        for pattern in &mut project.patterns {
-            let old_slots = pattern
-                .effect_slots
-                .get(track_idx)
-                .cloned()
-                .unwrap_or_default();
-            let mut migrated_slots = Vec::new();
-            for legacy_idx in 0..2 {
-                if preserve_legacy[legacy_idx] {
-                    migrated_slots.push(
-                        old_slots.get(legacy_idx).cloned().unwrap_or_else(|| {
-                            default_project_effect_slot(legacy_descs[legacy_idx])
-                        }),
-                    );
-                }
-            }
-            if old_slots.len() > 2 {
-                migrated_slots.extend(old_slots.into_iter().skip(2));
-            }
-            migrated_slots.truncate(max_slots);
-            while pattern.effect_slots.len() <= track_idx {
-                pattern.effect_slots.push(Vec::new());
-            }
-            pattern.effect_slots[track_idx] = migrated_slots;
-        }
-    }
-}
-
 fn project_builtin_effect_name_for_save(name: &str) -> Option<String> {
     let trimmed = name.trim();
     crate::effects::EffectDescriptor::builtin_insert_project_name(trimmed).or_else(|| {
@@ -560,7 +442,7 @@ fn migrate_legacy_dgen_param_node_indices(project: &mut ProjectFile) {
     let custom_instrument_tracks: Vec<bool> = project
         .tracks
         .iter()
-        .map(|track| matches!(track, project::ProjectTrack::Custom { .. }))
+        .map(|track| matches!(track.kind, project::ProjectTrackKind::Custom { .. }))
         .collect();
     let track_effect_names = project.custom_effects.clone();
     let bus_effect_names: std::collections::HashMap<u64, Vec<Option<String>>> = project
@@ -1125,9 +1007,9 @@ impl App {
             .master_volume
             .store(1.0_f32.to_bits(), Ordering::Relaxed);
         self.push_master_volume();
-        self.set_reverb_param(0, 0.2);
-        self.set_reverb_param(1, 0.8);
-        self.set_reverb_param(2, 0.3);
+        self.set_reverb_param_unrecorded(0, 0.2);
+        self.set_reverb_param_unrecorded(1, 0.8);
+        self.set_reverb_param_unrecorded(2, 0.3);
 
         self.current_project_name = None;
         self.editor.scratch_buffer.clear();
@@ -1148,7 +1030,11 @@ impl App {
         self.ui.selection_anchor = None;
         self.ui.track_selection_anchor = None;
         self.ui.visual_steps.clear();
+        self.ui.recording = false;
+        self.recording_history = None;
 
+        self.history.reset();
+        self.device_registry.clear();
         self.editor.status_message = Some(("New project".to_string(), Instant::now()));
     }
 
@@ -1168,6 +1054,22 @@ impl App {
         }
         self.publish_bus_gate_runtime();
         id
+    }
+
+    pub(crate) fn add_bus_channel_with_id(
+        &mut self,
+        id: BusId,
+        name: impl Into<String>,
+    ) -> Result<usize, String> {
+        if self.buses.iter().any(|bus| bus.id == id) {
+            return Err(format!("Bus {:?} already exists", id));
+        }
+        self.buses.push(BusChannelState::new(id, name));
+        let index = self.buses.len() - 1;
+        let bus = self.buses[index].clone();
+        self.graph_controller().ensure_bus_graph_node(bus.id, &bus.name);
+        self.publish_bus_gate_runtime();
+        Ok(index)
     }
 
     pub fn delete_bus_channel(&mut self, id: BusId) -> bool {
@@ -1229,14 +1131,21 @@ impl App {
     /// scene, then apply graph routing. Group membership is global, so its
     /// members must keep this routing across every scene — see
     /// `SequencerState::set_track_output_in_all_track_patterns`.
-    pub fn set_track_output_all_scenes(&mut self, track: usize, output: TrackOutput) {
+    #[doc(hidden)]
+    pub fn set_track_output_all_scenes_unrecorded(
+        &mut self,
+        track: usize,
+        output: TrackOutput,
+    ) -> bool {
         if track >= self.state.pattern.track_params.len() {
-            return;
+            return false;
         }
+        let live_changed = self.state.pattern.track_params[track].output() != output;
         self.state.pattern.track_params[track].set_output(output.clone());
-        self.state
+        let stored_changed = self.state
             .set_track_output_in_all_track_patterns(track, output);
         self.graph_controller().apply_track_output_routing(track);
+        live_changed || stored_changed
     }
 
     fn remove_bus_references_from_live_pattern(&self, id: BusId) {
@@ -1289,11 +1198,11 @@ impl App {
         if project.version > project::project_file_version() {
             return Err(format!("Unsupported project version {}", project.version));
         }
-        migrate_legacy_default_track_effects(&mut project);
         migrate_dgen_builtin_effect_names(&mut project);
         if project.version < 2 {
             migrate_legacy_dgen_param_node_indices(&mut project);
         }
+        project.normalize_device_instances()?;
 
         self.editor.pending_project_load = Some(super::PendingProjectLoad {
             name: name.to_string(),
@@ -1430,8 +1339,10 @@ impl App {
     }
 
     pub(super) fn save_project_named(&mut self, project_name: &str) -> Result<(), String> {
+        super::edit::finish_active_gesture(self);
         let project = self.capture_project(project_name)?;
         project::save_project(project_name, &project).map_err(|error| error.to_string())?;
+        self.history.mark_saved();
         Ok(())
     }
 
@@ -1451,8 +1362,14 @@ impl App {
             .patterns
             .get(project.current_pattern)
             .ok_or_else(|| "Current pattern is missing while saving Sound".to_string())?;
-        let (track_payload, rack_payload) = match source_track {
-            ProjectTrack::Rack { .. } => {
+        let ProjectTrack {
+            id,
+            color,
+            collapsed,
+            kind,
+        } = source_track;
+        let (track_payload, rack_payload) = match kind {
+            ProjectTrackKind::Rack { .. } => {
                 let rack = pattern
                     .rack_tracks
                     .get(track)
@@ -1461,11 +1378,7 @@ impl App {
                     .ok_or_else(|| "Rack pattern data is missing".to_string())?;
                 (project.tracks[track].clone(), rack)
             }
-            ProjectTrack::Sampler {
-                sample_path,
-                color,
-                collapsed,
-            } => {
+            ProjectTrackKind::Sampler { sample_path } => {
                 let sample_name = pattern.sample_names.get(track).cloned();
                 let slot_source = crate::project::ProjectRackTrackSlot {
                     instrument_type: crate::project::ProjectInstrumentType::Sampler,
@@ -1497,11 +1410,14 @@ impl App {
                     sample_name,
                 };
                 (
-                    ProjectTrack::Rack {
-                        routing: crate::project::ProjectRackRouting::Broadcast,
-                        slots: vec![slot_source],
+                    ProjectTrack {
+                        id,
                         color,
                         collapsed,
+                        kind: ProjectTrackKind::Rack {
+                            routing: crate::project::ProjectRackRouting::Broadcast,
+                            slots: vec![slot_source],
+                        },
                     },
                     crate::project::ProjectRackTrackPattern {
                         routing: crate::project::ProjectRackRouting::Broadcast,
@@ -1510,11 +1426,7 @@ impl App {
                     },
                 )
             }
-            ProjectTrack::Custom {
-                instrument_name,
-                color,
-                collapsed,
-            } => {
+            ProjectTrackKind::Custom { instrument_name } => {
                 let slot_source = crate::project::ProjectRackTrackSlot {
                     instrument_type: crate::project::ProjectInstrumentType::Custom,
                     sample_path: None,
@@ -1549,11 +1461,14 @@ impl App {
                     sample_name: None,
                 };
                 (
-                    ProjectTrack::Rack {
-                        routing: crate::project::ProjectRackRouting::Broadcast,
-                        slots: vec![slot_source],
+                    ProjectTrack {
+                        id,
                         color,
                         collapsed,
+                        kind: ProjectTrackKind::Rack {
+                            routing: crate::project::ProjectRackRouting::Broadcast,
+                            slots: vec![slot_source],
+                        },
                     },
                     crate::project::ProjectRackTrackPattern {
                         routing: crate::project::ProjectRackRouting::Broadcast,
@@ -1562,7 +1477,7 @@ impl App {
                     },
                 )
             }
-            ProjectTrack::Modulator { .. } => {
+            ProjectTrackKind::Modulator => {
                 return Err("Modulator tracks cannot be saved as Sounds".to_string())
             }
         };
@@ -1588,15 +1503,26 @@ impl App {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("Sound");
-        self.load_container_preset_onto_track(track, sound, fallback_name)
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        self.apply_recorded_instrument_binding_mutation(track, "Load Sound", |app| {
+            app.load_container_preset_onto_track(track, sound, fallback_name)?;
+            app.device_registry.clear_rack_track(track_id);
+            Ok(())
+        })?;
+        Ok(())
     }
 
     pub fn add_track_from_sound(&mut self, path: &Path) -> Result<usize, String> {
         // Parse and validate before changing topology. Loading samples and engines
         // still happens after the shell exists, so roll that shell back on error.
-        crate::project::load_sound_preset(path).map_err(|error| error.to_string())?;
+        let sound = crate::project::load_sound_preset(path).map_err(|error| error.to_string())?;
+        let fallback_name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Sound");
         let track = self.graph_controller().add_blank_sampler_track()?;
-        if let Err(error) = self.load_sound_onto_track(track, path) {
+        if let Err(error) = self.load_container_preset_onto_track(track, sound, fallback_name) {
             let rollback = self.graph_controller().delete_track(track);
             return match rollback {
                 Ok(_) => Err(error),
@@ -1614,8 +1540,8 @@ impl App {
         sound: crate::project::ProjectSoundPreset,
         fallback_name: &str,
     ) -> Result<(), String> {
-        let source_slots = match &sound.track {
-            ProjectTrack::Rack { slots, .. } => slots.clone(),
+        let source_slots = match &sound.track.kind {
+            ProjectTrackKind::Rack { slots, .. } => slots.clone(),
             _ => return Err("Container preset does not contain a rack".to_string()),
         };
         if source_slots.len() != sound.rack.slots.len() {
@@ -1772,10 +1698,19 @@ impl App {
     }
 
     pub fn load_rack_preset_onto_track(&mut self, track: usize, name: &str) -> Result<(), String> {
+        if self.graph.track_instrument_types.get(track) != Some(&InstrumentType::Rack) {
+            return Err("Rack presets can only be loaded onto an instrument rack".to_string());
+        }
         let preset = crate::project::load_rack_preset(name).map_err(|error| error.to_string())?;
-        self.load_container_preset_onto_track(track, preset, name)?;
-        self.set_track_sound_state(track, None, Some(name.to_string()), false);
-        Ok(())
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let preset_name = name.to_string();
+        self.apply_recorded_instrument_binding_mutation(track, "Load rack preset", |app| {
+            app.load_container_preset_onto_track(track, preset, &preset_name)?;
+            app.set_track_sound_state(track, None, Some(preset_name), false);
+            app.device_registry.clear_rack_track(track_id);
+            Ok(())
+        })
     }
 
     pub fn promote_preset_to_sound(
@@ -1874,6 +1809,7 @@ impl App {
             .export_bus_pattern_repository(&default_bus_snapshot);
         let tracks = self.capture_project_tracks()?;
         let custom_effects = self.capture_custom_effects();
+        let device_instances = self.capture_project_device_instances(&tracks, &custom_effects)?;
         let patterns = bank
             .iter()
             .enumerate()
@@ -1944,6 +1880,7 @@ impl App {
                 .collect(),
             tracks,
             custom_effects,
+            device_instances,
             scratch: ProjectScratchState {
                 buffer: self.editor.scratch_buffer.clone(),
                 cursor_row: self.editor.scratch_cursor.0,
@@ -1966,6 +1903,10 @@ impl App {
             .iter()
             .enumerate()
             .map(|(track_idx, name)| {
+                let id = self
+                    .track_registry
+                    .id_at(track_idx)
+                    .ok_or_else(|| format!("Missing stable id for track {}", track_idx + 1))?;
                 let color = self.track_colors.get(track_idx).copied();
                 let collapsed = self
                     .track_collapsed
@@ -2051,11 +1992,14 @@ impl App {
                             }
                         }
                     }
-                    Ok(ProjectTrack::Rack {
-                        routing: crate::project::ProjectRackRouting::from(rack.routing),
-                        slots,
+                    Ok(ProjectTrack {
+                        id,
                         color,
                         collapsed,
+                        kind: ProjectTrackKind::Rack {
+                            routing: crate::project::ProjectRackRouting::from(rack.routing),
+                            slots,
+                        },
                     })
                 } else if self.is_sampler_track(track_idx) {
                     let path = self
@@ -2064,15 +2008,23 @@ impl App {
                     let Some(path) = path else {
                         return Err(format!("Couldn't resolve sample path for '{}'", name));
                     };
-                    Ok(ProjectTrack::Sampler {
-                        sample_path: path.to_string_lossy().to_string(),
+                    Ok(ProjectTrack {
+                        id,
                         color,
                         collapsed,
+                        kind: ProjectTrackKind::Sampler {
+                            sample_path: path.to_string_lossy().to_string(),
+                        },
                     })
                 } else if self.graph.track_instrument_types.get(track_idx)
                     == Some(&InstrumentType::Modulator)
                 {
-                    Ok(ProjectTrack::Modulator { color, collapsed })
+                    Ok(ProjectTrack {
+                        id,
+                        color,
+                        collapsed,
+                        kind: ProjectTrackKind::Modulator,
+                    })
                 } else {
                     let instrument_name = self
                         .graph
@@ -2082,10 +2034,11 @@ impl App {
                         .and_then(|engine_id| self.editor.engine_registry.get(engine_id))
                         .map(|engine| engine.name.clone())
                         .unwrap_or_else(|| name.clone());
-                    Ok(ProjectTrack::Custom {
-                        instrument_name,
+                    Ok(ProjectTrack {
+                        id,
                         color,
                         collapsed,
+                        kind: ProjectTrackKind::Custom { instrument_name },
                     })
                 }
             })
@@ -2121,6 +2074,242 @@ impl App {
                     .collect()
             })
             .collect()
+    }
+
+    fn capture_project_device_instances(
+        &mut self,
+        tracks: &[ProjectTrack],
+        custom_effects: &[Vec<Option<String>>],
+    ) -> Result<crate::project::ProjectDeviceInstances, String> {
+        let mut result = crate::project::ProjectDeviceInstances::default();
+        for (track, project_track) in tracks.iter().enumerate() {
+            let sources = custom_effects.get(track).cloned().unwrap_or_default();
+            let active_sources = sources.into_iter().take_while(Option::is_some)
+                .flatten().collect::<Vec<_>>();
+            let ids = self.device_registry.audio_effect_chain(
+                project_track.id,
+                (0..active_sources.len()).map(|offset| BUILTIN_SLOT_COUNT + offset),
+            );
+            self.device_registry.bind_audio_effect_chain(
+                project_track.id,
+                BUILTIN_SLOT_COUNT,
+                &ids,
+            )?;
+            result.track_effects.push(crate::project::ProjectTrackEffectChain {
+                track_id: project_track.id.0,
+                instances: ids.into_iter().zip(active_sources).map(|(id, name)| {
+                    crate::project::ProjectEffectInstance {
+                        id: id.0,
+                        source: crate::project::ProjectEffectSource::from_project_name(&name),
+                    }
+                }).collect(),
+            });
+
+            let midi_names = self.state.pattern.track_params.get(track)
+                .map(|params| params.midi_fx_chain())
+                .unwrap_or_default();
+            let midi_ids = self.device_registry.midi_effect_chain(project_track.id, midi_names.len());
+            self.device_registry.bind_midi_effect_chain(project_track.id, &midi_ids)?;
+            result.midi_effects.push(crate::project::ProjectMidiEffectChain {
+                track_id: project_track.id.0,
+                instances: midi_ids.into_iter().zip(midi_names).map(|(id, name)| {
+                    crate::project::ProjectMidiEffectInstance { id: id.0, name }
+                }).collect(),
+            });
+        }
+        for bus in &self.buses {
+            let names = bus.custom_effect_names.iter().take_while(|name| name.is_some())
+                .filter_map(|name| name.clone()).collect::<Vec<_>>();
+            let ids = (0..names.len()).map(|slot| {
+                self.device_registry.bus_audio_effect(bus.id, slot)
+            }).collect::<Vec<_>>();
+            self.device_registry.bind_bus_audio_effect_chain(bus.id, &ids)?;
+            result.bus_effects.push(crate::project::ProjectBusEffectChain {
+                bus_id: bus.id.0,
+                instances: ids.into_iter().zip(names).map(|(id, name)| {
+                    crate::project::ProjectEffectInstance {
+                        id: id.0,
+                        source: crate::project::ProjectEffectSource::from_project_name(&name),
+                    }
+                }).collect(),
+            });
+        }
+        let racks = self.state.pattern.rack_tracks.lock().unwrap().clone();
+        for (track, rack) in racks.into_iter().enumerate() {
+            let (Some(project_track), Some(rack)) = (tracks.get(track), rack) else { continue };
+            for (slot_index, slot) in rack.slots.into_iter().enumerate() {
+                let rack_slot_id = self.device_registry.rack_slot(project_track.id, slot_index);
+                let names = slot.custom_effect_names.into_iter().take_while(Option::is_some)
+                    .flatten().collect::<Vec<_>>();
+                let ids = (0..names.len()).map(|effect_slot| {
+                    self.device_registry.rack_audio_effect(rack_slot_id, effect_slot)
+                }).collect::<Vec<_>>();
+                self.device_registry.bind_rack_audio_effect_chain(rack_slot_id, &ids)?;
+                result.rack_effects.push(crate::project::ProjectRackEffectChain {
+                    track_id: project_track.id.0,
+                    slot_index,
+                    rack_slot_id: rack_slot_id.0,
+                    instances: ids.into_iter().zip(names).map(|(id, name)| {
+                        crate::project::ProjectEffectInstance {
+                            id: id.0,
+                            source: crate::project::ProjectEffectSource::from_project_name(&name),
+                        }
+                    }).collect(),
+                });
+            }
+        }
+        Ok(result)
+    }
+
+    fn restore_project_device_instances(
+        &mut self,
+        instances: &crate::project::ProjectDeviceInstances,
+    ) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut observe = |id: u64, label: &str| -> Result<(), String> {
+            if id == 0 {
+                return Err(format!("{label} has an invalid zero identity"));
+            }
+            if !seen.insert(id) {
+                return Err(format!("project device identity {id} is duplicated"));
+            }
+            Ok(())
+        };
+        for chain in &instances.track_effects {
+            for instance in &chain.instances { observe(instance.id, "track effect")?; }
+        }
+        for chain in &instances.midi_effects {
+            for instance in &chain.instances { observe(instance.id, "MIDI effect")?; }
+        }
+        for chain in &instances.bus_effects {
+            for instance in &chain.instances { observe(instance.id, "bus effect")?; }
+        }
+        for chain in &instances.rack_effects {
+            observe(chain.rack_slot_id, "rack slot")?;
+            for instance in &chain.instances { observe(instance.id, "rack-slot effect")?; }
+        }
+
+        let expected_tracks = self.track_registry.ids().iter()
+            .map(|id| id.0).collect::<std::collections::HashSet<_>>();
+        let track_effect_owners = instances.track_effects.iter()
+            .map(|chain| chain.track_id).collect::<std::collections::HashSet<_>>();
+        if track_effect_owners.len() != instances.track_effects.len()
+            || track_effect_owners != expected_tracks
+        {
+            return Err("project track-effect records do not cover every track exactly once".to_string());
+        }
+        let midi_effect_owners = instances.midi_effects.iter()
+            .map(|chain| chain.track_id).collect::<std::collections::HashSet<_>>();
+        if midi_effect_owners.len() != instances.midi_effects.len()
+            || midi_effect_owners != expected_tracks
+        {
+            return Err("project MIDI-effect records do not cover every track exactly once".to_string());
+        }
+        let expected_buses = self.buses.iter()
+            .map(|bus| bus.id.0).collect::<std::collections::HashSet<_>>();
+        let bus_effect_owners = instances.bus_effects.iter()
+            .map(|chain| chain.bus_id).collect::<std::collections::HashSet<_>>();
+        if bus_effect_owners.len() != instances.bus_effects.len()
+            || bus_effect_owners != expected_buses
+        {
+            return Err("project bus-effect records do not cover every bus exactly once".to_string());
+        }
+        let racks = self.state.pattern.rack_tracks.lock().unwrap().clone();
+        let mut expected_rack_slots = std::collections::HashSet::new();
+        for (track, rack) in racks.iter().enumerate() {
+            let Some(rack) = rack else { continue };
+            let track_id = self.track_registry.id_at(track)
+                .ok_or_else(|| format!("rack at track {} has no stable track identity", track + 1))?;
+            expected_rack_slots.extend(
+                (0..rack.slots.len()).map(|slot_index| (track_id.0, slot_index)),
+            );
+        }
+        let rack_effect_owners = instances.rack_effects.iter()
+            .map(|chain| (chain.track_id, chain.slot_index))
+            .collect::<std::collections::HashSet<_>>();
+        if rack_effect_owners.len() != instances.rack_effects.len()
+            || rack_effect_owners != expected_rack_slots
+        {
+            return Err("project rack-effect records do not cover every rack slot exactly once".to_string());
+        }
+
+        for chain in &instances.track_effects {
+            let track_id = crate::sequencer::TrackId(chain.track_id);
+            let track = self.track_registry.index_of(track_id)
+                .ok_or_else(|| format!("effect chain references missing track {}", chain.track_id))?;
+            let live_count = self.state.pattern.effect_chains[track]
+                .iter().skip(BUILTIN_SLOT_COUNT)
+                .take_while(|slot| slot.node_id.load(Ordering::Relaxed) != 0)
+                .count();
+            if live_count != chain.instances.len() {
+                return Err(format!("track {} effect-instance count does not match the live chain", track + 1));
+            }
+        }
+        for chain in &instances.midi_effects {
+            let track_id = crate::sequencer::TrackId(chain.track_id);
+            let track = self.track_registry.index_of(track_id)
+                .ok_or_else(|| format!("MIDI chain references missing track {}", chain.track_id))?;
+            if self.state.pattern.track_params[track].midi_fx_chain().len() != chain.instances.len() {
+                return Err(format!("track {} MIDI-instance count does not match the live chain", track + 1));
+            }
+        }
+        for chain in &instances.bus_effects {
+            let bus_id = BusId(chain.bus_id);
+            let bus = self.buses.iter().position(|bus| bus.id == bus_id)
+                .ok_or_else(|| format!("effect chain references missing bus {}", chain.bus_id))?;
+            let live_count = self.buses[bus].effect_slots.iter()
+                .take_while(|slot| slot.node_id != 0).count();
+            if live_count != chain.instances.len() {
+                return Err(format!("bus {} effect-instance count does not match the live chain", chain.bus_id));
+            }
+        }
+        for chain in &instances.rack_effects {
+            let track_id = crate::sequencer::TrackId(chain.track_id);
+            let track = self.track_registry.index_of(track_id)
+                .ok_or_else(|| format!("rack chain references missing track {}", chain.track_id))?;
+            let rack_slot_id = crate::sequencer::RackSlotId(chain.rack_slot_id);
+            let slot = self.state.pattern.rack_tracks.lock().unwrap()
+                .get(track).and_then(Option::as_ref)
+                .and_then(|rack| rack.slots.get(chain.slot_index)).cloned()
+                .ok_or_else(|| format!("rack chain references missing track {} slot {}", track + 1, chain.slot_index + 1))?;
+            let live_count = slot.effect_slots.iter().take_while(|slot| slot.node_id != 0).count();
+            if live_count != chain.instances.len() {
+                return Err(format!("rack-slot effect-instance count does not match the live chain"));
+            }
+        }
+
+        self.device_registry.clear();
+        for chain in &instances.track_effects {
+            let track_id = crate::sequencer::TrackId(chain.track_id);
+            let ids = chain.instances.iter()
+                .map(|instance| crate::sequencer::EffectInstanceId(instance.id))
+                .collect::<Vec<_>>();
+            self.device_registry.bind_audio_effect_chain(track_id, BUILTIN_SLOT_COUNT, &ids)?;
+        }
+        for chain in &instances.midi_effects {
+            let track_id = crate::sequencer::TrackId(chain.track_id);
+            let ids = chain.instances.iter()
+                .map(|instance| crate::sequencer::MidiFxInstanceId(instance.id))
+                .collect::<Vec<_>>();
+            self.device_registry.bind_midi_effect_chain(track_id, &ids)?;
+        }
+        for chain in &instances.bus_effects {
+            let bus_id = BusId(chain.bus_id);
+            let ids = chain.instances.iter()
+                .map(|instance| crate::sequencer::EffectInstanceId(instance.id))
+                .collect::<Vec<_>>();
+            self.device_registry.bind_bus_audio_effect_chain(bus_id, &ids)?;
+        }
+        for chain in &instances.rack_effects {
+            let track_id = crate::sequencer::TrackId(chain.track_id);
+            let rack_slot_id = crate::sequencer::RackSlotId(chain.rack_slot_id);
+            self.device_registry.bind_rack_slot(track_id, chain.slot_index, rack_slot_id)?;
+            let ids = chain.instances.iter()
+                .map(|instance| crate::sequencer::EffectInstanceId(instance.id))
+                .collect::<Vec<_>>();
+            self.device_registry.bind_rack_audio_effect_chain(rack_slot_id, &ids)?;
+        }
+        Ok(())
     }
 
     fn resolve_sample_path_for_snapshot(
@@ -2253,6 +2442,10 @@ impl App {
                     pending.project.tracks.len()
                 );
                 if track_idx >= pending.project.tracks.len() {
+                    self.track_registry = crate::sequencer::TrackRegistry::from_ids(
+                        pending.project.tracks.iter().map(|track| track.id),
+                    )
+                    .map_err(|error| format!("Invalid project track ids: {error:?}"))?;
                     pending.phase = super::PendingProjectLoadPhase::AddEffect {
                         track_idx: 0,
                         offset: 0,
@@ -2260,8 +2453,8 @@ impl App {
                 } else {
                     let saved_color = pending.project.tracks[track_idx].color();
                     let saved_collapsed = pending.project.tracks[track_idx].collapsed();
-                    match &pending.project.tracks[track_idx] {
-                        ProjectTrack::Sampler { sample_path, .. } => {
+                    match &pending.project.tracks[track_idx].kind {
+                        ProjectTrackKind::Sampler { sample_path } => {
                             eprintln!(
                                 "project-load: add sampler track index={} path={}",
                                 track_idx, sample_path
@@ -2272,20 +2465,18 @@ impl App {
                                     format!("Failed to load sample '{}': {error}", sample_path)
                                 })?;
                         }
-                        ProjectTrack::Custom {
-                            instrument_name, ..
-                        } => {
+                        ProjectTrackKind::Custom { instrument_name } => {
                             eprintln!(
                                 "project-load: add custom track index={} instrument={}",
                                 track_idx, instrument_name
                             );
                             self.add_saved_instrument_track_sync(instrument_name)?;
                         }
-                        ProjectTrack::Modulator { .. } => {
+                        ProjectTrackKind::Modulator => {
                             eprintln!("project-load: add modulator track index={track_idx}");
                             self.graph_controller().add_modulator_track()?;
                         }
-                        ProjectTrack::Rack { routing, slots, .. } => {
+                        ProjectTrackKind::Rack { routing, slots } => {
                             eprintln!(
                                 "project-load: add rack track index={} slots={}",
                                 track_idx,
@@ -2663,6 +2854,7 @@ impl App {
             scratch,
             tracks: _,
             custom_effects: _,
+            device_instances,
             patterns: _,
             groups,
             macros,
@@ -2727,7 +2919,7 @@ impl App {
         for group in self.groups.clone() {
             let output = TrackOutput::Bus(BusId(group.bus_id));
             for &member in &group.members {
-                self.set_track_output_all_scenes(member, output.clone());
+                self.set_track_output_all_scenes_unrecorded(member, output.clone());
             }
         }
         let saved_bus_effects: Vec<(usize, usize, String, crate::effects::EffectSlotSnapshot)> =
@@ -2854,9 +3046,9 @@ impl App {
                 graph.apply_track_bus_sends(track_idx);
             }
         }
-        self.set_reverb_param(0, reverb.size);
-        self.set_reverb_param(1, reverb.brightness);
-        self.set_reverb_param(2, reverb.replace);
+        self.set_reverb_param_unrecorded(0, reverb.size);
+        self.set_reverb_param_unrecorded(1, reverb.brightness);
+        self.set_reverb_param_unrecorded(2, reverb.replace);
         let mut macro_engine = crate::macro_engine::MacroEngine::default();
         let mut restored_values = Vec::with_capacity(macros.len());
         for project_macro in macros {
@@ -2872,6 +3064,7 @@ impl App {
             macro_engine.set_value(id, value);
         }
         self.macro_engine = macro_engine;
+        self.restore_project_device_instances(&device_instances)?;
         self.push_all_restored_defaults();
         self.push_all_delay_bpm();
 
@@ -2913,6 +3106,11 @@ impl App {
             status
         };
         eprintln!("project-load: finish complete status={status}");
+        self.ui.recording = false;
+        self.recording_history = None;
+        self.history.reset();
+        self.device_registry.clear();
+        self.history.mark_saved();
         self.editor.status_message = Some((status, Instant::now()));
         self.editor.pending_project_load = None;
         Ok(())
@@ -3525,6 +3723,65 @@ fn apply_instrument_preset_to_container_slot(
     }
 }
 
+/// Canonical persisted project state used by undo/redo tests.
+///
+/// Serialization deliberately excludes runtime graph identities. The project
+/// name, active scene/track, and scratch editor are normalized because they
+/// are session or text-editor state rather than sequencer authoring state.
+#[cfg(test)]
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct AuthoringStateSnapshot(Vec<u8>);
+
+#[cfg(test)]
+impl std::fmt::Debug for AuthoringStateSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthoringStateSnapshot")
+            .field("serialized_bytes", &self.0.len())
+            .finish()
+    }
+}
+
+#[cfg(test)]
+impl AuthoringStateSnapshot {
+    pub(super) fn first_difference(&self, other: &Self) -> Option<(usize, String, String)> {
+        let index = self
+            .0
+            .iter()
+            .zip(&other.0)
+            .position(|(left, right)| left != right)
+            .or_else(|| {
+                (self.0.len() != other.0.len()).then_some(self.0.len().min(other.0.len()))
+            })?;
+        let start = index.saturating_sub(48);
+        let left_end = (index + 48).min(self.0.len());
+        let right_end = (index + 48).min(other.0.len());
+        Some((
+            index,
+            String::from_utf8_lossy(&self.0[start..left_end]).into_owned(),
+            String::from_utf8_lossy(&other.0[start..right_end]).into_owned(),
+        ))
+    }
+}
+
+#[cfg(test)]
+impl App {
+    pub(super) fn capture_authoring_state_snapshot(
+        &mut self,
+    ) -> Result<AuthoringStateSnapshot, String> {
+        let mut project = self.capture_project("__authoring_state_snapshot__")?;
+        project.name.clear();
+        project.current_pattern = 0;
+        project.current_track = None;
+        project.scratch.buffer.clear();
+        project.scratch.cursor_row = 0;
+        project.scratch.cursor_col = 0;
+        serde_json::to_vec(&project)
+            .map(AuthoringStateSnapshot)
+            .map_err(|error| format!("could not serialize authoring-state snapshot: {error}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3927,12 +4184,16 @@ mod tests {
             },
             buses: Vec::new(),
             groups: Vec::new(),
-            tracks: vec![ProjectTrack::Sampler {
-                sample_path: "samples/kick.wav".to_string(),
+            tracks: vec![ProjectTrack {
+                id: crate::sequencer::TrackId(1),
                 color: None,
                 collapsed: false,
+                kind: ProjectTrackKind::Sampler {
+                    sample_path: "samples/kick.wav".to_string(),
+                },
             }],
             custom_effects: vec![custom_effects],
+            device_instances: crate::project::ProjectDeviceInstances::default(),
             scratch: ProjectScratchState::default(),
             patterns: vec![ProjectPattern {
                 track_bits: Vec::new(),
@@ -3968,15 +4229,6 @@ mod tests {
             macros: Vec::new(),
             next_macro_id: 1,
         }
-    }
-
-    fn legacy_default_project_effect_slot(
-        mut desc: EffectDescriptor,
-    ) -> project::ProjectEffectSlot {
-        if let Some(enabled) = desc.params.iter_mut().find(|param| param.name == "enabled") {
-            enabled.default = 0.0;
-        }
-        default_project_effect_slot(&desc)
     }
 
     #[test]
@@ -4016,6 +4268,7 @@ mod tests {
         project.buses = project::default_project_buses();
         project.buses[1].custom_effects = vec![Some(project_name)];
         project.buses[1].effect_slots = vec![bus_slot];
+        project.normalize_device_instances().unwrap();
 
         let before = serde_json::to_string_pretty(&project).expect("serialize project");
         let restored: ProjectFile = serde_json::from_str(&before).expect("deserialize project");
@@ -4025,83 +4278,100 @@ mod tests {
     }
 
     #[test]
-    fn legacy_default_filter_delay_migration_drops_untouched_slots() {
-        let custom_slot = project::ProjectEffectSlot {
-            num_params: 1,
-            defaults: vec![0.42],
-            plocks: vec![vec![None]; MAX_STEPS],
-            plock_param_ids: vec![vec![None]; MAX_STEPS],
-            key_locks: std::collections::BTreeMap::new(),
-            key_lock_param_ids: std::collections::BTreeMap::new(),
-            param_node_indices: vec![9],
-            param_node_spans: vec![1],
-            tensor_params: Vec::new(),
-            ir: None,
+    fn project_device_instance_records_roundtrip_stable_ids_and_sources() {
+        let mut project = minimal_project_with_effect_slots(Vec::new(), Vec::new());
+        project.buses = project::default_project_buses();
+        project.device_instances = crate::project::ProjectDeviceInstances {
+            track_effects: vec![crate::project::ProjectTrackEffectChain {
+                track_id: 1,
+                instances: vec![crate::project::ProjectEffectInstance {
+                    id: 10,
+                    source: crate::project::ProjectEffectSource::Builtin {
+                        name: "Filter".to_string(),
+                    },
+                }],
+            }],
+            midi_effects: vec![crate::project::ProjectMidiEffectChain {
+                track_id: 1,
+                instances: vec![crate::project::ProjectMidiEffectInstance {
+                    id: 11,
+                    name: "arp".to_string(),
+                }],
+            }],
+            bus_effects: vec![crate::project::ProjectBusEffectChain {
+                bus_id: BusId::DEFAULT_A.0,
+                instances: vec![crate::project::ProjectEffectInstance {
+                    id: 12,
+                    source: crate::project::ProjectEffectSource::Saved {
+                        name: "stereo-tremolo".to_string(),
+                    },
+                }],
+            }],
+            rack_effects: vec![crate::project::ProjectRackEffectChain {
+                track_id: 1,
+                slot_index: 0,
+                rack_slot_id: 13,
+                instances: vec![crate::project::ProjectEffectInstance {
+                    id: 14,
+                    source: crate::project::ProjectEffectSource::Builtin {
+                        name: "OTT".to_string(),
+                    },
+                }],
+            }],
         };
-        let mut project = minimal_project_with_effect_slots(
-            vec![Some("custom-fx".to_string())],
-            vec![
-                legacy_default_project_effect_slot(EffectDescriptor::builtin_filter()),
-                legacy_default_project_effect_slot(EffectDescriptor::builtin_delay()),
-                custom_slot.clone(),
-            ],
-        );
 
-        migrate_legacy_default_track_effects(&mut project);
-
+        let json = serde_json::to_string_pretty(&project).expect("serialize instance records");
+        assert!(json.contains("\"device_instances\""));
+        assert!(!json.contains("\"midi_fx_chain\""));
+        let restored: ProjectFile = serde_json::from_str(&json).expect("restore instance records");
+        assert_eq!(restored.device_instances, project.device_instances);
+        assert_eq!(restored.custom_effects[0][0].as_deref(), Some("builtin:Filter"));
         assert_eq!(
-            project.custom_effects[0],
-            vec![Some("custom-fx".to_string())]
-        );
-        assert_eq!(project.patterns[0].effect_slots[0].len(), 1);
-        assert_eq!(
-            project.patterns[0].effect_slots[0][0].defaults,
-            custom_slot.defaults
+            restored.buses.iter().find(|bus| bus.id == BusId::DEFAULT_A.0)
+                .unwrap().custom_effects[0].as_deref(),
+            Some("stereo-tremolo")
         );
     }
 
     #[test]
-    fn legacy_default_filter_delay_migration_preserves_edited_slots() {
-        let mut filter_slot =
-            legacy_default_project_effect_slot(EffectDescriptor::builtin_filter());
-        filter_slot.defaults[2] = 880.0;
-        let mut delay_slot = legacy_default_project_effect_slot(EffectDescriptor::builtin_delay());
-        delay_slot.plocks[3][0] = Some(0.0);
-        let custom_slot = project::ProjectEffectSlot {
-            num_params: 1,
-            defaults: vec![0.24],
-            plocks: vec![vec![None]; MAX_STEPS],
-            plock_param_ids: vec![vec![None]; MAX_STEPS],
+    fn device_normalization_keeps_modern_dense_custom_slots() {
+        let shimmer_values = vec![
+            1.6437798, 7.0884132, 53.366623, 230.13315, 0.82464963, 5579.7046, 0.85,
+            0.7110942, 0.38275215, 1.0, 1.0,
+        ];
+        let shimmer_slot = project::ProjectEffectSlot {
+            num_params: shimmer_values.len() as u32,
+            defaults: shimmer_values.clone(),
+            plocks: vec![vec![None; shimmer_values.len()]; MAX_STEPS],
+            plock_param_ids: vec![vec![None; shimmer_values.len()]; MAX_STEPS],
             key_locks: std::collections::BTreeMap::new(),
             key_lock_param_ids: std::collections::BTreeMap::new(),
-            param_node_indices: vec![11],
-            param_node_spans: vec![1],
+            param_node_indices: vec![6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 4],
+            param_node_spans: vec![1; shimmer_values.len()],
             tensor_params: Vec::new(),
             ir: None,
         };
+        let mut slots = vec![shimmer_slot];
+        slots.resize_with(crate::lisp_host::MAX_CUSTOM_FX, Default::default);
         let mut project = minimal_project_with_effect_slots(
-            vec![Some("custom-fx".to_string())],
-            vec![filter_slot, delay_slot, custom_slot.clone()],
+            vec![Some("shimmerpitch".to_string())],
+            slots,
         );
+        project.version = 1;
 
-        migrate_legacy_default_track_effects(&mut project);
+        project.normalize_device_instances().unwrap();
 
         assert_eq!(
             project.custom_effects[0],
-            vec![
-                EffectDescriptor::builtin_insert_project_name("Filter"),
-                EffectDescriptor::builtin_insert_project_name("Delay"),
-                Some("custom-fx".to_string()),
-            ]
-        );
-        assert_eq!(project.patterns[0].effect_slots[0][0].defaults[2], 880.0);
-        assert_eq!(
-            project.patterns[0].effect_slots[0][1].plocks[3][0],
-            Some(0.0)
+            vec![Some("shimmerpitch".to_string())]
         );
         assert_eq!(
-            project.patterns[0].effect_slots[0][2].defaults,
-            custom_slot.defaults
+            project.patterns[0].effect_slots[0][0].defaults,
+            shimmer_values
+        );
+        assert_eq!(
+            project.patterns[0].effect_slots[0].len(),
+            crate::lisp_host::MAX_CUSTOM_FX
         );
     }
 

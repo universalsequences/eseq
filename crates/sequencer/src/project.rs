@@ -1,21 +1,23 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot, TensorParamSnapshot};
 use crate::graph::ProjectGraphOverrides;
 use crate::macro_engine::{
-    Macro, MacroCurve, MacroEngineError, MacroKind, MacroMapping, SceneMacroConfig, StealQuantize,
-    normalize_macro_key,
+    normalize_macro_key, Macro, MacroCurve, MacroEngineError, MacroKind, MacroMapping,
+    SceneMacroConfig, StealQuantize,
 };
 use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
-    BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MAX_STEPS, MidiFxPosition,
-    ModConnection, ModDestination, NUM_PARAMS, PatternSnapshot, RackRouting, RackSlotParamPlocks,
-    RackSlotSnapshot, RackTrackSnapshot, SwingResolution, TRACK_PATTERN_WORDS, Timebase,
-    TrackOutput, TrackParamsSnapshot, TrackSendSnapshot, TrackSoundState,
+    BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
+    ModDestination, PatternSnapshot, RackRouting, RackSlotParamPlocks, RackSlotSnapshot,
+    RackTrackSnapshot, SwingResolution, Timebase, TrackId, TrackOutput, TrackParamsSnapshot,
+    TrackRegistry, TrackSendSnapshot, TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use crate::track_color::TrackColor;
 
@@ -28,7 +30,10 @@ const RACK_PRESETS_DIR: &str = "presets/racks";
 //   2 — dgenlisp header grew to 10 slots (node-owned process identity);
 //       dgen `param_node_indices` are `10 + cell_id`. Version-1 files are
 //       migrated on load (see `migrate_legacy_dgen_param_node_indices`).
-const PROJECT_FILE_VERSION: u32 = 2;
+//   3 — tracks gained stable ids and shared metadata around a kind enum.
+//   4 — effect, MIDI-FX, bus-FX, and rack-slot-FX chains gained authoritative
+//       stable instance records; dense pattern slots remain value snapshots.
+const PROJECT_FILE_VERSION: u32 = 4;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectSoundPreset {
@@ -47,7 +52,7 @@ pub struct ProjectSoundMetadata {
     pub author: String,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize)]
 pub struct ProjectFile {
     pub version: u32,
     pub name: String,
@@ -61,7 +66,10 @@ pub struct ProjectFile {
     #[serde(default = "default_project_buses")]
     pub buses: Vec<ProjectBusChannel>,
     pub tracks: Vec<ProjectTrack>,
+    #[serde(skip_serializing)]
     pub custom_effects: Vec<Vec<Option<String>>>,
+    #[serde(default)]
+    pub device_instances: ProjectDeviceInstances,
     #[serde(default)]
     pub scratch: ProjectScratchState,
     pub patterns: Vec<ProjectPattern>,
@@ -71,6 +79,318 @@ pub struct ProjectFile {
     pub macros: Vec<ProjectMacro>,
     #[serde(default = "default_next_macro_id")]
     pub next_macro_id: u32,
+}
+
+#[derive(Deserialize)]
+struct ProjectFileWire {
+    version: u32,
+    name: String,
+    bpm: u32,
+    #[serde(default = "default_master_volume")]
+    master_volume: f32,
+    current_pattern: usize,
+    #[serde(default)]
+    current_track: Option<usize>,
+    reverb: ProjectReverbState,
+    #[serde(default = "default_project_buses")]
+    buses: Vec<ProjectBusChannel>,
+    tracks: Vec<ProjectTrackWire>,
+    #[serde(default)]
+    custom_effects: Vec<Vec<Option<String>>>,
+    #[serde(default)]
+    device_instances: ProjectDeviceInstances,
+    #[serde(default)]
+    scratch: ProjectScratchState,
+    patterns: Vec<ProjectPattern>,
+    #[serde(default)]
+    groups: Vec<ProjectTrackGroup>,
+    #[serde(default)]
+    macros: Vec<ProjectMacro>,
+    #[serde(default = "default_next_macro_id")]
+    next_macro_id: u32,
+}
+
+impl<'de> Deserialize<'de> for ProjectFile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ProjectFileWire::deserialize(deserializer)?;
+        let tracks = migrate_project_tracks(wire.version, wire.tracks).map_err(D::Error::custom)?;
+        let mut project = Self {
+            version: wire.version,
+            name: wire.name,
+            bpm: wire.bpm,
+            master_volume: wire.master_volume,
+            current_pattern: wire.current_pattern,
+            current_track: wire.current_track,
+            reverb: wire.reverb,
+            buses: wire.buses,
+            tracks,
+            custom_effects: wire.custom_effects,
+            device_instances: wire.device_instances,
+            scratch: wire.scratch,
+            patterns: wire.patterns,
+            groups: wire.groups,
+            macros: wire.macros,
+            next_macro_id: wire.next_macro_id,
+        };
+        project.normalize_device_instances().map_err(D::Error::custom)?;
+        Ok(project)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectDeviceInstances {
+    #[serde(default)]
+    pub track_effects: Vec<ProjectTrackEffectChain>,
+    #[serde(default)]
+    pub midi_effects: Vec<ProjectMidiEffectChain>,
+    #[serde(default)]
+    pub bus_effects: Vec<ProjectBusEffectChain>,
+    #[serde(default)]
+    pub rack_effects: Vec<ProjectRackEffectChain>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectEffectInstance {
+    pub id: u64,
+    pub source: ProjectEffectSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProjectEffectSource {
+    Builtin { name: String },
+    Saved { name: String },
+}
+
+impl ProjectEffectSource {
+    pub fn project_name(&self) -> String {
+        match self {
+            Self::Builtin { name } => format!("builtin:{name}"),
+            Self::Saved { name } => name.clone(),
+        }
+    }
+
+    pub fn from_project_name(name: &str) -> Self {
+        if let Some(name) = crate::effects::EffectDescriptor::strip_builtin_insert_project_name(name) {
+            return Self::Builtin { name: name.to_string() };
+        }
+        if crate::effects::EffectDescriptor::builtin_insert(name).is_some()
+            || crate::effects::conv_reverb::is_dgen_builtin(name)
+        {
+            return Self::Builtin { name: name.to_string() };
+        }
+        Self::Saved { name: name.to_string() }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectTrackEffectChain {
+    pub track_id: u64,
+    pub instances: Vec<ProjectEffectInstance>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMidiEffectInstance {
+    pub id: u64,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMidiEffectChain {
+    pub track_id: u64,
+    pub instances: Vec<ProjectMidiEffectInstance>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectBusEffectChain {
+    pub bus_id: u64,
+    pub instances: Vec<ProjectEffectInstance>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRackEffectChain {
+    pub track_id: u64,
+    pub slot_index: usize,
+    pub rack_slot_id: u64,
+    pub instances: Vec<ProjectEffectInstance>,
+}
+
+impl ProjectFile {
+    pub(crate) fn normalize_device_instances(&mut self) -> Result<(), String> {
+        let mut next_id = self.device_instances.track_effects.iter()
+            .flat_map(|chain| chain.instances.iter().map(|instance| instance.id))
+            .chain(self.device_instances.midi_effects.iter()
+                .flat_map(|chain| chain.instances.iter().map(|instance| instance.id)))
+            .chain(self.device_instances.bus_effects.iter()
+                .flat_map(|chain| chain.instances.iter().map(|instance| instance.id)))
+            .chain(self.device_instances.rack_effects.iter().flat_map(|chain| {
+                std::iter::once(chain.rack_slot_id)
+                    .chain(chain.instances.iter().map(|instance| instance.id))
+            }))
+            .max()
+            .unwrap_or(0);
+        let rebuild_tracks = self.version < 4 || self.device_instances.track_effects.is_empty();
+        let rebuild_midi = self.version < 4 || self.device_instances.midi_effects.is_empty();
+        let rebuild_buses = self.version < 4 || self.device_instances.bus_effects.is_empty();
+        let rebuild_racks = self.version < 4 || self.device_instances.rack_effects.is_empty();
+        let required_ids = (if rebuild_tracks {
+            self.custom_effects.iter().flatten().filter_map(|name| name.as_deref())
+                .filter(|name| !name.trim().is_empty()).count()
+        } else { 0 })
+            + (if rebuild_midi {
+                self.patterns.first().map(|pattern| pattern.track_params.iter()
+                    .map(|params| params.midi_fx_chain.len()).sum()).unwrap_or(0)
+            } else { 0 })
+            + (if rebuild_buses {
+                self.buses.iter().flat_map(|bus| &bus.custom_effects)
+                    .filter_map(|name| name.as_deref())
+                    .filter(|name| !name.trim().is_empty()).count()
+            } else { 0 })
+            + (if rebuild_racks {
+                self.patterns.first().map(|pattern| pattern.rack_tracks.iter().flatten()
+                    .flat_map(|rack| &rack.slots)
+                    .map(|slot| 1 + slot.custom_effects.iter()
+                        .filter_map(|name| name.as_deref())
+                        .filter(|name| !name.trim().is_empty()).count())
+                    .sum()).unwrap_or(0)
+            } else { 0 });
+        next_id.checked_add(required_ids as u64)
+            .ok_or_else(|| "project device identity space is exhausted".to_string())?;
+        let mut allocate = || {
+            next_id += 1;
+            next_id
+        };
+
+        if rebuild_tracks {
+            self.device_instances.track_effects = self.tracks.iter().enumerate()
+                .map(|(track, project_track)| ProjectTrackEffectChain {
+                    track_id: project_track.id.0,
+                    instances: self.custom_effects.get(track).into_iter().flatten()
+                        .filter_map(|name| name.as_deref())
+                        .filter(|name| !name.trim().is_empty())
+                        .map(|name| ProjectEffectInstance {
+                            id: allocate(),
+                            source: ProjectEffectSource::from_project_name(name),
+                        })
+                        .collect(),
+                })
+                .collect();
+        }
+        if rebuild_midi {
+            let first_pattern = self.patterns.first();
+            self.device_instances.midi_effects = self.tracks.iter().enumerate()
+                .map(|(track, project_track)| ProjectMidiEffectChain {
+                    track_id: project_track.id.0,
+                    instances: first_pattern
+                        .and_then(|pattern| pattern.track_params.get(track))
+                        .map(|params| params.midi_fx_chain.iter().map(|name| {
+                            ProjectMidiEffectInstance { id: allocate(), name: name.clone() }
+                        }).collect())
+                        .unwrap_or_default(),
+                })
+                .collect();
+        }
+        if rebuild_buses {
+            self.device_instances.bus_effects = self.buses.iter().map(|bus| {
+                ProjectBusEffectChain {
+                    bus_id: bus.id,
+                    instances: bus.custom_effects.iter().filter_map(|name| name.as_deref())
+                        .filter(|name| !name.trim().is_empty())
+                        .map(|name| ProjectEffectInstance {
+                            id: allocate(),
+                            source: ProjectEffectSource::from_project_name(name),
+                        })
+                        .collect(),
+                }
+            }).collect();
+        }
+        if rebuild_racks {
+            self.device_instances.rack_effects.clear();
+            if let Some(pattern) = self.patterns.first() {
+                for (track, rack) in pattern.rack_tracks.iter().enumerate() {
+                    let Some(rack) = rack else { continue };
+                    let Some(project_track) = self.tracks.get(track) else { continue };
+                    for (slot_index, slot) in rack.slots.iter().enumerate() {
+                        self.device_instances.rack_effects.push(ProjectRackEffectChain {
+                            track_id: project_track.id.0,
+                            slot_index,
+                            rack_slot_id: allocate(),
+                            instances: slot.custom_effects.iter()
+                                .filter_map(|name| name.as_deref())
+                                .filter(|name| !name.trim().is_empty())
+                                .map(|name| ProjectEffectInstance {
+                                    id: allocate(),
+                                    source: ProjectEffectSource::from_project_name(name),
+                                })
+                                .collect(),
+                        });
+                    }
+                }
+            }
+        }
+
+        self.custom_effects = self.tracks.iter().map(|track| {
+            self.device_instances.track_effects.iter()
+                .find(|chain| chain.track_id == track.id.0)
+                .map(|chain| chain.instances.iter()
+                    .map(|instance| Some(instance.source.project_name()))
+                    .collect())
+                .unwrap_or_default()
+        }).collect();
+        for pattern in &mut self.patterns {
+            for (track, params) in pattern.track_params.iter_mut().enumerate() {
+                let Some(project_track) = self.tracks.get(track) else { continue };
+                params.midi_fx_chain = self.device_instances.midi_effects.iter()
+                    .find(|chain| chain.track_id == project_track.id.0)
+                    .map(|chain| chain.instances.iter().map(|instance| instance.name.clone()).collect())
+                    .unwrap_or_default();
+            }
+            for (track, rack) in pattern.rack_tracks.iter_mut().enumerate() {
+                let (Some(project_track), Some(rack)) = (self.tracks.get(track), rack.as_mut()) else {
+                    continue;
+                };
+                for (slot_index, slot) in rack.slots.iter_mut().enumerate() {
+                    slot.custom_effects = self.device_instances.rack_effects.iter()
+                        .find(|chain| chain.track_id == project_track.id.0 && chain.slot_index == slot_index)
+                        .map(|chain| chain.instances.iter()
+                            .map(|instance| Some(instance.source.project_name()))
+                            .collect())
+                        .unwrap_or_default();
+                }
+            }
+        }
+        for bus in &mut self.buses {
+            bus.custom_effects = self.device_instances.bus_effects.iter()
+                .find(|chain| chain.bus_id == bus.id)
+                .map(|chain| chain.instances.iter()
+                    .map(|instance| Some(instance.source.project_name()))
+                    .collect())
+                .unwrap_or_default();
+        }
+        let mut ids = HashSet::new();
+        for (id, label) in self.device_instances.track_effects.iter()
+            .flat_map(|chain| chain.instances.iter().map(|instance| (instance.id, "track effect")))
+            .chain(self.device_instances.midi_effects.iter()
+                .flat_map(|chain| chain.instances.iter().map(|instance| (instance.id, "MIDI effect"))))
+            .chain(self.device_instances.bus_effects.iter()
+                .flat_map(|chain| chain.instances.iter().map(|instance| (instance.id, "bus effect"))))
+            .chain(self.device_instances.rack_effects.iter().flat_map(|chain| {
+                std::iter::once((chain.rack_slot_id, "rack slot"))
+                    .chain(chain.instances.iter().map(|instance| (instance.id, "rack effect")))
+            }))
+        {
+            if id == 0 {
+                return Err(format!("{label} has reserved identity 0"));
+            }
+            if !ids.insert(id) {
+                return Err(format!("duplicate project device identity {id}"));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -293,7 +613,7 @@ impl From<ProjectStealQuantize> for StealQuantize {
 /// unit backed by an auto-created bus. It references tracks by index and owns a
 /// backing bus by id; it does not own track data. See
 /// `docs/track-groups-spec.md`.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectTrackGroup {
     pub id: u64,
     pub name: String,
@@ -336,7 +656,7 @@ pub struct ProjectBusChannel {
     pub solo: bool,
     #[serde(default)]
     pub gate_sequence: ProjectBusGateSequence,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub custom_effects: Vec<Option<String>>,
     #[serde(default)]
     pub effect_slots: Vec<ProjectEffectSlot>,
@@ -433,59 +753,138 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
     ]
 }
 
+#[derive(Clone, Serialize)]
+pub struct ProjectTrack {
+    pub id: TrackId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<TrackColor>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub collapsed: bool,
+    #[serde(flatten)]
+    pub kind: ProjectTrackKind,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ProjectTrack {
+pub enum ProjectTrackKind {
     Sampler {
         sample_path: String,
-        #[serde(default)]
-        color: Option<TrackColor>,
-        #[serde(default)]
-        collapsed: bool,
     },
     Custom {
         instrument_name: String,
-        #[serde(default)]
-        color: Option<TrackColor>,
-        #[serde(default)]
-        collapsed: bool,
     },
-    Modulator {
-        #[serde(default)]
-        color: Option<TrackColor>,
-        #[serde(default)]
-        collapsed: bool,
-    },
+    Modulator,
     Rack {
         #[serde(default)]
         routing: ProjectRackRouting,
         #[serde(default)]
         slots: Vec<ProjectRackTrackSlot>,
-        #[serde(default)]
-        color: Option<TrackColor>,
-        #[serde(default)]
-        collapsed: bool,
     },
+}
+
+#[derive(Deserialize)]
+struct ProjectTrackWire {
+    #[serde(default)]
+    id: Option<TrackId>,
+    #[serde(default)]
+    color: Option<TrackColor>,
+    #[serde(default)]
+    collapsed: bool,
+    #[serde(flatten)]
+    kind: ProjectTrackKind,
+}
+
+impl<'de> Deserialize<'de> for ProjectTrack {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ProjectTrackWire::deserialize(deserializer)?;
+        let id = wire.id.unwrap_or(TrackId::MIN);
+        if id.0 == 0 {
+            return Err(D::Error::custom("stable track id 0 is reserved"));
+        }
+        Ok(Self {
+            id,
+            color: wire.color,
+            collapsed: wire.collapsed,
+            kind: wire.kind,
+        })
+    }
+}
+
+fn migrate_project_tracks(
+    version: u32,
+    tracks: Vec<ProjectTrackWire>,
+) -> Result<Vec<ProjectTrack>, String> {
+    if version < 3 {
+        let registry = TrackRegistry::for_legacy_track_count(tracks.len())
+            .map_err(|error| format!("could not assign legacy track ids: {error:?}"))?;
+        return Ok(tracks
+            .into_iter()
+            .zip(registry.ids().iter().copied())
+            .map(|(track, id)| ProjectTrack {
+                id,
+                color: track.color,
+                collapsed: track.collapsed,
+                kind: track.kind,
+            })
+            .collect());
+    }
+
+    let mut used = HashSet::with_capacity(tracks.len());
+    for id in tracks.iter().filter_map(|track| track.id) {
+        if id.0 == 0 {
+            return Err("stable track id 0 is reserved".to_string());
+        }
+        if !used.insert(id) {
+            return Err(format!("duplicate stable track id {}", id.0));
+        }
+    }
+    let mut next_missing = 1u64;
+    let mut migrated = Vec::with_capacity(tracks.len());
+    for track in tracks {
+        let id = match track.id {
+            Some(id) => id,
+            None => {
+                if next_missing == 0 {
+                    return Err("stable track id space is exhausted".to_string());
+                }
+                while used.contains(&TrackId(next_missing)) {
+                    next_missing = next_missing
+                        .checked_add(1)
+                        .ok_or_else(|| "stable track id space is exhausted".to_string())?;
+                }
+                let id = TrackId(next_missing);
+                used.insert(id);
+                next_missing = next_missing.checked_add(1).unwrap_or(0);
+                id
+            }
+        };
+        migrated.push(ProjectTrack {
+            id,
+            color: track.color,
+            collapsed: track.collapsed,
+            kind: track.kind,
+        });
+    }
+    TrackRegistry::from_ids(migrated.iter().map(|track| track.id))
+        .map_err(|error| format!("invalid stable track ids: {error:?}"))?;
+    Ok(migrated)
 }
 
 impl ProjectTrack {
     pub fn color(&self) -> Option<TrackColor> {
-        match self {
-            Self::Sampler { color, .. }
-            | Self::Custom { color, .. }
-            | Self::Modulator { color, .. }
-            | Self::Rack { color, .. } => color.map(TrackColor::clamped),
-        }
+        self.color.map(TrackColor::clamped)
     }
 
     pub fn collapsed(&self) -> bool {
-        match self {
-            Self::Sampler { collapsed, .. }
-            | Self::Custom { collapsed, .. }
-            | Self::Modulator { collapsed, .. }
-            | Self::Rack { collapsed, .. } => *collapsed,
-        }
+        self.collapsed
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -625,7 +1024,7 @@ pub struct ProjectTrackParams {
     pub accumulator_idx: usize,
     #[serde(default)]
     pub script_accumulator_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub midi_fx_chain: Vec<String>,
     #[serde(default = "default_midi_fx_position")]
     pub midi_fx_position: ProjectMidiFxPosition,
@@ -1574,7 +1973,7 @@ fn load_container_preset(path: &Path, kind: &str) -> std::io::Result<ProjectSoun
             format!("Failed to parse {kind} '{}': {error}", path.display()),
         )
     })?;
-    if !matches!(sound.track, ProjectTrack::Rack { .. }) {
+    if !matches!(sound.track.kind, ProjectTrackKind::Rack { .. }) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("{kind} '{}' does not contain a rack track", path.display()),
@@ -2248,18 +2647,25 @@ mod tests {
             buses: default_project_buses(),
             groups: Vec::new(),
             tracks: vec![
-                ProjectTrack::Custom {
-                    instrument_name: "prophet-5".to_string(),
+                ProjectTrack {
+                    id: TrackId(1),
                     color: Some(TrackColor::new(0.96, 0.28, 0.52)),
                     collapsed: true,
+                    kind: ProjectTrackKind::Custom {
+                        instrument_name: "prophet-5".to_string(),
+                    },
                 },
-                ProjectTrack::Sampler {
-                    sample_path: "samples/drums/kick.wav".to_string(),
+                ProjectTrack {
+                    id: TrackId(2),
                     color: Some(TrackColor::new(0.98, 0.56, 0.20)),
                     collapsed: false,
+                    kind: ProjectTrackKind::Sampler {
+                        sample_path: "samples/drums/kick.wav".to_string(),
+                    },
                 },
             ],
             custom_effects: vec![vec![Some("widener".to_string()), None], vec![None, None]],
+            device_instances: ProjectDeviceInstances::default(),
             scratch: ProjectScratchState {
                 buffer: "(+ 1 2)".to_string(),
                 cursor_row: 3,
@@ -2560,6 +2966,8 @@ mod tests {
         );
         assert!(restored.tracks[0].collapsed());
         assert!(!restored.tracks[1].collapsed());
+        assert_eq!(restored.tracks[0].id, TrackId(1));
+        assert_eq!(restored.tracks[1].id, TrackId(2));
         assert_eq!(restored.patterns.len(), 1);
         assert_eq!(restored.patterns[0].track_bits[0], [0b1011, 0, 0, 0]);
         assert_eq!(restored.patterns[0].track_bits[1], [0b0101, 1, 0, 0]);
@@ -2680,6 +3088,41 @@ mod tests {
             restored.patterns[0].track_params[0].sends[0].destination,
             crate::sequencer::DEFAULT_BUS_B_ID
         );
+    }
+
+    #[test]
+    fn project_track_id_migration_is_deterministic_and_validates_current_ids() {
+        let mut legacy = serde_json::to_value(sample_project()).expect("serialize legacy fixture");
+        legacy["version"] = serde_json::json!(2);
+        for track in legacy["tracks"]
+            .as_array_mut()
+            .expect("project tracks array")
+        {
+            track.as_object_mut().expect("project track object").remove("id");
+        }
+        let migrated: ProjectFile =
+            serde_json::from_value(legacy).expect("migrate tracks without stable ids");
+        assert_eq!(migrated.tracks[0].id, TrackId(1));
+        assert_eq!(migrated.tracks[1].id, TrackId(2));
+
+        let mut missing = serde_json::to_value(sample_project()).expect("serialize v3 fixture");
+        missing["tracks"][0]["id"] = serde_json::json!(42);
+        missing["tracks"][1]
+            .as_object_mut()
+            .expect("second track object")
+            .remove("id");
+        let filled: ProjectFile =
+            serde_json::from_value(missing).expect("fill one missing current track id");
+        assert_eq!(filled.tracks[0].id, TrackId(42));
+        assert_eq!(filled.tracks[1].id, TrackId(1));
+
+        let mut duplicate = serde_json::to_value(sample_project()).expect("serialize v3 fixture");
+        duplicate["tracks"][1]["id"] = duplicate["tracks"][0]["id"].clone();
+        let error = match serde_json::from_value::<ProjectFile>(duplicate) {
+            Ok(_) => panic!("duplicate current track ids must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("duplicate stable track id"));
     }
 
     #[test]
@@ -3078,8 +3521,8 @@ mod tests {
         "#;
 
         let project: ProjectFile = serde_json::from_str(json).unwrap();
-        match &project.tracks[0] {
-            ProjectTrack::Rack { routing, slots, .. } => {
+        match &project.tracks[0].kind {
+            ProjectTrackKind::Rack { routing, slots } => {
                 assert_eq!(*routing, ProjectRackRouting::Broadcast);
                 assert_eq!(slots.len(), 2);
                 assert_eq!(
@@ -3192,8 +3635,8 @@ mod tests {
         "#;
 
         let project: ProjectFile = serde_json::from_str(json).unwrap();
-        match &project.tracks[0] {
-            ProjectTrack::Rack { routing, slots, .. } => {
+        match &project.tracks[0].kind {
+            ProjectTrackKind::Rack { routing, slots } => {
                 assert_eq!(*routing, ProjectRackRouting::ByPitch);
                 assert_eq!(slots.len(), 2);
                 assert_eq!(slots[0].sample_name.as_deref(), Some("kick"));
@@ -3274,16 +3717,19 @@ mod tests {
                 tags: vec!["pad".to_string(), "wide".to_string()],
                 author: "Test".to_string(),
             },
-            track: ProjectTrack::Rack {
-                routing: ProjectRackRouting::Broadcast,
-                slots: vec![ProjectRackTrackSlot {
-                    instrument_type: ProjectInstrumentType::Sampler,
-                    sample_path: Some("samples/pad.wav".to_string()),
-                    sample_name: Some("pad".to_string()),
-                    instrument_name: None,
-                }],
+            track: ProjectTrack {
+                id: TrackId(1),
                 color: None,
                 collapsed: false,
+                kind: ProjectTrackKind::Rack {
+                    routing: ProjectRackRouting::Broadcast,
+                    slots: vec![ProjectRackTrackSlot {
+                        instrument_type: ProjectInstrumentType::Sampler,
+                        sample_path: Some("samples/pad.wav".to_string()),
+                        sample_name: Some("pad".to_string()),
+                        instrument_name: None,
+                    }],
+                },
             },
             rack: ProjectRackTrackPattern {
                 macros: default_project_rack_macros(),
@@ -3338,11 +3784,14 @@ mod tests {
                 tags: Vec::new(),
                 author: String::new(),
             },
-            track: ProjectTrack::Rack {
-                routing: ProjectRackRouting::Broadcast,
-                slots: Vec::new(),
+            track: ProjectTrack {
+                id: TrackId(1),
                 color: None,
                 collapsed: false,
+                kind: ProjectTrackKind::Rack {
+                    routing: ProjectRackRouting::Broadcast,
+                    slots: Vec::new(),
+                },
             },
             rack: ProjectRackTrackPattern {
                 macros: default_project_rack_macros(),

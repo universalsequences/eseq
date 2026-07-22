@@ -14345,6 +14345,8 @@ where
                                     source,
                                 });
                             }
+                            HostCommand::AuthoringTransactionBegin { .. }
+                            | HostCommand::AuthoringTransactionEnd { .. } => {}
                             HostCommand::Custom { .. } => {}
                         }
                     } else {

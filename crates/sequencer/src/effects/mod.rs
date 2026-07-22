@@ -39,7 +39,7 @@ pub(crate) mod tape;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::neural::ParamNodeId;
 use crate::sequencer::MAX_STEPS;
@@ -539,6 +539,37 @@ mod tests {
             restored.tensor_params.plock_values(7, 0).unwrap(),
             vec![0.1, 0.2, 0.95, 0.4]
         );
+    }
+
+    #[test]
+    fn device_value_snapshot_retains_prepared_convolution_ir_for_fileless_redo() {
+        let descriptor = EffectDescriptor::builtin_filter();
+        let slot = EffectSlotState::new(&descriptor, 424_242);
+        let prepared = std::sync::Arc::new(crate::effects::conv_reverb::StereoIr {
+            left: crate::effects::conv_reverb::ChannelIr {
+                re: vec![1.0, -0.25],
+                im: vec![0.0, 0.5],
+            },
+            right: crate::effects::conv_reverb::ChannelIr {
+                re: vec![0.75, -0.5],
+                im: vec![0.25, 0.0],
+            },
+        });
+        crate::effects::conv_reverb::record_prepared_ir(
+            424_242,
+            "plate-a",
+            "Plate A",
+            prepared.clone(),
+        );
+
+        let snapshot = EffectSlotSnapshot::capture_authoring_values(&slot);
+
+        assert_eq!(snapshot.ir.as_deref(), Some("plate-a"));
+        assert!(std::sync::Arc::ptr_eq(
+            snapshot.prepared_ir.as_ref().expect("prepared IR memento"),
+            &prepared,
+        ));
+        assert!(snapshot.bit_exact_eq(&snapshot.clone()));
     }
 
     #[test]
@@ -5354,12 +5385,7 @@ impl EffectDescriptor {
                     0.0,
                     comp::COMPRESSOR_PARAM_LOOKAHEAD,
                 ),
-                options(
-                    "env",
-                    &["lin", "log"],
-                    1.0,
-                    comp::COMPRESSOR_PARAM_ENV_MODE,
-                ),
+                options("env", &["lin", "log"], 1.0, comp::COMPRESSOR_PARAM_ENV_MODE),
                 continuous(
                     "out",
                     -36.0,
@@ -7690,6 +7716,192 @@ fn unique_param_index_by_name(desc: &EffectDescriptor, name: &str) -> Option<usi
 
 // ── EffectSlotSnapshot (for pattern save/restore) ──
 
+/// Authoring values for one device slot, excluding live graph bindings.
+///
+/// This is the device-history memento. Node ids, parameter-node ids, and
+/// descriptor routing metadata remain owned by the live/project slot and are
+/// deliberately reconstructed when these values are applied.
+#[derive(Clone, Debug)]
+pub struct EffectSlotValuesSnapshot {
+    pub num_params: usize,
+    pub defaults: Vec<f32>,
+    pub plocks: Vec<Vec<Option<f32>>>,
+    pub key_locks: BTreeMap<u8, Vec<Option<f32>>>,
+    pub tensor_params: Vec<TensorParamSnapshot>,
+    pub ir: Option<String>,
+    pub prepared_ir: Option<Arc<conv_reverb::StereoIr>>,
+}
+
+impl EffectSlotValuesSnapshot {
+    pub fn bit_exact_eq(&self, other: &Self) -> bool {
+        let Self {
+            num_params: left_num_params,
+            defaults: left_defaults,
+            plocks: left_plocks,
+            key_locks: left_key_locks,
+            tensor_params: left_tensor_params,
+            ir: left_ir,
+            prepared_ir: left_prepared_ir,
+        } = self;
+        let Self {
+            num_params: right_num_params,
+            defaults: right_defaults,
+            plocks: right_plocks,
+            key_locks: right_key_locks,
+            tensor_params: right_tensor_params,
+            ir: right_ir,
+            prepared_ir: right_prepared_ir,
+        } = other;
+        left_num_params == right_num_params
+            && f32_slice_bits_eq(left_defaults, right_defaults)
+            && optional_f32_rows_bits_eq(left_plocks, right_plocks)
+            && left_key_locks.len() == right_key_locks.len()
+            && left_key_locks.iter().all(|(note, values)| {
+                right_key_locks
+                    .get(note)
+                    .is_some_and(|other| optional_f32_slice_bits_eq(values, other))
+            })
+            && tensor_snapshots_bits_eq(left_tensor_params, right_tensor_params)
+            && left_ir == right_ir
+            && prepared_ir_bits_eq(left_prepared_ir.as_deref(), right_prepared_ir.as_deref())
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        let Self {
+            num_params: _,
+            defaults,
+            plocks,
+            key_locks,
+            tensor_params,
+            ir,
+            prepared_ir: _,
+        } = self;
+        std::mem::size_of::<Self>()
+            + defaults.capacity() * std::mem::size_of::<f32>()
+            + optional_f32_rows_retained_bytes(plocks)
+            + key_locks
+                .iter()
+                .map(|(_, values)| {
+                    std::mem::size_of::<u8>()
+                        + values.capacity() * std::mem::size_of::<Option<f32>>()
+                })
+                .sum::<usize>()
+            + tensor_params
+                .iter()
+                .map(tensor_snapshot_retained_bytes)
+                .sum::<usize>()
+            + ir.as_ref().map_or(0, String::capacity)
+    }
+}
+
+fn prepared_ir_bits_eq(
+    left: Option<&conv_reverb::StereoIr>,
+    right: Option<&conv_reverb::StereoIr>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            f32_slice_bits_eq(&left.left.re, &right.left.re)
+                && f32_slice_bits_eq(&left.left.im, &right.left.im)
+                && f32_slice_bits_eq(&left.right.re, &right.right.re)
+                && f32_slice_bits_eq(&left.right.im, &right.right.im)
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn f32_slice_bits_eq(left: &[f32], right: &[f32]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.to_bits() == right.to_bits())
+}
+
+fn optional_f32_slice_bits_eq(left: &[Option<f32>], right: &[Option<f32>]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| match (left, right) {
+            (Some(left), Some(right)) => left.to_bits() == right.to_bits(),
+            (None, None) => true,
+            _ => false,
+        })
+}
+
+fn optional_f32_rows_bits_eq(
+    left: &[Vec<Option<f32>>],
+    right: &[Vec<Option<f32>>],
+) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| optional_f32_slice_bits_eq(left, right))
+}
+
+fn tensor_snapshots_bits_eq(
+    left: &[TensorParamSnapshot],
+    right: &[TensorParamSnapshot],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            let TensorParamSnapshot {
+                name: left_name,
+                shape: left_shape,
+                cell_offset: left_cell_offset,
+                default: left_default,
+                plocks: left_plocks,
+            } = left;
+            let TensorParamSnapshot {
+                name: right_name,
+                shape: right_shape,
+                cell_offset: right_cell_offset,
+                default: right_default,
+                plocks: right_plocks,
+            } = right;
+            left_name == right_name
+                && left_shape == right_shape
+                && left_cell_offset == right_cell_offset
+                && f32_slice_bits_eq(left_default, right_default)
+                && left_plocks.len() == right_plocks.len()
+                && left_plocks
+                    .iter()
+                    .zip(right_plocks)
+                    .all(|(left, right)| match (left, right) {
+                        (Some(left), Some(right)) => f32_slice_bits_eq(left, right),
+                        (None, None) => true,
+                        _ => false,
+                    })
+        })
+}
+
+fn optional_f32_rows_retained_bytes(rows: &[Vec<Option<f32>>]) -> usize {
+    rows.len() * std::mem::size_of::<Vec<Option<f32>>>()
+        + rows
+            .iter()
+            .map(|row| row.capacity() * std::mem::size_of::<Option<f32>>())
+            .sum::<usize>()
+}
+
+fn tensor_snapshot_retained_bytes(tensor: &TensorParamSnapshot) -> usize {
+    let TensorParamSnapshot {
+        name,
+        shape,
+        cell_offset: _,
+        default,
+        plocks,
+    } = tensor;
+    std::mem::size_of::<TensorParamSnapshot>()
+        + name.capacity()
+        + shape.capacity() * std::mem::size_of::<usize>()
+        + default.capacity() * std::mem::size_of::<f32>()
+        + plocks.capacity() * std::mem::size_of::<Option<Vec<f32>>>()
+        + plocks
+            .iter()
+            .flatten()
+            .map(|values| values.capacity() * std::mem::size_of::<f32>())
+            .sum::<usize>()
+}
+
 #[derive(Clone, Debug)]
 pub struct EffectSlotSnapshot {
     pub node_id: u32,
@@ -7710,6 +7922,96 @@ pub struct EffectSlotSnapshot {
 }
 
 impl EffectSlotSnapshot {
+    pub fn capture_authoring_values(slot: &EffectSlotState) -> EffectSlotValuesSnapshot {
+        Self::capture(slot).authoring_values()
+    }
+
+    pub fn restore_authoring_values(
+        slot: &EffectSlotState,
+        values: &EffectSlotValuesSnapshot,
+    ) -> Result<(), String> {
+        let mut current = Self::capture(slot);
+        current.apply_authoring_values(values)?;
+        current.restore(slot);
+        Ok(())
+    }
+
+    pub fn authoring_values(&self) -> EffectSlotValuesSnapshot {
+        EffectSlotValuesSnapshot {
+            num_params: self.num_params as usize,
+            defaults: self.defaults.clone(),
+            plocks: self.plocks.clone(),
+            key_locks: self.key_locks.clone(),
+            tensor_params: self.tensor_params.clone(),
+            ir: self.ir.clone(),
+            prepared_ir: conv_reverb::prepared_ir_for(self.node_id as i32),
+        }
+    }
+
+    pub fn apply_authoring_values(
+        &mut self,
+        values: &EffectSlotValuesSnapshot,
+    ) -> Result<(), String> {
+        if self.num_params as usize != values.num_params
+            || self.defaults.len() < values.num_params
+        {
+            return Err("device scalar descriptor changed while replaying history".to_string());
+        }
+        if self.tensor_params.len() != values.tensor_params.len()
+            || self
+                .tensor_params
+                .iter()
+                .zip(&values.tensor_params)
+                .any(|(current, saved)| {
+                    current.name != saved.name
+                        || current.shape != saved.shape
+                        || current.cell_offset != saved.cell_offset
+                })
+        {
+            return Err("device tensor descriptor changed while replaying history".to_string());
+        }
+        self.defaults.clone_from(&values.defaults);
+        self.plocks.clone_from(&values.plocks);
+        self.key_locks.clone_from(&values.key_locks);
+        self.tensor_params.clone_from(&values.tensor_params);
+        self.ir.clone_from(&values.ir);
+        self.rebuild_lock_param_ids();
+        Ok(())
+    }
+
+    fn rebuild_lock_param_ids(&mut self) {
+        let param_ids = (0..self.num_params as usize)
+            .map(|param_idx| self.param_node_id(param_idx))
+            .collect::<Vec<_>>();
+        self.plock_param_ids = self
+            .plocks
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .map(|(param_idx, value)| {
+                        value.and_then(|_| param_ids.get(param_idx).copied().flatten())
+                    })
+                    .collect()
+            })
+            .collect();
+        self.key_lock_param_ids = self
+            .key_locks
+            .iter()
+            .map(|(note, row)| {
+                (
+                    *note,
+                    row.iter()
+                        .enumerate()
+                        .map(|(param_idx, value)| {
+                            value.and_then(|_| param_ids.get(param_idx).copied().flatten())
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+    }
+
     /// Copy scene-level parameter values while preserving all step/note locks,
     /// runtime node bindings, and descriptor metadata owned by this snapshot.
     pub fn copy_base_values_from(&mut self, source: &Self) {

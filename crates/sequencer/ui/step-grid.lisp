@@ -114,7 +114,7 @@
               (if visible
                 (do
                   (cool-off-follow)
-                  (set! cursor-step step)
+                  (set-cursor-step-value step)
                   (if (selection-click? evt)
                     (bus-step-select-drag-start step evt)
                     (seq-clear-selection)))
@@ -141,7 +141,7 @@
                       (if visible
                         (do
                           (cool-off-follow)
-                          (set! cursor-step step)
+                          (set-cursor-step-value step)
                           (if (seq-has-selection?)
                             (bus-set-selected-step-param v)
                             (bus-set-step-param step v)))
@@ -161,7 +161,7 @@
                       (if visible
                         (do
                           (cool-off-follow)
-                          (set! cursor-step step)
+                          (set-cursor-step-value step)
                           (if (seq-has-selection?)
                             (bus-set-selected-step-param v)
                             (bus-set-step-param step v)))

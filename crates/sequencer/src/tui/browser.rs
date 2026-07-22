@@ -711,31 +711,48 @@ impl App {
         let Some(preset) = presets.into_iter().find(|p| p.name == selected_name) else {
             return;
         };
-        let Some(desc) = self.current_instrument_descriptor() else {
+        let Some(desc) = self.current_instrument_descriptor().cloned() else {
             return;
         };
-        let slot = &self.state.pattern.instrument_slots[track];
-        for (idx, param) in desc.params.iter().enumerate() {
-            let value = preset
-                .params
-                .get(&param.name)
-                .copied()
-                .unwrap_or(param.default);
-            let clamped = param.clamp(value);
-            slot.defaults.set(idx, clamped);
-            self.send_instrument_param(track, idx, clamped);
-        }
-        crate::effects::restore_key_locks_by_param_name(slot, desc, &preset.key_locks);
-        self.state.pattern.instrument_base_note_offsets[track].store(
-            preset.base_note_offset.to_bits(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.state.schedule_mod_resync();
-        self.state.publish_scheduler_snapshot();
         let engine_id = self.graph.track_engine_ids.get(track).and_then(|id| *id);
-        self.set_track_sound_state(track, engine_id, Some(preset.name.clone()), false);
-        self.editor.status_message =
-            Some((format!("Loaded preset '{}'", preset.name), Instant::now()));
+        let preset_label = preset.name.clone();
+        let result = super::edit::apply_recorded_instrument_values_mutation(
+            self,
+            track,
+            format!("Load preset '{preset_label}'"),
+            move |app| {
+                let slot = &app.state.pattern.instrument_slots[track];
+                for (idx, param) in desc.params.iter().enumerate() {
+                    let value = preset
+                        .params
+                        .get(&param.name)
+                        .copied()
+                        .unwrap_or(param.default);
+                    let clamped = param.clamp(value);
+                    slot.defaults.set(idx, clamped);
+                    app.send_instrument_param(track, idx, clamped);
+                }
+                crate::effects::restore_key_locks_by_param_name(
+                    slot,
+                    &desc,
+                    &preset.key_locks,
+                );
+                app.state.pattern.instrument_base_note_offsets[track].store(
+                    preset.base_note_offset.to_bits(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                app.state.schedule_mod_resync();
+                app.set_track_sound_state(track, engine_id, Some(preset.name.clone()), false);
+                Ok(())
+            },
+        );
+        self.editor.status_message = Some((
+            match result {
+                Ok(_) => format!("Loaded preset '{preset_label}'"),
+                Err(error) => format!("Error: {error:?}"),
+            },
+            Instant::now(),
+        ));
     }
 
     pub fn save_current_track_as_preset(
@@ -913,6 +930,10 @@ impl App {
                         if track < self.sampler_paths.len() {
                             self.sampler_paths[track] = Some(path.to_path_buf());
                         }
+                        self.state.seed_unset_pattern_sample_ids(
+                            track,
+                            (new_buffer_id, new_name.clone(), sample_rate),
+                        );
                         self.reset_sampler_bpm_for_analysis(track);
                         self.publish_sampler_analysis_runtime(track);
                         self.editor.status_message =

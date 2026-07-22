@@ -16,6 +16,7 @@ use eseqlisp::Editor as LispEditor;
 
 use super::fx_chain::{
     push_fx_param, rewire_fx_chain, FxChainLocator, FxGraphEditBatch, FxLeaseSlotRemoval,
+    RetainedEffectSource,
 };
 use super::{
     App, CompileTarget, EffectTab, HookCallback, HookUnit, InputMode, PendingCompile,
@@ -158,6 +159,41 @@ impl App {
             self.graph.sample_rate,
             source_path.parent(),
         )
+    }
+
+    pub(super) fn retained_effect_source_for_name(
+        &self,
+        name: &str,
+    ) -> Result<RetainedEffectSource, String> {
+        if EffectDescriptor::builtin_insert(name).is_some() {
+            return Ok(RetainedEffectSource::NativeBuiltin {
+                name: name.to_string(),
+            });
+        }
+        if crate::effects::conv_reverb::is_dgen_builtin(name) {
+            return Ok(RetainedEffectSource::Compiled {
+                name: name.to_string(),
+                source: crate::effects::conv_reverb::dsp_source().to_string(),
+                asset_base: None,
+                origin: lisp_host::DGenSourceOrigin::BuiltinConvolutionReverb,
+            });
+        }
+        let source_path = lisp_host::effect_source_path(name);
+        Ok(RetainedEffectSource::Compiled {
+            name: name.to_string(),
+            source: std::fs::read_to_string(&source_path).map_err(|error| error.to_string())?,
+            asset_base: source_path.parent().map(std::path::Path::to_path_buf),
+            origin: lisp_host::DGenSourceOrigin::Custom,
+        })
+    }
+
+    pub(super) fn retain_effect_source(
+        &mut self,
+        locator: FxChainLocator,
+        slot: usize,
+        source: RetainedEffectSource,
+    ) -> Result<(), String> {
+        self.editor.effect_chain_leases.set_source(locator, slot, Some(source))
     }
 
     pub(super) fn sync_scratch_runtime_descriptors(&self) {
@@ -323,8 +359,8 @@ impl App {
         let prepared = self.prepare_saved_instrument_for_rack_slot_sync(name)?;
         let lib_ptr: *const lisp_host::LoadedDGenLib =
             &self.editor.instrument_libs[prepared.lib_index];
-        unsafe {
-            self.graph_controller().add_custom_slot_to_rack(
+        self.apply_recorded_rack_slot_add(track, "Add rack instrument", |app| unsafe {
+            app.graph_controller().add_custom_slot_to_rack(
                 track,
                 &prepared.name,
                 prepared.engine_id,
@@ -332,7 +368,7 @@ impl App {
                 &*lib_ptr,
                 prepared.run_mode,
             )
-        }
+        })
     }
 
     pub fn replace_rack_slot_with_saved_instrument_sync(
@@ -359,13 +395,20 @@ impl App {
         }
 
         let prepared = self.prepare_saved_instrument_for_rack_slot_sync(name)?;
-        self.graph_controller().replace_rack_slot_with_custom(
+        self.apply_recorded_rack_slot_source_replacement(
             track,
             slot,
-            &prepared.name,
-            prepared.engine_id,
-            &prepared.manifest,
-            prepared.run_mode,
+            "Replace rack instrument",
+            |app| {
+                app.graph_controller().replace_rack_slot_with_custom(
+                    track,
+                    slot,
+                    &prepared.name,
+                    prepared.engine_id,
+                    &prepared.manifest,
+                    prepared.run_mode,
+                )
+            },
         )
     }
 
@@ -446,12 +489,15 @@ impl App {
         } else {
             cache_idx
         };
-        Some(unsafe {
-            self.graph_controller()
-                .replace_track_with_custom_instrument(
+        Some(self.apply_recorded_instrument_binding_mutation(
+            track,
+            "Replace instrument",
+            |app| unsafe {
+                app.graph_controller().replace_track_with_custom_instrument(
                     track, name, engine_id, &manifest, &*lib_ptr, run_mode,
                 )
-        })
+            },
+        ))
     }
 
     pub fn add_compiled_saved_instrument_track_sync(
@@ -502,12 +548,15 @@ impl App {
         } else {
             cache_idx
         };
-        unsafe {
-            self.graph_controller()
-                .replace_track_with_custom_instrument(
+        self.apply_recorded_instrument_binding_mutation(
+            track,
+            "Replace instrument",
+            |app| unsafe {
+                app.graph_controller().replace_track_with_custom_instrument(
                     track, name, engine_id, &manifest, &*lib_ptr, run_mode,
                 )
-        }
+            },
+        )
     }
 
     pub fn add_transient_instrument_track_sync(
@@ -835,12 +884,17 @@ impl App {
         let desc = lisp_host::load_midi_fx_descriptor(name)
             .ok_or_else(|| format!("Unknown MIDI FX '{name}'"))?;
 
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
         let mut chain = self.state.pattern.track_params[track].midi_fx_chain();
+        let old_len = chain.len();
         chain.push(desc.name.clone());
         self.state.pattern.track_params[track].set_midi_fx_chain(chain);
         self.state.pattern.midi_fx_slots[track][slot_idx].apply_descriptor(&desc, 0);
 
         self.state.save_current_track_midi_fx_snapshot(track);
+        self.device_registry
+            .insert_midi_effect_identity(track_id, slot_idx, old_len)?;
 
         self.state.publish_scheduler_snapshot();
         Ok(slot_idx)
@@ -854,6 +908,9 @@ impl App {
         if slot_idx >= chain.len() {
             return Err("Invalid MIDI FX slot".to_string());
         }
+        let old_len = chain.len();
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
         chain.remove(slot_idx);
         self.state.pattern.track_params[track].set_midi_fx_chain(chain);
 
@@ -868,7 +925,30 @@ impl App {
 
         self.state
             .remove_midi_fx_slot_from_track_patterns(track, slot_idx);
+        self.device_registry
+            .remove_midi_effect_identity(track_id, slot_idx, old_len)?;
 
+        self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
+
+    pub fn replace_midi_fx_slot_sync(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        name: &str,
+    ) -> Result<(), String> {
+        if track >= self.tracks.len() {
+            return Err("Invalid track index".to_string());
+        }
+        let descriptor = lisp_host::load_midi_fx_descriptor(name)
+            .ok_or_else(|| format!("Unknown MIDI FX '{name}'"))?;
+        self.state.replace_midi_fx_slot_in_all_track_patterns(
+            track,
+            slot_idx,
+            descriptor.name.clone(),
+            &descriptor,
+        )?;
         self.state.publish_scheduler_snapshot();
         Ok(())
     }
@@ -1042,9 +1122,11 @@ impl App {
         target_slot: usize,
         name: &str,
     ) -> Result<usize, String> {
+        let source = self.retained_effect_source_for_name(name)?;
         let result = self.compile_saved_effect(name)?;
         let slot_idx = self.prepare_custom_effect_insert_slot(track, target_slot)?;
         self.apply_compiled_effect_to_slot_sync(result, name, slot_idx, track)?;
+        self.retain_effect_source(FxChainLocator::Track(track), slot_idx, source)?;
         Ok(slot_idx)
     }
 
@@ -1108,7 +1190,10 @@ impl App {
         }
         let desc = lisp_host::load_midi_fx_descriptor(name)
             .ok_or_else(|| format!("Unknown MIDI FX '{name}'"))?;
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
         let mut chain = self.state.pattern.track_params[track].midi_fx_chain();
+        let old_len = chain.len();
         if chain.len() >= MAX_MIDI_FX_SLOTS {
             return Err("No free MIDI FX slots available".to_string());
         }
@@ -1121,6 +1206,8 @@ impl App {
         }
         slots[slot_idx].apply_descriptor(&desc, 0);
         self.sync_other_pattern_midi_fx_insert(track, slot_idx, desc.name.clone(), &desc);
+        self.device_registry
+            .insert_midi_effect_identity(track_id, slot_idx, old_len)?;
         self.publish_effect_reorder();
         Ok(slot_idx)
     }
@@ -1138,6 +1225,9 @@ impl App {
         if source_slot >= chain.len() {
             return Err("Invalid source MIDI FX slot".to_string());
         }
+        let chain_len = chain.len();
+        let track_id = self.track_registry.id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
         let name = chain.remove(source_slot);
         let source_snapshot =
             EffectSlotSnapshot::capture(&self.state.pattern.midi_fx_slots[track][source_slot]);
@@ -1163,6 +1253,8 @@ impl App {
         source_snapshot.restore(&slots[target_idx]);
         self.state.pattern.track_params[track].set_midi_fx_chain(chain);
         self.sync_other_pattern_midi_fx_move(track, source_slot, target_idx);
+        self.device_registry
+            .move_midi_effect_identity(track_id, source_slot, target_idx, chain_len)?;
         self.publish_effect_reorder();
         Ok(target_idx)
     }
@@ -1533,6 +1625,11 @@ impl App {
             modulator_node_id,
             desc,
         );
+        self.retain_effect_source(
+            FxChainLocator::Track(track),
+            slot_idx,
+            RetainedEffectSource::NativeBuiltin { name: name.to_string() },
+        )?;
         self.push_track_effect_slot_defaults(track, slot_idx);
         self.push_all_delay_bpm();
         self.ui.effect_tab = EffectTab::Slot(slot_idx);
@@ -1565,6 +1662,16 @@ impl App {
         // Capture IR tensor offsets before `result` is consumed by apply.
         let slots = crate::effects::conv_reverb::StereoIrSlots::from_manifest(&result.manifest);
         self.apply_compiled_effect_to_slot_sync(result, name, slot_idx, track)?;
+        self.retain_effect_source(
+            FxChainLocator::Track(track),
+            slot_idx,
+            RetainedEffectSource::Compiled {
+                name: name.to_string(),
+                source: source.to_string(),
+                asset_base: None,
+                origin: lisp_host::DGenSourceOrigin::BuiltinConvolutionReverb,
+            },
+        )?;
         let node_id = self.state.pattern.effect_chains[track][slot_idx]
             .node_id
             .load(Ordering::Relaxed) as i32;
@@ -1608,20 +1715,109 @@ impl App {
         }
         let slots = crate::effects::conv_reverb::ir_slots_for(node_id)
             .ok_or_else(|| "slot is not a Convolution Reverb".to_string())?;
-        let ir = crate::effects::conv_reverb::prepare_ir(abs_path, self.graph.sample_rate)?;
+        let ir = Arc::new(crate::effects::conv_reverb::prepare_ir(
+            abs_path,
+            self.graph.sample_rate,
+        )?);
+        self.apply_prepared_conv_reverb_ir_to_node(node_id, ir, reference, abs_path)
+    }
+
+    pub(crate) fn apply_prepared_conv_reverb_ir_to_node(
+        &self,
+        node_id: i32,
+        ir: Arc<crate::effects::conv_reverb::StereoIr>,
+        reference: &str,
+        source_path: &std::path::Path,
+    ) -> Result<(), String> {
+        if node_id == 0 {
+            return Err("Convolution Reverb node not live".to_string());
+        }
+        let slots = crate::effects::conv_reverb::ir_slots_for(node_id)
+            .ok_or_else(|| "slot is not a Convolution Reverb".to_string())?;
         unsafe {
-            crate::effects::conv_reverb::apply_ir_to_node(self.graph.lg.0, node_id, &slots, &ir)?;
+            crate::effects::conv_reverb::apply_ir_to_node(
+                self.graph.lg.0,
+                node_id,
+                &slots,
+                ir.as_ref(),
+            )?;
         }
         // Friendly label: the bundled default has a fixed title; user samples
         // resolve their display title from the DB, falling back to the stem.
         let display = if reference == crate::effects::conv_reverb::DEFAULT_IR_REF {
             "Lexicon 300 Rich Plate".to_string()
         } else {
-            crate::sample_db::display_title_for_sample_path(abs_path)
+            crate::sample_db::display_title_for_sample_path(source_path)
                 .unwrap_or_else(|| reference.to_string())
         };
-        crate::effects::conv_reverb::record_ir(node_id, reference, &display);
+        crate::effects::conv_reverb::record_prepared_ir(node_id, reference, &display, ir);
         Ok(())
+    }
+
+    pub(crate) fn restore_prepared_track_effect_ir(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        reference: &str,
+        ir: Arc<crate::effects::conv_reverb::StereoIr>,
+    ) -> Result<(), String> {
+        let node_id = self
+            .state
+            .pattern
+            .effect_chains
+            .get(track)
+            .and_then(|chain| chain.get(slot_idx))
+            .map(|slot| slot.node_id.load(Ordering::Relaxed) as i32)
+            .ok_or_else(|| "Track effect slot not found".to_string())?;
+        self.apply_prepared_conv_reverb_ir_to_node(
+            node_id,
+            ir,
+            reference,
+            std::path::Path::new(reference),
+        )
+    }
+
+    pub(crate) fn restore_prepared_rack_effect_ir(
+        &self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        reference: &str,
+        ir: Arc<crate::effects::conv_reverb::StereoIr>,
+    ) -> Result<(), String> {
+        let node_id = self
+            .rack_slot_effect_snapshot(track, rack_slot)?
+            .effect_slots
+            .get(effect_slot)
+            .map(|slot| slot.node_id as i32)
+            .ok_or_else(|| "Rack effect slot not found".to_string())?;
+        self.apply_prepared_conv_reverb_ir_to_node(
+            node_id,
+            ir,
+            reference,
+            std::path::Path::new(reference),
+        )
+    }
+
+    pub(crate) fn restore_prepared_bus_effect_ir(
+        &self,
+        bus_idx: usize,
+        effect_slot: usize,
+        reference: &str,
+        ir: Arc<crate::effects::conv_reverb::StereoIr>,
+    ) -> Result<(), String> {
+        let node_id = self
+            .buses
+            .get(bus_idx)
+            .and_then(|bus| bus.effect_slots.get(effect_slot))
+            .map(|slot| slot.node_id as i32)
+            .ok_or_else(|| "Bus effect slot not found".to_string())?;
+        self.apply_prepared_conv_reverb_ir_to_node(
+            node_id,
+            ir,
+            reference,
+            std::path::Path::new(reference),
+        )
     }
 
     /// Load an impulse response into a live Convolution Reverb on a track slot.
@@ -2200,6 +2396,21 @@ impl App {
     }
 
     pub fn start_effect_compile(&mut self, name: &str, slot_idx: usize) {
+        let track = match self.track_registry.id_at(self.ui.cursor_track) {
+            Some(track) => track,
+            None => {
+                self.editor.status_message = Some(("Error: effect target track is missing".to_string(), Instant::now()));
+                return;
+            }
+        };
+        let expected_node_id = self
+            .state
+            .pattern
+            .effect_chains
+            .get(self.ui.cursor_track)
+            .and_then(|chain| chain.get(slot_idx))
+            .map(|slot| slot.node_id.load(Ordering::Relaxed))
+            .unwrap_or(0);
         let source_path = lisp_host::effect_source_path(name);
         let source = match std::fs::read_to_string(&source_path) {
             Ok(source) => source,
@@ -2227,7 +2438,8 @@ impl App {
             target: CompileTarget::Effect {
                 name: name.to_string(),
                 slot_idx,
-                track: self.ui.cursor_track,
+                track,
+                expected_node_id,
             },
             tick: 0,
         });
@@ -2244,10 +2456,12 @@ impl App {
                         name,
                         slot_idx,
                         track,
+                        expected_node_id,
                     } => CompileTarget::Effect {
                         name: name.clone(),
                         slot_idx: *slot_idx,
                         track: *track,
+                        expected_node_id: *expected_node_id,
                     },
                     CompileTarget::Instrument { name } => {
                         CompileTarget::Instrument { name: name.clone() }
@@ -2259,9 +2473,30 @@ impl App {
                         name,
                         slot_idx,
                         track,
+                        expected_node_id,
                     } => {
-                        self.apply_compiled_effect(compile_result, &name, slot_idx, track);
-                        Some(format!("Loaded effect: {name}"))
+                        let Some(track) = self.track_registry.index_of(track) else {
+                            return Some(format!("Effect load canceled: target track no longer exists"));
+                        };
+                        let current_node_id = self
+                            .state
+                            .pattern
+                            .effect_chains
+                            .get(track)
+                            .and_then(|chain| chain.get(slot_idx))
+                            .map(|slot| slot.node_id.load(Ordering::Relaxed));
+                        if current_node_id != Some(expected_node_id) {
+                            return Some("Effect load canceled: target slot changed while compiling".to_string());
+                        }
+                        match self.apply_compiled_effect_to_slot_recorded(
+                            compile_result,
+                            &name,
+                            slot_idx,
+                            track,
+                        ) {
+                            Ok(()) => Some(format!("Loaded effect: {name}")),
+                            Err(error) => Some(format!("Effect load failed: {error}")),
+                        }
                     }
                     CompileTarget::Instrument { name } => {
                         self.apply_compiled_instrument(compile_result, &name);
@@ -2331,8 +2566,10 @@ impl App {
         slot_idx: usize,
         name: &str,
     ) -> Result<(), String> {
+        let source = self.retained_effect_source_for_name(name)?;
         let result = self.compile_saved_effect(name)?;
         self.apply_compiled_effect_to_slot_sync(result, name, slot_idx, track)?;
+        self.retain_effect_source(FxChainLocator::Track(track), slot_idx, source)?;
         Ok(())
     }
 
@@ -2712,23 +2949,23 @@ impl App {
         bus_idx: usize,
         slot_idx: usize,
     ) -> Result<(), String> {
+        let snapshot_before_remap = self.capture_bus_pattern_snapshot();
+        let active_slots = self.active_bus_effect_slots(bus_idx)?;
+        let source_offset = active_slots.iter().position(|slot| *slot == slot_idx)
+            .ok_or_else(|| format!("Bus effect slot {} is empty", slot_idx + 1))?;
+        let mut entries = self.bus_effect_entries(bus_idx)?;
+        entries.remove(source_offset);
+        let mut new_to_old = active_slots.into_iter().map(Some).collect::<Vec<_>>();
+        new_to_old.remove(source_offset);
+        new_to_old.resize(MAX_CUSTOM_FX, None);
         let locator = self.bus_fx_locator(bus_idx)?;
-        self.remove_fx_slot_node(locator, slot_idx, FxLeaseSlotRemoval::Clear)?;
-        let bus = self
-            .buses
-            .get_mut(bus_idx)
-            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
-        if slot_idx >= bus.effect_descriptors.len() || slot_idx >= bus.effect_slots.len() {
-            return Err(format!("Bus effect slot {} out of range", slot_idx + 1));
-        }
-        bus.effect_descriptors[slot_idx] = EffectDescriptor::empty_custom_slot();
-        bus.effect_slots[slot_idx] = crate::effects::EffectSlotSnapshot::new_empty();
-        if slot_idx < bus.custom_effect_names.len() {
-            bus.custom_effect_names[slot_idx] = None;
-        }
-        let live_snapshot = self.capture_bus_pattern_snapshot();
-        self.state
-            .clear_bus_effect_slot_in_other_scene_patterns(bus_idx, slot_idx, &live_snapshot);
+        self.remove_fx_slot_node(locator, slot_idx, FxLeaseSlotRemoval::Shift)?;
+        self.write_bus_effect_entries(bus_idx, &entries)?;
+        self.remap_other_bus_pattern_effect_slots(
+            bus_idx,
+            &new_to_old,
+            &snapshot_before_remap,
+        );
         Ok(())
     }
 
@@ -3029,14 +3266,14 @@ impl App {
         }
     }
 
-    fn rack_slot_fx_locator(track: usize, rack_slot: usize) -> FxChainLocator {
+    pub(super) fn rack_slot_fx_locator(track: usize, rack_slot: usize) -> FxChainLocator {
         FxChainLocator::RackSlot {
             track,
             slot: rack_slot,
         }
     }
 
-    fn rack_slot_effect_snapshot(
+    pub(super) fn rack_slot_effect_snapshot(
         &self,
         track: usize,
         rack_slot: usize,
@@ -3304,7 +3541,7 @@ impl App {
         )
     }
 
-    fn apply_compiled_rack_slot_effect_to_slot_sync(
+    pub(super) fn apply_compiled_rack_slot_effect_to_slot_sync(
         &mut self,
         track: usize,
         rack_slot: usize,
@@ -3549,7 +3786,56 @@ impl App {
         Ok(())
     }
 
+    pub fn send_effect_tensor_param(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        tensor_idx: usize,
+        values: &[f32],
+    ) {
+        let Some(slot) = self
+            .state
+            .pattern
+            .effect_chains
+            .get(track)
+            .and_then(|chain| chain.get(slot_idx))
+        else {
+            return;
+        };
+        let Some(cell_offset) = slot.tensor_params.tensor_cell_offset(tensor_idx) else {
+            return;
+        };
+        let node_id = slot.node_id.load(Ordering::Relaxed) as i32;
+        if node_id == 0 {
+            return;
+        }
+        unsafe {
+            crate::lisp_host::queue_tensor_write(self.graph.lg.0, node_id, cell_offset, values);
+        }
+    }
+
     pub fn set_rack_slot_effect_plocks(
+        &mut self,
+        track: usize,
+        rack_slot: usize,
+        effect_slot: usize,
+        steps: &[usize],
+        param_idx: usize,
+        value: f32,
+    ) -> Result<(), String> {
+        self.set_rack_slot_effect_plocks_no_publish(
+            track,
+            rack_slot,
+            effect_slot,
+            steps,
+            param_idx,
+            value,
+        )?;
+        self.state.publish_scheduler_snapshot();
+        Ok(())
+    }
+
+    pub(crate) fn set_rack_slot_effect_plocks_no_publish(
         &mut self,
         track: usize,
         rack_slot: usize,
@@ -3604,11 +3890,10 @@ impl App {
         if !updated {
             return Err("Failed to set rack-slot effect parameter locks".to_string());
         }
-        self.state.publish_scheduler_snapshot();
         Ok(())
     }
 
-    fn rack_slot_effect_option_value(
+    pub fn rack_slot_effect_option_value(
         &self,
         track: usize,
         rack_slot: usize,
@@ -3713,7 +3998,7 @@ impl App {
             return Err("The selected effect slot is not a custom effect slot.".to_string());
         }
         crate::lisp_host::save_effect(name, source).map_err(|e| e.to_string())?;
-        self.load_saved_effect_to_slot_sync(track, slot_idx, name)?;
+        self.load_saved_effect_to_slot_recorded(track, slot_idx, name)?;
         self.ui.effect_tab = EffectTab::Slot(slot_idx);
         Ok(())
     }
@@ -4172,6 +4457,8 @@ mod tests {
         app.tracks = (0..track_count)
             .map(|idx| format!("Track {}", idx + 1))
             .collect();
+        app.track_registry =
+            crate::sequencer::TrackRegistry::for_legacy_track_count(track_count).unwrap();
         app
     }
 
@@ -4306,6 +4593,7 @@ mod tests {
             .expect("initial saved instrument track should load");
         assert_eq!(initial_track, 0);
         assert_eq!(app.graph.track_engine_ids, vec![Some(0)]);
+        graph.process_block();
 
         let cached_engine_id = app.cache_instrument_engine(
             "bank/cached",
@@ -4327,6 +4615,7 @@ mod tests {
         assert_eq!(app.graph.track_engine_ids, vec![Some(cached_engine_id)]);
         assert_eq!(app.tracks, vec!["cached"]);
         assert!(app.graph.engine_node_ids[0].is_none());
+        graph.process_block();
 
         let compiled_summary = app
             .swap_track_to_compiled_saved_instrument_sync(
@@ -4344,6 +4633,45 @@ mod tests {
         assert_eq!(compiled_summary.patterns_reset, 1);
         assert_eq!(app.graph.track_engine_ids, vec![Some(2)]);
         assert!(app.graph.engine_node_ids[cached_engine_id].is_none());
+        assert_eq!(app.tracks, vec!["compiled"]);
+        graph.process_block();
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_engine_ids, vec![Some(cached_engine_id)]);
+        assert_eq!(app.tracks, vec!["cached"]);
+        graph.process_block();
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_engine_ids, vec![Some(0)]);
+        assert_eq!(app.tracks, vec!["old"]);
+        graph.process_block();
+        for _ in 0..3 {
+            assert!(matches!(
+                crate::tui::edit::redo(&mut app),
+                crate::tui::history::HistoryReplay::Applied(_)
+            ));
+            graph.process_block();
+            assert!(matches!(
+                crate::tui::edit::undo(&mut app),
+                crate::tui::history::HistoryReplay::Applied(_)
+            ));
+            graph.process_block();
+        }
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        graph.process_block();
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_engine_ids, vec![Some(2)]);
         assert_eq!(app.tracks, vec!["compiled"]);
         graph.process_block();
     }
@@ -4399,6 +4727,112 @@ mod tests {
         );
         assert_eq!(snapshot.transport.topology_epoch, live_topology_epoch);
         assert!(app.state.scheduler_snapshot_version() > snapshot_version_before);
+        graph.process_block();
+    }
+
+    #[test]
+    fn instrument_history_replays_custom_sampler_conversion() {
+        let graph = TestLiveGraph::new("instrument-history-conversion-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let manifest = test_instrument_manifest();
+        app.add_compiled_saved_instrument_track_sync(
+            "old",
+            "old source",
+            CustomInstrumentRunMode::Instrument,
+            lisp_host::CompileResult {
+                manifest,
+                lib: lisp_host::test_loaded_dgen_lib(),
+                lease: None,
+            },
+        )
+        .expect("initial custom track should load");
+        let buffer_id = crate::sampler::create_silent_buffer(graph.ptr.0)
+            .expect("silent sampler buffer should allocate");
+
+        app.apply_recorded_instrument_binding_mutation(
+            0,
+            "Replace instrument",
+            |app| {
+                app.graph_controller().convert_custom_track_to_sampler(
+                    0,
+                    buffer_id,
+                    44_100,
+                    "silent",
+                )
+            },
+        )
+        .expect("custom track should convert to sampler");
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Sampler);
+        assert_eq!(app.tracks[0], "silent");
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Custom);
+        assert_eq!(app.graph.track_engine_ids[0], Some(0));
+        assert_eq!(app.tracks[0], "old");
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Sampler);
+        assert_eq!(app.graph.track_buffer_ids[0], buffer_id);
+        assert_eq!(app.tracks[0], "silent");
+        graph.process_block();
+    }
+
+    #[test]
+    fn instrument_history_retains_free_patch_dedicated_engine() {
+        let graph = TestLiveGraph::new("instrument-history-free-patch-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let manifest = test_instrument_manifest();
+        app.add_compiled_saved_instrument_track_sync(
+            "old",
+            "old source",
+            CustomInstrumentRunMode::Instrument,
+            lisp_host::CompileResult {
+                manifest: manifest.clone(),
+                lib: lisp_host::test_loaded_dgen_lib(),
+                lease: None,
+            },
+        )
+        .unwrap();
+        app.cache_instrument_engine(
+            "free",
+            "free source",
+            &manifest,
+            lisp_host::test_loaded_dgen_lib(),
+            None,
+        );
+        app.try_swap_track_to_cached_saved_instrument_sync(
+            0,
+            "free",
+            "free source",
+            CustomInstrumentRunMode::FreePatch,
+        )
+        .unwrap()
+        .unwrap();
+        let dedicated_engine = app.graph.track_engine_ids[0].unwrap();
+        assert_eq!(
+            app.graph.track_instrument_run_modes[0],
+            CustomInstrumentRunMode::FreePatch
+        );
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_engine_ids[0], Some(0));
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_engine_ids[0], Some(dedicated_engine));
+        assert_eq!(
+            app.graph.track_instrument_run_modes[0],
+            CustomInstrumentRunMode::FreePatch
+        );
         graph.process_block();
     }
 
@@ -4534,6 +4968,7 @@ mod tests {
             keyboard_tx,
         );
         app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.effect_descriptors = vec![vec![desc]];
 
         app.push_all_delay_bpm();
@@ -4594,6 +5029,7 @@ mod tests {
             keyboard_tx,
         );
         app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.track_node_ids = vec![crate::tui::TrackNodeIds {
             sampler_ids: Vec::new(),
             sampler_gatepitch_ids: Vec::new(),
@@ -4659,7 +5095,325 @@ mod tests {
 
         app.delete_bus_effect_slot(bus_idx, moved_slot)
             .expect("bus effect delete should rewire through the shared host");
-        assert_eq!(app.buses[bus_idx].effect_slots[moved_slot].node_id, 0);
+        assert_eq!(app.buses[bus_idx].effect_descriptors[moved_slot].name, "Filter");
+        assert!(app.buses[bus_idx].effect_slots[moved_slot].node_id > 0);
+        assert_eq!(app.buses[bus_idx].effect_slots[moved_slot + 1].node_id, 0);
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_bus_effect_insert_places_new_effect_before_target_without_duplication() {
+        let graph = TestLiveGraph::new("bus-fx-recorded-insert-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let bus_id = app.add_bus_channel("Insert Test");
+        let bus_idx = app.buses.iter().position(|bus| bus.id == bus_id).unwrap();
+        let filter_slot = app
+            .add_builtin_bus_effect_sync(bus_idx, "Filter")
+            .expect("filter should install first");
+        let ott_slot = app
+            .add_builtin_bus_effect_sync(bus_idx, "OTT")
+            .expect("OTT should install second");
+        let filter_node = app.buses[bus_idx].effect_slots[filter_slot].node_id;
+        let ott_node = app.buses[bus_idx].effect_slots[ott_slot].node_id;
+
+        let inserted = app
+            .apply_recorded_bus_effect_chain_mutation(bus_idx, "Insert bus effect", |app| {
+                app.insert_builtin_bus_effect_before_slot_sync(bus_idx, ott_slot, "Phaser-Flanger")
+            })
+            .expect("recorded insert should succeed");
+
+        assert_eq!(inserted, 1);
+        assert_eq!(app.buses[bus_idx].effect_descriptors[0].name, "Filter");
+        assert_eq!(app.buses[bus_idx].effect_descriptors[1].name, "Phaser-Flanger");
+        assert_eq!(app.buses[bus_idx].effect_descriptors[2].name, "OTT");
+        assert_eq!(app.buses[bus_idx].effect_slots[0].node_id, filter_node);
+        assert_eq!(app.buses[bus_idx].effect_slots[2].node_id, ott_node);
+        assert_eq!(
+            app.buses[bus_idx]
+                .effect_slots
+                .iter()
+                .take(3)
+                .map(|slot| slot.node_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3,
+            "every effect in the inserted chain must retain a distinct live node",
+        );
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.buses[bus_idx].effect_descriptors[0].name, "Filter");
+        assert_eq!(app.buses[bus_idx].effect_descriptors[1].name, "OTT");
+        assert_eq!(app.buses[bus_idx].effect_slots[0].node_id, filter_node);
+        assert_eq!(app.buses[bus_idx].effect_slots[1].node_id, ott_node);
+
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.buses[bus_idx].effect_descriptors[0].name, "Filter");
+        assert_eq!(app.buses[bus_idx].effect_descriptors[1].name, "Phaser-Flanger");
+        assert_eq!(app.buses[bus_idx].effect_descriptors[2].name, "OTT");
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_track_effect_insert_places_new_effect_before_target() {
+        let graph = TestLiveGraph::new("track-fx-recorded-insert-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("sampler track should be created");
+        let filter_slot = app
+            .add_builtin_effect_sync(0, "Filter")
+            .expect("filter should install first");
+        let ott_slot = app
+            .add_builtin_effect_sync(0, "OTT")
+            .expect("OTT should install second");
+        let track_id = app.track_registry.id_at(0).unwrap();
+        let filter_id = app.device_registry.audio_effect(track_id, filter_slot);
+        let ott_id = app.device_registry.audio_effect(track_id, ott_slot);
+
+        let inserted = app
+            .apply_recorded_track_effect_chain_mutation(0, "Insert audio effect", |app| {
+                app.insert_builtin_effect_before_slot_sync(0, ott_slot, "Phaser-Flanger")
+            })
+            .expect("recorded insert should succeed");
+
+        assert_eq!(inserted, ott_slot);
+        assert_eq!(app.graph.effect_descriptors[0][filter_slot].name, "Filter");
+        assert_eq!(app.graph.effect_descriptors[0][inserted].name, "Phaser-Flanger");
+        assert_eq!(app.graph.effect_descriptors[0][inserted + 1].name, "OTT");
+        assert_eq!(app.device_registry.audio_effect_location(filter_id), Some((track_id, filter_slot)));
+        assert_eq!(app.device_registry.audio_effect_location(ott_id), Some((track_id, inserted + 1)));
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_rack_slot_effect_insert_places_new_effect_before_target() {
+        let graph = TestLiveGraph::new("rack-fx-recorded-insert-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller()
+            .add_sampler_rack_track(&[std::path::Path::new(
+                "assets/ir/lexicon-300-rich-plate.wav",
+            )
+            .to_path_buf()])
+            .expect("sampler rack should be created");
+        let filter_slot = app
+            .add_builtin_rack_slot_effect_sync(0, 0, "Filter")
+            .expect("filter should install first");
+        let ott_slot = app
+            .add_builtin_rack_slot_effect_sync(0, 0, "OTT")
+            .expect("OTT should install second");
+        let track_id = app.track_registry.id_at(0).unwrap();
+        let rack_slot_id = app.device_registry.rack_slot(track_id, 0);
+        let filter_id = app.device_registry.rack_audio_effect(rack_slot_id, filter_slot);
+        let ott_id = app.device_registry.rack_audio_effect(rack_slot_id, ott_slot);
+
+        let inserted = app
+            .apply_recorded_rack_effect_chain_mutation(0, 0, "Insert rack-slot effect", |app| {
+                app.insert_builtin_rack_slot_effect_before_slot_sync(
+                    0,
+                    0,
+                    ott_slot,
+                    "Phaser-Flanger",
+                )
+            })
+            .expect("recorded insert should succeed");
+
+        let rack = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("rack should remain live");
+        assert_eq!(inserted, ott_slot);
+        assert_eq!(rack.slots[0].effect_descriptors[filter_slot].name, "Filter");
+        assert_eq!(rack.slots[0].effect_descriptors[inserted].name, "Phaser-Flanger");
+        assert_eq!(rack.slots[0].effect_descriptors[inserted + 1].name, "OTT");
+        assert_eq!(
+            app.device_registry.rack_audio_effect_location(filter_id),
+            Some((rack_slot_id, filter_slot)),
+        );
+        assert_eq!(
+            app.device_registry.rack_audio_effect_location(ott_id),
+            Some((rack_slot_id, inserted + 1)),
+        );
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_group_delete_restores_backing_bus_fx_and_all_scene_routing() {
+        let graph = TestLiveGraph::new("recorded-group-delete-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        app.graph_controller().add_blank_sampler_track()
+            .expect("first sampler track");
+        app.graph_controller().add_blank_sampler_track()
+            .expect("second sampler track");
+        let bus_id = app.group_tracks_recorded(vec![0, 1])
+            .expect("tracks should group");
+        let group_id = app.groups[0].id;
+        let bus_idx = app.buses.iter().position(|bus| bus.id == bus_id)
+            .expect("group backing bus");
+        app.add_builtin_bus_effect_sync(bus_idx, "OTT")
+            .expect("group bus should accept an effect");
+        let effect_id = app.device_registry.bus_audio_effect(bus_id, 0);
+
+        app.delete_group_recorded(group_id)
+            .expect("group deletion should record");
+        assert!(app.groups.is_empty());
+        assert!(app.buses.iter().all(|bus| bus.id != bus_id));
+
+        let undo = crate::tui::edit::undo(&mut app);
+        assert!(
+            matches!(undo, crate::tui::history::HistoryReplay::Applied(_)),
+            "group delete undo failed: {undo:?}",
+        );
+        let restored_idx = app.buses.iter().position(|bus| bus.id == bus_id)
+            .expect("undo should restore the same bus id");
+        assert_eq!(app.groups[0].id, group_id);
+        assert_eq!(app.groups[0].members, vec![0, 1]);
+        assert_eq!(app.buses[restored_idx].effect_descriptors[0].name, "OTT");
+        assert_eq!(app.device_registry.bus_audio_effect(bus_id, 0), effect_id);
+        for track in 0..2 {
+            assert_eq!(
+                app.state.with_scene_track_pattern(0, track, |pattern| {
+                    pattern.track_params.output.clone()
+                }),
+                Some(crate::sequencer::TrackOutput::Bus(bus_id)),
+            );
+        }
+
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert!(app.groups.is_empty());
+        assert!(app.buses.iter().all(|bus| bus.id != bus_id));
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_bus_effect_chain_restores_stable_identity_and_scene_values() {
+        let graph = TestLiveGraph::new("bus-fx-history-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let bus_id = app.add_bus_channel("History Bus");
+        let bus_idx = app.buses.iter().position(|bus| bus.id == bus_id).unwrap();
+
+        let slot = app
+            .apply_recorded_bus_effect_chain_mutation(bus_idx, "Add bus effect", |app| {
+                app.add_builtin_bus_effect_sync(bus_idx, "Filter")
+            })
+            .expect("recorded bus filter add should succeed");
+        let instance = app.device_registry.bus_audio_effect(bus_id, slot);
+        app.buses[bus_idx].effect_slots[slot].defaults[0] = 0.37;
+        app.save_current_bus_pattern();
+
+        app.apply_recorded_bus_effect_chain_mutation(bus_idx, "Delete bus effect", |app| {
+            app.delete_bus_effect_slot(bus_idx, slot)
+        })
+        .expect("recorded bus filter delete should succeed");
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.buses[bus_idx].effect_descriptors[slot].name, "Filter");
+        assert_eq!(app.buses[bus_idx].effect_slots[slot].defaults[0].to_bits(), 0.37_f32.to_bits());
+        assert_eq!(
+            app.device_registry.bus_audio_effect_location(instance),
+            Some((bus_id, slot))
+        );
+
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.buses[bus_idx].effect_slots[slot].node_id, 0);
+        assert!(app.device_registry.bus_audio_effect_location(instance).is_none());
+        graph.process_block();
+    }
+
+    #[test]
+    fn recorded_bus_effect_parameter_drag_coalesces_and_replays() {
+        let graph = TestLiveGraph::new("bus-fx-value-history-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let bus_id = app.add_bus_channel("Value Bus");
+        let bus_idx = app.buses.iter().position(|bus| bus.id == bus_id).unwrap();
+        let slot = app.apply_recorded_bus_effect_chain_mutation(
+            bus_idx,
+            "Add bus effect",
+            |app| app.add_builtin_bus_effect_sync(bus_idx, "Filter"),
+        ).unwrap();
+        let param = 2;
+        let before = app.buses[bus_idx].effect_slots[slot].defaults[param];
+
+        for value in [500.0, 1_000.0, 2_000.0] {
+            app.apply_recorded_bus_effect_value_mutation(
+                bus_idx,
+                slot,
+                "Set bus effect parameter",
+                format!("param:{param}"),
+                |app| app.set_bus_effect_param(bus_idx, slot, param, value),
+            ).unwrap();
+        }
+        crate::tui::edit::finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), 2, "the drag should add one history entry");
+        assert_eq!(app.buses[bus_idx].effect_slots[slot].defaults[param].to_bits(), 2_000.0_f32.to_bits());
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.buses[bus_idx].effect_slots[slot].defaults[param].to_bits(), before.to_bits());
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.buses[bus_idx].effect_slots[slot].defaults[param].to_bits(), 2_000.0_f32.to_bits());
+        graph.process_block();
+    }
+
+    #[test]
+    fn bus_effect_value_history_follows_stable_scene_identity_after_reorder() {
+        let graph = TestLiveGraph::new("bus-fx-scene-identity-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let bus_id = app.add_bus_channel("Scene Identity Bus");
+        let bus_idx = app.buses.iter().position(|bus| bus.id == bus_id).unwrap();
+        let slot = app.apply_recorded_bus_effect_chain_mutation(
+            bus_idx,
+            "Add bus effect",
+            |app| app.add_builtin_bus_effect_sync(bus_idx, "Filter"),
+        ).unwrap();
+        let original_scene = app.state.current_scene_id().unwrap();
+        let param = 2;
+        let before = app.buses[bus_idx].effect_slots[slot].defaults[param];
+        app.apply_recorded_bus_effect_value_mutation(
+            bus_idx,
+            slot,
+            "Set bus effect parameter",
+            format!("param:{param}"),
+            |app| app.set_bus_effect_param(bus_idx, slot, param, 4_000.0),
+        ).unwrap();
+        crate::tui::edit::finish_active_gesture(&mut app);
+
+        app.state.clone_pattern(0, &[], &[], &[], &[]);
+        assert_eq!(app.state.reorder_scene(0, 1), Some(0));
+        let original_scene_idx = app.state.scene_index(original_scene).unwrap();
+        assert_eq!(original_scene_idx, 1);
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        let live = app.capture_bus_pattern_snapshot();
+        let repository = app.state.export_bus_pattern_repository(&live);
+        let original_bus = repository[original_scene_idx]
+            .iter()
+            .find(|bus| bus.id == bus_id)
+            .unwrap();
+        assert_eq!(
+            original_bus.effect_defaults[slot][param].to_bits(),
+            before.to_bits(),
+            "undo must update the original scene after its dense index changes"
+        );
         graph.process_block();
     }
 
@@ -4668,6 +5422,7 @@ mod tests {
         let graph = TestLiveGraph::new("track-fx-chain-host-lifecycle-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 1);
         app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         let pan_id = graph.add_gain(1.0, "track_fx_pan");
         let delay_name = CString::new("track_fx_delay").unwrap();
         let delay_id = unsafe {
@@ -4733,6 +5488,148 @@ mod tests {
     }
 
     #[test]
+    fn recorded_track_effect_add_undo_redo_restores_stable_instance() {
+        let graph = TestLiveGraph::new("track-fx-history-add-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 1);
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        let pan_id = graph.add_gain(1.0, "track_fx_history_pan");
+        let delay_name = CString::new("track_fx_history_delay").unwrap();
+        let delay_id = unsafe {
+            crate::audiograph::add_node(
+                graph.ptr.0,
+                crate::effects::delay::delay_vtable(),
+                crate::effects::delay::DELAY_STATE_SIZE * std::mem::size_of::<f32>(),
+                delay_name.as_ptr(),
+                2,
+                2,
+                std::ptr::null(),
+                0,
+            )
+        };
+        app.graph.track_node_ids = vec![crate::tui::TrackNodeIds {
+            sampler_ids: Vec::new(),
+            sampler_gatepitch_ids: Vec::new(),
+            sampler_modulator_ids: Vec::new(),
+            voice_sum_id: 0,
+            voice_sum_r_id: 0,
+            pan_id,
+            filter_id: 0,
+            delay_id,
+            send_id: 0,
+            mod_out_id: 0,
+            mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
+            mod_env_id: 0,
+            bus_send_ids: Vec::new(),
+            rack_slots: Vec::new(),
+            rack_signature: None,
+        }];
+        app.graph.effect_descriptors = vec![EffectDescriptor::default_full_chain()];
+        app.graph.instrument_descriptors = vec![EffectDescriptor::builtin_sampler()];
+
+        let slot = app
+            .apply_recorded_track_effect_chain_mutation(0, "Add audio effect", |app| {
+                app.add_builtin_effect_sync(0, "Filter")
+            })
+            .expect("recorded filter add should succeed");
+        let track_id = app.track_registry.id_at(0).unwrap();
+        let instance = app.device_registry.audio_effect(track_id, slot);
+        assert_eq!(app.history.undo_len(), 1);
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.state.pattern.effect_chains[0][slot]
+                .node_id
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert!(app.device_registry.audio_effect_location(instance).is_none());
+
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.effect_descriptors[0][slot].name, "Filter");
+        assert_eq!(
+            app.device_registry.audio_effect_location(instance),
+            Some((track_id, slot))
+        );
+
+        let ott_slot = app
+            .apply_recorded_track_effect_chain_mutation(0, "Add audio effect", |app| {
+                app.add_builtin_effect_sync(0, "OTT")
+            })
+            .expect("recorded OTT add should succeed");
+        let ott_instance = app.device_registry.audio_effect(track_id, ott_slot);
+        app.apply_recorded_track_effect_chain_mutation(0, "Move audio effect", |app| {
+            app.move_effect_slot_sync(0, ott_slot, Some(slot))
+        })
+        .expect("recorded effect move should succeed");
+        assert_eq!(
+            app.device_registry.audio_effect_location(ott_instance),
+            Some((track_id, slot)),
+            "the moved logical effect keeps its identity"
+        );
+        assert_eq!(
+            app.device_registry.audio_effect_location(instance),
+            Some((track_id, ott_slot)),
+            "the displaced effect identity follows its new slot"
+        );
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.device_registry.audio_effect_location(instance),
+            Some((track_id, slot))
+        );
+        assert_eq!(
+            app.device_registry.audio_effect_location(ott_instance),
+            Some((track_id, ott_slot))
+        );
+
+        let retained_value = 0.37_f32;
+        app.state.pattern.effect_chains[0][slot]
+            .defaults
+            .set(0, retained_value);
+        app.delete_custom_effect_slot_recorded(0, slot)
+            .expect("recorded effect delete should succeed");
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.state.pattern.effect_chains[0][slot].defaults.get(0),
+            retained_value,
+            "undoing delete restores the effect's authoring values"
+        );
+        assert_eq!(
+            app.device_registry.audio_effect_location(instance),
+            Some((track_id, slot))
+        );
+        app.apply_recorded_track_effect_chain_mutation(0, "Replace audio effect", |app| {
+            app.load_builtin_effect_to_slot_sync(0, slot, "OTT")
+        })
+        .expect("recorded source replacement should succeed");
+        assert_eq!(app.graph.effect_descriptors[0][slot].name, "OTT");
+        assert_eq!(
+            app.device_registry.audio_effect_location(instance),
+            Some((track_id, slot)),
+            "source replacement keeps the logical instance identity"
+        );
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.effect_descriptors[0][slot].name, "Filter");
+        assert_eq!(app.state.pattern.effect_chains[0][slot].defaults.get(0), retained_value);
+        graph.process_block();
+    }
+
+    #[test]
     fn sidechain_effect_descriptor_uses_other_tracks_as_options() {
         let app = test_app_with_track_count(2);
         let result = app
@@ -4776,5 +5673,80 @@ mod tests {
             .expect("adding MIDI FX should not block on pattern_bank");
         assert_eq!(result.unwrap(), 0);
         assert_eq!(published_chain, vec!["arp".to_string()]);
+    }
+
+    #[test]
+    fn recorded_midi_fx_chain_restores_order_values_and_stable_ids() {
+        let mut app = test_app_with_track();
+        let track_id = app.track_registry.id_at(0).unwrap();
+        let arp_slot = app
+            .apply_recorded_track_midi_fx_chain_mutation(0, "Add MIDI FX", |app| {
+                app.add_midi_fx_to_track_sync(0, "arp")
+            })
+            .unwrap();
+        let arp_id = app.device_registry.midi_effect(track_id, arp_slot);
+        let trigger_slot = app
+            .apply_recorded_track_midi_fx_chain_mutation(0, "Add MIDI FX", |app| {
+                app.add_midi_fx_to_track_sync(0, "trigger-to-track")
+            })
+            .unwrap();
+        let trigger_id = app.device_registry.midi_effect(track_id, trigger_slot);
+        app.state.pattern.midi_fx_slots[0][arp_slot]
+            .defaults
+            .set(0, 0.42);
+
+        app.apply_recorded_track_midi_fx_chain_mutation(0, "Move MIDI FX", |app| {
+            app.move_midi_fx_slot_sync(0, trigger_slot, Some(arp_slot))
+        })
+        .unwrap();
+        assert_eq!(
+            app.device_registry.midi_effect_location(trigger_id),
+            Some((track_id, arp_slot))
+        );
+        assert_eq!(
+            app.device_registry.midi_effect_location(arp_id),
+            Some((track_id, trigger_slot))
+        );
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.device_registry.midi_effect_location(arp_id),
+            Some((track_id, arp_slot))
+        );
+        assert_eq!(app.state.pattern.midi_fx_slots[0][arp_slot].defaults.get(0), 0.42);
+
+        app.apply_recorded_track_midi_fx_chain_mutation(0, "Delete MIDI FX", |app| {
+            app.delete_midi_fx_slot(0, arp_slot)
+        })
+        .unwrap();
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.device_registry.midi_effect_location(arp_id),
+            Some((track_id, arp_slot))
+        );
+        assert_eq!(app.state.pattern.midi_fx_slots[0][arp_slot].defaults.get(0), 0.42);
+        app.apply_recorded_track_midi_fx_chain_mutation(0, "Replace MIDI FX", |app| {
+            app.replace_midi_fx_slot_sync(0, arp_slot, "trigger-to-track")
+        })
+        .unwrap();
+        assert_eq!(
+            app.device_registry.midi_effect_location(arp_id),
+            Some((track_id, arp_slot)),
+            "MIDI-FX source replacement preserves instance identity"
+        );
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.state.pattern.track_params[0].midi_fx_chain()[arp_slot],
+            "arp"
+        );
+        assert_eq!(app.state.pattern.midi_fx_slots[0][arp_slot].defaults.get(0), 0.42);
     }
 }

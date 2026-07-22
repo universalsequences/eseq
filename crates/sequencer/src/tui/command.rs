@@ -11,12 +11,14 @@
 //! publish.
 
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
+use crate::effects::HostControl;
 use crate::macro_engine::{MacroCurve, MacroId};
 use crate::plock_variants::{PlockVariantDomain, PlockVariantKey};
 use crate::process::ParamTarget;
 use crate::sequencer::{
-    RackSlotParam, StepParam, StepSnapshot, SwingResolution, Timebase, TrackOutput,
+    BusId, RackSlotParam, StepParam, StepSnapshot, SwingResolution, Timebase, TrackOutput,
     TrackSendSnapshot,
 };
 
@@ -69,11 +71,19 @@ fn sync_instrument_mod_active_plock(
         return;
     };
     let slot = &app.state.pattern.instrument_slots[track];
-    let active = desc
+    let targets = desc
         .instrument_modulation_targets
         .iter()
         .filter(|target| target.active_param_idx == Some(active_param_idx))
-        .any(|target| {
+        .collect::<Vec<_>>();
+    if !targets
+        .iter()
+        .any(|target| slot.plocks.get(step, target.depth_param_idx).is_some())
+    {
+        slot.plocks.clear_param(step, active_param_idx);
+        return;
+    }
+    let active = targets.iter().any(|target| {
             slot.plocks
                 .get(step, target.depth_param_idx)
                 .unwrap_or_else(|| slot.defaults.get(target.depth_param_idx))
@@ -101,11 +111,19 @@ fn sync_instrument_mod_active_key_lock(
         return;
     };
     let slot = &app.state.pattern.instrument_slots[track];
-    let active = desc
+    let targets = desc
         .instrument_modulation_targets
         .iter()
         .filter(|target| target.active_param_idx == Some(active_param_idx))
-        .any(|target| {
+        .collect::<Vec<_>>();
+    if !targets
+        .iter()
+        .any(|target| slot.key_locks.get(note, target.depth_param_idx).is_some())
+    {
+        slot.key_locks.clear_param(note, active_param_idx);
+        return;
+    }
+    let active = targets.iter().any(|target| {
             slot.key_locks
                 .get(note, target.depth_param_idx)
                 .unwrap_or_else(|| slot.defaults.get(target.depth_param_idx))
@@ -188,11 +206,19 @@ fn sync_effect_mod_active_plock(
     else {
         return;
     };
-    let active = desc
+    let targets = desc
         .instrument_modulation_targets
         .iter()
         .filter(|target| target.active_param_idx == Some(active_param_idx))
-        .any(|target| {
+        .collect::<Vec<_>>();
+    if !targets
+        .iter()
+        .any(|target| slot.plocks.get(step, target.depth_param_idx).is_some())
+    {
+        slot.plocks.clear_param(step, active_param_idx);
+        return;
+    }
+    let active = targets.iter().any(|target| {
             slot.plocks
                 .get(step, target.depth_param_idx)
                 .unwrap_or_else(|| slot.defaults.get(target.depth_param_idx))
@@ -202,7 +228,7 @@ fn sync_effect_mod_active_plock(
     slot.set_plock(step, active_param_idx, if active { 1.0 } else { 0.0 });
 }
 
-fn sanitize_pasted_step_snapshot(
+pub(crate) fn sanitize_pasted_step_snapshot(
     snapshot: &StepSnapshot,
     preserve_audio_plocks: bool,
 ) -> StepSnapshot {
@@ -224,6 +250,7 @@ fn sanitize_pasted_step_snapshot(
 ///   - Transport                 (always publish)
 ///   - Pure UI                   (no publish)
 #[allow(dead_code)]
+#[derive(Clone)]
 pub enum AppCommand {
     // ── Pattern / step mutations ──────────────────────────────────────────────
     /// Toggle a step on/off and clear its plocks if it was active.
@@ -293,6 +320,14 @@ pub enum AppCommand {
         new_lo: usize,
     },
 
+    /// Toggle one piano-roll note while preserving the compact single-note
+    /// representation in `StepParam::Transpose`.
+    TogglePianoNote {
+        track: usize,
+        step: usize,
+        semitone: i32,
+    },
+
     /// Double track pattern length by duplicating existing steps.
     DuplicateTrackPattern {
         track: usize,
@@ -333,10 +368,20 @@ pub enum AppCommand {
     ToggleTrackPolyphonic {
         track: usize,
     },
+    ToggleTrackMute {
+        track: usize,
+    },
+    ToggleTrackSolo {
+        track: usize,
+    },
 
     AdjustTrackMaxPolyphony {
         track: usize,
         delta: isize,
+    },
+    SetTrackMaxPolyphony {
+        track: usize,
+        value: usize,
     },
 
     SetTrackAttack {
@@ -456,12 +501,28 @@ pub enum AppCommand {
         sends: Vec<TrackSendSnapshot>,
     },
 
+    SetBusVolume {
+        bus: BusId,
+        value: f32,
+    },
+    ToggleBusMute {
+        bus: BusId,
+    },
+    ToggleBusSolo {
+        bus: BusId,
+    },
+
     /// Set master volume; also pushes to the live audio graph.
     SetMasterVolume {
         value: f32,
     },
     AdjustMasterVolume {
         delta: f32,
+    },
+    /// Set one persisted global reverb parameter; also pushes to the live graph.
+    SetReverbParam {
+        param_idx: usize,
+        value: f32,
     },
 
     SetTrackTimebase {
@@ -484,6 +545,7 @@ pub enum AppCommand {
         track: usize,
         idx: usize,
         default_limit: Option<f32>,
+        script_name: Option<String>,
     },
     SetTrackAccumLimit {
         track: usize,
@@ -496,6 +558,14 @@ pub enum AppCommand {
     SetTrackAccumMode {
         track: usize,
         mode: u32,
+    },
+    SetTrackMuteGroup {
+        track: usize,
+        group: u8,
+    },
+    SetTrackGlobalTranspose {
+        track: usize,
+        enabled: bool,
     },
 
     // ── Effect params ─────────────────────────────────────────────────────────
@@ -524,6 +594,75 @@ pub enum AppCommand {
         param_idx: usize,
         value: f32,
     },
+    ClearEffectPlockMulti {
+        track: usize,
+        steps: Vec<usize>,
+        slot_idx: usize,
+        param_idx: usize,
+    },
+    SetEffectTensorCell {
+        track: usize,
+        slot_idx: usize,
+        tensor_idx: usize,
+        cell_idx: usize,
+        value: f32,
+    },
+    SetEffectTensorPlockCellMulti {
+        track: usize,
+        steps: Vec<usize>,
+        slot_idx: usize,
+        tensor_idx: usize,
+        cell_idx: usize,
+        value: f32,
+    },
+    ClearEffectTensorPlockMulti {
+        track: usize,
+        steps: Vec<usize>,
+        slot_idx: usize,
+        tensor_idx: usize,
+    },
+
+    SetMidiFxParam {
+        track: usize,
+        slot_idx: usize,
+        param_idx: usize,
+        value: f32,
+    },
+
+    SetMidiFxPlockMulti {
+        track: usize,
+        steps: Vec<usize>,
+        slot_idx: usize,
+        param_idx: usize,
+        value: f32,
+    },
+    ClearMidiFxPlockMulti {
+        track: usize,
+        steps: Vec<usize>,
+        slot_idx: usize,
+        param_idx: usize,
+    },
+    SetMidiFxTensorCell {
+        track: usize,
+        slot_idx: usize,
+        tensor_idx: usize,
+        cell_idx: usize,
+        value: f32,
+    },
+    SetMidiFxTensorPlockCellMulti {
+        track: usize,
+        steps: Vec<usize>,
+        slot_idx: usize,
+        tensor_idx: usize,
+        cell_idx: usize,
+        value: f32,
+    },
+    ClearMidiFxTensorPlockMulti {
+        track: usize,
+        steps: Vec<usize>,
+        slot_idx: usize,
+        tensor_idx: usize,
+    },
 
     // ── Instrument params ─────────────────────────────────────────────────────
     /// Set an instrument slot default param; also pushes to audio graph.
@@ -547,6 +686,11 @@ pub enum AppCommand {
         steps: Vec<usize>,
         param_idx: usize,
         value: f32,
+    },
+    ClearInstrumentPlockMulti {
+        track: usize,
+        steps: Vec<usize>,
+        param_idx: usize,
     },
 
     /// Set a key lock on a single MIDI note for an instrument param.
@@ -606,6 +750,11 @@ pub enum AppCommand {
         tensor_idx: usize,
         cell_idx: usize,
         value: f32,
+    },
+    ClearInstrumentTensorPlockMulti {
+        track: usize,
+        steps: Vec<usize>,
+        tensor_idx: usize,
     },
 
     /// Set the instrument base-note offset.
@@ -689,6 +838,14 @@ pub enum AppCommand {
         value: f32,
     },
 
+    SetRackSlotEffectParam {
+        track: usize,
+        rack_slot_idx: usize,
+        effect_slot_idx: usize,
+        param_idx: usize,
+        value: f32,
+    },
+
     /// Set a rack layer's underlying instrument step p-lock.
     SetRackSlotInstrumentPlock {
         track: usize,
@@ -705,6 +862,32 @@ pub enum AppCommand {
         steps: Vec<usize>,
         param_idx: usize,
         value: f32,
+    },
+    SetRackMacroPlockMulti {
+        track: usize,
+        steps: Vec<usize>,
+        macro_idx: usize,
+        value: f32,
+    },
+    ClearRackMacroPlockMulti {
+        track: usize,
+        steps: Vec<usize>,
+        macro_idx: usize,
+    },
+    SetRackSlotEffectPlockMulti {
+        track: usize,
+        steps: Vec<usize>,
+        rack_slot_idx: usize,
+        effect_slot_idx: usize,
+        param_idx: usize,
+        value: f32,
+    },
+    ClearRackSlotEffectPlockMulti {
+        track: usize,
+        steps: Vec<usize>,
+        rack_slot_idx: usize,
+        effect_slot_idx: usize,
+        param_idx: usize,
     },
 
     // ── Project-global macros ─────────────────────────────────────────────
@@ -779,6 +962,275 @@ pub enum AppCommand {
     },
 }
 
+/// Exhaustive staged history classification for every command intent.
+///
+/// Unsupported authoring commands remain barriers until their patch family is
+/// implemented. Live macro gestures and transport playback are performance
+/// actions and never affect authoring history.
+pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
+    use super::history::HistoryPolicy;
+
+    match cmd {
+        AppCommand::ToggleStep { .. }
+        | AppCommand::SetStepActive { .. }
+        | AppCommand::SetStepParam { .. }
+        | AppCommand::AdjustStepParam { .. }
+        | AppCommand::ClearStepPayload { .. }
+        | AppCommand::ClearSteps { .. }
+        | AppCommand::RotateSteps { .. }
+        | AppCommand::PasteSteps { .. }
+        | AppCommand::ShiftStepRange { .. }
+        | AppCommand::TogglePianoNote { .. }
+        | AppCommand::SetTimebasePlock { .. }
+        | AppCommand::SetTimebasePlockMulti { .. }
+        | AppCommand::ClearTimebasePlockMulti { .. }
+        | AppCommand::SetTrackSwingPlock { .. }
+        | AppCommand::SetTrackSwingPlockMulti { .. }
+        | AppCommand::ClearTrackSwingPlockMulti { .. }
+        | AppCommand::SetTrackSwingResolutionPlock { .. }
+        | AppCommand::SetTrackSwingResolutionPlockMulti { .. }
+        | AppCommand::ClearTrackSwingResolutionPlockMulti { .. }
+        | AppCommand::ClearEffectPlockMulti { .. }
+        | AppCommand::ClearEffectTensorPlockMulti { .. }
+        | AppCommand::ClearMidiFxPlockMulti { .. }
+        | AppCommand::ClearMidiFxTensorPlockMulti { .. }
+        | AppCommand::ClearInstrumentPlockMulti { .. }
+        | AppCommand::ClearInstrumentTensorPlockMulti { .. }
+        | AppCommand::ClearRackMacroPlockMulti { .. }
+        | AppCommand::ClearRackSlotEffectPlockMulti { .. } => HistoryPolicy::Record,
+        AppCommand::DuplicateTrackPattern { .. }
+        | AppCommand::HalveTrackPattern { .. }
+        | AppCommand::SetTrackNumSteps { .. }
+        | AppCommand::AdjustTrackNumSteps { .. } => HistoryPolicy::Record,
+
+        AppCommand::ToggleTrackGate { .. }
+        | AppCommand::ToggleTrackPolyphonic { .. }
+        | AppCommand::ToggleTrackMute { .. }
+        | AppCommand::ToggleTrackSolo { .. }
+        | AppCommand::SetTrackSwingResolution { .. }
+        | AppCommand::NextTrackSwingResolution { .. }
+        | AppCommand::PrevTrackSwingResolution { .. }
+        | AppCommand::SetTrackOutput { .. }
+        | AppCommand::SetTrackTimebase { .. }
+        | AppCommand::NextTrackTimebase { .. }
+        | AppCommand::PrevTrackTimebase { .. }
+        | AppCommand::SetTrackFtsScale { .. }
+        | AppCommand::SetTrackAccumIdx { .. }
+        | AppCommand::SetTrackAccumMode { .. }
+        | AppCommand::SetTrackMuteGroup { .. }
+        | AppCommand::SetTrackGlobalTranspose { .. } => HistoryPolicy::Record,
+
+        AppCommand::ToggleBusMute { .. } | AppCommand::ToggleBusSolo { .. } => {
+            HistoryPolicy::Record
+        }
+        AppCommand::SetInstrumentKeyLock { .. }
+        | AppCommand::SetInstrumentKeyLockMulti { .. }
+        | AppCommand::ClearInstrumentKeyLock { .. }
+        | AppCommand::ClearInstrumentKeyLocksForNote { .. }
+        | AppCommand::StampInstrumentKeyLockVariant { .. }
+        | AppCommand::ClearInstrumentKeyLockVariantsForNotes { .. }
+        | AppCommand::SetRackSlotMute { .. }
+        | AppCommand::SetRackSlotSolo { .. }
+        | AppCommand::SetRackSlotChokeGroup { .. } => HistoryPolicy::Record,
+
+        AppCommand::AdjustTrackMaxPolyphony { track, .. }
+        | AppCommand::SetTrackMaxPolyphony { track, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("track:{track}:max-polyphony")),
+        ),
+        AppCommand::SetTrackAttack { track, .. } | AppCommand::AdjustTrackAttack { track, .. } => {
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:attack"
+            )))
+        }
+        AppCommand::SetTrackRelease { track, .. }
+        | AppCommand::AdjustTrackRelease { track, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("track:{track}:release")),
+        ),
+        AppCommand::SetTrackSwing { track, .. } | AppCommand::AdjustTrackSwing { track, .. } => {
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:swing"
+            )))
+        }
+        AppCommand::SetTrackVolume { track, .. } | AppCommand::AdjustTrackVolume { track, .. } => {
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:volume"
+            )))
+        }
+        AppCommand::SetTrackPan { track, .. } | AppCommand::AdjustTrackPan { track, .. } => {
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:pan"
+            )))
+        }
+        AppCommand::SetTrackSend { track, .. } | AppCommand::AdjustTrackSend { track, .. } => {
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:send"
+            )))
+        }
+        AppCommand::SetTrackSends { track, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("track:{track}:sends")),
+        ),
+        AppCommand::SetBusVolume { bus, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("bus:{}:volume", bus.0)),
+        ),
+        AppCommand::SetEffectPlock { track, step, slot_idx, param_idx, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:effect:{slot_idx}:param:{param_idx}:step:{step}"
+            ))),
+        AppCommand::SetEffectPlockMulti { track, slot_idx, param_idx, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:effect:{slot_idx}:param:{param_idx}:plock"
+            ))),
+        AppCommand::SetEffectTensorPlockCellMulti {
+            track, slot_idx, tensor_idx, cell_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:effect:{slot_idx}:tensor:{tensor_idx}:cell:{cell_idx}:plock"
+        ))),
+        AppCommand::SetMidiFxPlockMulti { track, slot_idx, param_idx, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:midi-fx:{slot_idx}:param:{param_idx}:plock"
+            ))),
+        AppCommand::SetMidiFxTensorPlockCellMulti {
+            track, slot_idx, tensor_idx, cell_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:midi-fx:{slot_idx}:tensor:{tensor_idx}:cell:{cell_idx}:plock"
+        ))),
+        AppCommand::SetInstrumentPlock { track, step, param_idx, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:instrument:param:{param_idx}:step:{step}"
+            ))),
+        AppCommand::SetInstrumentPlockMulti { track, param_idx, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:instrument:param:{param_idx}:plock"
+            ))),
+        AppCommand::SetInstrumentTensorPlockCellMulti {
+            track, tensor_idx, cell_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:instrument:tensor:{tensor_idx}:cell:{cell_idx}:plock"
+        ))),
+        AppCommand::SetRackSlotParamPlock { track, slot_idx, step, param, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:rack:{slot_idx}:param:{}:step:{step}",
+                param.index(),
+            ))),
+        AppCommand::SetRackSlotParamPlockMulti { track, slot_idx, param, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:rack:{slot_idx}:param:{}:plock",
+                param.index(),
+            ))),
+        AppCommand::SetRackSlotInstrumentPlock {
+            track, slot_idx, step, param_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:rack:{slot_idx}:instrument:{param_idx}:step:{step}"
+        ))),
+        AppCommand::SetRackSlotInstrumentPlockMulti { track, slot_idx, param_idx, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:rack:{slot_idx}:instrument:{param_idx}:plock"
+            ))),
+        AppCommand::SetRackMacroPlockMulti { track, macro_idx, .. } =>
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:rack-macro:{macro_idx}:plock"
+            ))),
+        AppCommand::SetRackSlotEffectPlockMulti {
+            track, rack_slot_idx, effect_slot_idx, param_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:rack:{rack_slot_idx}:effect:{effect_slot_idx}:param:{param_idx}:plock"
+        ))),
+        AppCommand::SetEffectParam {
+            track, slot_idx, param_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:effect:{slot_idx}:param:{param_idx}"
+        ))),
+        AppCommand::SetMidiFxParam {
+            track, slot_idx, param_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:midi-fx:{slot_idx}:param:{param_idx}"
+        ))),
+        AppCommand::SetEffectTensorCell {
+            track, slot_idx, tensor_idx, cell_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:effect:{slot_idx}:tensor:{tensor_idx}:cell:{cell_idx}"
+        ))),
+        AppCommand::SetMidiFxTensorCell {
+            track, slot_idx, tensor_idx, cell_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:midi-fx:{slot_idx}:tensor:{tensor_idx}:cell:{cell_idx}"
+        ))),
+        AppCommand::SetInstrumentParam { track, param_idx, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("track:{track}:instrument:param:{param_idx}")),
+        ),
+        AppCommand::SetInstrumentTensorCell {
+            track, tensor_idx, cell_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:instrument:tensor:{tensor_idx}:cell:{cell_idx}"
+        ))),
+        AppCommand::SetRackSlotGain { track, slot_idx, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("track:{track}:rack-slot:{slot_idx}:gain")),
+        ),
+        AppCommand::SetRackSlotPan { track, slot_idx, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("track:{track}:rack-slot:{slot_idx}:pan")),
+        ),
+        AppCommand::SetRackSlotMaxPolyphony { track, slot_idx, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!(
+                "track:{track}:rack-slot:{slot_idx}:max-polyphony"
+            )),
+        ),
+        AppCommand::SetRackSlotBaseNoteOffset { track, slot_idx, .. } => {
+            HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+                "track:{track}:rack-slot:{slot_idx}:base-note"
+            )))
+        }
+        AppCommand::SetRackSlotInstrumentParam {
+            track, slot_idx, param_idx, ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:rack-slot:{slot_idx}:instrument:param:{param_idx}"
+        ))),
+        AppCommand::SetRackSlotEffectParam {
+            track,
+            rack_slot_idx,
+            effect_slot_idx,
+            param_idx,
+            ..
+        } => HistoryPolicy::Coalesce(super::history::MergeKey::new(format!(
+            "track:{track}:rack-slot:{rack_slot_idx}:effect:{effect_slot_idx}:param:{param_idx}"
+        ))),
+        AppCommand::SetTrackAccumLimit { track, .. }
+        | AppCommand::AdjustTrackAccumLimit { track, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("track:{track}:accum-limit")),
+        ),
+        AppCommand::SetInstrumentBaseNoteOffset { track, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("track:{track}:base-note")),
+        ),
+        AppCommand::SetMasterVolume { .. } | AppCommand::AdjustMasterVolume { .. } => {
+            HistoryPolicy::Coalesce(super::history::MergeKey::new("transport:master-volume"))
+        }
+        AppCommand::SetReverbParam { param_idx, .. } => HistoryPolicy::Coalesce(
+            super::history::MergeKey::new(format!("global:reverb:{param_idx}")),
+        ),
+        AppCommand::SetBpm { .. } => {
+            HistoryPolicy::Coalesce(super::history::MergeKey::new("transport:bpm"))
+        }
+
+        AppCommand::MacroSetValue { .. }
+        | AppCommand::MacroRelease { .. }
+        | AppCommand::ScenePushBegin { .. }
+        | AppCommand::ScenePushSetValue { .. }
+        | AppCommand::ScenePushEnd
+        | AppCommand::TogglePlay
+        | AppCommand::AdjustRecordQuantizeThresh { .. } => HistoryPolicy::Ignore,
+
+        AppCommand::MacroCreate { .. }
+        | AppCommand::MacroCreateScene { .. }
+        | AppCommand::MacroSceneConfig { .. }
+        | AppCommand::MacroEnsure { .. }
+        | AppCommand::MacroDelete { .. }
+        | AppCommand::MacroRename { .. }
+        | AppCommand::MacroMapParam { .. }
+        | AppCommand::MacroSetRange { .. }
+        | AppCommand::MacroSetCurve { .. }
+        | AppCommand::MacroUnmap { .. } => HistoryPolicy::Record,
+    }
+}
+
 /// Execute `cmd` against `app`, calling
 /// `app.state.publish_scheduler_snapshot()` afterwards when the command
 /// mutated sequencer/transport state.
@@ -787,12 +1239,9 @@ pub enum AppCommand {
 /// performed inside this function alongside the state mutation.
 #[allow(dead_code)]
 pub fn apply_command(app: &mut App, cmd: AppCommand) {
-    let needs_publish = command_mutates_sequencer_state(&cmd);
-
-    execute_command(app, cmd);
-
-    if needs_publish {
-        app.state.publish_scheduler_snapshot();
+    if let Err(error) = super::edit::try_apply_command(app, cmd) {
+        app.editor.status_message = Some((format!("Command failed: {error:?}"), Instant::now()));
+        eprintln!("command failed: {error:?}");
     }
 }
 
@@ -801,7 +1250,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        apply_command, command_mutates_sequencer_state, sanitize_pasted_step_snapshot, AppCommand,
+        apply_command, command_mutates_sequencer_state, history_policy,
+        sanitize_pasted_step_snapshot, AppCommand,
     };
     use crate::audiograph::LiveGraphPtr;
     use crate::effects::{
@@ -904,6 +1354,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn history_policy_records_completed_step_and_pattern_geometry_slices() {
+        use crate::tui::history::HistoryPolicy;
+
+        assert_eq!(
+            history_policy(&AppCommand::ToggleStep { track: 0, step: 3 }),
+            HistoryPolicy::Record
+        );
+        assert_eq!(
+            history_policy(&AppCommand::DuplicateTrackPattern { track: 0 }),
+            HistoryPolicy::Record
+        );
+        assert_eq!(
+            history_policy(&AppCommand::MacroSetValue {
+                id: 1,
+                value: 0.5,
+            }),
+            HistoryPolicy::Ignore
+        );
+        assert_eq!(
+            history_policy(&AppCommand::TogglePlay),
+            HistoryPolicy::Ignore
+        );
+        assert!(matches!(
+            history_policy(&AppCommand::SetTrackVolume {
+                track: 0,
+                value: 0.75,
+            }),
+            HistoryPolicy::Coalesce(_)
+        ));
+        assert_eq!(
+            history_policy(&AppCommand::SetTrackTimebase {
+                track: 0,
+                timebase: Timebase::Eighth,
+            }),
+            HistoryPolicy::Record
+        );
+        assert_eq!(
+            history_policy(&AppCommand::AdjustRecordQuantizeThresh { delta: 0.1 }),
+            HistoryPolicy::Ignore
+        );
+    }
+
     fn test_app_with_effect_descriptor(desc: EffectDescriptor) -> App {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         state.pattern.effect_chains[0][0].apply_descriptor(&desc, 0);
@@ -925,6 +1418,7 @@ mod tests {
             keyboard_tx,
         );
         app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.effect_descriptors = vec![vec![desc]];
         app
     }
@@ -950,6 +1444,7 @@ mod tests {
             keyboard_tx,
         );
         app.tracks = vec!["Track 1".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.track_instrument_types = vec![InstrumentType::Custom];
         app.graph.instrument_descriptors = vec![desc];
         app
@@ -1036,6 +1531,7 @@ mod tests {
             keyboard_tx,
         );
         app.tracks = vec!["Rack".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.track_instrument_types = vec![InstrumentType::Rack];
         app.graph.instrument_descriptors = vec![EffectDescriptor::empty_custom_slot()];
         app
@@ -1177,19 +1673,31 @@ mod tests {
             timebase: Some(Timebase::Eighth),
             swing: Some(62.0),
             swing_resolution: Some(SwingResolution::Eighth),
+            midi_fx_plocks: vec![StepSlotPlocks {
+                params: vec![Some(0.5)],
+                tensor_params: vec![Some(vec![0.1, 0.2])],
+            }],
             effect_plocks: vec![StepSlotPlocks {
                 params: vec![Some(0.1), None, Some(0.9)],
+                tensor_params: vec![Some(vec![0.3, 0.4])],
             }],
             instrument_plocks: StepSlotPlocks {
                 params: vec![Some(0.2), Some(0.8)],
+                tensor_params: vec![Some(vec![0.5, 0.6])],
             },
             rack_macro_plocks: vec![Some(0.6), None],
             rack_slot_param_plocks: vec![StepSlotPlocks {
                 params: vec![Some(12.0), Some(0.4), None],
+                tensor_params: Vec::new(),
             }],
             rack_slot_instrument_plocks: vec![StepSlotPlocks {
                 params: vec![Some(0.3), None, Some(0.7)],
+                tensor_params: vec![Some(vec![0.7, 0.8])],
             }],
+            rack_slot_effect_plocks: vec![vec![StepSlotPlocks {
+                params: vec![Some(0.9)],
+                tensor_params: vec![Some(vec![0.9, 1.0])],
+            }]],
         };
 
         let sanitized = sanitize_pasted_step_snapshot(&snapshot, false);
@@ -1203,6 +1711,11 @@ mod tests {
         assert_eq!(sanitized.timebase, Some(Timebase::Eighth));
         assert_eq!(sanitized.swing, Some(62.0));
         assert_eq!(sanitized.swing_resolution, Some(SwingResolution::Eighth));
+        assert!(sanitized
+            .midi_fx_plocks
+            .iter()
+            .all(|plocks| plocks.params.iter().all(Option::is_none)
+                && plocks.tensor_params.iter().all(Option::is_none)));
         assert!(sanitized
             .effect_plocks
             .iter()
@@ -1222,8 +1735,14 @@ mod tests {
         assert!(sanitized
             .rack_slot_instrument_plocks
             .iter()
-            .flat_map(|plocks| plocks.params.iter())
-            .all(Option::is_none));
+            .all(|plocks| plocks.params.iter().all(Option::is_none)
+                && plocks.tensor_params.iter().all(Option::is_none)));
+        assert!(sanitized
+            .rack_slot_effect_plocks
+            .iter()
+            .flatten()
+            .all(|plocks| plocks.params.iter().all(Option::is_none)
+                && plocks.tensor_params.iter().all(Option::is_none)));
     }
 
     #[test]
@@ -1238,19 +1757,31 @@ mod tests {
             timebase: None,
             swing: None,
             swing_resolution: None,
+            midi_fx_plocks: vec![StepSlotPlocks {
+                params: vec![Some(0.5)],
+                tensor_params: vec![Some(vec![0.1, 0.2])],
+            }],
             effect_plocks: vec![StepSlotPlocks {
                 params: vec![Some(0.1), None, Some(0.9)],
+                tensor_params: vec![Some(vec![0.3, 0.4])],
             }],
             instrument_plocks: StepSlotPlocks {
                 params: vec![Some(0.2), Some(0.8)],
+                tensor_params: vec![Some(vec![0.5, 0.6])],
             },
             rack_macro_plocks: vec![Some(0.6), None],
             rack_slot_param_plocks: vec![StepSlotPlocks {
                 params: vec![Some(12.0), Some(0.4), None],
+                tensor_params: Vec::new(),
             }],
             rack_slot_instrument_plocks: vec![StepSlotPlocks {
                 params: vec![Some(0.3), None, Some(0.7)],
+                tensor_params: vec![Some(vec![0.7, 0.8])],
             }],
+            rack_slot_effect_plocks: vec![vec![StepSlotPlocks {
+                params: vec![Some(0.9)],
+                tensor_params: vec![Some(vec![0.9, 1.0])],
+            }]],
         };
 
         let sanitized = sanitize_pasted_step_snapshot(&snapshot, true);
@@ -2154,7 +2685,7 @@ mod tests {
 /// `execute_command`. Publishing a full scheduler snapshot for each drag tick
 /// makes the app loop perform broad pattern/UI sync work even though event
 /// scheduling cannot observe those fields.
-fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
+pub(crate) fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
     !matches!(
         cmd,
         AppCommand::SetTrackVolume { .. }
@@ -2164,8 +2695,13 @@ fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
             | AppCommand::SetTrackSend { .. }
             | AppCommand::AdjustTrackSend { .. }
             | AppCommand::SetTrackSends { .. }
+            | AppCommand::SetMidiFxParam { .. }
+            | AppCommand::SetBusVolume { .. }
+            | AppCommand::ToggleBusMute { .. }
+            | AppCommand::ToggleBusSolo { .. }
             | AppCommand::SetMasterVolume { .. }
             | AppCommand::AdjustMasterVolume { .. }
+            | AppCommand::SetReverbParam { .. }
             | AppCommand::MacroCreate { .. }
             | AppCommand::MacroEnsure { .. }
             | AppCommand::MacroDelete { .. }
@@ -2179,7 +2715,7 @@ fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
     )
 }
 
-fn execute_command(app: &mut App, cmd: AppCommand) {
+pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
     match cmd {
         // ── Pattern / step mutations ──────────────────────────────────────
         AppCommand::ToggleStep { track, step } => {
@@ -2262,12 +2798,16 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             app.state.move_step_range(track, lo, hi, new_lo);
         }
 
+        AppCommand::TogglePianoNote { .. } => {
+            unreachable!("piano-note edits execute through the recorded edit boundary")
+        }
+
         AppCommand::DuplicateTrackPattern { track } => {
-            app.state.duplicate_track_pattern(track);
+            app.state.duplicate_track_pattern_no_publish(track);
         }
 
         AppCommand::HalveTrackPattern { track } => {
-            app.state.halve_track_pattern(track);
+            app.state.halve_track_pattern_no_publish(track);
         }
 
         AppCommand::SetTimebasePlock {
@@ -2304,10 +2844,24 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             app.state.pattern.track_params[track].toggle_polyphonic();
         }
 
+        AppCommand::ToggleTrackMute { track } => {
+            app.state.pattern.track_params[track].toggle_mute();
+            app.push_track_mute(track);
+        }
+
+        AppCommand::ToggleTrackSolo { track } => {
+            app.state.pattern.track_params[track].toggle_solo();
+            app.push_track_solo_mutes();
+        }
+
         AppCommand::AdjustTrackMaxPolyphony { track, delta } => {
             let tp = &app.state.pattern.track_params[track];
             let cur = tp.get_max_polyphony() as isize;
             tp.set_max_polyphony((cur + delta).max(1) as usize);
+        }
+
+        AppCommand::SetTrackMaxPolyphony { track, value } => {
+            app.state.pattern.track_params[track].set_max_polyphony(value);
         }
 
         AppCommand::SetTrackAttack { track, ms } => {
@@ -2450,6 +3004,27 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             app.graph_controller().apply_track_bus_sends(track);
         }
 
+        AppCommand::SetBusVolume { bus, value } => {
+            if let Some(channel) = app.buses.iter_mut().find(|channel| channel.id == bus) {
+                channel.volume = value.clamp(0.0, 1.0);
+                app.push_bus_volume(bus);
+            }
+        }
+
+        AppCommand::ToggleBusMute { bus } => {
+            if let Some(channel) = app.buses.iter_mut().find(|channel| channel.id == bus) {
+                channel.mute = !channel.mute;
+                app.push_bus_mute(bus);
+            }
+        }
+
+        AppCommand::ToggleBusSolo { bus } => {
+            if let Some(channel) = app.buses.iter_mut().find(|channel| channel.id == bus) {
+                channel.solo = !channel.solo;
+                app.push_bus_solo_mutes();
+            }
+        }
+
         AppCommand::SetMasterVolume { value } => {
             app.state
                 .transport
@@ -2465,6 +3040,10 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
                 Ordering::Relaxed,
             );
             app.push_master_volume();
+        }
+
+        AppCommand::SetReverbParam { param_idx, value } => {
+            app.set_reverb_param_unrecorded(param_idx, value);
         }
 
         AppCommand::SetTrackTimebase { track, timebase } => {
@@ -2487,11 +3066,14 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             track,
             idx,
             default_limit,
+            script_name,
         } => {
             app.state.pattern.track_params[track].set_accumulator_idx(idx);
+            app.state.pattern.track_params[track].set_script_accumulator_name(script_name);
             if let Some(limit) = default_limit {
                 app.state.pattern.track_params[track].set_accum_limit(limit);
             }
+            app.state.request_accumulator_reset(track);
         }
 
         AppCommand::SetTrackAccumLimit { track, value } => {
@@ -2507,6 +3089,14 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             app.state.pattern.track_params[track].set_accum_mode(mode);
         }
 
+        AppCommand::SetTrackMuteGroup { track, group } => {
+            app.state.pattern.track_params[track].set_mute_group(group);
+        }
+
+        AppCommand::SetTrackGlobalTranspose { track, enabled } => {
+            app.state.pattern.track_params[track].set_global_transpose(enabled);
+        }
+
         // ── Effect params ─────────────────────────────────────────────────
         AppCommand::SetEffectParam {
             track,
@@ -2514,10 +3104,37 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             param_idx,
             value,
         } => {
+            let value = app
+                .graph
+                .effect_descriptors
+                .get(track)
+                .and_then(|descriptors| descriptors.get(slot_idx))
+                .and_then(|descriptor| descriptor.params.get(param_idx))
+                .map(|param| param.clamp(value))
+                .unwrap_or(value);
+            let is_sidechain = app
+                .graph
+                .effect_descriptors
+                .get(track)
+                .and_then(|descriptors| descriptors.get(slot_idx))
+                .and_then(|descriptor| descriptor.params.get(param_idx))
+                .is_some_and(|param| {
+                    matches!(param.host_control, Some(HostControl::FxSidechain { .. }))
+                });
+            if is_sidechain {
+                app.apply_effect_sidechain_selection(
+                    track,
+                    slot_idx,
+                    param_idx,
+                    value.round().max(0.0) as usize,
+                );
+            }
             let chain = &app.state.pattern.effect_chains[track];
             if let Some(slot) = chain.get(slot_idx) {
                 slot.defaults.set(param_idx, value);
-                app.send_effective_slot_param(track, slot_idx, param_idx);
+                if !is_sidechain {
+                    app.send_effective_slot_param(track, slot_idx, param_idx);
+                }
                 sync_effect_mod_active_default(app, track, slot_idx, param_idx);
             }
         }
@@ -2529,6 +3146,11 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             param_idx,
             value,
         } => {
+            let value = app.graph.effect_descriptors.get(track)
+                .and_then(|descriptors| descriptors.get(slot_idx))
+                .and_then(|descriptor| descriptor.params.get(param_idx))
+                .map(|param| param.clamp(value))
+                .unwrap_or(value);
             let chain = &app.state.pattern.effect_chains[track];
             if let Some(slot) = chain.get(slot_idx) {
                 slot.set_plock(step, param_idx, value);
@@ -2543,6 +3165,11 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             param_idx,
             value,
         } => {
+            let value = app.graph.effect_descriptors.get(track)
+                .and_then(|descriptors| descriptors.get(slot_idx))
+                .and_then(|descriptor| descriptor.params.get(param_idx))
+                .map(|param| param.clamp(value))
+                .unwrap_or(value);
             let updated = app
                 .state
                 .pattern
@@ -2562,12 +3189,180 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             }
         }
 
+        AppCommand::ClearEffectPlockMulti {
+            track,
+            steps,
+            slot_idx,
+            param_idx,
+        } => {
+            if let Some(slot) = app
+                .state
+                .pattern
+                .effect_chains
+                .get(track)
+                .and_then(|chain| chain.get(slot_idx))
+            {
+                for step in &steps {
+                    slot.plocks.clear_param(*step, param_idx);
+                }
+            }
+            for step in steps {
+                sync_effect_mod_active_plock(app, track, step, slot_idx, param_idx);
+            }
+        }
+
+        AppCommand::SetEffectTensorCell {
+            track,
+            slot_idx,
+            tensor_idx,
+            cell_idx,
+            value,
+        } => {
+            if let Some(slot) = app
+                .state
+                .pattern
+                .effect_chains
+                .get(track)
+                .and_then(|chain| chain.get(slot_idx))
+            {
+                if let Some(values) = slot.tensor_params.set_default_cell(tensor_idx, cell_idx, value)
+                {
+                    app.send_effect_tensor_param(track, slot_idx, tensor_idx, &values);
+                }
+            }
+        }
+
+        AppCommand::SetEffectTensorPlockCellMulti {
+            track, steps, slot_idx, tensor_idx, cell_idx, value,
+        } => {
+            if let Some(slot) = app.state.pattern.effect_chains.get(track).and_then(|chain| chain.get(slot_idx)) {
+                for step in steps {
+                    slot.tensor_params.set_plock_cell(step, tensor_idx, cell_idx, value);
+                }
+            }
+        }
+
+        AppCommand::ClearEffectTensorPlockMulti {
+            track, steps, slot_idx, tensor_idx,
+        } => {
+            if let Some(slot) = app.state.pattern.effect_chains.get(track).and_then(|chain| chain.get(slot_idx)) {
+                for step in steps {
+                    slot.tensor_params.clear_plock(step, tensor_idx);
+                }
+            }
+        }
+
+        AppCommand::SetMidiFxParam {
+            track,
+            slot_idx,
+            param_idx,
+            value,
+        } => {
+            let value = app.state.pattern.track_params.get(track)
+                .and_then(|params| params.midi_fx_chain().get(slot_idx).cloned())
+                .and_then(|name| crate::lisp_host::load_midi_fx_descriptor(&name))
+                .and_then(|descriptor| descriptor.params.get(param_idx).cloned())
+                .map(|param| param.clamp(value))
+                .unwrap_or(value);
+            if let Some(slot) = app
+                .state
+                .pattern
+                .midi_fx_slots
+                .get(track)
+                .and_then(|slots| slots.get(slot_idx))
+            {
+                slot.defaults.set(param_idx, value);
+            }
+        }
+
+        AppCommand::SetMidiFxPlockMulti {
+            track,
+            steps,
+            slot_idx,
+            param_idx,
+            value,
+        } => {
+            let value = app.state.pattern.track_params.get(track)
+                .and_then(|params| params.midi_fx_chain().get(slot_idx).cloned())
+                .and_then(|name| crate::lisp_host::load_midi_fx_descriptor(&name))
+                .and_then(|descriptor| descriptor.params.get(param_idx).cloned())
+                .map(|param| param.clamp(value))
+                .unwrap_or(value);
+            if let Some(slot) = app
+                .state
+                .pattern
+                .midi_fx_slots
+                .get(track)
+                .and_then(|slots| slots.get(slot_idx))
+            {
+                for step in steps {
+                    slot.set_plock(step, param_idx, value);
+                }
+            }
+        }
+
+        AppCommand::ClearMidiFxPlockMulti {
+            track,
+            steps,
+            slot_idx,
+            param_idx,
+        } => {
+            if let Some(slot) = app
+                .state
+                .pattern
+                .midi_fx_slots
+                .get(track)
+                .and_then(|slots| slots.get(slot_idx))
+            {
+                for step in steps {
+                    slot.plocks.clear_param(step, param_idx);
+                }
+            }
+        }
+
+        AppCommand::SetMidiFxTensorCell {
+            track, slot_idx, tensor_idx, cell_idx, value,
+        } => {
+            if let Some(slot) = app.state.pattern.midi_fx_slots.get(track).and_then(|slots| slots.get(slot_idx)) {
+                slot.tensor_params.set_default_cell(tensor_idx, cell_idx, value);
+            }
+        }
+
+        AppCommand::SetMidiFxTensorPlockCellMulti {
+            track, steps, slot_idx, tensor_idx, cell_idx, value,
+        } => {
+            if let Some(slot) = app.state.pattern.midi_fx_slots.get(track).and_then(|slots| slots.get(slot_idx)) {
+                for step in steps {
+                    slot.tensor_params.set_plock_cell(step, tensor_idx, cell_idx, value);
+                }
+            }
+        }
+
+        AppCommand::ClearMidiFxTensorPlockMulti {
+            track, steps, slot_idx, tensor_idx,
+        } => {
+            if let Some(slot) = app.state.pattern.midi_fx_slots.get(track).and_then(|slots| slots.get(slot_idx)) {
+                for step in steps {
+                    slot.tensor_params.clear_plock(step, tensor_idx);
+                }
+            }
+        }
+
         // ── Instrument params ─────────────────────────────────────────────
         AppCommand::SetInstrumentParam {
             track,
             param_idx,
             value,
         } => {
+            let value = app.graph.instrument_descriptors.get(track)
+                .and_then(|descriptor| descriptor.params.get(param_idx))
+                .map(|param| param.clamp(value))
+                .unwrap_or(value);
+            if crate::sampler::srange_debug_enabled() && (param_idx == 2 || param_idx == 3) {
+                eprintln!(
+                    "[srange] SetInstrumentParam track={track} param={param_idx} value={value}"
+                );
+            }
             let slot = &app.state.pattern.instrument_slots[track];
             slot.defaults.set(param_idx, value);
             app.send_effective_instrument_param(track, param_idx);
@@ -2580,6 +3375,10 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             param_idx,
             value,
         } => {
+            let value = app.graph.instrument_descriptors.get(track)
+                .and_then(|descriptor| descriptor.params.get(param_idx))
+                .map(|param| param.clamp(value))
+                .unwrap_or(value);
             app.state.pattern.instrument_slots[track].set_plock(step, param_idx, value);
             sync_instrument_mod_active_plock(app, track, step, param_idx);
         }
@@ -2590,8 +3389,25 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             param_idx,
             value,
         } => {
+            let value = app.graph.instrument_descriptors.get(track)
+                .and_then(|descriptor| descriptor.params.get(param_idx))
+                .map(|param| param.clamp(value))
+                .unwrap_or(value);
             for step in steps {
                 app.state.pattern.instrument_slots[track].set_plock(step, param_idx, value);
+                sync_instrument_mod_active_plock(app, track, step, param_idx);
+            }
+        }
+
+        AppCommand::ClearInstrumentPlockMulti {
+            track,
+            steps,
+            param_idx,
+        } => {
+            for step in steps {
+                app.state.pattern.instrument_slots[track]
+                    .plocks
+                    .clear_param(step, param_idx);
                 sync_instrument_mod_active_plock(app, track, step, param_idx);
             }
         }
@@ -2602,6 +3418,10 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             param_idx,
             value,
         } => {
+            let value = app.graph.instrument_descriptors.get(track)
+                .and_then(|descriptor| descriptor.params.get(param_idx))
+                .map(|param| param.clamp(value))
+                .unwrap_or(value);
             app.state.pattern.instrument_slots[track].set_key_lock(note, param_idx, value);
             sync_instrument_mod_active_key_lock(app, track, note, param_idx);
             app.mark_track_sound_dirty(track);
@@ -2613,6 +3433,10 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             param_idx,
             value,
         } => {
+            let value = app.graph.instrument_descriptors.get(track)
+                .and_then(|descriptor| descriptor.params.get(param_idx))
+                .map(|param| param.clamp(value))
+                .unwrap_or(value);
             for note in notes {
                 app.state.pattern.instrument_slots[track].set_key_lock(note, param_idx, value);
                 sync_instrument_mod_active_key_lock(app, track, note, param_idx);
@@ -2710,6 +3534,17 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             }
         }
 
+        AppCommand::ClearInstrumentTensorPlockMulti {
+            track,
+            steps,
+            tensor_idx,
+        } => {
+            let slot = &app.state.pattern.instrument_slots[track];
+            for step in steps {
+                slot.tensor_params.clear_plock(step, tensor_idx);
+            }
+        }
+
         AppCommand::SetInstrumentBaseNoteOffset { track, value } => {
             app.state.pattern.instrument_base_note_offsets[track]
                 .store(value.to_bits(), Ordering::Relaxed);
@@ -2802,6 +3637,22 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             app.set_rack_slot_instrument_param(track, slot_idx, param_idx, value);
         }
 
+        AppCommand::SetRackSlotEffectParam {
+            track,
+            rack_slot_idx,
+            effect_slot_idx,
+            param_idx,
+            value,
+        } => {
+            let _ = app.set_rack_slot_effect_param(
+                track,
+                rack_slot_idx,
+                effect_slot_idx,
+                param_idx,
+                value,
+            );
+        }
+
         AppCommand::SetRackSlotInstrumentPlock {
             track,
             slot_idx,
@@ -2822,6 +3673,67 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             for step in steps {
                 app.set_rack_slot_instrument_plock(track, slot_idx, step, param_idx, value);
             }
+        }
+
+        AppCommand::SetRackMacroPlockMulti {
+            track,
+            steps,
+            macro_idx,
+            value,
+        } => {
+            if let Some(id) = crate::sequencer::RackMacroId::from_index(macro_idx) {
+                app.set_rack_macro_plocks(track, id, &steps, value);
+            }
+        }
+
+        AppCommand::ClearRackMacroPlockMulti {
+            track,
+            steps,
+            macro_idx,
+        } => {
+            if let Some(id) = crate::sequencer::RackMacroId::from_index(macro_idx) {
+                for step in steps {
+                    app.clear_rack_macro_plock(track, id, step);
+                }
+            }
+        }
+
+        AppCommand::SetRackSlotEffectPlockMulti {
+            track,
+            steps,
+            rack_slot_idx,
+            effect_slot_idx,
+            param_idx,
+            value,
+        } => {
+            let _ = app.set_rack_slot_effect_plocks_no_publish(
+                track,
+                rack_slot_idx,
+                effect_slot_idx,
+                &steps,
+                param_idx,
+                value,
+            );
+        }
+
+        AppCommand::ClearRackSlotEffectPlockMulti {
+            track,
+            steps,
+            rack_slot_idx,
+            effect_slot_idx,
+            param_idx,
+        } => {
+            app.state.update_rack_slot_in_current_pattern(
+                track,
+                rack_slot_idx,
+                |slot| {
+                    if let Some(effect) = slot.effect_slots.get_mut(effect_slot_idx) {
+                        for step in &steps {
+                            effect.clear_plock(*step, param_idx);
+                        }
+                    }
+                },
+            );
         }
 
         // ── Project-global macros ─────────────────────────────────────────
@@ -2914,7 +3826,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
 
         // ── Transport ─────────────────────────────────────────────────────
         AppCommand::TogglePlay => {
-            app.state.toggle_play();
+            app.state.toggle_play_no_publish();
         }
 
         AppCommand::SetBpm { bpm } => {

@@ -11,9 +11,7 @@ use std::collections::HashMap;
 use super::live_audio::{LiveAudioSourceSelector, source_from_props};
 use super::{CellBuffer, WidgetDefinition, resolve_named_color, styled_cell};
 #[cfg(target_os = "macos")]
-use super::{
-    MetalPrimitive, MetalRectPrimitive, MetalTrianglePrimitive, WidgetViewport,
-};
+use super::{MetalPrimitive, MetalRectPrimitive, MetalTrianglePrimitive, WidgetViewport};
 use crate::backend::Color;
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::live_audio::CompressorMeterFrame;
@@ -122,19 +120,15 @@ fn column_values(
                 let frac = mid - index as f32;
                 let a = window[index];
                 let b = window[(index + 1).min(window.len() - 1)];
-                [
-                    a[0] + (b[0] - a[0]) * frac,
-                    a[1] + (b[1] - a[1]) * frac,
-                ]
+                [a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac]
             }
         })
         .collect();
     let raw = values.clone();
     for i in 1..values.len().saturating_sub(1) {
         for channel in 0..2 {
-            values[i][channel] = 0.25 * raw[i - 1][channel]
-                + 0.5 * raw[i][channel]
-                + 0.25 * raw[i + 1][channel];
+            values[i][channel] =
+                0.25 * raw[i - 1][channel] + 0.5 * raw[i][channel] + 0.25 * raw[i + 1][channel];
         }
     }
     values
@@ -191,8 +185,7 @@ impl WidgetDefinition for CompressorDisplayWidget {
                     styled_cell('▒', fg, None),
                 );
             }
-            let gr_row = (axis_norm(AXIS_MAX_DB + value[1]) * (height - 1) as f32).round()
-                as usize;
+            let gr_row = (axis_norm(AXIS_MAX_DB + value[1]) * (height - 1) as f32).round() as usize;
             buf.set(
                 rect.row.floor() as u16 + gr_row.min(height - 1) as u16,
                 rect.col.floor() as u16 + column as u16,
@@ -229,11 +222,8 @@ impl WidgetDefinition for CompressorDisplayWidget {
             "level-color",
             Color::rgba(0.52, 0.54, 0.56, 0.88),
         );
-        let gr_color = resolve_named_color(
-            &node.props,
-            "gr-color",
-            Color::rgba(1.0, 0.62, 0.25, 1.0),
-        );
+        let gr_color =
+            resolve_named_color(&node.props, "gr-color", Color::rgba(1.0, 0.62, 0.25, 1.0));
         let threshold_color = resolve_named_color(
             &node.props,
             "threshold-color",
@@ -408,7 +398,10 @@ mod tests {
             .fold(f32::NEG_INFINITY, f32::max);
         let deepest = values.iter().map(|value| value[1]).fold(0.0f32, f32::min);
         assert!(peak > -20.0, "event should remain visible, peak {peak}");
-        assert!(deepest < -8.0, "gain reduction should remain visible, {deepest}");
+        assert!(
+            deepest < -8.0,
+            "gain reduction should remain visible, {deepest}"
+        );
     }
 
     #[test]
