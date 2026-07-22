@@ -3611,12 +3611,17 @@ impl PatternSnapshot {
         track: usize,
         desc: &EffectDescriptor,
         node_id: u32,
+        modulator_node_id: u32,
         instrument_type: InstrumentType,
     ) {
         while self.instrument_slots.len() <= track {
             self.push_default_track(track, &[]);
         }
-        self.instrument_slots[track].sync_to_descriptor(desc, node_id);
+        self.instrument_slots[track].sync_to_descriptor_with_modulator(
+            desc,
+            node_id,
+            modulator_node_id,
+        );
         if track < self.instrument_types.len() {
             self.instrument_types[track] = instrument_type;
         }
@@ -5328,14 +5333,20 @@ impl SequencerState {
         slot_descriptors: &[Vec<EffectDescriptor>],
         track: usize,
         run_mode: CustomInstrumentRunMode,
-        instrument: Option<(&EffectDescriptor, u32, InstrumentType)>,
+        instrument: Option<(&EffectDescriptor, u32, u32, InstrumentType)>,
     ) -> Option<TrackPatternData> {
         let mut snapshot = PatternSnapshot::new_default(track_count, slot_descriptors);
         if let Some(mode) = snapshot.instrument_run_modes.get_mut(track) {
             *mode = run_mode;
         }
-        if let Some((descriptor, node_id, instrument_type)) = instrument {
-            snapshot.sync_instrument_slot(track, descriptor, node_id, instrument_type);
+        if let Some((descriptor, node_id, modulator_node_id, instrument_type)) = instrument {
+            snapshot.sync_instrument_slot(
+                track,
+                descriptor,
+                node_id,
+                modulator_node_id,
+                instrument_type,
+            );
         }
         snapshot.track_pattern_data(track)
     }
@@ -5346,7 +5357,7 @@ impl SequencerState {
         slot_descriptors: &[Vec<EffectDescriptor>],
         track: usize,
         run_mode: CustomInstrumentRunMode,
-        instrument: Option<(&EffectDescriptor, u32, InstrumentType)>,
+        instrument: Option<(&EffectDescriptor, u32, u32, InstrumentType)>,
     ) {
         let Some(default_data) = Self::default_track_pattern_data_for_track(
             track_count,

@@ -8049,25 +8049,22 @@ impl GraphController<'_> {
             }
         }
 
-        let instrument_snapshot = if instrument_type == InstrumentType::Custom
-            || instrument_type == InstrumentType::Modulator
-        {
-            let desc = self.app.graph.instrument_descriptors[idx].clone();
-            let node_id = self.app.state.pattern.instrument_slots[idx]
-                .node_id
-                .load(Ordering::Relaxed);
-            Some((desc, node_id, instrument_type))
-        } else {
-            None
-        };
+        let instrument_descriptor = self.app.graph.instrument_descriptors[idx].clone();
+        let instrument_slot = &self.app.state.pattern.instrument_slots[idx];
+        let instrument_node_id = instrument_slot.node_id.load(Ordering::Relaxed);
+        let instrument_modulator_node_id =
+            instrument_slot.modulator_node_id.load(Ordering::Relaxed);
         self.app.state.extend_all_pattern_snapshots_to_track(
             idx + 1,
             &self.app.graph.effect_descriptors,
             idx,
             run_mode,
-            instrument_snapshot
-                .as_ref()
-                .map(|(desc, node_id, instrument_type)| (desc, *node_id, *instrument_type)),
+            Some((
+                &instrument_descriptor,
+                instrument_node_id,
+                instrument_modulator_node_id,
+                instrument_type,
+            )),
         );
         if let (Some(&buffer_id), Some(&sample_rate)) = (
             self.app.graph.track_buffer_ids.get(idx),
@@ -8229,8 +8226,9 @@ mod tests {
     use crate::macro_engine::{MacroCurve, MacroKind, MacroMapping, MacroParamKey};
     use crate::process::ParamTarget;
     use crate::recorder::MasterRecorder;
-    use crate::sequencer::{default_empty_effect_chain, SequencerState};
-    use crate::tui::AudioBuses;
+    use crate::sequencer::{default_empty_effect_chain, PatternSnapshot, SequencerState};
+    use crate::tui::edit::{try_apply_command, EditOutcome};
+    use crate::tui::{AppCommand, AudioBuses};
     use std::path::PathBuf;
     use std::sync::{mpsc, Arc, Mutex};
 
@@ -8728,6 +8726,86 @@ mod tests {
         assert_eq!(app.track_registry.ids(), &[second]);
         assert_eq!(app.track_registry.index_of(second), Some(0));
         assert_eq!(app.track_registry.len(), app.tracks.len());
+        graph.process_block();
+    }
+
+    #[test]
+    fn sampler_track_added_to_existing_scenes_keeps_its_instrument_descriptor() {
+        let graph = TestLiveGraph::new("sampler-track-existing-scenes-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(0, &[]),
+                PatternSnapshot::new_default(0, &[]),
+            ],
+            0,
+        );
+
+        let track = app
+            .graph_controller()
+            .add_blank_sampler_track()
+            .expect("add sampler track to the existing scenes");
+        let sampler_descriptor = EffectDescriptor::builtin_sampler();
+        let expected_param_count = sampler_descriptor.params.len();
+        let enabled_param = sampler_descriptor
+            .params
+            .iter()
+            .position(|param| param.name == "enabled")
+            .expect("sampler enabled parameter");
+        let expected_node_id = app.state.pattern.instrument_slots[track]
+            .node_id
+            .load(Ordering::Relaxed);
+        let expected_modulator_node_id = app.state.pattern.instrument_slots[track]
+            .modulator_node_id
+            .load(Ordering::Relaxed);
+
+        assert!(matches!(
+            try_apply_command(
+                &mut app,
+                AppCommand::SetInstrumentParam {
+                    track,
+                    param_idx: 0,
+                    value: 25.0,
+                },
+            ),
+            Ok(EditOutcome::Applied(_))
+        ));
+
+        let sample_ids = app
+            .state
+            .launch_scene(
+                1,
+                app.tracks.len(),
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            )
+            .expect("switch to the other existing scene");
+
+        let slot = &app.state.pattern.instrument_slots[track];
+        assert_eq!(
+            slot.num_params.load(Ordering::Relaxed) as usize,
+            expected_param_count,
+        );
+        assert_eq!(slot.node_id.load(Ordering::Relaxed), expected_node_id);
+        assert_eq!(
+            slot.modulator_node_id.load(Ordering::Relaxed),
+            expected_modulator_node_id,
+        );
+        assert_eq!(slot.defaults.get(enabled_param), 1.0);
+        assert_eq!(sample_ids[track].0, app.graph.track_buffer_ids[track]);
+        assert!(matches!(
+            try_apply_command(
+                &mut app,
+                AppCommand::SetInstrumentParam {
+                    track,
+                    param_idx: 0,
+                    value: 50.0,
+                },
+            ),
+            Ok(EditOutcome::Applied(_))
+        ));
         graph.process_block();
     }
 
