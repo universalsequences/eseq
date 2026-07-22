@@ -1626,6 +1626,105 @@ impl App {
         Ok(result)
     }
 
+    fn restore_grouped_track_before_state(
+        &mut self,
+        track: usize,
+        instrument: &TrackInstrumentState,
+        effects: &EffectChainState,
+    ) -> Result<(), String> {
+        self.restore_track_instrument_state(track, instrument)?;
+        let current_effects = self.capture_track_effect_chain_state(track, None)?;
+        self.restore_track_effect_chain_state(track, &current_effects, effects)
+    }
+
+    pub fn group_track_to_instrument_rack_recorded(
+        &mut self,
+        track: usize,
+    ) -> Result<(), String> {
+        finish_active_gesture(self);
+        let track_id = self
+            .track_registry
+            .id_at(track)
+            .ok_or_else(|| format!("Track {} has no stable identity", track + 1))?;
+        let before_instrument = self.capture_track_instrument_state(track)?;
+        let before_effects = self.capture_track_effect_chain_state(track, None)?;
+
+        if let Err(error) = self.graph_controller().group_track_to_instrument_rack(track) {
+            return match self.restore_grouped_track_before_state(
+                track,
+                &before_instrument,
+                &before_effects,
+            ) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!(
+                    "Grouping the track failed ({error}); restoring the original track also failed ({rollback_error})"
+                )),
+            };
+        }
+
+        let after_instrument = match self.capture_track_instrument_state(track) {
+            Ok(state) => state,
+            Err(error) => {
+                return match self.restore_grouped_track_before_state(
+                    track,
+                    &before_instrument,
+                    &before_effects,
+                ) {
+                    Ok(()) => Err(format!(
+                        "Grouped track was restored because its history state could not be captured: {error}"
+                    )),
+                    Err(rollback_error) => Err(format!(
+                        "Grouped-track history capture failed ({error}); restoring the original track also failed ({rollback_error})"
+                    )),
+                };
+            }
+        };
+        let after_effects = match self.capture_track_effect_chain_state(track, None) {
+            Ok(state) => state,
+            Err(error) => {
+                return match self.restore_grouped_track_before_state(
+                    track,
+                    &before_instrument,
+                    &before_effects,
+                ) {
+                    Ok(()) => Err(format!(
+                        "Grouped track was restored because its effect history state could not be captured: {error}"
+                    )),
+                    Err(rollback_error) => Err(format!(
+                        "Grouped-track effect history capture failed ({error}); restoring the original track also failed ({rollback_error})"
+                    )),
+                };
+            }
+        };
+
+        // Grouping moves the flat track effect chain into the first rack slot.
+        // Replay the flat-chain removal before materializing the rack, and undo
+        // in the reverse order, so an effect host never exists in both places.
+        let effect_patch = EffectChainPatch {
+            track: track_id,
+            before: before_effects,
+            after: after_effects,
+        };
+        let instrument_patch = InstrumentBindingPatch {
+            track: track_id,
+            before: before_instrument,
+            after: after_instrument,
+        };
+        let retained_bytes = std::mem::size_of::<Vec<EditPatch>>()
+            + effect_patch.retained_bytes()
+            + instrument_patch.retained_bytes();
+        self.history.commit(
+            "Group track to Instrument Rack",
+            None,
+            EditPatch::Composite(vec![
+                EditPatch::EffectChain(effect_patch),
+                EditPatch::InstrumentBinding(instrument_patch),
+            ]),
+            retained_bytes,
+        );
+        Ok(())
+    }
+
     pub fn apply_recorded_scene_structure_mutation<T>(
         &mut self,
         label: &'static str,

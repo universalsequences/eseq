@@ -11535,7 +11535,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .or_else(|| current_track_for_app(&mut app, &current_track));
                         match track {
                             Some(track) => {
-                                match app.graph_controller().group_track_to_instrument_rack(track) {
+                                match app.group_track_to_instrument_rack_recorded(track) {
                                     Ok(()) => {
                                         sync_after_instrument_track_apply(
                                             &mut app,

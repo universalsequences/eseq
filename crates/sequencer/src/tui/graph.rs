@@ -9310,6 +9310,66 @@ mod tests {
     }
 
     #[test]
+    fn grouping_sampler_track_is_undoable_with_its_insert_chain() {
+        let graph = TestLiveGraph::new("sampler-group-to-rack-history-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("blank sampler track should be created");
+        app.tracks[0] = "Original".to_string();
+        let effect_slot = app
+            .add_builtin_effect_sync(0, "OTT")
+            .expect("OTT should be inserted on the flat track");
+        app.state.pattern.effect_chains[0][effect_slot]
+            .defaults
+            .set(0, 0.63);
+
+        app.group_track_to_instrument_rack_recorded(0)
+            .expect("grouping should enter history");
+
+        assert_eq!(app.history.undo_len(), 1);
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Rack);
+        let grouped = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("grouped rack state");
+        assert_eq!(grouped.slots[0].effect_descriptors[effect_slot].name, "OTT");
+        assert_eq!(grouped.slots[0].effect_slots[effect_slot].defaults[0], 0.63);
+
+        assert!(matches!(
+            crate::tui::edit::undo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Sampler);
+        assert_eq!(app.tracks[0], "Original");
+        assert!(app.state.pattern.rack_tracks.lock().unwrap()[0].is_none());
+        assert_eq!(app.graph.effect_descriptors[0][effect_slot].name, "OTT");
+        assert_ne!(
+            app.state.pattern.effect_chains[0][effect_slot]
+                .node_id
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            app.state.pattern.effect_chains[0][effect_slot]
+                .defaults
+                .get(0),
+            0.63
+        );
+
+        assert!(matches!(
+            crate::tui::edit::redo(&mut app),
+            crate::tui::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Rack);
+        let regrouped = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .clone()
+            .expect("regrouped rack state");
+        assert_eq!(regrouped.slots[0].effect_descriptors[effect_slot].name, "OTT");
+        assert_eq!(regrouped.slots[0].effect_slots[effect_slot].defaults[0], 0.63);
+        graph.process_block();
+    }
+
+    #[test]
     fn rack_rebuild_defers_old_sampler_nodes_until_forced_reap() {
         let graph = TestLiveGraph::new("rack-deferred-sampler-teardown-test");
         let mut app = test_app_with_track_count(&graph, 0);
