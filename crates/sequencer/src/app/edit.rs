@@ -7641,7 +7641,7 @@ mod tests {
         default_empty_effect_chain, InstrumentType, PatternSnapshot, SequencerState,
         SwingResolution, Timebase,
     };
-    use crate::tui::AudioBuses;
+    use crate::app::AudioBuses;
 
     struct TestLiveGraph(LiveGraphPtr);
 

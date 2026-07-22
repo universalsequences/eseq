@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use eseqlisp::vm::Value;
 use eseqlisp::{Editor, HostEvent};
 use sequencer::sequencer::SequencerState;
-use sequencer::tui;
+use sequencer::app;
 
 use super::natives;
 use super::state_values::{
@@ -27,7 +27,7 @@ pub(crate) enum MacroHostCommandOutcome {
 pub(crate) fn handle_macro_host_command(
     name: &str,
     payload: &Value,
-    app: &mut tui::App,
+    app: &mut app::App,
     state: &SequencerState,
     current_track: usize,
 ) -> MacroHostCommandOutcome {
@@ -63,7 +63,7 @@ pub(crate) fn handle_macro_host_command(
             let Some(name) = map_string(map, "name") else {
                 return Ignored;
             };
-            tui::AppCommand::MacroCreate { name }
+            app::AppCommand::MacroCreate { name }
         }
         "macro-create-scene" => {
             let (Some(name), Some(target_scene)) =
@@ -71,7 +71,7 @@ pub(crate) fn handle_macro_host_command(
             else {
                 return Ignored;
             };
-            tui::AppCommand::MacroCreateScene { name, target_scene }
+            app::AppCommand::MacroCreateScene { name, target_scene }
         }
         "macro-scene-config" => {
             let Some(id) = map_u32(map, "id") else {
@@ -108,7 +108,7 @@ pub(crate) fn handle_macro_host_command(
                     _ => None,
                 })
                 .unwrap_or(existing.track_mask);
-            tui::AppCommand::MacroSceneConfig {
+            app::AppCommand::MacroSceneConfig {
                 id,
                 config: sequencer::macro_engine::SceneMacroConfig {
                     target_scene: map_usize(map, "target-scene").unwrap_or(existing.target_scene),
@@ -123,25 +123,25 @@ pub(crate) fn handle_macro_host_command(
             let (Some(key), Some(name)) = (map_string(map, "key"), map_string(map, "name")) else {
                 return Ignored;
             };
-            tui::AppCommand::MacroEnsure { key, name }
+            app::AppCommand::MacroEnsure { key, name }
         }
         "macro-delete" => {
             let Some(id) = map_u32(map, "id") else {
                 return Ignored;
             };
-            tui::AppCommand::MacroDelete { id }
+            app::AppCommand::MacroDelete { id }
         }
         "macro-rename" => {
             let (Some(id), Some(name)) = (map_u32(map, "id"), map_string(map, "name")) else {
                 return Ignored;
             };
-            tui::AppCommand::MacroRename { id, name }
+            app::AppCommand::MacroRename { id, name }
         }
         "macro-set-value" => {
             let (Some(id), Some(value)) = (map_u32(map, "id"), map_number(map, "value")) else {
                 return Ignored;
             };
-            tui::AppCommand::MacroSetValue {
+            app::AppCommand::MacroSetValue {
                 id,
                 value: value as f32,
             }
@@ -150,14 +150,14 @@ pub(crate) fn handle_macro_host_command(
             let Some(id) = map_u32(map, "id") else {
                 return Ignored;
             };
-            tui::AppCommand::MacroRelease { id }
+            app::AppCommand::MacroRelease { id }
         }
         "scene-push-begin" => {
             let Some(target_scene) = map_usize(map, "target-scene") else {
                 return Ignored;
             };
             let value = map_number(map, "value").unwrap_or(1.0) as f32;
-            tui::AppCommand::ScenePushBegin {
+            app::AppCommand::ScenePushBegin {
                 target_scene,
                 value,
             }
@@ -166,11 +166,11 @@ pub(crate) fn handle_macro_host_command(
             let Some(value) = map_number(map, "value") else {
                 return Ignored;
             };
-            tui::AppCommand::ScenePushSetValue {
+            app::AppCommand::ScenePushSetValue {
                 value: value as f32,
             }
         }
-        "scene-push-end" => tui::AppCommand::ScenePushEnd,
+        "scene-push-end" => app::AppCommand::ScenePushEnd,
         "macro-map-param" => {
             let Some(id) = map_u32(map, "id") else {
                 return Ignored;
@@ -185,7 +185,7 @@ pub(crate) fn handle_macro_host_command(
                     return Ignored;
                 }
             };
-            tui::AppCommand::MacroMapParam { id, track, target }
+            app::AppCommand::MacroMapParam { id, track, target }
         }
         "macro-set-range" => {
             let (Some(id), Some(mapping_idx), Some(min), Some(max)) = (
@@ -196,7 +196,7 @@ pub(crate) fn handle_macro_host_command(
             ) else {
                 return Ignored;
             };
-            tui::AppCommand::MacroSetRange {
+            app::AppCommand::MacroSetRange {
                 id,
                 mapping_idx,
                 min: min as f32,
@@ -217,7 +217,7 @@ pub(crate) fn handle_macro_host_command(
                 "log" | "logarithmic" => sequencer::macro_engine::MacroCurve::Log,
                 _ => return Ignored,
             };
-            tui::AppCommand::MacroSetCurve {
+            app::AppCommand::MacroSetCurve {
                 id,
                 mapping_idx,
                 curve,
@@ -228,17 +228,17 @@ pub(crate) fn handle_macro_host_command(
             else {
                 return Ignored;
             };
-            tui::AppCommand::MacroUnmap { id, mapping_idx }
+            app::AppCommand::MacroUnmap { id, mapping_idx }
         }
         _ => unreachable!("macro command set and command dispatch must stay in sync"),
     };
 
-    tui::apply_command(app, command);
+    app::apply_command(app, command);
     Applied
 }
 
 pub(crate) struct AddTrackInstrumentCtx<'a> {
-    pub(crate) app: &'a mut tui::App,
+    pub(crate) app: &'a mut app::App,
     pub(crate) editor: &'a mut Editor,
     pub(crate) state: &'a Arc<SequencerState>,
     pub(crate) current_track: &'a Arc<AtomicUsize>,
@@ -354,7 +354,7 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
 }
 
 pub(crate) struct SwapTrackInstrumentCtx<'a> {
-    pub(crate) app: &'a mut tui::App,
+    pub(crate) app: &'a mut app::App,
     pub(crate) editor: &'a mut Editor,
     pub(crate) state: &'a Arc<SequencerState>,
     pub(crate) current_track: &'a Arc<AtomicUsize>,
@@ -459,7 +459,7 @@ pub(crate) fn instrument_swap_status(
 }
 
 pub(crate) fn add_new_track_to_group(
-    app: &mut tui::App,
+    app: &mut app::App,
     track: usize,
     group_id: Option<u64>,
 ) -> bool {

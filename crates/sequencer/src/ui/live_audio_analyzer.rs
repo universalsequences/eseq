@@ -16,7 +16,7 @@ use eseqlisp::widget_render::spectrogram::{collect_spectrogram_requests, Spectro
 use sequencer::audio_tap::{self, SpectrogramProcessor};
 use sequencer::audiograph::{self, LiveGraphPtr};
 use sequencer::sequencer::BusId;
-use sequencer::tui;
+use sequencer::app;
 
 use crate::constants::LIVE_AUDIO_ANALYZER_POLL_INTERVAL;
 
@@ -94,7 +94,7 @@ impl LiveAudioAnalyzerManager {
         }
     }
 
-    pub(crate) fn sync_visible(&mut self, editor: &eseqlisp::Editor, app: &tui::App) -> bool {
+    pub(crate) fn sync_visible(&mut self, editor: &eseqlisp::Editor, app: &app::App) -> bool {
         if app.has_pending_project_load() {
             return self.suspend_for_project_load();
         }
@@ -328,7 +328,7 @@ impl LiveAudioAnalyzerManager {
     /// republishes their state meters when the values move.
     fn sync_band_meters(
         &mut self,
-        app: &tui::App,
+        app: &app::App,
         requests: HashMap<String, BandMeterRequest>,
         poll_due: bool,
     ) -> bool {
@@ -451,7 +451,7 @@ impl LiveAudioAnalyzerManager {
     /// `compressor-display` widgets and republishes their meter rings.
     fn sync_compressor_meters(
         &mut self,
-        app: &tui::App,
+        app: &app::App,
         requests: HashMap<String, CompressorMeterRequest>,
         poll_due: bool,
     ) -> bool {
@@ -675,7 +675,7 @@ impl Drop for GraphEditBatchGuard {
 
 /// Resolves an effect-slot source straight to its node id (for widgets that
 /// read the effect node's own state rather than tapping its audio).
-fn resolve_effect_node(app: &tui::App, source: &LiveAudioSourceSelector) -> Option<i32> {
+fn resolve_effect_node(app: &app::App, source: &LiveAudioSourceSelector) -> Option<i32> {
     match source {
         LiveAudioSourceSelector::TrackEffect { index, slot } => app
             .state
@@ -726,7 +726,7 @@ fn resolve_effect_node(app: &tui::App, source: &LiveAudioSourceSelector) -> Opti
     }
 }
 
-fn resolve_source_node(app: &tui::App, tap_key: &TapKey) -> Option<i32> {
+fn resolve_source_node(app: &app::App, tap_key: &TapKey) -> Option<i32> {
     match &tap_key.source {
         LiveAudioSourceSelector::Master => app
             .graph
@@ -816,7 +816,7 @@ fn resolve_source_node(app: &tui::App, tap_key: &TapKey) -> Option<i32> {
     }
 }
 
-fn node_for_bus(bus: &tui::BusNodeIds, tap_point: TapPoint) -> i32 {
+fn node_for_bus(bus: &app::BusNodeIds, tap_point: TapPoint) -> i32 {
     match tap_point {
         TapPoint::PreFx => bus.gate_id,
         TapPoint::PostFx => bus.volume_id,

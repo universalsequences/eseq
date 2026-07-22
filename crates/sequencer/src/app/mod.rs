@@ -32,28 +32,22 @@ use crate::sequencer::{
 use crate::track_color::TrackColor;
 
 mod browser;
-mod cirklon;
 pub mod command;
 pub mod edit;
 pub mod history;
-mod draw;
 mod effect_params;
 mod effects;
-mod effects_draw;
 mod fx_chain;
 mod graph;
 mod hooks;
-mod input;
 mod params;
 mod projects;
-mod recording;
 mod synth;
 
 pub use browser::BrowserNode;
 #[allow(unused_imports)]
 pub use command::{apply_command, AppCommand};
 pub use edit::try_apply_command;
-pub use draw::draw;
 
 const BAR_HEIGHT: usize = 8;
 const COL_WIDTH: u16 = 3;
@@ -616,27 +610,6 @@ impl Region {
     }
 }
 
-#[derive(Default, Clone)]
-pub struct LayoutRects {
-    pub cirklon_area: ratatui::prelude::Rect,
-    pub track_list: ratatui::prelude::Rect,
-    pub param_tabs: ratatui::prelude::Rect,
-    pub bars: ratatui::prelude::Rect,
-    pub trigger_row: ratatui::prelude::Rect,
-    pub track_params_inner: ratatui::prelude::Rect,
-    pub effects_tabs: ratatui::prelude::Rect,
-    pub effects_inner: ratatui::prelude::Rect,
-    pub effects_block: ratatui::prelude::Rect,
-    pub info_bar: ratatui::prelude::Rect,
-    pub rec_button: ratatui::prelude::Rect,
-    pub master_rec_button: ratatui::prelude::Rect,
-    pub pattern_buttons_area: ratatui::prelude::Rect,
-    pub page_blocks_area: ratatui::prelude::Rect,
-    pub sidebar_tabs: ratatui::prelude::Rect,
-    pub sidebar_inner: ratatui::prelude::Rect,
-    pub piano_area: ratatui::prelude::Rect,
-}
-
 /// Per-track node IDs needed for graph rewiring.
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -825,7 +798,6 @@ pub struct UiState {
     pub dropdown_open: bool,
     pub dropdown_cursor: usize,
     pub track_param_dropdown: bool,
-    pub layout: LayoutRects,
     pub last_step_click: Option<(usize, Instant)>,
     pub last_x_press: Option<Instant>,
     pub pattern_clone_pending: bool,
@@ -2037,7 +2009,6 @@ impl App {
                 dropdown_open: false,
                 dropdown_cursor: 0,
                 track_param_dropdown: false,
-                layout: LayoutRects::default(),
                 last_step_click: None,
                 last_x_press: None,
                 pattern_clone_pending: false,

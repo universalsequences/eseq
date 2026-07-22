@@ -76,7 +76,7 @@ pub mod sequencer;
 pub mod track_color;
 #[allow(dead_code)]
 pub mod track_modulator;
-pub mod tui;
+pub mod app;
 #[allow(dead_code)]
 mod voice;
 #[allow(dead_code)]

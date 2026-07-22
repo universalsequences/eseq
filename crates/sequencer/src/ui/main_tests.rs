@@ -21,18 +21,18 @@
 
     fn history_test_app() -> (
         std::sync::Arc<sequencer::sequencer::SequencerState>,
-        sequencer::tui::App,
+        sequencer::app::App,
     ) {
         let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(
             1,
             vec![sequencer::sequencer::default_empty_effect_chain()],
         ));
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
-        let mut app = sequencer::tui::App::new(
+        let mut app = sequencer::app::App::new(
             state.clone(),
             sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
             44_100,
-            sequencer::tui::AudioBuses {
+            sequencer::app::AudioBuses {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
@@ -111,13 +111,13 @@
 
         let (outcome, track) = apply_slice3_history_host_command(&mut app, &payload)
             .expect("apply Slice 3 host action");
-        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
         assert_eq!(track, Some(0));
-        sequencer::tui::edit::finish_active_gesture(&mut app);
+        sequencer::app::edit::finish_active_gesture(&mut app);
         assert_eq!(state.pattern.track_params[0].get_volume().to_bits(), 0.25f32.to_bits());
         assert!(matches!(
-            sequencer::tui::edit::undo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(state.pattern.track_params[0].get_volume().to_bits(), before.to_bits());
     }
@@ -135,13 +135,13 @@
 
         let (outcome, bus) = apply_bus_mixer_history_host_command(&mut app, &payload)
             .expect("apply bus mixer host action");
-        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
         assert_eq!(bus, 1);
-        sequencer::tui::edit::finish_active_gesture(&mut app);
+        sequencer::app::edit::finish_active_gesture(&mut app);
         assert_eq!(app.buses[1].volume.to_bits(), 0.25f32.to_bits());
         assert!(matches!(
-            sequencer::tui::edit::undo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.buses[1].volume.to_bits(), before.to_bits());
     }
@@ -166,14 +166,14 @@
 
         let (outcome, track, step) =
             apply_toggle_step_host_command(&mut app, &payload).expect("toggle through host seam");
-        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
         assert_eq!((track, step), (0, 6));
         assert!(state.pattern.patterns[0].is_active(6));
         assert_eq!(app.history.undo_len(), 1);
 
         assert!(matches!(
-            sequencer::tui::edit::undo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert!(!state.pattern.patterns[0].is_active(6));
     }
@@ -195,7 +195,7 @@
 
         let (outcome, steps) =
             apply_selected_steps_delete(&mut app, 0, &selected).expect("delete selected steps");
-        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
         assert_eq!(steps, vec![2, 5]);
         assert!(selected.lock().unwrap().is_empty());
         assert!(!state.pattern.patterns[0].is_active(2));
@@ -203,8 +203,8 @@
         assert_eq!(app.history.undo_len(), 1);
 
         assert!(matches!(
-            sequencer::tui::edit::undo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert!(state.pattern.patterns[0].is_active(2));
         assert!(state.pattern.patterns[0].is_active(5));
@@ -213,8 +213,8 @@
             sequencer::sequencer::StepParam::Velocity,
         ), 0.5);
         assert!(matches!(
-            sequencer::tui::edit::redo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::redo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert!(!state.pattern.patterns[0].is_active(2));
         assert!(!state.pattern.patterns[0].is_active(5));
@@ -270,30 +270,30 @@
         assert_eq!(app.history.undo_len(), 4);
 
         assert!(matches!(
-            sequencer::tui::edit::undo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(state.drum_lane_step_duration(0, 5, 36), Some(3.0));
         assert!(matches!(
-            sequencer::tui::edit::undo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
         assert!(matches!(
-            sequencer::tui::edit::undo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert_ne!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
         assert!(matches!(
-            sequencer::tui::edit::undo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert!(!state.pattern.patterns[0].is_active(2));
 
         for _ in 0..4 {
             assert!(matches!(
-                sequencer::tui::edit::redo(&mut app),
-                sequencer::tui::history::HistoryReplay::Applied(_)
+                sequencer::app::edit::redo(&mut app),
+                sequencer::app::history::HistoryReplay::Applied(_)
             ));
         }
         assert!(!state.pattern.patterns[0].is_active(5));
@@ -326,7 +326,7 @@
             &create_payload,
         )
         .expect("create piano-roll note through history seam");
-        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
         assert!(state.pattern.patterns[0].is_active(2));
         assert_eq!(app.history.undo_len(), 1);
 
@@ -351,28 +351,28 @@
             &delete_payload,
         )
         .expect("delete piano-roll note through history seam");
-        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
         assert!(!state.pattern.patterns[0].is_active(2));
         assert_eq!(app.history.undo_len(), 2);
 
         assert!(matches!(
-            sequencer::tui::edit::undo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert!(state.pattern.patterns[0].is_active(2));
         assert!(matches!(
-            sequencer::tui::edit::undo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert!(!state.pattern.patterns[0].is_active(2));
         assert!(matches!(
-            sequencer::tui::edit::redo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::redo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert!(state.pattern.patterns[0].is_active(2));
         assert!(matches!(
-            sequencer::tui::edit::redo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::redo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert!(!state.pattern.patterns[0].is_active(2));
     }
@@ -442,13 +442,13 @@
             &piano_roll_gesture_payload(finish),
         )
         .expect("finish piano-roll move");
-        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
         assert_eq!(app.history.undo_len(), 1);
         assert_eq!(state.scheduler_snapshot_version(), version_before + 2);
 
         assert!(matches!(
-            sequencer::tui::edit::undo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert!(state.pattern.patterns[0].is_active(2));
         assert!(!state.pattern.patterns[0].is_active(6));
@@ -458,8 +458,8 @@
         );
         assert_eq!(state.scheduler_snapshot_version(), version_before + 3);
         assert!(matches!(
-            sequencer::tui::edit::redo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::redo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert!(!state.pattern.patterns[0].is_active(2));
         assert!(state.pattern.patterns[0].is_active(6));
@@ -524,8 +524,8 @@
         assert_eq!(state.pattern.chord_data[0].get(8, 0), 12.0);
 
         assert!(matches!(
-            sequencer::tui::edit::undo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(
             state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Transpose),
@@ -539,8 +539,8 @@
         assert!(!state.pattern.patterns[0].is_active(8));
 
         assert!(matches!(
-            sequencer::tui::edit::redo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::redo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(state.pattern.chord_data[0].get(6, 0), 5.0);
         assert_eq!(state.pattern.chord_data[0].get(8, 0), 12.0);
@@ -574,15 +574,15 @@
             &piano_roll_gesture_payload(action),
         )
         .expect("nudge piano-roll note through history seam");
-        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
         assert_eq!(app.history.undo_len(), 1);
         assert!(!state.pattern.patterns[0].is_active(2));
         assert!(state.pattern.patterns[0].is_active(5));
         assert_eq!(state.pattern.chord_data[0].get(5, 0), 5.0);
 
         assert!(matches!(
-            sequencer::tui::edit::undo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert!(state.pattern.patterns[0].is_active(2));
         assert!(!state.pattern.patterns[0].is_active(5));
@@ -592,8 +592,8 @@
         );
 
         assert!(matches!(
-            sequencer::tui::edit::redo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::redo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert!(!state.pattern.patterns[0].is_active(2));
         assert!(state.pattern.patterns[0].is_active(5));
@@ -644,7 +644,7 @@
             &piano_roll_gesture_payload(paste_action),
         )
         .expect("paste piano-roll note through history seam");
-        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
         assert_eq!(app.history.undo_len(), 1);
         assert!(state.pattern.patterns[0].is_active(2));
         assert!(state.pattern.patterns[0].is_active(6));
@@ -652,15 +652,15 @@
         assert_eq!(state.pattern.chord_data[0].get_duration(6, 0), 1.5);
 
         assert!(matches!(
-            sequencer::tui::edit::undo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert!(state.pattern.patterns[0].is_active(2));
         assert!(!state.pattern.patterns[0].is_active(6));
 
         assert!(matches!(
-            sequencer::tui::edit::redo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::redo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert!(state.pattern.patterns[0].is_active(6));
         assert_eq!(state.pattern.chord_data[0].get(6, 0), 4.0);
@@ -717,21 +717,21 @@
             &piano_roll_gesture_payload(finish),
         )
         .expect("finish piano-roll resize");
-        assert!(matches!(outcome, sequencer::tui::edit::EditOutcome::Applied(_)));
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
         assert_eq!(app.history.undo_len(), 1);
         assert_eq!(state.scheduler_snapshot_version(), version_before + 2);
 
         assert!(matches!(
-            sequencer::tui::edit::undo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(
             state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Duration),
             1.0,
         );
         assert!(matches!(
-            sequencer::tui::edit::redo(&mut app),
-            sequencer::tui::history::HistoryReplay::Applied(_)
+            sequencer::app::edit::redo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(
             state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Duration),
@@ -1455,7 +1455,7 @@
         let _engine_guard = TestEngineGuard { lg_raw };
         let _audio_pump = HeadlessAudioPump::start(lg_ptr, eng.channels as usize);
         let master_recorder = eng.master_recorder.clone();
-        let mut app = tui::App::new(
+        let mut app = app::App::new(
             state.clone(),
             lg_ptr,
             sample_rate,
@@ -1932,7 +1932,7 @@
         let _engine_guard = TestEngineGuard { lg_raw };
         let _audio_pump = HeadlessAudioPump::start(lg_ptr, eng.channels as usize);
         let master_recorder = eng.master_recorder.clone();
-        let mut app = tui::App::new(
+        let mut app = app::App::new(
             state.clone(),
             lg_ptr,
             sample_rate,
@@ -2229,7 +2229,7 @@
                 )
             };
 
-            let apply_pending_step_commands = |editor: &mut Editor, app: &mut tui::App| {
+            let apply_pending_step_commands = |editor: &mut Editor, app: &mut app::App| {
                 for command in editor.drain_host_commands() {
                     let HostCommand::Custom { name, payload } = command else {
                         continue;
@@ -2239,7 +2239,7 @@
                             let (outcome, track, step) =
                                 apply_toggle_step_host_command(app, &payload)
                                     .expect("apply benchmark step toggle");
-                            assert!(matches!(outcome, tui::edit::EditOutcome::Applied(_)));
+                            assert!(matches!(outcome, app::edit::EditOutcome::Applied(_)));
                             selected_steps.lock().unwrap().clear();
                             ui_invalidations.push(UiInvalidation::StepBatch {
                                 track,
@@ -2250,7 +2250,7 @@
                             let (outcome, track, steps, affected_steps, delta, move_selection) =
                                 apply_move_step_history_host_command(app, &payload)
                                     .expect("apply benchmark step move");
-                            assert!(matches!(outcome, tui::edit::EditOutcome::Applied(_)));
+                            assert!(matches!(outcome, app::edit::EditOutcome::Applied(_)));
                             let moved_steps = steps
                                 .iter()
                                 .map(|step| (*step as isize + delta) as usize)
@@ -2284,7 +2284,7 @@
             };
 
             let neural = selected_neural_neurons.lock().unwrap().clone();
-            let mut finish_visible_update = |editor: &mut Editor, app: &mut tui::App| {
+            let mut finish_visible_update = |editor: &mut Editor, app: &mut app::App| {
                 let started = Instant::now();
                 let invalidations = ui_invalidations.drain();
                 if !invalidations.is_empty() {

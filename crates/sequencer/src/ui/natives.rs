@@ -885,13 +885,13 @@ mod process_binding_target_tests {
 }
 
 pub(crate) fn init_runtime(
-    app: &tui::App,
+    app: &app::App,
     state: Arc<SequencerState>,
     track_names: &[String],
     track_pan_ids: Arc<Mutex<Vec<i32>>>,
     track_collapsed: Arc<Mutex<Vec<bool>>>,
-    buses: Arc<Mutex<Vec<tui::BusChannelState>>>,
-    bus_node_ids: Arc<Mutex<Vec<tui::BusNodeIds>>>,
+    buses: Arc<Mutex<Vec<app::BusChannelState>>>,
+    bus_node_ids: Arc<Mutex<Vec<app::BusNodeIds>>>,
     current_track: Arc<AtomicUsize>,
     selected_tracks: Arc<Mutex<HashSet<usize>>>,
     track_groups: Arc<Mutex<Vec<sequencer::project::ProjectTrackGroup>>>,

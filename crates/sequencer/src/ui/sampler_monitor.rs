@@ -2,7 +2,7 @@ use super::*;
 
 /// Read the current sampler playhead position (in seconds) for a track.
 /// Scans all voices and returns the newest active voice.
-pub(crate) fn read_sampler_playhead_seconds(app: &tui::App, track: usize) -> f64 {
+pub(crate) fn read_sampler_playhead_seconds(app: &app::App, track: usize) -> f64 {
     let sampler_ids = match app.graph.track_node_ids.get(track) {
         Some(ids) => &ids.sampler_ids,
         None => return 0.0,
@@ -129,7 +129,7 @@ mod tests {
 }
 
 pub(crate) fn sync_watched_sampler_voices(
-    app: &tui::App,
+    app: &app::App,
     current_track: usize,
     watched_track: &mut Option<usize>,
     watched_voice_ids: &mut Vec<i32>,

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crossterm::event::KeyCode;
 use std::ffi::CString;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -19,15 +18,8 @@ use super::fx_chain::{
     RetainedEffectSource,
 };
 use super::{
-    App, CompileTarget, EffectTab, HookCallback, HookUnit, InputMode, PendingCompile,
-    PendingEditor, Region,
+    App, CompileTarget, EffectTab, HookCallback, HookUnit, PendingCompile, Region,
 };
-
-#[derive(Clone, Copy)]
-pub(super) enum OverlayPickerKind {
-    Effect,
-    Instrument,
-}
 
 pub(crate) struct PreparedRackInstrument {
     pub name: String,
@@ -2308,92 +2300,6 @@ impl App {
         Ok(repaired)
     }
 
-    fn run_effect_editor(&mut self, slot_idx: usize, existing_name: Option<String>) {
-        if self.tracks.is_empty() {
-            return;
-        }
-        let track = self.ui.cursor_track;
-        let Ok((
-            slot_id,
-            predecessor_id,
-            predecessor_outputs,
-            successor_id,
-            successor_inputs,
-            existing,
-        )) = self.resolve_custom_slot_wiring(track, slot_idx)
-        else {
-            self.editor.status_message = Some((
-                "Cannot resolve the selected track FX chain".to_string(),
-                Instant::now(),
-            ));
-            return;
-        };
-
-        let result = lisp_host::run_embedded_effect_editor_flow(
-            self.graph.sample_rate,
-            Arc::clone(&self.state),
-            track,
-            existing_name.as_deref(),
-            |_, result, name, _source| {
-                self.apply_compiled_effect(result, name, slot_idx, track);
-                Ok(())
-            },
-        );
-
-        if let Some(r) = result {
-            let lisp_host::EffectEditResult {
-                manifest,
-                lib,
-                source: _,
-                name,
-                lease,
-            } = r;
-            let existing_modulator = self.current_effect_modulator_node(track, slot_idx);
-            let ext_mod_inputs = self.track_effect_ext_mod_input_nodes(track);
-            match unsafe {
-                lisp_host::add_effect_to_chain_at(
-                    self.graph.lg.0,
-                    slot_id,
-                    &manifest,
-                    &lib,
-                    predecessor_id,
-                    predecessor_outputs,
-                    successor_id,
-                    successor_inputs,
-                    existing,
-                    existing_modulator,
-                    ext_mod_inputs.as_ref(),
-                )
-            } {
-                Ok(node_ids) => {
-                    if let Some(old_node_id) = existing {
-                        crate::effects::conv_reverb::clear_instance(old_node_id);
-                    }
-                    self.apply_effect_to_slot(track, slot_idx, node_ids, &name, &manifest);
-                    self.ui.effect_tab = EffectTab::Slot(slot_idx);
-                    self.ui.effect_param_cursor = 0;
-                    self.ui.effect_scroll_offset = 0;
-                    self.ui.focused_region = Region::Params;
-                    self.ui.params_column = 1;
-                    self.editor.lisp_libs.push(lib);
-                    if let Err(error) = self.set_track_effect_lease(
-                        track,
-                        slot_idx,
-                        lease,
-                        node_ids.replacement_batch_serial,
-                    ) {
-                        self.editor.status_message = Some((
-                            format!("Error retaining effect lease: {error}"),
-                            Instant::now(),
-                        ));
-                    }
-                }
-                Err(error) => {
-                    self.editor.status_message = Some((format!("Error: {error}"), Instant::now()));
-                }
-            }
-        }
-    }
 
     pub fn start_effect_compile(&mut self, name: &str, slot_idx: usize) {
         let track = match self.track_registry.id_at(self.ui.cursor_track) {
@@ -4042,329 +3948,14 @@ impl App {
         }
     }
 
-    fn run_instrument_editor(&mut self, existing_name: Option<String>) {
-        let result = lisp_host::run_embedded_instrument_editor_flow(
-            self.graph.sample_rate,
-            Arc::clone(&self.state),
-            Some(self.ui.cursor_track),
-            existing_name.as_deref(),
-            |_, result, name, source| {
-                let is_existing_custom = self.ui.cursor_track
-                    < self.graph.track_instrument_types.len()
-                    && self.graph.track_instrument_types[self.ui.cursor_track]
-                        == InstrumentType::Custom;
 
-                if is_existing_custom {
-                    let track = self.ui.cursor_track;
-                    let runtime_engine_id =
-                        self.graph.track_engine_ids.get(track).and_then(|id| *id);
-                    let manifest = result.manifest.clone();
-                    let lib_index = self.push_instrument_lib(result.lib, result.lease);
-                    let lib_ptr: *const lisp_host::LoadedDGenLib =
-                        &self.editor.instrument_libs[lib_index];
-                    unsafe {
-                        self.graph_controller()
-                            .hot_reload_instrument(track, &manifest, &*lib_ptr)
-                    }
-                    .map_err(|e| e.to_string())?;
-                    self.push_instrument_defaults_for_track(track);
-                    if let Some(runtime_engine_id) = runtime_engine_id {
-                        self.editor.engine_registry.replace_at(
-                            runtime_engine_id,
-                            super::EngineDescriptor {
-                                name: name.to_string(),
-                                source: source.to_string(),
-                                manifest: manifest.clone(),
-                                lib_index,
-                                shared_runtime: self
-                                    .editor
-                                    .engine_registry
-                                    .get(runtime_engine_id)
-                                    .map(|engine| engine.shared_runtime)
-                                    .unwrap_or(true),
-                            },
-                        );
-                    }
-                    self.tracks[self.ui.cursor_track] = instrument_display_name(name);
-                    if let Some(sound) = self
-                        .state
-                        .pattern
-                        .track_sound_state
-                        .lock()
-                        .unwrap()
-                        .get_mut(track)
-                    {
-                        sound.engine_id = runtime_engine_id;
-                    }
-                    self.editor.status_message =
-                        Some((format!("Reloaded instrument '{}'", name), Instant::now()));
-                } else {
-                    self.apply_compiled_instrument(result, name);
-                }
-                Ok(())
-            },
-        );
 
-        if let Some(r) = result {
-            let is_existing_custom = self.ui.cursor_track < self.graph.track_instrument_types.len()
-                && self.graph.track_instrument_types[self.ui.cursor_track]
-                    == InstrumentType::Custom;
 
-            if is_existing_custom {
-                let track = self.ui.cursor_track;
-                let runtime_engine_id = self.graph.track_engine_ids.get(track).and_then(|id| *id);
-                let manifest = r.manifest.clone();
-                let lib_index = self.push_instrument_lib(r.lib, r.lease);
-                let lib_ptr: *const lisp_host::LoadedDGenLib =
-                    &self.editor.instrument_libs[lib_index];
-                match unsafe {
-                    self.graph_controller()
-                        .hot_reload_instrument(track, &manifest, &*lib_ptr)
-                } {
-                    Ok(()) => {
-                        self.push_instrument_defaults_for_track(track);
-                        if let Some(runtime_engine_id) = runtime_engine_id {
-                            self.editor.engine_registry.replace_at(
-                                runtime_engine_id,
-                                super::EngineDescriptor {
-                                    name: r.name.clone(),
-                                    source: r.source.clone(),
-                                    manifest: manifest.clone(),
-                                    lib_index,
-                                    shared_runtime: self
-                                        .editor
-                                        .engine_registry
-                                        .get(runtime_engine_id)
-                                        .map(|engine| engine.shared_runtime)
-                                        .unwrap_or(true),
-                                },
-                            );
-                        }
-                        self.tracks[self.ui.cursor_track] = instrument_display_name(&r.name);
-                        if let Some(sound) = self
-                            .state
-                            .pattern
-                            .track_sound_state
-                            .lock()
-                            .unwrap()
-                            .get_mut(track)
-                        {
-                            sound.engine_id = runtime_engine_id;
-                        }
-                        self.editor.status_message =
-                            Some((format!("Reloaded instrument '{}'", r.name), Instant::now()));
-                    }
-                    Err(e) => {
-                        self.editor.status_message =
-                            Some((format!("Error: {}", e), Instant::now()));
-                    }
-                }
-            } else {
-                let cache_idx =
-                    self.cache_instrument_engine(&r.name, &r.source, &r.manifest, r.lib, r.lease);
-                let manifest = self.editor.engine_registry.engines[cache_idx]
-                    .manifest
-                    .clone();
-                let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
-                let lib_ptr: *const lisp_host::LoadedDGenLib =
-                    &self.editor.instrument_libs[lib_index];
-                match unsafe {
-                    self.graph_controller().add_custom_track(
-                        &r.name,
-                        cache_idx,
-                        &manifest,
-                        &*lib_ptr,
-                        crate::sequencer::CustomInstrumentRunMode::Instrument,
-                    )
-                } {
-                    Ok(idx) => {
-                        self.ui.cursor_track = idx;
-                        self.ui.sidebar_mode = super::SidebarMode::Presets;
-                        self.ui.focused_region = super::Region::Cirklon;
-                        self.editor.status_message =
-                            Some((format!("Added synth track '{}'", r.name), Instant::now()));
-                    }
-                    Err(e) => {
-                        self.editor.status_message =
-                            Some((format!("Error: {}", e), Instant::now()));
-                    }
-                }
-            }
-        }
-    }
 
-    fn run_scratch_editor(&mut self) {
-        if self.tracks.is_empty() {
-            return;
-        }
-        let scratch_buffer = self.editor.scratch_buffer.clone();
-        let scratch_cursor = self.editor.scratch_cursor;
-        let track = self.ui.cursor_track;
-        let cursor_step = self.ui.cursor_step;
-        self.sync_scratch_runtime_descriptors();
-        let mut runtime = self.editor.scratch_runtime.take().unwrap_or_else(|| {
-            lisp_host::ScratchControlRuntime::new(
-                Arc::clone(&self.state),
-                self.graph.effect_descriptors.clone(),
-                self.graph.instrument_descriptors.clone(),
-                track,
-                cursor_step,
-            )
-        });
-        runtime.sync_descriptors(
-            self.graph.effect_descriptors.clone(),
-            self.graph.instrument_descriptors.clone(),
-        );
-        let midi_fx_library = lisp_host::load_midi_fx_library_source();
-        if !midi_fx_library.trim().is_empty() {
-            let _ = runtime.eval(&midi_fx_library);
-        }
-        let process_library = lisp_host::load_process_library_source();
-        if !process_library.trim().is_empty() {
-            let _ = runtime.eval(&process_library);
-        }
-        if let Some((text, cursor, runtime)) = lisp_host::run_embedded_scratch_flow(
-            track,
-            cursor_step,
-            &scratch_buffer,
-            scratch_cursor,
-            runtime,
-            |editor, event| match event {
-                Some((name, payload)) => match name {
-                    "register-hook" => self.register_hook_from_payload(editor, track, payload),
-                    "clear-hooks" => Some(self.clear_control_hooks()),
-                    "sync-current-buffer" => {
-                        self.editor.scratch_buffer = editor.active_buffer().text();
-                        self.editor.scratch_cursor = editor.active_buffer().cursor;
-                        self.sync_scratch_runtime_descriptors();
-                        self.state
-                            .set_scratch_source(self.editor.scratch_buffer.clone());
-                        None
-                    }
-                    _ => None,
-                },
-                None => {
-                    self.tick_control_hooks_with_editor(editor);
-                    None
-                }
-            },
-        ) {
-            self.editor.scratch_buffer = text;
-            self.editor.scratch_cursor = cursor;
-            self.state
-                .set_scratch_source(self.editor.scratch_buffer.clone());
-            self.editor.scratch_runtime = Some(runtime);
-        }
-    }
 
-    pub fn has_pending_editor(&self) -> bool {
-        self.editor.pending_editor.is_some()
-    }
 
-    pub fn run_pending_editor(&mut self) {
-        let Some(action) = self.editor.pending_editor.take() else {
-            return;
-        };
 
-        match action {
-            PendingEditor::Effect { slot_idx, name } => self.run_effect_editor(slot_idx, name),
-            PendingEditor::Instrument { name } => self.run_instrument_editor(name),
-            PendingEditor::Scratch => self.run_scratch_editor(),
-        }
-    }
 
-    pub(super) fn overlay_new_label(kind: OverlayPickerKind) -> &'static str {
-        match kind {
-            OverlayPickerKind::Effect => "+ New effect",
-            OverlayPickerKind::Instrument => "+ New instrument",
-        }
-    }
-
-    pub(super) fn filtered_overlay_items(&self, kind: OverlayPickerKind) -> Vec<String> {
-        let mut items = vec![Self::overlay_new_label(kind).to_string()];
-        let filter_lower = self.editor.picker_filter.to_lowercase();
-        for name in &self.editor.picker_items {
-            if filter_lower.is_empty() || name.to_lowercase().contains(&filter_lower) {
-                items.push(name.clone());
-            }
-        }
-        items
-    }
-
-    fn handle_overlay_picker_input(&mut self, kind: OverlayPickerKind, code: KeyCode) {
-        match code {
-            KeyCode::Char(c) => {
-                self.editor.picker_filter.push(c);
-                self.editor.picker_cursor = 0;
-            }
-            KeyCode::Backspace => {
-                self.editor.picker_filter.pop();
-                self.editor.picker_cursor = 0;
-            }
-            KeyCode::Up => {
-                if self.editor.picker_cursor > 0 {
-                    self.editor.picker_cursor -= 1;
-                }
-            }
-            KeyCode::Down => {
-                let max = self.filtered_overlay_items(kind).len();
-                if self.editor.picker_cursor + 1 < max {
-                    self.editor.picker_cursor += 1;
-                }
-            }
-            KeyCode::Enter => {
-                let items = self.filtered_overlay_items(kind);
-                if self.editor.picker_cursor < items.len() {
-                    let selected = &items[self.editor.picker_cursor];
-                    if selected == Self::overlay_new_label(kind) {
-                        match kind {
-                            OverlayPickerKind::Effect => {
-                                if let Some(slot_idx) = self.next_free_custom_slot() {
-                                    self.editor.pending_editor = Some(PendingEditor::Effect {
-                                        slot_idx,
-                                        name: None,
-                                    });
-                                }
-                            }
-                            OverlayPickerKind::Instrument => {
-                                self.editor.pending_editor =
-                                    Some(PendingEditor::Instrument { name: None });
-                            }
-                        }
-                    } else {
-                        let name = selected.clone();
-                        match kind {
-                            OverlayPickerKind::Effect => {
-                                if let Some(slot_idx) = self.next_free_custom_slot() {
-                                    self.start_effect_compile(&name, slot_idx);
-                                }
-                            }
-                            OverlayPickerKind::Instrument => {
-                                self.start_instrument_compile(&name);
-                            }
-                        }
-                    }
-                }
-                self.ui.input_mode = InputMode::Normal;
-            }
-            KeyCode::Esc => {
-                self.ui.input_mode = InputMode::Normal;
-                if matches!(kind, OverlayPickerKind::Instrument) && !self.tracks.is_empty() {
-                    self.ui.sidebar_mode = super::SidebarMode::Audition;
-                    self.ui.focused_region = super::Region::Cirklon;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    pub(super) fn handle_effect_picker(&mut self, code: KeyCode) {
-        self.handle_overlay_picker_input(OverlayPickerKind::Effect, code);
-    }
-
-    pub(super) fn handle_instrument_picker_overlay(&mut self, code: KeyCode) {
-        self.handle_overlay_picker_input(OverlayPickerKind::Instrument, code);
-    }
 
     pub(super) fn instrument_usage_count(&self, instrument_name: &str) -> usize {
         self.graph
@@ -4426,7 +4017,7 @@ mod tests {
     use crate::audiograph::LiveGraphPtr;
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{default_empty_effect_chain, SequencerState};
-    use crate::tui::AudioBuses;
+    use crate::app::AudioBuses;
     use std::sync::{mpsc, Mutex};
     use std::time::Duration;
 
@@ -4637,39 +4228,39 @@ mod tests {
         graph.process_block();
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.track_engine_ids, vec![Some(cached_engine_id)]);
         assert_eq!(app.tracks, vec!["cached"]);
         graph.process_block();
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.track_engine_ids, vec![Some(0)]);
         assert_eq!(app.tracks, vec!["old"]);
         graph.process_block();
         for _ in 0..3 {
             assert!(matches!(
-                crate::tui::edit::redo(&mut app),
-                crate::tui::history::HistoryReplay::Applied(_)
+                crate::app::edit::redo(&mut app),
+                crate::app::history::HistoryReplay::Applied(_)
             ));
             graph.process_block();
             assert!(matches!(
-                crate::tui::edit::undo(&mut app),
-                crate::tui::history::HistoryReplay::Applied(_)
+                crate::app::edit::undo(&mut app),
+                crate::app::history::HistoryReplay::Applied(_)
             ));
             graph.process_block();
         }
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         graph.process_block();
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.track_engine_ids, vec![Some(2)]);
         assert_eq!(app.tracks, vec!["compiled"]);
@@ -4766,15 +4357,15 @@ mod tests {
         assert_eq!(app.tracks[0], "silent");
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Custom);
         assert_eq!(app.graph.track_engine_ids[0], Some(0));
         assert_eq!(app.tracks[0], "old");
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Sampler);
         assert_eq!(app.graph.track_buffer_ids[0], buffer_id);
@@ -4820,13 +4411,13 @@ mod tests {
         );
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.track_engine_ids[0], Some(0));
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.track_engine_ids[0], Some(dedicated_engine));
         assert_eq!(
@@ -4842,11 +4433,11 @@ mod tests {
         let first_id = crate::sequencer::BusId(41);
         let target_id = crate::sequencer::BusId(73);
         app.buses = vec![
-            crate::tui::BusChannelState::new(target_id, "Loaded project group"),
-            crate::tui::BusChannelState::new(first_id, "Previous project group"),
+            crate::app::BusChannelState::new(target_id, "Loaded project group"),
+            crate::app::BusChannelState::new(first_id, "Previous project group"),
         ];
         app.graph.bus_node_ids = vec![
-            crate::tui::BusNodeIds {
+            crate::app::BusNodeIds {
                 id: first_id,
                 left_id: 101,
                 right_id: 102,
@@ -4855,7 +4446,7 @@ mod tests {
                 volume_id: 105,
                 mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
             },
-            crate::tui::BusNodeIds {
+            crate::app::BusNodeIds {
                 id: target_id,
                 left_id: 201,
                 right_id: 202,
@@ -4886,11 +4477,11 @@ mod tests {
         let first_id = crate::sequencer::BusId(41);
         let target_id = crate::sequencer::BusId(73);
         app.buses = vec![
-            crate::tui::BusChannelState::new(target_id, "Loaded project group"),
-            crate::tui::BusChannelState::new(first_id, "Previous project group"),
+            crate::app::BusChannelState::new(target_id, "Loaded project group"),
+            crate::app::BusChannelState::new(first_id, "Previous project group"),
         ];
         app.graph.bus_node_ids = vec![
-            crate::tui::BusNodeIds {
+            crate::app::BusNodeIds {
                 id: first_id,
                 left_id: 101,
                 right_id: 102,
@@ -4899,7 +4490,7 @@ mod tests {
                 volume_id: 105,
                 mod_in_clip_ids: [0; crate::sequencer::EXT_MOD_INPUT_COUNT],
             },
-            crate::tui::BusNodeIds {
+            crate::app::BusNodeIds {
                 id: target_id,
                 left_id: 201,
                 right_id: 202,
@@ -5030,7 +4621,7 @@ mod tests {
         );
         app.tracks = vec!["Track 1".to_string()];
         app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
-        app.graph.track_node_ids = vec![crate::tui::TrackNodeIds {
+        app.graph.track_node_ids = vec![crate::app::TrackNodeIds {
             sampler_ids: Vec::new(),
             sampler_gatepitch_ids: Vec::new(),
             sampler_modulator_ids: Vec::new(),
@@ -5141,8 +4732,8 @@ mod tests {
         );
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.buses[bus_idx].effect_descriptors[0].name, "Filter");
         assert_eq!(app.buses[bus_idx].effect_descriptors[1].name, "OTT");
@@ -5150,8 +4741,8 @@ mod tests {
         assert_eq!(app.buses[bus_idx].effect_slots[1].node_id, ott_node);
 
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.buses[bus_idx].effect_descriptors[0].name, "Filter");
         assert_eq!(app.buses[bus_idx].effect_descriptors[1].name, "Phaser-Flanger");
@@ -5263,9 +4854,9 @@ mod tests {
         assert!(app.groups.is_empty());
         assert!(app.buses.iter().all(|bus| bus.id != bus_id));
 
-        let undo = crate::tui::edit::undo(&mut app);
+        let undo = crate::app::edit::undo(&mut app);
         assert!(
-            matches!(undo, crate::tui::history::HistoryReplay::Applied(_)),
+            matches!(undo, crate::app::history::HistoryReplay::Applied(_)),
             "group delete undo failed: {undo:?}",
         );
         let restored_idx = app.buses.iter().position(|bus| bus.id == bus_id)
@@ -5284,8 +4875,8 @@ mod tests {
         }
 
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert!(app.groups.is_empty());
         assert!(app.buses.iter().all(|bus| bus.id != bus_id));
@@ -5313,8 +4904,8 @@ mod tests {
         })
         .expect("recorded bus filter delete should succeed");
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.buses[bus_idx].effect_descriptors[slot].name, "Filter");
         assert_eq!(app.buses[bus_idx].effect_slots[slot].defaults[0].to_bits(), 0.37_f32.to_bits());
@@ -5324,8 +4915,8 @@ mod tests {
         );
 
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.buses[bus_idx].effect_slots[slot].node_id, 0);
         assert!(app.device_registry.bus_audio_effect_location(instance).is_none());
@@ -5355,17 +4946,17 @@ mod tests {
                 |app| app.set_bus_effect_param(bus_idx, slot, param, value),
             ).unwrap();
         }
-        crate::tui::edit::finish_active_gesture(&mut app);
+        crate::app::edit::finish_active_gesture(&mut app);
         assert_eq!(app.history.undo_len(), 2, "the drag should add one history entry");
         assert_eq!(app.buses[bus_idx].effect_slots[slot].defaults[param].to_bits(), 2_000.0_f32.to_bits());
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.buses[bus_idx].effect_slots[slot].defaults[param].to_bits(), before.to_bits());
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.buses[bus_idx].effect_slots[slot].defaults[param].to_bits(), 2_000.0_f32.to_bits());
         graph.process_block();
@@ -5392,7 +4983,7 @@ mod tests {
             format!("param:{param}"),
             |app| app.set_bus_effect_param(bus_idx, slot, param, 4_000.0),
         ).unwrap();
-        crate::tui::edit::finish_active_gesture(&mut app);
+        crate::app::edit::finish_active_gesture(&mut app);
 
         app.state.clone_pattern(0, &[], &[], &[], &[]);
         assert_eq!(app.state.reorder_scene(0, 1), Some(0));
@@ -5400,8 +4991,8 @@ mod tests {
         assert_eq!(original_scene_idx, 1);
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         let live = app.capture_bus_pattern_snapshot();
         let repository = app.state.export_bus_pattern_repository(&live);
@@ -5438,7 +5029,7 @@ mod tests {
             )
         };
         assert!(delay_id > 0);
-        app.graph.track_node_ids = vec![crate::tui::TrackNodeIds {
+        app.graph.track_node_ids = vec![crate::app::TrackNodeIds {
             sampler_ids: Vec::new(),
             sampler_gatepitch_ids: Vec::new(),
             sampler_modulator_ids: Vec::new(),
@@ -5507,7 +5098,7 @@ mod tests {
                 0,
             )
         };
-        app.graph.track_node_ids = vec![crate::tui::TrackNodeIds {
+        app.graph.track_node_ids = vec![crate::app::TrackNodeIds {
             sampler_ids: Vec::new(),
             sampler_gatepitch_ids: Vec::new(),
             sampler_modulator_ids: Vec::new(),
@@ -5537,8 +5128,8 @@ mod tests {
         assert_eq!(app.history.undo_len(), 1);
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(
             app.state.pattern.effect_chains[0][slot]
@@ -5549,8 +5140,8 @@ mod tests {
         assert!(app.device_registry.audio_effect_location(instance).is_none());
 
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.effect_descriptors[0][slot].name, "Filter");
         assert_eq!(
@@ -5579,8 +5170,8 @@ mod tests {
             "the displaced effect identity follows its new slot"
         );
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(
             app.device_registry.audio_effect_location(instance),
@@ -5598,8 +5189,8 @@ mod tests {
         app.delete_custom_effect_slot_recorded(0, slot)
             .expect("recorded effect delete should succeed");
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(
             app.state.pattern.effect_chains[0][slot].defaults.get(0),
@@ -5621,8 +5212,8 @@ mod tests {
             "source replacement keeps the logical instance identity"
         );
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.effect_descriptors[0][slot].name, "Filter");
         assert_eq!(app.state.pattern.effect_chains[0][slot].defaults.get(0), retained_value);
@@ -5708,8 +5299,8 @@ mod tests {
             Some((track_id, trigger_slot))
         );
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(
             app.device_registry.midi_effect_location(arp_id),
@@ -5722,8 +5313,8 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(
             app.device_registry.midi_effect_location(arp_id),
@@ -5740,8 +5331,8 @@ mod tests {
             "MIDI-FX source replacement preserves instance identity"
         );
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(
             app.state.pattern.track_params[0].midi_fx_chain()[arp_slot],

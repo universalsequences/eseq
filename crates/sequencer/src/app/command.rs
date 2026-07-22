@@ -1270,7 +1270,7 @@ mod tests {
         StepSlotPlocks, StepSnapshot, SwingResolution, Timebase, TrackSendSnapshot,
         TrackSoundState, NUM_PARAMS,
     };
-    use crate::tui::{App, AudioBuses};
+    use crate::app::{App, AudioBuses};
 
     fn effect_mod_test_descriptor() -> EffectDescriptor {
         EffectDescriptor {
@@ -1356,7 +1356,7 @@ mod tests {
 
     #[test]
     fn history_policy_records_completed_step_and_pattern_geometry_slices() {
-        use crate::tui::history::HistoryPolicy;
+        use crate::app::history::HistoryPolicy;
 
         assert_eq!(
             history_policy(&AppCommand::ToggleStep { track: 0, step: 3 }),
@@ -2448,7 +2448,7 @@ mod tests {
         app.state
             .replace_bus_pattern_repository(vec![origin.clone(), target], &origin);
         app.buses[0].effect_slots[0].plocks[0][0] = Some(0.33);
-        app.graph.bus_node_ids.push(crate::tui::BusNodeIds {
+        app.graph.bus_node_ids.push(crate::app::BusNodeIds {
             id: app.buses[0].id,
             left_id: 0,
             right_id: 0,

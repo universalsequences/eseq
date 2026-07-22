@@ -36,7 +36,7 @@ use crate::sequencer::{
     SequencerSnapshot, SequencerState, StepParam, SwingResolution, MAX_INSTRUMENT_ENGINES,
     MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS,
 };
-use crate::tui::BusGateRuntimeState;
+use crate::app::BusGateRuntimeState;
 use crate::voice::{VoicePool, MAX_VOICES};
 
 pub const FALLBACK_SAMPLE_RATE: u32 = 44_100;

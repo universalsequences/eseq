@@ -4,8 +4,8 @@
     use crate::process::ParamTarget;
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{default_empty_effect_chain, PatternSnapshot, SequencerState};
-    use crate::tui::edit::{try_apply_command, EditOutcome};
-    use crate::tui::{AppCommand, AudioBuses};
+    use crate::app::edit::{try_apply_command, EditOutcome};
+    use crate::app::{AppCommand, AudioBuses};
     use std::path::PathBuf;
     use std::sync::{mpsc, Arc, Mutex};
 
@@ -601,15 +601,15 @@
             .expect("record creation");
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.tracks.len(), 1);
         assert_eq!(app.track_registry.index_of(created_id), None);
 
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.tracks.len(), 2);
         assert_eq!(app.track_registry.index_of(created_id), Some(1));
@@ -630,12 +630,12 @@
         app.commit_created_track(created, "Add modulator track").unwrap();
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.track_registry.index_of(created_id), Some(1));
         assert_eq!(app.graph.track_instrument_types[1], InstrumentType::Modulator);
@@ -687,8 +687,8 @@
         );
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.tracks, ["First", "Deleted", "Last"]);
         assert_eq!(app.track_registry.ids(), ids.as_slice());
@@ -707,8 +707,8 @@
         );
 
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.tracks, ["First", "Last"]);
         assert_eq!(app.track_registry.ids(), &[ids[0], ids[2]]);
@@ -731,8 +731,8 @@
 
         app.delete_track_recorded(1).expect("delete rack track");
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.track_registry.index_of(rack_id), Some(1));
         assert_eq!(app.graph.track_instrument_types[1], InstrumentType::Rack);
@@ -742,13 +742,13 @@
         assert_eq!(rack.slots[0].effect_descriptors[0].name, "OTT");
         assert_ne!(rack.slots[0].effect_slots[0].node_id, 0);
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.track_registry.index_of(rack_id), None);
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.track_instrument_types[1], InstrumentType::Rack);
         assert_eq!(
@@ -786,8 +786,8 @@
 
         app.delete_track_recorded(1).expect("delete custom track");
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.track_registry.index_of(custom_id), Some(1));
         assert_eq!(app.graph.track_instrument_types[1], InstrumentType::Custom);
@@ -1191,8 +1191,8 @@
         assert_eq!(grouped.slots[0].effect_slots[effect_slot].defaults[0], 0.63);
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Sampler);
         assert_eq!(app.tracks[0], "Original");
@@ -1212,8 +1212,8 @@
         );
 
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Rack);
         let regrouped = app.state.pattern.rack_tracks.lock().unwrap()[0]
@@ -1313,8 +1313,8 @@
             Some(rack_topology_signature(&rack))
         );
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(
             app.state.pattern.rack_tracks.lock().unwrap()[0]
@@ -1325,8 +1325,8 @@
             1
         );
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(
             app.state.pattern.rack_tracks.lock().unwrap()[0]
@@ -1471,8 +1471,8 @@
             engine_id as u32
         );
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(
             app.state.pattern.rack_tracks.lock().unwrap()[rack_track]
@@ -1483,8 +1483,8 @@
             1
         );
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(
             app.state.pattern.rack_tracks.lock().unwrap()[rack_track]
@@ -1566,8 +1566,8 @@
             Some(1)
         );
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(
             app.state.pattern.rack_tracks.lock().unwrap()[rack_track]
@@ -1579,8 +1579,8 @@
             Some(0)
         );
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(
             app.state.pattern.rack_tracks.lock().unwrap()[rack_track]
@@ -1804,8 +1804,8 @@
             "an unreferenced deferred engine must stop consuming DSP"
         );
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         let undone = app.state.pattern.rack_tracks.lock().unwrap()[0]
             .clone()
@@ -1813,8 +1813,8 @@
         assert_eq!(undone.slots[0].instrument_type, InstrumentType::Custom);
         assert_eq!(undone.slots[0].effect_slots[effect_slot].node_id, effect_node);
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         let redone = app.state.pattern.rack_tracks.lock().unwrap()[0]
             .clone()
@@ -1874,8 +1874,8 @@
         assert_ne!(restored.slots[0].effect_slots[0].node_id, 0);
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         let undone = app.state.pattern.rack_tracks.lock().unwrap()[0]
             .clone().expect("pre-preset rack state should be restored");
@@ -1883,8 +1883,8 @@
         assert_eq!(undone.slots[0].custom_effect_names[0], None);
 
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         let redone = app.state.pattern.rack_tracks.lock().unwrap()[0]
             .clone().expect("rack preset should be restored on redo");
@@ -1959,8 +1959,8 @@
         );
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         let restored = app.state.pattern.rack_tracks.lock().unwrap()[0]
             .clone().expect("rack should restore");
@@ -1969,8 +1969,8 @@
         assert_eq!(app.device_registry.rack_slot(track_id, 0), deleted_id);
 
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(
             app.state.pattern.rack_tracks.lock().unwrap()[0]
@@ -2003,13 +2003,13 @@
             .expect("created scene track pattern id");
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.state.scene_count(), 1);
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.state.scene_count(), 2);
         assert_eq!(
@@ -2056,16 +2056,16 @@
         assert_eq!(edited.slots[0].lanes["amount"].values[1], 0.75);
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         let restored = app.state.track_process_chain(0).expect("restored process chain");
         assert_eq!(restored.slots[0].instance_id, instance_id);
         assert!(restored.slots[0].enabled);
         assert_eq!(restored.slots[0].lanes["amount"].values[1], 1.0);
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         let redone = app.state.track_process_chain(0).expect("redone process chain");
         assert_eq!(redone.slots[0].instance_id, instance_id);
@@ -2097,26 +2097,26 @@
         let after_step_2 = app.state.capture_step_snapshot(0, 2);
         let after_step_7 = app.state.capture_step_snapshot(0, 7);
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
-        assert!(crate::tui::history::step_snapshot_bit_exact_eq(
+        assert!(crate::app::history::step_snapshot_bit_exact_eq(
             &before_step_2,
             &app.state.capture_step_snapshot(0, 2),
         ));
-        assert!(crate::tui::history::step_snapshot_bit_exact_eq(
+        assert!(crate::app::history::step_snapshot_bit_exact_eq(
             &before_step_7,
             &app.state.capture_step_snapshot(0, 7),
         ));
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
-        assert!(crate::tui::history::step_snapshot_bit_exact_eq(
+        assert!(crate::app::history::step_snapshot_bit_exact_eq(
             &after_step_2,
             &app.state.capture_step_snapshot(0, 2),
         ));
-        assert!(crate::tui::history::step_snapshot_bit_exact_eq(
+        assert!(crate::app::history::step_snapshot_bit_exact_eq(
             &after_step_7,
             &app.state.capture_step_snapshot(0, 7),
         ));
@@ -2138,7 +2138,7 @@
         assert!(app.cancel_recording_take_history().expect("cancel take"));
 
         assert_eq!(app.history.undo_len(), 0);
-        assert!(crate::tui::history::step_snapshot_bit_exact_eq(
+        assert!(crate::app::history::step_snapshot_bit_exact_eq(
             &before,
             &app.state.capture_step_snapshot(0, 4),
         ));
@@ -2304,8 +2304,8 @@
             |app| app.delete_rack_slot_effect_slot(0, 0, effect_slot),
         ).expect("recorded rack filter delete should succeed");
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         let restored = app.state.pattern.rack_tracks.lock().unwrap()[0]
             .clone().expect("rack should remain live");
@@ -2317,8 +2317,8 @@
             Some((rack_slot_id, effect_slot))
         );
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         let redone = app.state.pattern.rack_tracks.lock().unwrap()[0]
             .clone().expect("rack should remain live");
@@ -2514,8 +2514,8 @@
         assert_eq!(rack.slots[0].effect_descriptors[0].name, "OTT");
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Sampler);
         assert_eq!(app.graph.track_buffer_ids[0], original_buffer_id);
@@ -2529,8 +2529,8 @@
         );
 
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Rack);
         assert_eq!(
@@ -2627,8 +2627,8 @@
         assert_ne!(replacement_rack_slot_id, original_rack_slot_id);
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         let restored = app.state.pattern.rack_tracks.lock().unwrap()[0]
             .clone().expect("original rack should be restored");
@@ -2644,8 +2644,8 @@
         );
 
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         let redone = app.state.pattern.rack_tracks.lock().unwrap()[0]
             .clone().expect("replacement rack should be restored on redo");
@@ -2739,8 +2739,8 @@
         assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Rack);
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Custom);
         assert_eq!(app.graph.track_engine_ids[0], Some(engine_id));
@@ -2756,8 +2756,8 @@
         );
 
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Rack);
         assert_eq!(
@@ -2805,8 +2805,8 @@
         assert_eq!(app.graph.track_engine_ids[0], Some(engine_id));
 
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Rack);
         let restored_rack = app.state.pattern.rack_tracks.lock().unwrap()[0]
@@ -2816,8 +2816,8 @@
         assert_eq!(restored_rack.slots[0].sample_id, original_rack.slots[0].sample_id);
 
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Custom);
         assert_eq!(app.graph.track_engine_ids[0], Some(engine_id));
@@ -3079,8 +3079,8 @@
             .expect("system clock should follow the Unix epoch")
             .as_nanos();
         assert!(matches!(
-            crate::tui::edit::undo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         let undo_project_name = format!(
             "__test-instrument-swap-undo-roundtrip-{}-{nonce}",
@@ -3102,8 +3102,8 @@
             }] if instrument_name == "old"
         ));
         assert!(matches!(
-            crate::tui::edit::redo(&mut app),
-            crate::tui::history::HistoryReplay::Applied(_)
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
         ));
         let project_name = format!(
             "__test-instrument-swap-roundtrip-{}-{nonce}",

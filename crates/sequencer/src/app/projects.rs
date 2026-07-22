@@ -3,7 +3,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crossterm::event::KeyCode;
 
 use crate::effects::{EffectDescriptor, BUILTIN_SLOT_COUNT};
 use crate::lisp_host;
@@ -1247,83 +1246,7 @@ impl App {
         }
     }
 
-    pub(super) fn handle_project_name_entry(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Char(c) => self.ui.value_buffer.push(c),
-            KeyCode::Backspace => {
-                self.ui.value_buffer.pop();
-            }
-            KeyCode::Enter => {
-                let requested_name = self.ui.value_buffer.trim().to_string();
-                self.ui.value_buffer.clear();
-                self.ui.input_mode = InputMode::Normal;
-                if requested_name.is_empty() {
-                    return;
-                }
-                match self.save_project_with_name(Some(&requested_name)) {
-                    Ok(save_name) => {
-                        self.editor.status_message =
-                            Some((format!("Saved project '{}'", save_name), Instant::now()));
-                    }
-                    Err(error) => {
-                        self.editor.status_message =
-                            Some((format!("Error: {error}"), Instant::now()));
-                    }
-                }
-            }
-            KeyCode::Esc => {
-                self.ui.value_buffer.clear();
-                self.ui.input_mode = InputMode::Normal;
-            }
-            _ => {}
-        }
-    }
 
-    pub(super) fn handle_project_picker(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Char(c) => {
-                self.editor.picker_filter.push(c);
-                self.editor.picker_cursor = 0;
-            }
-            KeyCode::Backspace => {
-                self.editor.picker_filter.pop();
-                self.editor.picker_cursor = 0;
-            }
-            KeyCode::Up => {
-                if self.editor.picker_cursor > 0 {
-                    self.editor.picker_cursor -= 1;
-                }
-            }
-            KeyCode::Down => {
-                if self.editor.picker_cursor + 1 < self.filtered_project_items().len() {
-                    self.editor.picker_cursor += 1;
-                }
-            }
-            KeyCode::Enter => {
-                let Some(name) = self
-                    .filtered_project_items()
-                    .get(self.editor.picker_cursor)
-                    .cloned()
-                else {
-                    return;
-                };
-                self.ui.input_mode = InputMode::Normal;
-                match self.queue_project_load_named(&name) {
-                    Ok(()) => {}
-                    Err(error) => {
-                        self.editor.status_message =
-                            Some((format!("Error: {error}"), Instant::now()));
-                    }
-                }
-            }
-            KeyCode::Esc => {
-                self.editor.picker_filter.clear();
-                self.editor.picker_cursor = 0;
-                self.ui.input_mode = InputMode::Normal;
-            }
-            _ => {}
-        }
-    }
 
     pub(super) fn filtered_project_items(&self) -> Vec<String> {
         if self.editor.picker_filter.is_empty() {
@@ -3070,12 +2993,6 @@ impl App {
 
         if !self.tracks.is_empty() {
             self.clamp_cursor_to_steps();
-            self.browser.sync_to_track(
-                &self.tracks,
-                self.ui.cursor_track,
-                self.is_sampler_track(self.ui.cursor_track),
-                &self.ui,
-            );
         }
 
         self.current_project_name = Some(pending.name.clone());

@@ -8,7 +8,7 @@ use crate::audiograph::{self, LiveGraphPtr};
 use crate::effects::reverb;
 use crate::recorder::MasterRecorder;
 use crate::sequencer::{BusId, KeyboardTrigger, SequencerState};
-use crate::tui::{AudioBuses, BusGateRuntimeState, BusNodeIds};
+use crate::app::{AudioBuses, BusGateRuntimeState, BusNodeIds};
 
 const INITIAL_GRAPH_CAPACITY: i32 = 256;
 
@@ -336,7 +336,7 @@ fn init_engine_parts(
                 id: nodes.id,
                 gate_id: nodes.gate_id,
                 sequence: crate::sequencer::BusGateSequence::default(),
-                effect_slots: crate::tui::BusChannelState::default_effect_slots(),
+                effect_slots: crate::app::BusChannelState::default_effect_slots(),
             })
             .collect(),
     ));

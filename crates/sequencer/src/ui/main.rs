@@ -70,7 +70,7 @@ use sequencer::sequencer::{
     MidiFxPosition, PatternId, RackSlotParam, SequencerState, StepParam, SwingResolution, Timebase,
     TrackId, TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
 };
-use sequencer::tui;
+use sequencer::app;
 use std::sync::atomic::AtomicBool;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,7 +229,7 @@ enum SavedInstrumentLoadApply {
 }
 
 fn capture_instrument_swap_target(
-    app: &tui::App,
+    app: &app::App,
     track: usize,
 ) -> Result<SavedInstrumentLoadTarget, String> {
     match app.graph.track_instrument_types.get(track) {
@@ -264,7 +264,7 @@ fn capture_instrument_swap_target(
 }
 
 fn resolve_instrument_swap_target(
-    app: &tui::App,
+    app: &app::App,
     track_id: TrackId,
 ) -> Result<usize, String> {
     app.track_registry
@@ -273,7 +273,7 @@ fn resolve_instrument_swap_target(
 }
 
 fn try_apply_cached_saved_instrument(
-    app: &mut tui::App,
+    app: &mut app::App,
     target: SavedInstrumentLoadTarget,
     name: &str,
     source: &str,
@@ -297,7 +297,7 @@ fn try_apply_cached_saved_instrument(
 }
 
 fn apply_compiled_saved_instrument(
-    app: &mut tui::App,
+    app: &mut app::App,
     target: SavedInstrumentLoadTarget,
     name: &str,
     source: &str,
@@ -937,8 +937,8 @@ fn should_clear_active_delete_target_for_buffer(
 }
 
 fn pull_shared_bus_state(
-    app: &mut tui::App,
-    bus_state: &Arc<Mutex<Vec<tui::BusChannelState>>>,
+    app: &mut app::App,
+    bus_state: &Arc<Mutex<Vec<app::BusChannelState>>>,
 ) -> bool {
     let latest = bus_state.lock().unwrap().clone();
     if app.buses.len() != latest.len()
@@ -994,7 +994,7 @@ fn reconciled_track_index(
     }
 }
 
-fn current_track_for_app(app: &mut tui::App, current_track: &Arc<AtomicUsize>) -> Option<usize> {
+fn current_track_for_app(app: &mut app::App, current_track: &Arc<AtomicUsize>) -> Option<usize> {
     let track = reconciled_track_index(
         current_track.load(Ordering::Relaxed),
         app.ui.cursor_track,
@@ -1007,7 +1007,7 @@ fn current_track_for_app(app: &mut tui::App, current_track: &Arc<AtomicUsize>) -
     Some(track)
 }
 
-fn reveal_sequencer_current_track(editor: &mut Editor, app: &tui::App, track: usize) {
+fn reveal_sequencer_current_track(editor: &mut Editor, app: &app::App, track: usize) {
     let Some(track_id) = app.graph.track_node_ids.get(track).map(|ids| ids.pan_id) else {
         return;
     };
@@ -1060,7 +1060,7 @@ fn param_scaling(param: &sequencer::effects::ParamDescriptor) -> String {
 }
 
 fn metal_agent_session_context(
-    app: &tui::App,
+    app: &app::App,
     current_track: &Arc<AtomicUsize>,
     active_delete_target: &Arc<Mutex<Option<ActiveDeleteTarget>>>,
 ) -> AgentSessionContext {
@@ -1125,7 +1125,7 @@ fn metal_agent_session_context(
     }
 }
 
-fn current_track_for_snapshot(app: &tui::App, current_track: &Arc<AtomicUsize>) -> Option<usize> {
+fn current_track_for_snapshot(app: &app::App, current_track: &Arc<AtomicUsize>) -> Option<usize> {
     if app.tracks.is_empty() {
         return None;
     }
@@ -1138,7 +1138,7 @@ fn current_track_for_snapshot(app: &tui::App, current_track: &Arc<AtomicUsize>) 
 }
 
 fn metal_agent_instrument_preset_schema(
-    app: &tui::App,
+    app: &app::App,
     track: Option<usize>,
     instrument_name: Option<&str>,
 ) -> Option<AgentInstrumentPresetSchema> {
@@ -1294,9 +1294,9 @@ fn map_param_updates(
 }
 
 fn apply_toggle_step_host_command(
-    app: &mut tui::App,
+    app: &mut app::App,
     payload: &Value,
-) -> Result<(tui::edit::EditOutcome, usize, usize), String> {
+) -> Result<(app::edit::EditOutcome, usize, usize), String> {
     let Value::Map(map) = payload else {
         return Err("step toggle payload was invalid".to_string());
     };
@@ -1304,16 +1304,16 @@ fn apply_toggle_step_host_command(
         .ok_or_else(|| "step toggle track was invalid".to_string())?;
     let step =
         map_usize(map, "step").ok_or_else(|| "step toggle index was invalid".to_string())?;
-    tui::try_apply_command(app, tui::AppCommand::ToggleStep { track, step })
+    app::try_apply_command(app, app::AppCommand::ToggleStep { track, step })
         .map(|outcome| (outcome, track, step))
         .map_err(|error| format!("could not toggle step: {error:?}"))
 }
 
 fn apply_selected_steps_delete(
-    app: &mut tui::App,
+    app: &mut app::App,
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
-) -> Result<(tui::edit::EditOutcome, Vec<usize>), String> {
+) -> Result<(app::edit::EditOutcome, Vec<usize>), String> {
     let mut steps = selected_steps
         .lock()
         .unwrap()
@@ -1321,25 +1321,25 @@ fn apply_selected_steps_delete(
         .copied()
         .collect::<Vec<_>>();
     steps.sort_unstable();
-    let outcome = tui::try_apply_command(
+    let outcome = app::try_apply_command(
         app,
-        tui::AppCommand::ClearSteps {
+        app::AppCommand::ClearSteps {
             track,
             steps: steps.clone(),
         },
     )
     .map_err(|error| format!("could not delete selected steps: {error:?}"))?;
-    if matches!(outcome, tui::edit::EditOutcome::Applied(_)) {
+    if matches!(outcome, app::edit::EditOutcome::Applied(_)) {
         selected_steps.lock().unwrap().clear();
     }
     Ok((outcome, steps))
 }
 
 fn apply_step_paste_host_command(
-    app: &mut tui::App,
+    app: &mut app::App,
     clipboard: &Arc<Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>>,
     payload: &Value,
-) -> Result<(tui::edit::EditOutcome, usize), String> {
+) -> Result<(app::edit::EditOutcome, usize), String> {
     let Value::Map(map) = payload else {
         return Err("step paste payload was invalid".to_string());
     };
@@ -1348,7 +1348,7 @@ fn apply_step_paste_host_command(
     let dest_start = map_usize(map, "dest-start")
         .ok_or_else(|| "step paste destination was invalid".to_string())?;
     let Some((source_track, clipboard)) = clipboard.lock().unwrap().clone() else {
-        return Ok((tui::edit::EditOutcome::NoOp, track));
+        return Ok((app::edit::EditOutcome::NoOp, track));
     };
     let num_steps = app
         .state
@@ -1357,9 +1357,9 @@ fn apply_step_paste_host_command(
         .get(track)
         .ok_or_else(|| format!("step paste track {track} was out of range"))?
         .get_num_steps();
-    tui::try_apply_command(
+    app::try_apply_command(
         app,
-        tui::AppCommand::PasteSteps {
+        app::AppCommand::PasteSteps {
             track,
             source_track,
             clipboard,
@@ -1388,9 +1388,9 @@ fn step_param_from_name(name: &str) -> Option<StepParam> {
 }
 
 fn apply_step_param_history_host_command(
-    app: &mut tui::App,
+    app: &mut app::App,
     payload: &Value,
-) -> Result<(tui::edit::EditOutcome, usize, Vec<usize>, StepParam), String> {
+) -> Result<(app::edit::EditOutcome, usize, Vec<usize>, StepParam), String> {
     let Value::Map(map) = payload else {
         return Err("step parameter payload was invalid".to_string());
     };
@@ -1405,7 +1405,7 @@ fn apply_step_param_history_host_command(
         as f32;
     let steps = map_usize_list(map, "steps")
         .ok_or_else(|| "step parameter targets were invalid".to_string())?;
-    let outcome = tui::edit::apply_recorded_step_mutation(
+    let outcome = app::edit::apply_recorded_step_mutation(
         app,
         track,
         &steps,
@@ -1422,9 +1422,9 @@ fn apply_step_param_history_host_command(
 }
 
 fn apply_move_step_history_host_command(
-    app: &mut tui::App,
+    app: &mut app::App,
     payload: &Value,
-) -> Result<(tui::edit::EditOutcome, usize, Vec<usize>, Vec<usize>, isize, bool), String> {
+) -> Result<(app::edit::EditOutcome, usize, Vec<usize>, Vec<usize>, isize, bool), String> {
     let Value::Map(map) = payload else {
         return Err("step move payload was invalid".to_string());
     };
@@ -1475,7 +1475,7 @@ fn apply_move_step_history_host_command(
     }
     affected.sort_unstable();
     affected.dedup();
-    let outcome = tui::edit::apply_recorded_step_mutation(
+    let outcome = app::edit::apply_recorded_step_mutation(
         app,
         track,
         &affected,
@@ -1499,9 +1499,9 @@ fn apply_move_step_history_host_command(
 }
 
 fn apply_slice2_history_host_command(
-    app: &mut tui::App,
+    app: &mut app::App,
     payload: &Value,
-) -> Result<(tui::edit::EditOutcome, usize), String> {
+) -> Result<(app::edit::EditOutcome, usize), String> {
     let Value::Map(map) = payload else {
         return Err("Slice 2 edit payload was invalid".to_string());
     };
@@ -1510,14 +1510,14 @@ fn apply_slice2_history_host_command(
     let track = map_usize(map, "track")
         .ok_or_else(|| "Slice 2 edit track was invalid".to_string())?;
     let command = match op.as_str() {
-        "duplicate" => tui::AppCommand::DuplicateTrackPattern { track },
-        "halve" => tui::AppCommand::HalveTrackPattern { track },
-        "set-length" => tui::AppCommand::SetTrackNumSteps {
+        "duplicate" => app::AppCommand::DuplicateTrackPattern { track },
+        "halve" => app::AppCommand::HalveTrackPattern { track },
+        "set-length" => app::AppCommand::SetTrackNumSteps {
             track,
             n: map_usize(map, "value")
                 .ok_or_else(|| "track pattern length was invalid".to_string())?,
         },
-        "timebase-plock" => tui::AppCommand::SetTimebasePlockMulti {
+        "timebase-plock" => app::AppCommand::SetTimebasePlockMulti {
             track,
             steps: map_usize_list(map, "steps")
                 .ok_or_else(|| "timebase p-lock steps were invalid".to_string())?,
@@ -1527,7 +1527,7 @@ fn apply_slice2_history_host_command(
                     as u32,
             ),
         },
-        "swing-plock" => tui::AppCommand::SetTrackSwingPlockMulti {
+        "swing-plock" => app::AppCommand::SetTrackSwingPlockMulti {
             track,
             steps: map_usize_list(map, "steps")
                 .ok_or_else(|| "swing p-lock steps were invalid".to_string())?,
@@ -1536,7 +1536,7 @@ fn apply_slice2_history_host_command(
                 .ok_or_else(|| "swing p-lock value was invalid".to_string())?
                 as f32,
         },
-        "swing-resolution-plock" => tui::AppCommand::SetTrackSwingResolutionPlockMulti {
+        "swing-resolution-plock" => app::AppCommand::SetTrackSwingResolutionPlockMulti {
             track,
             steps: map_usize_list(map, "steps")
                 .ok_or_else(|| "swing-resolution p-lock steps were invalid".to_string())?,
@@ -1548,15 +1548,15 @@ fn apply_slice2_history_host_command(
         },
         _ => return Err(format!("unknown Slice 2 edit operation {op}")),
     };
-    tui::try_apply_command(app, command)
+    app::try_apply_command(app, command)
         .map(|outcome| (outcome, track))
         .map_err(|error| format!("could not apply Slice 2 edit: {error:?}"))
 }
 
 fn apply_slice3_history_host_command(
-    app: &mut tui::App,
+    app: &mut app::App,
     payload: &Value,
-) -> Result<(tui::edit::EditOutcome, Option<usize>), String> {
+) -> Result<(app::edit::EditOutcome, Option<usize>), String> {
     let Value::Map(map) = payload else {
         return Err("Slice 3 edit payload was invalid".to_string());
     };
@@ -1570,93 +1570,93 @@ fn apply_slice3_history_host_command(
     let track = map_usize(map, "track");
     let track_required = || track.ok_or_else(|| "Slice 3 edit track was invalid".to_string());
     let command = match op.as_str() {
-        "volume" => tui::AppCommand::SetTrackVolume {
+        "volume" => app::AppCommand::SetTrackVolume {
             track: track_required()?,
             value: value()? as f32,
         },
-        "pan" => tui::AppCommand::SetTrackPan {
+        "pan" => app::AppCommand::SetTrackPan {
             track: track_required()?,
             value: value()? as f32,
         },
-        "send" => tui::AppCommand::SetTrackSend {
+        "send" => app::AppCommand::SetTrackSend {
             track: track_required()?,
             value: value()? as f32,
         },
-        "attack" => tui::AppCommand::SetTrackAttack {
+        "attack" => app::AppCommand::SetTrackAttack {
             track: track_required()?,
             ms: value()? as f32,
         },
-        "release" => tui::AppCommand::SetTrackRelease {
+        "release" => app::AppCommand::SetTrackRelease {
             track: track_required()?,
             ms: value()? as f32,
         },
-        "swing" => tui::AppCommand::SetTrackSwing {
+        "swing" => app::AppCommand::SetTrackSwing {
             track: track_required()?,
             value: value()? as f32,
         },
-        "toggle-gate" => tui::AppCommand::ToggleTrackGate {
+        "toggle-gate" => app::AppCommand::ToggleTrackGate {
             track: track_required()?,
         },
-        "toggle-poly" => tui::AppCommand::ToggleTrackPolyphonic {
+        "toggle-poly" => app::AppCommand::ToggleTrackPolyphonic {
             track: track_required()?,
         },
-        "toggle-mute" => tui::AppCommand::ToggleTrackMute {
+        "toggle-mute" => app::AppCommand::ToggleTrackMute {
             track: track_required()?,
         },
-        "toggle-solo" => tui::AppCommand::ToggleTrackSolo {
+        "toggle-solo" => app::AppCommand::ToggleTrackSolo {
             track: track_required()?,
         },
-        "max-polyphony" => tui::AppCommand::SetTrackMaxPolyphony {
+        "max-polyphony" => app::AppCommand::SetTrackMaxPolyphony {
             track: track_required()?,
             value: value()?.round().max(1.0) as usize,
         },
-        "swing-resolution" => tui::AppCommand::SetTrackSwingResolution {
+        "swing-resolution" => app::AppCommand::SetTrackSwingResolution {
             track: track_required()?,
             resolution: SwingResolution::from_index(value()? as u32),
         },
-        "timebase" => tui::AppCommand::SetTrackTimebase {
+        "timebase" => app::AppCommand::SetTrackTimebase {
             track: track_required()?,
             timebase: Timebase::from_index(value()? as u32),
         },
-        "fts" => tui::AppCommand::SetTrackFtsScale {
+        "fts" => app::AppCommand::SetTrackFtsScale {
             track: track_required()?,
             scale_idx: value()? as usize,
         },
-        "accumulator" => tui::AppCommand::SetTrackAccumIdx {
+        "accumulator" => app::AppCommand::SetTrackAccumIdx {
             track: track_required()?,
             idx: value()? as usize,
             default_limit: map_number(map, "default-limit").map(|value| value as f32),
             script_name: map_string(map, "script-name"),
         },
-        "accum-limit" => tui::AppCommand::SetTrackAccumLimit {
+        "accum-limit" => app::AppCommand::SetTrackAccumLimit {
             track: track_required()?,
             value: value()? as f32,
         },
-        "accum-mode" => tui::AppCommand::SetTrackAccumMode {
+        "accum-mode" => app::AppCommand::SetTrackAccumMode {
             track: track_required()?,
             mode: value()? as u32,
         },
-        "mute-group" => tui::AppCommand::SetTrackMuteGroup {
+        "mute-group" => app::AppCommand::SetTrackMuteGroup {
             track: track_required()?,
             group: value()?.round().clamp(0.0, 8.0) as u8,
         },
-        "global-transpose" => tui::AppCommand::SetTrackGlobalTranspose {
+        "global-transpose" => app::AppCommand::SetTrackGlobalTranspose {
             track: track_required()?,
             enabled: value()? != 0.0,
         },
-        "base-note" => tui::AppCommand::SetInstrumentBaseNoteOffset {
+        "base-note" => app::AppCommand::SetInstrumentBaseNoteOffset {
             track: track_required()?,
             value: value()? as f32,
         },
-        "master-volume" => tui::AppCommand::SetMasterVolume {
+        "master-volume" => app::AppCommand::SetMasterVolume {
             value: value()? as f32,
         },
-        "bpm" => tui::AppCommand::SetBpm {
+        "bpm" => app::AppCommand::SetBpm {
             bpm: value()?.round() as u32,
         },
         _ => return Err(format!("unknown Slice 3 edit operation {op}")),
     };
-    tui::try_apply_command(app, command)
+    app::try_apply_command(app, command)
         .map(|outcome| (outcome, track))
         .map_err(|error| format!("could not apply Slice 3 edit: {error:?}"))
 }
@@ -1690,9 +1690,9 @@ fn bus_mixer_targeted_invalidation(payload: &Value) -> Option<BusMixerInvalidati
 }
 
 fn apply_bus_mixer_history_host_command(
-    app: &mut tui::App,
+    app: &mut app::App,
     payload: &Value,
-) -> Result<(tui::edit::EditOutcome, usize), String> {
+) -> Result<(app::edit::EditOutcome, usize), String> {
     let Value::Map(map) = payload else {
         return Err("Bus mixer edit payload was invalid".to_string());
     };
@@ -1715,18 +1715,18 @@ fn apply_bus_mixer_history_host_command(
             )
         })?;
     let command = match op.as_str() {
-        "volume" => tui::AppCommand::SetBusVolume {
+        "volume" => app::AppCommand::SetBusVolume {
             bus,
             value: map_number(map, "value")
                 .filter(|value| value.is_finite())
                 .ok_or_else(|| "Bus mixer volume was invalid".to_string())?
                 as f32,
         },
-        "toggle-mute" => tui::AppCommand::ToggleBusMute { bus },
-        "toggle-solo" => tui::AppCommand::ToggleBusSolo { bus },
+        "toggle-mute" => app::AppCommand::ToggleBusMute { bus },
+        "toggle-solo" => app::AppCommand::ToggleBusSolo { bus },
         _ => return Err(format!("Unsupported bus mixer edit operation: {op}")),
     };
-    tui::try_apply_command(app, command)
+    app::try_apply_command(app, command)
         .map(|outcome| (outcome, bus_idx))
         .map_err(|error| format!("could not apply bus mixer edit: {error:?}"))
 }
@@ -1865,9 +1865,9 @@ fn parse_drum_lane_history_action(payload: &Value) -> Result<DrumLaneHistoryActi
 }
 
 fn apply_drum_lane_history_host_command(
-    app: &mut tui::App,
+    app: &mut app::App,
     payload: &Value,
-) -> Result<(tui::edit::EditOutcome, DrumLaneHistoryAction), String> {
+) -> Result<(app::edit::EditOutcome, DrumLaneHistoryAction), String> {
     let action = parse_drum_lane_history_action(payload)?;
     let track = action.track();
     if track >= app.state.active_track_count() {
@@ -1879,7 +1879,7 @@ fn apply_drum_lane_history_host_command(
     }
     let label = action.label();
     let mutation = action.clone();
-    let outcome = tui::edit::apply_recorded_step_mutation(
+    let outcome = app::edit::apply_recorded_step_mutation(
         app,
         track,
         &affected,
@@ -1931,12 +1931,12 @@ fn apply_drum_lane_history_host_command(
 }
 
 fn apply_piano_roll_history_host_command(
-    app: &mut tui::App,
+    app: &mut app::App,
     selection: &Arc<Mutex<HashSet<u64>>>,
     move_state: &Arc<Mutex<Option<PianoRollMoveState>>>,
     clipboard: &PianoRollClipboard,
     payload: &Value,
-) -> Result<(tui::edit::EditOutcome, String, usize), String> {
+) -> Result<(app::edit::EditOutcome, String, usize), String> {
     let Value::Map(map) = payload else {
         return Err("piano-roll edit payload was invalid".to_string());
     };
@@ -1952,7 +1952,7 @@ fn apply_piano_roll_history_host_command(
     let plan = piano_roll_history_plan(&app.state, track, &action, clipboard)?
         .ok_or_else(|| "piano-roll action is not recordable at this boundary".to_string())?;
     let mut status = None;
-    let outcome = tui::edit::apply_recorded_step_mutation(
+    let outcome = app::edit::apply_recorded_step_mutation(
         app,
         track,
         &plan.steps,
@@ -1967,7 +1967,7 @@ fn apply_piano_roll_history_host_command(
                     clipboard,
                     &action,
                 )
-                .map_err(tui::edit::EditError::ReplayFailed)?,
+                .map_err(app::edit::EditError::ReplayFailed)?,
             );
             Ok(())
         },
@@ -1983,7 +1983,7 @@ fn apply_piano_roll_history_host_command(
 struct ActivePianoRollHistoryGesture {
     kind: PianoRollDragKind,
     track: usize,
-    transaction: tui::edit::StepGestureTransaction,
+    transaction: app::edit::StepGestureTransaction,
 }
 
 fn piano_roll_host_action(payload: &Value) -> Result<(usize, Value), String> {
@@ -2000,7 +2000,7 @@ fn piano_roll_host_action(payload: &Value) -> Result<(usize, Value), String> {
 }
 
 fn apply_piano_roll_gesture_update(
-    app: &mut tui::App,
+    app: &mut app::App,
     selection: &Arc<Mutex<HashSet<u64>>>,
     move_state: &Arc<Mutex<Option<PianoRollMoveState>>>,
     active: &mut Option<ActivePianoRollHistoryGesture>,
@@ -2033,7 +2033,7 @@ fn apply_piano_roll_gesture_update(
         *active = Some(ActivePianoRollHistoryGesture {
             kind,
             track,
-            transaction: tui::edit::StepGestureTransaction::begin(app, track, &touched, label)
+            transaction: app::edit::StepGestureTransaction::begin(app, track, &touched, label)
                 .map_err(|error| format!("could not begin piano-roll gesture: {error:?}"))?,
         });
     } else if let Err(error) = active
@@ -2077,18 +2077,18 @@ fn apply_piano_roll_gesture_update(
 }
 
 fn finish_piano_roll_gesture(
-    app: &mut tui::App,
+    app: &mut app::App,
     move_state: &Arc<Mutex<Option<PianoRollMoveState>>>,
     active: &mut Option<ActivePianoRollHistoryGesture>,
     payload: &Value,
-) -> Result<(tui::edit::EditOutcome, usize), String> {
+) -> Result<(app::edit::EditOutcome, usize), String> {
     let (track, action) = piano_roll_host_action(payload)?;
     let Some(PianoRollGestureCommand::Finish(kind)) = piano_roll_gesture_command(&action) else {
         return Err("piano-roll gesture finish action was invalid".to_string());
     };
     let Some(gesture) = active.take() else {
         *move_state.lock().unwrap() = None;
-        return Ok((tui::edit::EditOutcome::NoOp, track));
+        return Ok((app::edit::EditOutcome::NoOp, track));
     };
     if gesture.kind != kind || gesture.track != track {
         gesture
@@ -2188,7 +2188,7 @@ struct AgentEffectFinalizeResult {
 }
 
 fn sync_after_instrument_track_apply(
-    app: &mut tui::App,
+    app: &mut app::App,
     editor: &mut Editor,
     state: &Arc<SequencerState>,
     track_index: usize,
@@ -2285,7 +2285,7 @@ fn refresh_visible_track_topology_layouts(editor: &mut Editor) {
 
 fn refresh_instrument_panel_reactive(
     editor: &mut Editor,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     ui_epoch: &AtomicUsize,
@@ -2312,7 +2312,7 @@ fn refresh_instrument_panel_reactive(
 
 fn refresh_rack_macro_value_reactive(
     editor: &mut Editor,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     id: sequencer::sequencer::RackMacroId,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
@@ -2328,7 +2328,7 @@ fn refresh_rack_macro_value_reactive(
 
 fn refresh_rack_macro_plock_reactive(
     editor: &mut Editor,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     id: sequencer::sequencer::RackMacroId,
@@ -2369,7 +2369,7 @@ enum RackDirectDisplayTarget {
 
 fn refresh_rack_direct_param_reactive(
     editor: &mut Editor,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     target: RackDirectDisplayTarget,
@@ -2424,7 +2424,7 @@ fn apply_rack_macro_host_command(
     name: &str,
     map: &HashMap<String, Rc<RefCell<Value>>>,
     editor: &mut Editor,
-    app: &mut tui::App,
+    app: &mut app::App,
     state: &Arc<SequencerState>,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     ui_epoch: &AtomicUsize,
@@ -2464,16 +2464,16 @@ fn apply_rack_macro_host_command(
                         .is_some_and(Option::is_some)
                 })
             };
-            let outcome = tui::try_apply_command(
+            let outcome = app::try_apply_command(
                 app,
-                tui::AppCommand::SetRackMacroPlockMulti {
+                app::AppCommand::SetRackMacroPlockMulti {
                     track,
                     steps,
                     macro_idx: id.index(),
                     value,
                 },
             );
-            if !outcome.is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp) {
+            if !outcome.is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp) {
                 return false;
             }
             refresh_rack_macro_plock_reactive(
@@ -2495,7 +2495,7 @@ fn apply_rack_macro_host_command(
 
 fn sync_rack_slot_instrument_authoring_display(
     editor: &mut Editor,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
@@ -2626,7 +2626,7 @@ fn sync_single_step_param_binding(
 fn sync_single_track_step_binding_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
@@ -2732,7 +2732,7 @@ fn sync_single_track_step_binding_fields(
 fn sync_single_track_sequencer_state(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
@@ -2833,7 +2833,7 @@ fn sync_single_track_sequencer_state(
 fn sync_single_step_structural_bindings(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     step: usize,
     current_track_idx: usize,
@@ -2855,7 +2855,7 @@ fn sync_single_step_structural_bindings(
 fn sync_step_batch_structural_bindings(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     steps: &[usize],
     current_track_idx: usize,
@@ -2988,7 +2988,7 @@ fn sync_track_duration_span_binding_fields(
 fn sync_drum_lane_duration_span_binding_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     start_step: usize,
 ) -> bool {
@@ -3015,7 +3015,7 @@ fn sync_drum_lane_duration_span_binding_fields(
 fn sync_step_selection_bindings(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: Option<&tui::App>,
+    app: Option<&app::App>,
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     current_track_idx: usize,
@@ -3117,7 +3117,7 @@ fn sync_selected_neural_neuron_bindings(
 
 fn sync_track_plocks_for_neural_selection(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
@@ -3161,7 +3161,7 @@ fn sync_track_plocks_for_neural_selection(
 
 fn sync_track_plock_variant_preview(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
@@ -3376,7 +3376,7 @@ fn write_selected_neural_effect_plock(
 }
 
 struct InstrumentParamDisplaySync<'a> {
-    app: &'a tui::App,
+    app: &'a app::App,
     state: &'a Arc<SequencerState>,
     selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
     selection: &'a BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
@@ -3434,7 +3434,7 @@ fn sync_instrument_param_authoring_display(
 struct EffectParamDisplaySync<'a> {
     state: &'a Arc<SequencerState>,
     effect_descriptors: &'a [Vec<sequencer::effects::EffectDescriptor>],
-    app: &'a tui::App,
+    app: &'a app::App,
     selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
     selection: &'a BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     track: usize,
@@ -3470,7 +3470,7 @@ fn sync_effect_param_authoring_display(editor: &mut Editor, sync: EffectParamDis
 
 fn sync_instrument_param_batch_display(
     editor: &mut Editor,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
@@ -3512,7 +3512,7 @@ fn sync_instrument_param_batch_display(
 
 fn sync_effect_param_batch_display(
     editor: &mut Editor,
-    app: &tui::App,
+    app: &app::App,
     selection: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     track: usize,
     slot_idx: usize,
@@ -3545,7 +3545,7 @@ fn flush_reactive_display_edit(editor: &mut Editor, dirty: bool) {
 fn sync_expanded_step_viewports_for_track(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     current_track_idx: usize,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
@@ -3563,7 +3563,7 @@ fn sync_expanded_step_viewports_for_track(
 fn sync_all_expanded_step_viewports(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     current_track_idx: usize,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
@@ -3577,12 +3577,12 @@ fn sync_all_expanded_step_viewports(
     dirty
 }
 
-fn sync_shared_track_collapsed(track_collapsed: &Arc<Mutex<Vec<bool>>>, app: &tui::App) {
+fn sync_shared_track_collapsed(track_collapsed: &Arc<Mutex<Vec<bool>>>, app: &app::App) {
     *track_collapsed.lock().unwrap() = app.track_collapsed.clone();
 }
 
 fn mod_route_destination_status_label(
-    app: &tui::App,
+    app: &app::App,
     destination: sequencer::sequencer::ModDestination,
 ) -> String {
     match destination {
@@ -3597,11 +3597,11 @@ fn mod_route_destination_status_label(
 }
 
 struct UiInvalidationApplyCtx<'a> {
-    app: &'a mut tui::App,
+    app: &'a mut app::App,
     editor: &'a mut Editor,
     state: &'a Arc<SequencerState>,
     track_collapsed: &'a Arc<Mutex<Vec<bool>>>,
-    bus_state: &'a Arc<Mutex<Vec<tui::BusChannelState>>>,
+    bus_state: &'a Arc<Mutex<Vec<app::BusChannelState>>>,
     current_track_idx: usize,
     selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
     selected_neural_neurons: &'a BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
@@ -4310,7 +4310,7 @@ struct SamplerTrackLoadResult {
 }
 
 fn load_or_convert_sampler_track(
-    app: &mut tui::App,
+    app: &mut app::App,
     editor: &mut Editor,
     state: &Arc<SequencerState>,
     current_track: &Arc<AtomicUsize>,
@@ -4458,7 +4458,7 @@ const AGENT_INSTRUMENT_STUB_UI: &str = r#"(defsynth-ui
 "#;
 
 fn ensure_agent_instrument_stub_track(
-    app: &mut tui::App,
+    app: &mut app::App,
     editor: &mut Editor,
     state: &Arc<SequencerState>,
     current_track: &Arc<AtomicUsize>,
@@ -4564,7 +4564,7 @@ fn ensure_agent_instrument_stub_track(
 }
 
 fn apply_agent_draft_to_owned_instrument(
-    app: &mut tui::App,
+    app: &mut app::App,
     editor: &mut Editor,
     state: &Arc<SequencerState>,
     current_track: &Arc<AtomicUsize>,
@@ -4736,7 +4736,7 @@ fn write_patcher_layout_sidecar(dsp_path: &Path, layout: &str) -> std::io::Resul
 }
 
 fn apply_compiled_effect_edit_session(
-    app: &mut tui::App,
+    app: &mut app::App,
     session: &EffectEditSession,
     name: &str,
     result: sequencer::lisp_host::CompileResult,
@@ -4854,7 +4854,7 @@ fn restore_effect_files(name: &str, source: Option<&str>, ui_source: Option<&str
 }
 
 fn apply_agent_draft_to_effect_slot(
-    app: &mut tui::App,
+    app: &mut app::App,
     editor: &mut Editor,
     state: &Arc<SequencerState>,
     current_track: &Arc<AtomicUsize>,
@@ -4963,7 +4963,7 @@ fn apply_agent_draft_to_effect_slot(
 }
 
 fn finalize_agent_instrument(
-    app: &mut tui::App,
+    app: &mut app::App,
     editor: &mut Editor,
     state: &Arc<SequencerState>,
     current_track: &Arc<AtomicUsize>,
@@ -5078,7 +5078,7 @@ fn finalize_agent_instrument(
 }
 
 fn finalize_agent_effect(
-    app: &mut tui::App,
+    app: &mut app::App,
     editor: &mut Editor,
     state: &Arc<SequencerState>,
     current_track: &Arc<AtomicUsize>,
@@ -5192,7 +5192,7 @@ fn finalize_agent_effect(
     })
 }
 
-fn agent_generation_watermark(app: &tui::App) -> u64 {
+fn agent_generation_watermark(app: &app::App) -> u64 {
     app.agent_store
         .list()
         .into_iter()
@@ -5226,7 +5226,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Create App. Start intentionally empty so the first action is choosing
     // a sound instead of editing a canned pattern.
     let master_recorder = eng.master_recorder.clone();
-    let mut app = tui::App::new(
+    let mut app = app::App::new(
         eng.state.clone(),
         eng.lg_ptr,
         eng.sample_rate,
@@ -5242,8 +5242,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.graph.track_node_ids.iter().map(|n| n.pan_id).collect(),
     ));
     let track_collapsed: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(app.track_collapsed.clone()));
-    let bus_state: Arc<Mutex<Vec<tui::BusChannelState>>> = Arc::new(Mutex::new(app.buses.clone()));
-    let bus_node_ids: Arc<Mutex<Vec<tui::BusNodeIds>>> =
+    let bus_state: Arc<Mutex<Vec<app::BusChannelState>>> = Arc::new(Mutex::new(app.buses.clone()));
+    let bus_node_ids: Arc<Mutex<Vec<app::BusNodeIds>>> =
         Arc::new(Mutex::new(app.graph.bus_node_ids.clone()));
     let lg_raw = lg_ptr.0;
 
@@ -5656,7 +5656,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 BackendEvent::Terminal(Event::Key(raw_key)) => {
                     if raw_key.kind == crossterm::event::KeyEventKind::Release {
-                        tui::edit::finish_active_gesture(&mut app);
+                        app::edit::finish_active_gesture(&mut app);
                     }
                     if editor.active_buffer().name == "*sample-import*" {
                         let key = normalize_command_shortcuts(raw_key);
@@ -5705,7 +5705,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             && raw_key.modifiers == crossterm::event::KeyModifiers::NONE
                             && app.history.active_gesture().is_some()
                         {
-                            match tui::edit::cancel_active_gesture(&mut app) {
+                            match app::edit::cancel_active_gesture(&mut app) {
                                 Ok(true) => editor.show_transient_message("Parameter edit canceled"),
                                 Ok(false) => {}
                                 Err(error) => editor.handle_host_event(HostEvent::Error(format!(
@@ -5726,7 +5726,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 gesture
                                     .transaction
                                     .rollback(&mut app)
-                                    .map(|()| tui::edit::EditOutcome::NoOp)
+                                    .map(|()| app::edit::EditOutcome::NoOp)
                             } else {
                                 gesture.transaction.commit(&mut app)
                             };
@@ -5757,11 +5757,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         let track_count_before_replay = app.tracks.len();
                         let replay = match shortcut {
-                            SequencerHistoryShortcut::Undo => tui::edit::undo(&mut app),
-                            SequencerHistoryShortcut::Redo => tui::edit::redo(&mut app),
+                            SequencerHistoryShortcut::Undo => app::edit::undo(&mut app),
+                            SequencerHistoryShortcut::Redo => app::edit::redo(&mut app),
                         };
                         let message = match replay {
-                            tui::history::HistoryReplay::Applied(result) => {
+                            app::history::HistoryReplay::Applied(result) => {
                                 let topology_changed = app.tracks.len() != track_count_before_replay;
                                 if !topology_changed {
                                     track_names.clone_from(&app.tracks);
@@ -5859,11 +5859,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                             }
-                            tui::history::HistoryReplay::Unavailable => match shortcut {
+                            app::history::HistoryReplay::Unavailable => match shortcut {
                                 SequencerHistoryShortcut::Undo => "Nothing to undo".to_string(),
                                 SequencerHistoryShortcut::Redo => "Nothing to redo".to_string(),
                             },
-                            tui::history::HistoryReplay::Failed(error) => match shortcut {
+                            app::history::HistoryReplay::Failed(error) => match shortcut {
                                 SequencerHistoryShortcut::Undo => {
                                     format!("Could not undo: {error:?}")
                                 }
@@ -6126,13 +6126,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         pending_lisp_history_transactions.remove(&id)
                     {
                         if success {
-                            tui::edit::squash_history_since(
+                            app::edit::squash_history_since(
                                 &mut app,
                                 checkpoint_len,
                                 label,
                             );
                         } else if let Err(error) =
-                            tui::edit::rollback_history_to(&mut app, checkpoint)
+                            app::edit::rollback_history_to(&mut app, checkpoint)
                         {
                             editor.handle_host_event(HostEvent::Error(format!(
                                 "Lisp authoring rollback failed: {error:?}"
@@ -6447,7 +6447,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &mut piano_roll_history_gesture,
                             &payload,
                         ) {
-                            Ok((tui::edit::EditOutcome::Applied(result), track)) => {
+                            Ok((app::edit::EditOutcome::Applied(result), track)) => {
                                 ui_invalidations.push(UiInvalidation::PianoRoll {
                                     track,
                                     change: PianoRollInvalidation::Items,
@@ -6456,8 +6456,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 editor.show_transient_message(result.label);
                             }
-                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
-                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                            Ok((app::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((app::edit::EditOutcome::AppliedUnrecorded, _)) => {
                                 editor.handle_host_event(HostEvent::Error(
                                     "Piano-roll gesture was applied without history".to_string(),
                                 ));
@@ -6474,7 +6474,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &payload,
                         ) {
                             Ok((outcome, status, track)) => {
-                                if matches!(outcome, tui::edit::EditOutcome::Applied(_)) {
+                                if matches!(outcome, app::edit::EditOutcome::Applied(_)) {
                                     *auto_follow_override_until.lock().unwrap() =
                                         Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
                                     ui_invalidations.push(UiInvalidation::PianoRoll {
@@ -6491,7 +6491,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "drum-lane-history-action" => {
                         match apply_drum_lane_history_host_command(&mut app, &payload) {
-                            Ok((tui::edit::EditOutcome::Applied(result), action)) => {
+                            Ok((app::edit::EditOutcome::Applied(result), action)) => {
                                 let track = action.track();
                                 let bindings = editor.runtime().reactive_binding_store();
                                 match action {
@@ -6550,8 +6550,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 editor.show_transient_message(result.label);
                             }
-                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
-                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                            Ok((app::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((app::edit::EditOutcome::AppliedUnrecorded, _)) => {
                                 editor.handle_host_event(HostEvent::Error(
                                     "Drum-lane edit was applied without history".to_string(),
                                 ));
@@ -6575,7 +6575,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             track,
                             &selected_steps,
                         ) {
-                            Ok((tui::edit::EditOutcome::Applied(_), steps)) => {
+                            Ok((app::edit::EditOutcome::Applied(_), steps)) => {
                                 *auto_follow_override_until.lock().unwrap() =
                                     Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
                                 ui_invalidations.push(UiInvalidation::Pattern(
@@ -6594,7 +6594,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "paste-steps" => {
                         match apply_step_paste_host_command(&mut app, &step_clipboard, &payload) {
-                            Ok((tui::edit::EditOutcome::Applied(result), track)) => {
+                            Ok((app::edit::EditOutcome::Applied(result), track)) => {
                                 *auto_follow_override_until.lock().unwrap() =
                                     Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
                                 ui_invalidations.push(UiInvalidation::Pattern(
@@ -6603,8 +6603,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 editor.show_transient_message(result.label);
                             }
-                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
-                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                            Ok((app::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((app::edit::EditOutcome::AppliedUnrecorded, _)) => {
                                 editor.handle_host_event(HostEvent::Error(
                                     "Step paste was applied without history".to_string(),
                                 ));
@@ -6614,7 +6614,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "set-step-param-history" => {
                         match apply_step_param_history_host_command(&mut app, &payload) {
-                            Ok((tui::edit::EditOutcome::Applied(result), track, steps, param)) => {
+                            Ok((app::edit::EditOutcome::Applied(result), track, steps, param)) => {
                                 *auto_follow_override_until.lock().unwrap() =
                                     Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
                                 for step in steps {
@@ -6634,8 +6634,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 editor.show_transient_message(result.label);
                             }
-                            Ok((tui::edit::EditOutcome::NoOp, ..)) => {}
-                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, ..)) => {
+                            Ok((app::edit::EditOutcome::NoOp, ..)) => {}
+                            Ok((app::edit::EditOutcome::AppliedUnrecorded, ..)) => {
                                 editor.handle_host_event(HostEvent::Error(
                                     "Step parameter edit was applied without history".to_string(),
                                 ));
@@ -6645,7 +6645,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "move-step-history" => {
                         match apply_move_step_history_host_command(&mut app, &payload) {
-                            Ok((tui::edit::EditOutcome::Applied(result), track, steps, affected_steps, delta, move_selection)) => {
+                            Ok((app::edit::EditOutcome::Applied(result), track, steps, affected_steps, delta, move_selection)) => {
                                 let moved_steps = steps
                                     .iter()
                                     .map(|step| (*step as isize + delta) as usize)
@@ -6676,8 +6676,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 editor.show_transient_message(result.label);
                             }
-                            Ok((tui::edit::EditOutcome::NoOp, ..)) => {}
-                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, ..)) => {
+                            Ok((app::edit::EditOutcome::NoOp, ..)) => {}
+                            Ok((app::edit::EditOutcome::AppliedUnrecorded, ..)) => {
                                 editor.handle_host_event(HostEvent::Error(
                                     "Step move was applied without history".to_string(),
                                 ));
@@ -6687,7 +6687,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "slice2-history-action" => {
                         match apply_slice2_history_host_command(&mut app, &payload) {
-                            Ok((tui::edit::EditOutcome::Applied(result), track)) => {
+                            Ok((app::edit::EditOutcome::Applied(result), track)) => {
                                 *auto_follow_override_until.lock().unwrap() =
                                     Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
                                 ui_invalidations.push(UiInvalidation::Pattern(
@@ -6696,8 +6696,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 editor.show_transient_message(result.label);
                             }
-                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
-                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                            Ok((app::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((app::edit::EditOutcome::AppliedUnrecorded, _)) => {
                                 editor.handle_host_event(HostEvent::Error(
                                     "Slice 2 edit was applied without history".to_string(),
                                 ));
@@ -6707,7 +6707,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "slice3-history-action" => {
                         match apply_slice3_history_host_command(&mut app, &payload) {
-                            Ok((tui::edit::EditOutcome::Applied(result), track)) => {
+                            Ok((app::edit::EditOutcome::Applied(result), track)) => {
                                 *auto_follow_override_until.lock().unwrap() =
                                     Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
                                 match (track, slice3_track_mixer_invalidation(&payload)) {
@@ -6729,8 +6729,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 editor.show_transient_message(result.label);
                             }
-                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
-                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                            Ok((app::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((app::edit::EditOutcome::AppliedUnrecorded, _)) => {
                                 editor.handle_host_event(HostEvent::Error(
                                     "Slice 3 edit was applied without history".to_string(),
                                 ));
@@ -6740,7 +6740,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "bus-mixer-history-action" => {
                         match apply_bus_mixer_history_host_command(&mut app, &payload) {
-                            Ok((tui::edit::EditOutcome::Applied(result), bus)) => {
+                            Ok((app::edit::EditOutcome::Applied(result), bus)) => {
                                 *bus_state.lock().unwrap() = app.buses.clone();
                                 match bus_mixer_targeted_invalidation(&payload) {
                                     Some(change) => {
@@ -6757,8 +6757,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 editor.show_transient_message(result.label);
                             }
-                            Ok((tui::edit::EditOutcome::NoOp, _)) => {}
-                            Ok((tui::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                            Ok((app::edit::EditOutcome::NoOp, _)) => {}
+                            Ok((app::edit::EditOutcome::AppliedUnrecorded, _)) => {
                                 editor.handle_host_event(HostEvent::Error(
                                     "Bus mixer edit was applied without history".to_string(),
                                 ));
@@ -6768,7 +6768,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "toggle-step" => {
                         match apply_toggle_step_host_command(&mut app, &payload) {
-                            Ok((tui::edit::EditOutcome::Applied(_), track, step)) => {
+                            Ok((app::edit::EditOutcome::Applied(_), track, step)) => {
                                 let mut selection = selected_steps.lock().unwrap();
                                 if !selection.is_empty() {
                                     selection.clear();
@@ -7573,9 +7573,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Some(param),
                                 Some(value),
                             ) => {
-                                let outcome = tui::try_apply_command(
+                                let outcome = app::try_apply_command(
                                     &mut app,
-                                    tui::AppCommand::SetRackSlotEffectParam {
+                                    app::AppCommand::SetRackSlotEffectParam {
                                         track,
                                         rack_slot_idx: rack_slot,
                                         effect_slot_idx: effect_slot,
@@ -7642,9 +7642,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ) => {
                                 let steps: Vec<usize> =
                                     selected_steps.lock().unwrap().iter().copied().collect();
-                                let outcome = tui::try_apply_command(
+                                let outcome = app::try_apply_command(
                                     &mut app,
-                                    tui::AppCommand::SetRackSlotEffectPlockMulti {
+                                    app::AppCommand::SetRackSlotEffectPlockMulti {
                                         track,
                                         steps,
                                         rack_slot_idx: rack_slot,
@@ -7654,7 +7654,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     },
                                 );
                                 if !outcome
-                                    .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp)
+                                    .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp)
                                 {
                                     editor.handle_host_event(HostEvent::Status(format!(
                                         "Rack-slot effect parameter locks were not changed"
@@ -7722,9 +7722,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         track, rack_slot, effect_slot, param_idx, &label,
                                     )
                                     .and_then(|value| {
-                                        let outcome = tui::try_apply_command(
+                                        let outcome = app::try_apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetRackSlotEffectPlockMulti {
+                                            app::AppCommand::SetRackSlotEffectPlockMulti {
                                                 track,
                                                 steps,
                                                 rack_slot_idx: rack_slot,
@@ -7736,7 +7736,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         outcome
                                             .map_err(|error| format!("{error:?}"))
                                             .and_then(|outcome| {
-                                                (outcome != tui::edit::EditOutcome::NoOp)
+                                                (outcome != app::edit::EditOutcome::NoOp)
                                                     .then_some(())
                                                     .ok_or_else(|| {
                                                     "Rack-slot effect parameter locks were not changed"
@@ -7749,9 +7749,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         track, rack_slot, effect_slot, param_idx, &label,
                                     )
                                     .and_then(|value| {
-                                        tui::try_apply_command(
+                                        app::try_apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetRackSlotEffectParam {
+                                            app::AppCommand::SetRackSlotEffectParam {
                                                 track,
                                                 rack_slot_idx: rack_slot,
                                                 effect_slot_idx: effect_slot,
@@ -8078,7 +8078,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         ),
                                     )
                                 } else if let Some(track) = track {
-                                    tui::edit::apply_recorded_track_effect_ir_mutation(
+                                    app::edit::apply_recorded_track_effect_ir_mutation(
                                         &mut app,
                                         track,
                                         slot,
@@ -9405,9 +9405,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 map_usize(map, "slot"),
                                 map_number(map, "value").map(|value| value as f32),
                             ) {
-                                tui::apply_command(
+                                app::apply_command(
                                     &mut app,
-                                    tui::AppCommand::SetRackSlotGain {
+                                    app::AppCommand::SetRackSlotGain {
                                         track,
                                         slot_idx,
                                         value,
@@ -9437,9 +9437,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 map_usize(map, "slot"),
                                 map_number(map, "value").map(|value| value as f32),
                             ) {
-                                tui::apply_command(
+                                app::apply_command(
                                     &mut app,
-                                    tui::AppCommand::SetRackSlotPan {
+                                    app::AppCommand::SetRackSlotPan {
                                         track,
                                         slot_idx,
                                         value,
@@ -9467,9 +9467,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let (Some(track), Some(slot_idx)) =
                                 (map_usize(map, "track"), map_usize(map, "slot"))
                             {
-                                tui::apply_command(
+                                app::apply_command(
                                     &mut app,
-                                    tui::AppCommand::SetRackSlotMute {
+                                    app::AppCommand::SetRackSlotMute {
                                         track,
                                         slot_idx,
                                         value: map_bool(map, "value"),
@@ -9510,9 +9510,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let (Some(track), Some(slot_idx)) =
                                 (map_usize(map, "track"), map_usize(map, "slot"))
                             {
-                                tui::apply_command(
+                                app::apply_command(
                                     &mut app,
-                                    tui::AppCommand::SetRackSlotSolo {
+                                    app::AppCommand::SetRackSlotSolo {
                                         track,
                                         slot_idx,
                                         value: map_bool(map, "value"),
@@ -9549,9 +9549,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 map_usize(map, "slot"),
                                 map_usize(map, "value"),
                             ) {
-                                tui::apply_command(
+                                app::apply_command(
                                     &mut app,
-                                    tui::AppCommand::SetRackSlotMaxPolyphony {
+                                    app::AppCommand::SetRackSlotMaxPolyphony {
                                         track,
                                         slot_idx,
                                         value,
@@ -9581,9 +9581,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 map_number(map, "value")
                                     .map(|value| value.round().clamp(0.0, u8::MAX as f64) as u8),
                             ) {
-                                tui::apply_command(
+                                app::apply_command(
                                     &mut app,
-                                    tui::AppCommand::SetRackSlotChokeGroup {
+                                    app::AppCommand::SetRackSlotChokeGroup {
                                         track,
                                         slot_idx,
                                         value,
@@ -9612,9 +9612,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 map_usize(map, "slot"),
                                 map_number(map, "value").map(|value| value as f32),
                             ) {
-                                tui::apply_command(
+                                app::apply_command(
                                     &mut app,
-                                    tui::AppCommand::SetRackSlotBaseNoteOffset {
+                                    app::AppCommand::SetRackSlotBaseNoteOffset {
                                         track,
                                         slot_idx,
                                         value,
@@ -9642,9 +9642,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             {
                                 let steps: Vec<usize> =
                                     selected_steps.lock().unwrap().iter().copied().collect();
-                                tui::apply_command(
+                                app::apply_command(
                                     &mut app,
-                                    tui::AppCommand::SetRackSlotParamPlockMulti {
+                                    app::AppCommand::SetRackSlotParamPlockMulti {
                                         track,
                                         slot_idx,
                                         steps,
@@ -9882,7 +9882,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let param = descriptor.params.get(param_idx)?;
                                             let value = param.clamp(param.user_input_to_stored(user_value));
                                             Some(if name == "set-rack-slot-instrument-plock-batch" {
-                                                tui::AppCommand::SetRackSlotInstrumentPlockMulti {
+                                                app::AppCommand::SetRackSlotInstrumentPlockMulti {
                                                     track,
                                                     slot_idx,
                                                     steps: steps.clone(),
@@ -9890,7 +9890,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     value,
                                                 }
                                             } else {
-                                                tui::AppCommand::SetRackSlotInstrumentParam {
+                                                app::AppCommand::SetRackSlotInstrumentParam {
                                                     track,
                                                     slot_idx,
                                                     param_idx,
@@ -9905,14 +9905,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let label = map_string(map, "label")
                                     .unwrap_or_else(|| "Set rack instrument parameters".to_string());
                                 let result = if name == "set-rack-slot-instrument-plock-batch" {
-                                    tui::edit::apply_coalesced_device_plock_batch(
+                                    app::edit::apply_coalesced_device_plock_batch(
                                         &mut app,
                                         &commands,
                                         &gesture,
                                         &label,
                                     )
                                 } else {
-                                    tui::edit::apply_coalesced_device_value_batch(
+                                    app::edit::apply_coalesced_device_value_batch(
                                         &mut app,
                                         &commands,
                                         &gesture,
@@ -9955,9 +9955,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     {
                                         let stored =
                                             desc.clamp(desc.user_input_to_stored(user_val));
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetRackSlotInstrumentParam {
+                                            app::AppCommand::SetRackSlotInstrumentParam {
                                                 track,
                                                 slot_idx,
                                                 param_idx,
@@ -10017,9 +10017,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .iter()
                                             .copied()
                                             .collect();
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetRackSlotInstrumentPlockMulti {
+                                            app::AppCommand::SetRackSlotInstrumentPlockMulti {
                                                 track,
                                                 slot_idx,
                                                 steps,
@@ -10081,9 +10081,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .unwrap_or(desc.default);
                                         let next =
                                             desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetRackSlotInstrumentParam {
+                                            app::AppCommand::SetRackSlotInstrumentParam {
                                                 track,
                                                 slot_idx,
                                                 param_idx,
@@ -10146,9 +10146,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .unwrap_or(default);
                                         let next =
                                             desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetRackSlotInstrumentPlockMulti {
+                                            app::AppCommand::SetRackSlotInstrumentPlockMulti {
                                                 track,
                                                 slot_idx,
                                                 steps: selected,
@@ -10194,9 +10194,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if let Some(selected_idx) =
                                             labels.iter().position(|item| item == &label)
                                         {
-                                            tui::apply_command(
+                                            app::apply_command(
                                                 &mut app,
-                                                tui::AppCommand::SetRackSlotInstrumentParam {
+                                                app::AppCommand::SetRackSlotInstrumentParam {
                                                     track,
                                                     slot_idx,
                                                     param_idx,
@@ -10246,9 +10246,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 .iter()
                                                 .copied()
                                                 .collect();
-                                            tui::apply_command(
+                                            app::apply_command(
                                                 &mut app,
-                                                tui::AppCommand::SetRackSlotInstrumentPlockMulti {
+                                                app::AppCommand::SetRackSlotInstrumentPlockMulti {
                                                     track,
                                                     slot_idx,
                                                     steps,
@@ -10297,21 +10297,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     {
                                         let value = desc.clamp(desc.user_input_to_stored(user_value));
                                         commands.push(if name == "set-instrument-plock-batch" {
-                                            tui::AppCommand::SetInstrumentPlockMulti {
+                                            app::AppCommand::SetInstrumentPlockMulti {
                                                 track,
                                                 steps: steps.clone(),
                                                 param_idx,
                                                 value,
                                             }
                                         } else if name == "set-instrument-key-lock-batch" {
-                                            tui::AppCommand::SetInstrumentKeyLockMulti {
+                                            app::AppCommand::SetInstrumentKeyLockMulti {
                                                 track,
                                                 notes: notes.clone(),
                                                 param_idx,
                                                 value,
                                             }
                                         } else {
-                                            tui::AppCommand::SetInstrumentParam {
+                                            app::AppCommand::SetInstrumentParam {
                                                 track,
                                                 param_idx,
                                                 value,
@@ -10324,7 +10324,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .unwrap_or_else(|| "instrument-envelope".to_string());
                                     let label = map_string(map, "label")
                                         .unwrap_or_else(|| "Set instrument envelope".to_string());
-                                    tui::edit::apply_coalesced_device_plock_batch(
+                                    app::edit::apply_coalesced_device_plock_batch(
                                         &mut app,
                                         &commands,
                                         &gesture,
@@ -10335,7 +10335,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .unwrap_or_else(|| "instrument-envelope".to_string());
                                     let label = map_string(map, "label")
                                         .unwrap_or_else(|| "Set instrument envelope".to_string());
-                                    tui::edit::apply_coalesced_device_value_batch(
+                                    app::edit::apply_coalesced_device_value_batch(
                                         &mut app,
                                         &commands,
                                         &gesture,
@@ -10356,11 +10356,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let param_indices = commands
                                         .iter()
                                         .filter_map(|command| match command {
-                                            tui::AppCommand::SetInstrumentParam { param_idx, .. }
-                                            | tui::AppCommand::SetInstrumentPlockMulti {
+                                            app::AppCommand::SetInstrumentParam { param_idx, .. }
+                                            | app::AppCommand::SetInstrumentPlockMulti {
                                                 param_idx, ..
                                             }
-                                            | tui::AppCommand::SetInstrumentKeyLockMulti {
+                                            | app::AppCommand::SetInstrumentKeyLockMulti {
                                                 param_idx, ..
                                             } => Some(*param_idx),
                                             _ => None,
@@ -10382,7 +10382,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 match result {
                                     Ok(_) if map_bool(map, "commit") => {
-                                        tui::edit::finish_active_gesture(&mut app);
+                                        app::edit::finish_active_gesture(&mut app);
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
                                         ui_epoch.fetch_add(1, Ordering::Relaxed);
                                     }
@@ -10431,9 +10431,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         );
                                     }
                                     if !wrote_neural_plock {
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetInstrumentParam {
+                                            app::AppCommand::SetInstrumentParam {
                                                 track,
                                                 param_idx,
                                                 value: stored,
@@ -10518,9 +10518,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .cloned()
                                 {
                                     let stored = desc.clamp(desc.user_input_to_stored(user_val));
-                                    tui::apply_command(
+                                    app::apply_command(
                                         &mut app,
-                                        tui::AppCommand::SetInstrumentKeyLock {
+                                        app::AppCommand::SetInstrumentKeyLock {
                                             track,
                                             note,
                                             param_idx,
@@ -10550,9 +10550,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .cloned()
                                 {
                                     let stored = desc.clamp(desc.user_input_to_stored(user_val));
-                                    tui::apply_command(
+                                    app::apply_command(
                                         &mut app,
-                                        tui::AppCommand::SetInstrumentKeyLockMulti {
+                                        app::AppCommand::SetInstrumentKeyLockMulti {
                                             track,
                                             notes,
                                             param_idx,
@@ -10585,9 +10585,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if let Some(selected_idx) =
                                         labels.iter().position(|item| item == &label)
                                     {
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetInstrumentKeyLock {
+                                            app::AppCommand::SetInstrumentKeyLock {
                                                 track,
                                                 note,
                                                 param_idx,
@@ -10620,9 +10620,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if let Some(selected_idx) =
                                         labels.iter().position(|item| item == &label)
                                     {
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetInstrumentKeyLockMulti {
+                                            app::AppCommand::SetInstrumentKeyLockMulti {
                                                 track,
                                                 notes,
                                                 param_idx,
@@ -10643,9 +10643,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 map_usize(map, "note").and_then(|note| u8::try_from(note).ok());
                             if let (Some(param_idx), Some(note)) = (param_idx, note) {
                                 let track = current_track.load(Ordering::Relaxed);
-                                tui::apply_command(
+                                app::apply_command(
                                     &mut app,
-                                    tui::AppCommand::ClearInstrumentKeyLock {
+                                    app::AppCommand::ClearInstrumentKeyLock {
                                         track,
                                         note,
                                         param_idx,
@@ -10662,9 +10662,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 map_usize(map, "note").and_then(|note| u8::try_from(note).ok());
                             if let Some(note) = note {
                                 let track = current_track.load(Ordering::Relaxed);
-                                tui::apply_command(
+                                app::apply_command(
                                     &mut app,
-                                    tui::AppCommand::ClearInstrumentKeyLocksForNote { track, note },
+                                    app::AppCommand::ClearInstrumentKeyLocksForNote { track, note },
                                 );
                                 fx_epoch.fetch_add(1, Ordering::Relaxed);
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -10678,9 +10678,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let (Some(notes), Some(label)) = (notes, label) {
                                 let track = current_track.load(Ordering::Relaxed);
                                 let applied = if label == "def" {
-                                    tui::apply_command(
+                                    app::apply_command(
                                         &mut app,
-                                        tui::AppCommand::ClearInstrumentKeyLockVariantsForNotes {
+                                        app::AppCommand::ClearInstrumentKeyLockVariantsForNotes {
                                             track,
                                             notes,
                                         },
@@ -10691,9 +10691,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .key_lock_variant_registry_snapshot(track)
                                         .assignment_for_label(&label)
                                         .is_some_and(|assignment| {
-                                            tui::apply_command(
+                                            app::apply_command(
                                                 &mut app,
-                                                tui::AppCommand::StampInstrumentKeyLockVariant {
+                                                app::AppCommand::StampInstrumentKeyLockVariant {
                                                     track,
                                                     notes,
                                                     key: assignment.key,
@@ -10787,9 +10787,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             },
                                         );
                                     } else if selected.is_empty() {
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetInstrumentParam {
+                                            app::AppCommand::SetInstrumentParam {
                                                 track,
                                                 param_idx,
                                                 value: next,
@@ -10805,9 +10805,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             editor.mark_needs_redraw();
                                         }
                                     } else {
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetInstrumentPlockMulti {
+                                            app::AppCommand::SetInstrumentPlockMulti {
                                                 track,
                                                 steps: selected,
                                                 param_idx,
@@ -10869,7 +10869,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .get(param_idx)?;
                                         let value = value.clamp(desc.min, desc.max);
                                         Some(if name == "set-effect-plock-batch" {
-                                            tui::AppCommand::SetEffectPlockMulti {
+                                            app::AppCommand::SetEffectPlockMulti {
                                                 track,
                                                 steps: steps.clone(),
                                                 slot_idx,
@@ -10877,7 +10877,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 value,
                                             }
                                         } else {
-                                            tui::AppCommand::SetEffectParam {
+                                            app::AppCommand::SetEffectParam {
                                                 track,
                                                 slot_idx,
                                                 param_idx,
@@ -10891,14 +10891,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .unwrap_or_else(|| "effect-curve".to_string());
                                     let label = map_string(map, "label")
                                         .unwrap_or_else(|| "Set effect curve".to_string());
-                                    tui::edit::apply_coalesced_device_plock_batch(
+                                    app::edit::apply_coalesced_device_plock_batch(
                                         &mut app,
                                         &commands,
                                         &gesture,
                                         &label,
                                     )
                                 } else {
-                                    tui::edit::apply_coalesced_device_value_batch(
+                                    app::edit::apply_coalesced_device_value_batch(
                                         &mut app,
                                         &commands,
                                         "effect-curve",
@@ -10919,8 +10919,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let param_indices = commands
                                         .iter()
                                         .filter_map(|command| match command {
-                                            tui::AppCommand::SetEffectParam { param_idx, .. }
-                                            | tui::AppCommand::SetEffectPlockMulti {
+                                            app::AppCommand::SetEffectParam { param_idx, .. }
+                                            | app::AppCommand::SetEffectPlockMulti {
                                                 param_idx, ..
                                             } => Some(*param_idx),
                                             _ => None,
@@ -10940,7 +10940,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 match result {
                                     Ok(_) if map_bool(map, "commit") => {
-                                        tui::edit::finish_active_gesture(&mut app);
+                                        app::edit::finish_active_gesture(&mut app);
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
                                         ui_epoch.fetch_add(1, Ordering::Relaxed);
                                     }
@@ -11000,9 +11000,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                 }
                                 if !wrote_neural_plock {
-                                    tui::apply_command(
+                                    app::apply_command(
                                         &mut app,
-                                        tui::AppCommand::SetEffectParam {
+                                        app::AppCommand::SetEffectParam {
                                             track,
                                             slot_idx,
                                             param_idx,
@@ -11176,9 +11176,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let next =
                                                 desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
                                             if selected.is_empty() {
-                                                tui::apply_command(
+                                                app::apply_command(
                                                     &mut app,
-                                                    tui::AppCommand::SetMidiFxParam {
+                                                    app::AppCommand::SetMidiFxParam {
                                                         track,
                                                         slot_idx,
                                                         param_idx,
@@ -11196,9 +11196,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     editor.mark_needs_redraw();
                                                 }
                                             } else {
-                                                tui::apply_command(
+                                                app::apply_command(
                                                     &mut app,
-                                                    tui::AppCommand::SetMidiFxPlockMulti {
+                                                    app::AppCommand::SetMidiFxPlockMulti {
                                                         track,
                                                         steps: selected,
                                                         slot_idx,
@@ -11287,9 +11287,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 },
                                             );
                                         } else if selected.is_empty() {
-                                            tui::apply_command(
+                                            app::apply_command(
                                                 &mut app,
-                                                tui::AppCommand::SetEffectParam {
+                                                app::AppCommand::SetEffectParam {
                                                     track,
                                                     slot_idx,
                                                     param_idx,
@@ -11307,9 +11307,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 editor.mark_needs_redraw();
                                             }
                                         } else {
-                                            tui::apply_command(
+                                            app::apply_command(
                                                 &mut app,
-                                                tui::AppCommand::SetEffectPlockMulti {
+                                                app::AppCommand::SetEffectPlockMulti {
                                                     track,
                                                     slot_idx,
                                                     steps: selected,
@@ -11365,9 +11365,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             );
                                         }
                                         if !wrote_neural_plock {
-                                            tui::apply_command(
+                                            app::apply_command(
                                                 &mut app,
-                                                tui::AppCommand::SetInstrumentParam {
+                                                app::AppCommand::SetInstrumentParam {
                                                     track,
                                                     param_idx,
                                                     value,
@@ -11439,9 +11439,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .iter()
                                             .copied()
                                             .collect();
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetInstrumentPlockMulti {
+                                            app::AppCommand::SetInstrumentPlockMulti {
                                                 track,
                                                 steps,
                                                 param_idx,
@@ -11504,9 +11504,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let steps: Vec<usize> =
                                         selected_steps.lock().unwrap().iter().copied().collect();
                                     if steps.is_empty() {
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetInstrumentTensorCell {
+                                            app::AppCommand::SetInstrumentTensorCell {
                                                 track,
                                                 tensor_idx,
                                                 cell_idx,
@@ -11514,9 +11514,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             },
                                         );
                                     } else {
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetInstrumentTensorPlockCellMulti {
+                                            app::AppCommand::SetInstrumentTensorPlockCellMulti {
                                                 track,
                                                 steps,
                                                 tensor_idx,
@@ -11592,9 +11592,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 .iter()
                                                 .copied()
                                                 .collect();
-                                            tui::apply_command(
+                                            app::apply_command(
                                                 &mut app,
-                                                tui::AppCommand::SetInstrumentPlockMulti {
+                                                app::AppCommand::SetInstrumentPlockMulti {
                                                     track,
                                                     steps,
                                                     param_idx,
@@ -11687,9 +11687,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         Some(sequencer::effects::HostControl::FxSidechain { .. })
                                     );
                                     if is_host_sidechain {
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetEffectParam {
+                                            app::AppCommand::SetEffectParam {
                                                 track,
                                                 slot_idx,
                                                 param_idx,
@@ -11715,9 +11715,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             );
                                         }
                                         if !wrote_neural_plock {
-                                            tui::apply_command(
+                                            app::apply_command(
                                                 &mut app,
-                                                tui::AppCommand::SetEffectParam {
+                                                app::AppCommand::SetEffectParam {
                                                     track,
                                                     slot_idx,
                                                     param_idx,
@@ -11864,9 +11864,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .map(|bus| TrackOutput::Bus(bus.id))
                                 };
                                 if let Some(output) = output {
-                                    tui::apply_command(
+                                    app::apply_command(
                                         &mut app,
-                                        tui::AppCommand::SetTrackOutput { track, output },
+                                        app::AppCommand::SetTrackOutput { track, output },
                                     );
                                     let rt = editor.runtime_mut();
                                     sync_track_mixer_state(rt, &app, &state);
@@ -12080,9 +12080,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     });
                                 }
                                 sends.retain(|send| send.amount > 0.0);
-                                tui::apply_command(
+                                app::apply_command(
                                     &mut app,
-                                    tui::AppCommand::SetTrackSends { track, sends },
+                                    app::AppCommand::SetTrackSends { track, sends },
                                 );
                                 let rt = editor.runtime_mut();
                                 sync_track_bus_send_binding_field(rt, &app, &state, track, bus_idx);
@@ -13028,9 +13028,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         Some(sequencer::effects::HostControl::FxSidechain { .. })
                                     );
                                     if is_host_sidechain {
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetEffectParam {
+                                            app::AppCommand::SetEffectParam {
                                                 track,
                                                 slot_idx,
                                                 param_idx,
@@ -13062,9 +13062,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 .iter()
                                                 .copied()
                                                 .collect();
-                                            tui::apply_command(
+                                            app::apply_command(
                                                 &mut app,
-                                                tui::AppCommand::SetEffectPlockMulti {
+                                                app::AppCommand::SetEffectPlockMulti {
                                                     track,
                                                     slot_idx,
                                                     steps,
@@ -13132,9 +13132,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .get(track)
                                     .and_then(|slots| slots.get(slot_idx))
                                 {
-                                    tui::apply_command(
+                                    app::apply_command(
                                         &mut app,
-                                        tui::AppCommand::SetMidiFxParam {
+                                        app::AppCommand::SetMidiFxParam {
                                             track,
                                             slot_idx,
                                             param_idx,
@@ -13194,9 +13194,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 {
                                     let steps: Vec<usize> =
                                         selected_steps.lock().unwrap().iter().copied().collect();
-                                    tui::apply_command(
+                                    app::apply_command(
                                         &mut app,
-                                        tui::AppCommand::SetMidiFxPlockMulti {
+                                        app::AppCommand::SetMidiFxPlockMulti {
                                             track,
                                             steps,
                                             slot_idx,
@@ -13241,9 +13241,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .get(track)
                                         .and_then(|slots| slots.get(slot_idx))
                                     {
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetMidiFxParam {
+                                            app::AppCommand::SetMidiFxParam {
                                                 track,
                                                 slot_idx,
                                                 param_idx,
@@ -13294,9 +13294,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .iter()
                                             .copied()
                                             .collect();
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetMidiFxPlockMulti {
+                                            app::AppCommand::SetMidiFxPlockMulti {
                                                 track,
                                                 steps,
                                                 slot_idx,
@@ -13320,9 +13320,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(value) = value {
                                 let track = current_track.load(Ordering::Relaxed);
                                 let clamped = value.clamp(-48.0, 48.0);
-                                tui::apply_command(
+                                app::apply_command(
                                     &mut app,
-                                    tui::AppCommand::SetInstrumentBaseNoteOffset {
+                                    app::AppCommand::SetInstrumentBaseNoteOffset {
                                         track,
                                         value: clamped,
                                     },
@@ -13370,9 +13370,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     "timebase" => {
                                         let idx = (value.round() as usize)
                                             .min(sequencer::sequencer::Timebase::ALL.len() - 1);
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetTimebasePlock {
+                                            app::AppCommand::SetTimebasePlock {
                                                 track,
                                                 step,
                                                 timebase: Some(
@@ -13382,9 +13382,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         );
                                     }
                                     "swing" => {
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetTrackSwingPlock {
+                                            app::AppCommand::SetTrackSwingPlock {
                                                 track,
                                                 step,
                                                 value: Some(value),
@@ -13395,9 +13395,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let idx = (value.round() as usize).min(
                                             sequencer::sequencer::SwingResolution::ALL.len() - 1,
                                         );
-                                        tui::apply_command(
+                                        app::apply_command(
                                             &mut app,
-                                            tui::AppCommand::SetTrackSwingResolutionPlock {
+                                            app::AppCommand::SetTrackSwingResolutionPlock {
                                                 track,
                                                 step,
                                                 resolution: Some(
@@ -13411,9 +13411,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             if let Some(param) =
                                                 sequencer::sequencer::StepParam::ALL.get(param_idx)
                                             {
-                                                tui::apply_command(
+                                                app::apply_command(
                                                     &mut app,
-                                                    tui::AppCommand::SetStepParam {
+                                                    app::AppCommand::SetStepParam {
                                                         track,
                                                         step,
                                                         param: *param,
@@ -13434,9 +13434,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             {
                                                 let stored =
                                                     desc.clamp(desc.user_input_to_stored(value));
-                                                tui::apply_command(
+                                                app::apply_command(
                                                     &mut app,
-                                                    tui::AppCommand::SetInstrumentPlock {
+                                                    app::AppCommand::SetInstrumentPlock {
                                                         track,
                                                         step,
                                                         param_idx,
@@ -13464,9 +13464,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     .and_then(|d| d.params.get(param_idx))
                                                     .map(|p| value.clamp(p.min, p.max))
                                                     .unwrap_or(value);
-                                                tui::apply_command(
+                                                app::apply_command(
                                                     &mut app,
-                                                    tui::AppCommand::SetEffectPlock {
+                                                    app::AppCommand::SetEffectPlock {
                                                         track,
                                                         step,
                                                         slot_idx,
@@ -13484,9 +13484,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     param_idx,
                                                 )
                                             {
-                                                tui::apply_command(
+                                                app::apply_command(
                                                     &mut app,
-                                                    tui::AppCommand::SetRackMacroPlockMulti {
+                                                    app::AppCommand::SetRackMacroPlockMulti {
                                                         track,
                                                         steps: vec![step],
                                                         macro_idx: id.index(),
@@ -13503,9 +13503,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Some(param_idx),
                                         ) = (rack_slot, slot_idx, param_idx)
                                         {
-                                            tui::apply_command(
+                                            app::apply_command(
                                                 &mut app,
-                                                tui::AppCommand::SetRackSlotEffectPlockMulti {
+                                                app::AppCommand::SetRackSlotEffectPlockMulti {
                                                     track,
                                                     steps: vec![step],
                                                     rack_slot_idx: rack_slot,
@@ -13538,9 +13538,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     })
                                                     .map(|p| value.clamp(p.min, p.max))
                                                     .unwrap_or(value);
-                                                tui::apply_command(
+                                                app::apply_command(
                                                     &mut app,
-                                                    tui::AppCommand::SetMidiFxPlockMulti {
+                                                    app::AppCommand::SetMidiFxPlockMulti {
                                                         track,
                                                         steps: vec![step],
                                                         slot_idx,
@@ -13595,9 +13595,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .iter()
                                             .position(|item| *item == label)
                                         {
-                                            tui::apply_command(
+                                            app::apply_command(
                                                 &mut app,
-                                                tui::AppCommand::SetTimebasePlock {
+                                                app::AppCommand::SetTimebasePlock {
                                                     track,
                                                     step,
                                                     timebase: Some(
@@ -13613,9 +13613,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 .iter()
                                                 .position(|item| *item == label)
                                         {
-                                            tui::apply_command(
+                                            app::apply_command(
                                                 &mut app,
-                                                tui::AppCommand::SetTrackSwingResolutionPlock {
+                                                app::AppCommand::SetTrackSwingResolutionPlock {
                                                     track,
                                                     step,
                                                     resolution: Some(
@@ -13649,9 +13649,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     _ => None,
                                                 })
                                             {
-                                                tui::apply_command(
+                                                app::apply_command(
                                                     &mut app,
-                                                    tui::AppCommand::SetInstrumentPlock {
+                                                    app::AppCommand::SetInstrumentPlock {
                                                         track,
                                                         step,
                                                         param_idx,
@@ -13693,9 +13693,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     .get(track)
                                                     .and_then(|chain| chain.get(slot_idx))
                                                 {
-                                                    tui::apply_command(
+                                                    app::apply_command(
                                                         &mut app,
-                                                        tui::AppCommand::SetEffectPlock {
+                                                        app::AppCommand::SetEffectPlock {
                                                             track,
                                                             step,
                                                             slot_idx,
@@ -13722,9 +13722,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 &label,
                                             ) {
                                                 Ok(value) => {
-                                                    tui::apply_command(
+                                                    app::apply_command(
                                                         &mut app,
-                                                        tui::AppCommand::SetRackSlotEffectPlockMulti {
+                                                        app::AppCommand::SetRackSlotEffectPlockMulti {
                                                             track,
                                                             steps: vec![step],
                                                             rack_slot_idx: rack_slot,
@@ -13781,9 +13781,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     .get(track)
                                                     .and_then(|slots| slots.get(slot_idx))
                                                 {
-                                                    tui::apply_command(
+                                                    app::apply_command(
                                                         &mut app,
-                                                        tui::AppCommand::SetMidiFxPlockMulti {
+                                                        app::AppCommand::SetMidiFxPlockMulti {
                                                             track,
                                                             steps: vec![step],
                                                             slot_idx,
@@ -13851,41 +13851,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 match target.as_str() {
                                     "timebase" => {
                                         if let Some(step) = step {
-                                            changed = tui::try_apply_command(
+                                            changed = app::try_apply_command(
                                                 &mut app,
-                                                tui::AppCommand::SetTimebasePlock {
+                                                app::AppCommand::SetTimebasePlock {
                                                     track,
                                                     step,
                                                     timebase: None,
                                                 },
                                             )
-                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
+                                            .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "swing" => {
                                         if let Some(step) = step {
-                                            changed = tui::try_apply_command(
+                                            changed = app::try_apply_command(
                                                 &mut app,
-                                                tui::AppCommand::SetTrackSwingPlock {
+                                                app::AppCommand::SetTrackSwingPlock {
                                                     track,
                                                     step,
                                                     value: None,
                                                 },
                                             )
-                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
+                                            .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "swing-resolution" => {
                                         if let Some(step) = step {
-                                            changed = tui::try_apply_command(
+                                            changed = app::try_apply_command(
                                                 &mut app,
-                                                tui::AppCommand::SetTrackSwingResolutionPlock {
+                                                app::AppCommand::SetTrackSwingResolutionPlock {
                                                     track,
                                                     step,
                                                     resolution: None,
                                                 },
                                             )
-                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
+                                            .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "step-param" => {
@@ -13893,46 +13893,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             if let Some(param) =
                                                 sequencer::sequencer::StepParam::ALL.get(param_idx)
                                             {
-                                                changed = tui::try_apply_command(
+                                                changed = app::try_apply_command(
                                                     &mut app,
-                                                    tui::AppCommand::SetStepParam {
+                                                    app::AppCommand::SetStepParam {
                                                         track,
                                                         step,
                                                         param: *param,
                                                         value: param.default_value(),
                                                     },
                                                 )
-                                                .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
+                                                .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp);
                                             }
                                         }
                                     }
                                     "instrument" => {
                                         if let (Some(step), Some(param_idx)) = (step, param_idx) {
-                                            changed = tui::try_apply_command(
+                                            changed = app::try_apply_command(
                                                 &mut app,
-                                                tui::AppCommand::ClearInstrumentPlockMulti {
+                                                app::AppCommand::ClearInstrumentPlockMulti {
                                                     track,
                                                     steps: vec![step],
                                                     param_idx,
                                                 },
                                             )
-                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
+                                            .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "effect" => {
                                         if let (Some(step), Some(slot_idx), Some(param_idx)) =
                                             (step, slot_idx, param_idx)
                                         {
-                                            changed = tui::try_apply_command(
+                                            changed = app::try_apply_command(
                                                 &mut app,
-                                                tui::AppCommand::ClearEffectPlockMulti {
+                                                app::AppCommand::ClearEffectPlockMulti {
                                                     track,
                                                     steps: vec![step],
                                                     slot_idx,
                                                     param_idx,
                                                 },
                                             )
-                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
+                                            .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "rack-macro" => {
@@ -13942,15 +13942,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     param_idx,
                                                 )
                                             {
-                                                changed = tui::try_apply_command(
+                                                changed = app::try_apply_command(
                                                     &mut app,
-                                                    tui::AppCommand::ClearRackMacroPlockMulti {
+                                                    app::AppCommand::ClearRackMacroPlockMulti {
                                                         track,
                                                         steps: vec![step],
                                                         macro_idx: id.index(),
                                                     },
                                                 )
-                                                .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
+                                                .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp);
                                             }
                                         }
                                     }
@@ -13962,9 +13962,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Some(param_idx),
                                         ) = (step, rack_slot, slot_idx, param_idx)
                                         {
-                                            changed = tui::try_apply_command(
+                                            changed = app::try_apply_command(
                                                 &mut app,
-                                                tui::AppCommand::ClearRackSlotEffectPlockMulti {
+                                                app::AppCommand::ClearRackSlotEffectPlockMulti {
                                                     track,
                                                     steps: vec![step],
                                                     rack_slot_idx: rack_slot,
@@ -13972,23 +13972,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     param_idx,
                                                 },
                                             )
-                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
+                                            .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "midi-fx" => {
                                         if let (Some(step), Some(slot_idx), Some(param_idx)) =
                                             (step, slot_idx, param_idx)
                                         {
-                                            changed = tui::try_apply_command(
+                                            changed = app::try_apply_command(
                                                 &mut app,
-                                                tui::AppCommand::ClearMidiFxPlockMulti {
+                                                app::AppCommand::ClearMidiFxPlockMulti {
                                                     track,
                                                     steps: vec![step],
                                                     slot_idx,
                                                     param_idx,
                                                 },
                                             )
-                                            .is_ok_and(|outcome| outcome != tui::edit::EditOutcome::NoOp);
+                                            .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp);
                                         }
                                     }
                                     "neural-instrument" => {
@@ -14148,7 +14148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .assignment_for_label(label)
                                     .map(|assignment| assignment.key.clone())
                             });
-                            let outcome = tui::edit::apply_recorded_step_mutation(
+                            let outcome = app::edit::apply_recorded_step_mutation(
                                 &mut app,
                                 track,
                                 &steps,
@@ -14174,9 +14174,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 },
                             );
                             let changed = match outcome {
-                                Ok(tui::edit::EditOutcome::Applied(_)) => true,
-                                Ok(tui::edit::EditOutcome::NoOp) => false,
-                                Ok(tui::edit::EditOutcome::AppliedUnrecorded) => {
+                                Ok(app::edit::EditOutcome::Applied(_)) => true,
+                                Ok(app::edit::EditOutcome::NoOp) => false,
+                                Ok(app::edit::EditOutcome::AppliedUnrecorded) => {
                                     editor.handle_host_event(HostEvent::Error(
                                         "Variant edit was applied without history".to_string(),
                                     ));
@@ -18983,9 +18983,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rack_control_snapshot_dirty = false;
         }
         if pointer_released_this_loop {
-            tui::edit::finish_active_gesture(&mut app);
+            app::edit::finish_active_gesture(&mut app);
         } else if !pointer_is_down {
-            tui::edit::finish_active_gesture_if_idle(&mut app);
+            app::edit::finish_active_gesture_if_idle(&mut app);
         }
         ui_loop_stats.note_host_commands(host_commands_started.elapsed());
 

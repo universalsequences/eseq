@@ -7252,7 +7252,7 @@
 
     fn assert_effective_color_reactives_match_builders(
         runtime: &Runtime,
-        app: &tui::App,
+        app: &app::App,
         state: &Arc<SequencerState>,
     ) {
         for channel in 0..3 {
@@ -7264,13 +7264,13 @@
         }
     }
 
-    fn test_app_for_track_visual_state(state: Arc<SequencerState>) -> tui::App {
+    fn test_app_for_track_visual_state(state: Arc<SequencerState>) -> app::App {
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
-        let mut app = tui::App::new(
+        let mut app = app::App::new(
             state.clone(),
             sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
             44_100,
-            tui::AudioBuses {
+            app::AudioBuses {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
@@ -8247,15 +8247,15 @@
         );
     }
 
-    fn test_app_with_instrument_descriptor(desc: sequencer::effects::EffectDescriptor) -> tui::App {
+    fn test_app_with_instrument_descriptor(desc: sequencer::effects::EffectDescriptor) -> app::App {
         let state = Arc::new(SequencerState::new(1, vec![vec![]]));
         state.pattern.instrument_slots[0].apply_descriptor(&desc, 0);
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
-        let mut app = tui::App::new(
+        let mut app = app::App::new(
             state,
             sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
             44_100,
-            tui::AudioBuses {
+            app::AudioBuses {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
@@ -8896,9 +8896,9 @@
             Ok(Some(Value::Number(-1.0)))
         );
 
-        tui::apply_command(
+        app::apply_command(
             &mut app,
-            tui::AppCommand::MacroEnsure {
+            app::AppCommand::MacroEnsure {
                 key: "delay-push".to_string(),
                 name: "Delay Push".to_string(),
             },
@@ -9469,13 +9469,13 @@
         );
     }
 
-    fn test_app_with_sampler_descriptor(desc: sequencer::effects::EffectDescriptor) -> tui::App {
+    fn test_app_with_sampler_descriptor(desc: sequencer::effects::EffectDescriptor) -> app::App {
         let mut app = test_app_with_instrument_descriptor(desc);
         app.graph.track_instrument_types = vec![sequencer::sequencer::InstrumentType::Sampler];
         app
     }
 
-    fn test_app_with_rack_panel() -> tui::App {
+    fn test_app_with_rack_panel() -> app::App {
         let state = Arc::new(SequencerState::new(1, vec![vec![]]));
         let sampler_desc = sequencer::effects::EffectDescriptor::builtin_sampler();
         state.set_rack_track_for_all_pattern_snapshots(
@@ -9511,11 +9511,11 @@
             ),
         );
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
-        let mut app = tui::App::new(
+        let mut app = app::App::new(
             state,
             sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
             44_100,
-            tui::AudioBuses {
+            app::AudioBuses {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
@@ -9536,7 +9536,7 @@
         app
     }
 
-    fn test_app_with_rack_panel_and_slot_fx() -> tui::App {
+    fn test_app_with_rack_panel_and_slot_fx() -> app::App {
         let app = test_app_with_rack_panel();
         let descriptor = sequencer::effects::EffectDescriptor::builtin_ott();
         let snapshot = sequencer::effects::EffectSlotSnapshot::new_default(&descriptor, 42);
@@ -9551,7 +9551,7 @@
         app
     }
 
-    fn test_app_with_drum_rack_panel(selected_pad_note: i32) -> tui::App {
+    fn test_app_with_drum_rack_panel(selected_pad_note: i32) -> app::App {
         let state = Arc::new(SequencerState::new(1, vec![vec![]]));
         let sampler_desc = sequencer::effects::EffectDescriptor::builtin_sampler();
         state.set_rack_track_for_all_pattern_snapshots(
@@ -9587,11 +9587,11 @@
             ),
         );
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
-        let mut app = tui::App::new(
+        let mut app = app::App::new(
             state,
             sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
             44_100,
-            tui::AudioBuses {
+            app::AudioBuses {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
@@ -15666,11 +15666,11 @@
     fn metal_seq_script_picker_load_syncs_hidden_scratch_into_project_state() {
         let state = Arc::new(SequencerState::new(1, vec![vec![]]));
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
-        let mut app = tui::App::new(
+        let mut app = app::App::new(
             Arc::clone(&state),
             sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
             44_100,
-            tui::AudioBuses {
+            app::AudioBuses {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
@@ -15726,11 +15726,11 @@
     fn metal_seq_project_scratch_sync_reads_hidden_named_scratch_buffer() {
         let state = Arc::new(SequencerState::new(1, vec![vec![]]));
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
-        let mut app = tui::App::new(
+        let mut app = app::App::new(
             Arc::clone(&state),
             sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
             44_100,
-            tui::AudioBuses {
+            app::AudioBuses {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
@@ -15849,7 +15849,7 @@
             let Value::String(name) = payload["name"].borrow().clone() else {
                 panic!("macro-ensure name should be a string");
             };
-            tui::apply_command(&mut app, tui::AppCommand::MacroEnsure { key, name });
+            app::apply_command(&mut app, app::AppCommand::MacroEnsure { key, name });
         }
         sync_macro_state(editor.runtime_mut(), &app);
         editor.runtime_mut().run_reactive_cycle();

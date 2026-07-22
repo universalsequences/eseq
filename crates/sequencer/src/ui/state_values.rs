@@ -51,7 +51,7 @@ pub(crate) fn build_steps_value(state: &Arc<SequencerState>, track: usize) -> Va
 }
 
 /// Build a list-of-lists of bools: one step list per track for the *sequencer* buffer.
-pub(crate) fn build_all_track_steps_value(state: &Arc<SequencerState>, app: &tui::App) -> Value {
+pub(crate) fn build_all_track_steps_value(state: &Arc<SequencerState>, app: &app::App) -> Value {
     let tracks: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
         .map(|t| {
             let steps: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
@@ -139,7 +139,7 @@ pub(crate) fn build_track_pattern_cells_value(
 
 pub(crate) fn build_all_track_num_steps_value(
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
 ) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
         .map(|t| {
@@ -188,7 +188,7 @@ fn build_track_timebase_labels_value(
 
 pub(crate) fn build_all_track_timebase_labels_value(
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) -> Value {
@@ -650,7 +650,7 @@ fn process_param_target_label(target: &sequencer::process::ParamTarget) -> Strin
 }
 
 fn macro_mapping_current_value(
-    app: &tui::App,
+    app: &app::App,
     mapping: &sequencer::macro_engine::MacroMapping,
 ) -> Option<f32> {
     match (mapping.scope, &mapping.target) {
@@ -711,7 +711,7 @@ fn macro_mapping_current_value(
 }
 
 fn macro_mapping_param_descriptor<'a>(
-    app: &'a tui::App,
+    app: &'a app::App,
     mapping: &sequencer::macro_engine::MacroMapping,
 ) -> Option<(
     &'a sequencer::effects::EffectDescriptor,
@@ -775,7 +775,7 @@ fn macro_mapping_param_descriptor<'a>(
 }
 
 fn macro_mapping_display_metadata(
-    app: &tui::App,
+    app: &app::App,
     mapping: &sequencer::macro_engine::MacroMapping,
 ) -> (String, String, f32, f32, f32, f32, f32, u8, String) {
     let Some((device, param)) = macro_mapping_param_descriptor(app, mapping) else {
@@ -832,7 +832,7 @@ fn macro_mapping_display_metadata(
     )
 }
 
-pub(crate) fn build_macros_value(app: &tui::App) -> Value {
+pub(crate) fn build_macros_value(app: &app::App) -> Value {
     list_value(app.macro_engine.macros().iter().map(|macro_definition| {
         let kind = match macro_definition.kind {
             sequencer::macro_engine::MacroKind::Mapped => "mapped",
@@ -968,7 +968,7 @@ pub(crate) fn build_macros_value(app: &tui::App) -> Value {
     }))
 }
 
-pub(crate) fn sync_macro_state(rt: &mut Runtime, app: &tui::App) {
+pub(crate) fn sync_macro_state(rt: &mut Runtime, app: &app::App) {
     rt.set_reactive("SEQ", "macros", build_macros_value(app));
 }
 
@@ -1766,7 +1766,7 @@ pub(crate) fn sync_expanded_step_param_slot(
 pub(crate) fn sync_expanded_step_slot(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     selected_steps: &HashSet<usize>,
     current_track_idx: usize,
     viewport: ExpandedStepViewport,
@@ -1851,7 +1851,7 @@ pub(crate) fn sync_expanded_step_slot(
 pub(crate) fn sync_expanded_step_viewport(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     selected_steps: &HashSet<usize>,
     current_track_idx: usize,
     viewport: ExpandedStepViewport,
@@ -1910,7 +1910,7 @@ pub(crate) fn sync_expanded_step_viewport_playhead(
 pub(crate) fn sync_all_track_step_binding_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     plock_masks: &[[u64; MAX_STEPS / 64]],
@@ -1929,7 +1929,7 @@ pub(crate) fn sync_all_track_step_binding_fields(
 pub(crate) fn sync_all_track_step_binding_fields_profiled(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     plock_masks: &[[u64; MAX_STEPS / 64]],
@@ -1950,7 +1950,7 @@ pub(crate) fn sync_all_track_step_binding_fields_profiled(
 fn sync_all_track_step_binding_fields_inner(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     plock_masks: &[[u64; MAX_STEPS / 64]],
@@ -2107,7 +2107,7 @@ fn sync_all_track_step_binding_fields_inner(
 
 pub(crate) fn build_all_track_duration_spans_value(
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
 ) -> Value {
     let tracks: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
         .map(|track| Rc::new(RefCell::new(build_track_duration_spans_value(state, track))))
@@ -2117,7 +2117,7 @@ pub(crate) fn build_all_track_duration_spans_value(
 
 pub(crate) fn build_all_track_playheads_value(
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
 ) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
         .map(|t| {
@@ -2141,7 +2141,7 @@ pub(crate) fn build_all_track_step_has_plocks_from_masks(
 
 pub(crate) fn build_all_track_param_lists_value(
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     param: StepParam,
 ) -> Value {
     let tracks: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
@@ -2160,7 +2160,7 @@ pub(crate) fn build_all_active_track_param_lists_value(
     Value::List(tracks)
 }
 
-pub(crate) fn track_playheads_snapshot(state: &Arc<SequencerState>, app: &tui::App) -> Vec<u32> {
+pub(crate) fn track_playheads_snapshot(state: &Arc<SequencerState>, app: &app::App) -> Vec<u32> {
     (0..app.tracks.len())
         .map(|t| state.transport.track_playheads[t].load(Ordering::Relaxed))
         .collect()
@@ -2216,7 +2216,7 @@ fn track_playhead_row_count(state: &Arc<SequencerState>, track: usize) -> usize 
 pub(crate) fn sync_all_track_playhead_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
 ) {
     for track in 0..app.tracks.len() {
         let active_step = track_active_playhead_step(state, track);
@@ -2238,7 +2238,7 @@ pub(crate) fn sync_all_track_playhead_fields(
     }
 }
 
-pub(crate) fn clear_all_track_playhead_fields(rt: &mut Runtime, app: &tui::App) {
+pub(crate) fn clear_all_track_playhead_fields(rt: &mut Runtime, app: &app::App) {
     let max_rows = (MAX_STEPS + PAGE_SIZE - 1) / PAGE_SIZE;
     for track in 0..app.tracks.len() {
         for row in 0..max_rows {
@@ -2477,7 +2477,7 @@ fn reactive_set_needs_ui(result: eseqlisp::runtime::ReactiveSetResult) -> bool {
 
 pub(crate) fn sync_instrument_param_value_field(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     param_idx: usize,
     display_step: Option<usize>,
@@ -2510,7 +2510,7 @@ pub(crate) fn sync_instrument_param_value_field(
 
 pub(crate) fn sync_instrument_tensor_value_field(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     tensor_idx: usize,
     display_step: Option<usize>,
@@ -2545,7 +2545,7 @@ pub(crate) fn sync_instrument_tensor_value_field(
 
 pub(crate) fn sync_rack_macro_value_fields(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     display_step: Option<usize>,
 ) -> bool {
@@ -2590,7 +2590,7 @@ pub(crate) fn sync_rack_macro_value_fields(
 
 pub(crate) fn sync_rack_macro_value_field(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     id: sequencer::sequencer::RackMacroId,
     display_step: Option<usize>,
@@ -2665,7 +2665,7 @@ fn set_rack_value_field_updates(
     })
 }
 
-fn rack_slot_sample_duration(app: &tui::App, slot: &sequencer::sequencer::RackSlotSnapshot) -> f64 {
+fn rack_slot_sample_duration(app: &app::App, slot: &sequencer::sequencer::RackSlotSnapshot) -> f64 {
     let Some((buffer_id, sample_name, _)) = slot.sample_id.as_ref() else {
         return 1.0;
     };
@@ -2680,7 +2680,7 @@ fn rack_slot_sample_duration(app: &tui::App, slot: &sequencer::sequencer::RackSl
 }
 
 fn rack_sampler_selection_update(
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     slot_idx: usize,
     slot: &sequencer::sequencer::RackSlotSnapshot,
@@ -2703,7 +2703,7 @@ fn rack_sampler_selection_update(
 
 pub(crate) fn sync_rack_slot_control_value_field(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     slot_idx: usize,
     param: sequencer::sequencer::RackSlotParam,
@@ -2736,7 +2736,7 @@ pub(crate) fn sync_rack_slot_control_value_field(
 
 pub(crate) fn sync_rack_slot_instrument_param_value_field(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     slot_idx: usize,
     param_idx: usize,
@@ -2777,7 +2777,7 @@ pub(crate) fn sync_rack_slot_instrument_param_value_field(
 
 pub(crate) fn sync_rack_slot_effect_param_value_field(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     rack_slot: usize,
     effect_slot: usize,
@@ -2821,7 +2821,7 @@ pub(crate) fn sync_rack_slot_effect_param_value_field(
 
 pub(crate) fn sync_rack_panel_param_value_fields(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     display_step: Option<usize>,
 ) -> bool {
@@ -2911,7 +2911,7 @@ pub(crate) fn sync_rack_panel_param_value_fields(
 
 pub(crate) fn sync_rack_macro_target_value_fields(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     id: sequencer::sequencer::RackMacroId,
     display_step: Option<usize>,
@@ -3047,7 +3047,7 @@ pub(crate) fn sync_rack_macro_target_value_fields(
 
 pub(crate) fn sync_instrument_param_value_field_with_neural_selection(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     param_idx: usize,
     display_step: Option<usize>,
@@ -3088,7 +3088,7 @@ pub(crate) fn sync_instrument_param_value_field_with_neural_selection(
 
 pub(crate) fn sync_sampler_selection_time_fields(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     display_step: Option<usize>,
 ) -> bool {
@@ -3127,7 +3127,7 @@ pub(crate) fn sync_sampler_selection_time_fields(
 
 pub(crate) fn sync_instrument_base_note_value_field(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
 ) -> bool {
     if track < app.tracks.len() {
@@ -3145,7 +3145,7 @@ pub(crate) fn sync_instrument_base_note_value_field(
 
 pub(crate) fn sync_track_effect_param_value_field(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     slot_idx: usize,
     param_idx: usize,
@@ -3185,7 +3185,7 @@ pub(crate) fn sync_track_effect_param_value_field(
 
 pub(crate) fn sync_track_effect_param_value_field_with_neural_selection(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     slot_idx: usize,
     param_idx: usize,
@@ -3267,7 +3267,7 @@ pub(crate) fn sync_midi_fx_param_value_field(
 
 pub(crate) fn sync_bus_effect_param_value_field(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     bus_idx: usize,
     slot_idx: usize,
     param_idx: usize,
@@ -3299,7 +3299,7 @@ pub(crate) fn sync_bus_effect_param_value_field(
 
 pub(crate) fn sync_fx_param_binding_fields(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
@@ -3309,7 +3309,7 @@ pub(crate) fn sync_fx_param_binding_fields(
 
 pub(crate) fn sync_fx_param_binding_fields_with_neural_selection(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
@@ -3398,7 +3398,7 @@ pub(crate) fn sync_fx_param_binding_fields_with_neural_selection(
 pub(crate) fn sync_track_playhead_field_delta(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     previous: &mut Vec<u32>,
 ) -> bool {
     let track_count = app.tracks.len();
@@ -3496,7 +3496,7 @@ pub(crate) fn sync_track_playhead_field_delta(
 pub(crate) fn sync_all_track_sequencer_state(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) {
@@ -3506,7 +3506,7 @@ pub(crate) fn sync_all_track_sequencer_state(
 pub(crate) fn sync_all_track_sequencer_state_profiled(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) -> AllTrackSequencerSyncProfile {
@@ -3525,7 +3525,7 @@ pub(crate) fn sync_all_track_sequencer_state_profiled(
 fn sync_all_track_sequencer_state_inner(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     mut profile: Option<&mut AllTrackSequencerSyncProfile>,
@@ -3887,7 +3887,7 @@ pub(crate) fn sync_step_param_lists(rt: &mut Runtime, state: &Arc<SequencerState
     sync_process_chain_state(rt, state, state.active_track_count(), track);
 }
 
-pub(crate) fn build_accumulator_names(app: &tui::App) -> Vec<String> {
+pub(crate) fn build_accumulator_names(app: &app::App) -> Vec<String> {
     let mut names = BUILTIN_ACCUMULATOR_NAMES
         .iter()
         .map(|name| (*name).to_string())
@@ -3898,7 +3898,7 @@ pub(crate) fn build_accumulator_names(app: &tui::App) -> Vec<String> {
     names
 }
 
-pub(crate) fn build_accumulator_options(app: &tui::App) -> Value {
+pub(crate) fn build_accumulator_options(app: &app::App) -> Value {
     let items = build_accumulator_names(app)
         .into_iter()
         .map(|name| Rc::new(RefCell::new(Value::String(name))))
@@ -3952,7 +3952,7 @@ pub(crate) fn accum_mode_label(mode: u32) -> &'static str {
         .unwrap_or(ACCUM_MODE_LABELS[0])
 }
 
-pub(crate) fn selected_accumulator_name(app: &tui::App, track: usize) -> String {
+pub(crate) fn selected_accumulator_name(app: &app::App, track: usize) -> String {
     let tp = &app.state.pattern.track_params[track];
     if let Some(name) = tp.script_accumulator_name() {
         return name;
@@ -3981,7 +3981,7 @@ pub(crate) fn build_track_names(names: &[String]) -> Value {
     Value::List(items)
 }
 
-pub(crate) fn build_track_colors(app: &tui::App) -> Value {
+pub(crate) fn build_track_colors(app: &app::App) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
         .map(|track| {
             let color = app
@@ -4012,11 +4012,11 @@ pub(crate) fn build_track_collapsed_from_slice(collapsed: &[bool], track_count: 
     )
 }
 
-pub(crate) fn build_track_collapsed(app: &tui::App) -> Value {
+pub(crate) fn build_track_collapsed(app: &app::App) -> Value {
     build_track_collapsed_from_slice(&app.track_collapsed, app.tracks.len())
 }
 
-pub(crate) fn build_track_ids(app: &tui::App) -> Value {
+pub(crate) fn build_track_ids(app: &app::App) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = app
         .graph
         .track_node_ids
@@ -4026,7 +4026,7 @@ pub(crate) fn build_track_ids(app: &tui::App) -> Value {
     Value::List(items)
 }
 
-pub(crate) fn build_track_instrument_types(app: &tui::App) -> Value {
+pub(crate) fn build_track_instrument_types(app: &app::App) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = app
         .graph
         .track_instrument_types
@@ -4044,7 +4044,7 @@ pub(crate) fn build_track_instrument_types(app: &tui::App) -> Value {
     Value::List(items)
 }
 
-pub(crate) fn build_track_mod_output_available(app: &tui::App) -> Value {
+pub(crate) fn build_track_mod_output_available(app: &app::App) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = (0..app.graph.track_instrument_types.len())
         .map(|track| {
             Rc::new(RefCell::new(Value::Bool(
@@ -4055,7 +4055,7 @@ pub(crate) fn build_track_mod_output_available(app: &tui::App) -> Value {
     Value::List(items)
 }
 
-pub(crate) fn build_track_instrument_run_modes(app: &tui::App) -> Value {
+pub(crate) fn build_track_instrument_run_modes(app: &app::App) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = app
         .graph
         .track_instrument_run_modes
@@ -4074,7 +4074,7 @@ pub(crate) fn build_track_instrument_run_modes(app: &tui::App) -> Value {
 pub(crate) fn sync_track_name_state(
     rt: &mut Runtime,
     track_names: &mut Vec<String>,
-    app: &tui::App,
+    app: &app::App,
 ) {
     rt.set_reactive("SEQ", "track-ids", build_track_ids(app));
     rt.set_reactive(
@@ -4175,7 +4175,7 @@ pub(crate) fn sync_track_volume_pan_binding_fields(rt: &mut Runtime, state: &Arc
     }
 }
 
-pub(crate) fn build_track_outputs(app: &tui::App, state: &Arc<SequencerState>) -> Value {
+pub(crate) fn build_track_outputs(app: &app::App, state: &Arc<SequencerState>) -> Value {
     let count = state.active_track_count();
     let items: Vec<Rc<RefCell<Value>>> = (0..count)
         .map(|t| {
@@ -4188,7 +4188,7 @@ pub(crate) fn build_track_outputs(app: &tui::App, state: &Arc<SequencerState>) -
     Value::List(items)
 }
 
-pub(crate) fn build_all_track_bus_sends(app: &tui::App, state: &Arc<SequencerState>) -> Value {
+pub(crate) fn build_all_track_bus_sends(app: &app::App, state: &Arc<SequencerState>) -> Value {
     let count = state.active_track_count();
     let items: Vec<Rc<RefCell<Value>>> = (0..count)
         .map(|t| {
@@ -4210,7 +4210,7 @@ pub(crate) fn current_track_bus_send_field(bus_idx: usize) -> String {
 }
 
 pub(crate) fn track_bus_send_amount(
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     bus_idx: usize,
@@ -4231,7 +4231,7 @@ pub(crate) fn track_bus_send_amount(
 
 pub(crate) fn sync_track_bus_send_binding_field(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     bus_idx: usize,
@@ -4247,7 +4247,7 @@ pub(crate) fn sync_track_bus_send_binding_field(
 
 pub(crate) fn sync_track_bus_send_binding_fields(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
 ) {
     for track in 0..state.active_track_count() {
@@ -4261,7 +4261,7 @@ pub(crate) fn sync_track_bus_send_binding_fields(
 
 pub(crate) fn sync_current_track_bus_send_binding_field(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     bus_idx: usize,
@@ -4277,7 +4277,7 @@ pub(crate) fn sync_current_track_bus_send_binding_field(
 
 pub(crate) fn sync_current_track_bus_send_binding_fields(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
 ) {
@@ -4391,7 +4391,7 @@ pub(crate) fn build_track_muted_effective(state: &Arc<SequencerState>) -> Value 
 /// so step-cell shader props can use `bind-seq-nth` instead of reading
 /// SEQ.track-mutes/track-colors in the row subtree.
 pub(crate) fn build_track_color_channel_effective(
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     channel: usize,
 ) -> Value {
@@ -4408,7 +4408,7 @@ pub(crate) fn build_track_color_channel_effective(
 }
 
 fn track_color_channel_effective_value(
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     channel: usize,
     muted: bool,
@@ -4441,7 +4441,7 @@ fn track_color_channel_effective_field(channel: usize) -> &'static str {
 
 pub(crate) fn sync_track_mute_visual_binding_fields(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     tracks: impl IntoIterator<Item = usize>,
     sync_muted_by_solo: bool,
@@ -4494,7 +4494,7 @@ pub(crate) fn sync_track_mute_visual_binding_fields(
 
 pub(crate) fn sync_track_mixer_state(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
 ) {
     rt.set_reactive("SEQ", "track-colors", build_track_colors(app));
@@ -4568,7 +4568,7 @@ pub(crate) fn sync_track_mixer_state(
     );
 }
 
-pub(crate) fn sync_bus_mixer_control_state(rt: &mut Runtime, app: &tui::App) {
+pub(crate) fn sync_bus_mixer_control_state(rt: &mut Runtime, app: &app::App) {
     let names: Vec<String> = app.buses.iter().map(|bus| bus.name.clone()).collect();
     let volumes: Vec<Rc<RefCell<Value>>> = app
         .buses
@@ -4597,7 +4597,7 @@ pub(crate) fn sync_bus_mixer_control_state(rt: &mut Runtime, app: &tui::App) {
     rt.set_reactive("SEQ", "bus-solos", Value::List(solos));
 }
 
-pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &tui::App) {
+pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &app::App) {
     sync_bus_mixer_control_state(rt, app);
     rt.set_reactive("SEQ", "bus-effects", build_bus_effects_value(app));
     rt.set_reactive("SEQ", "bus-steps", build_bus_steps_value(app));
@@ -4659,7 +4659,7 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "bus-playheads", Value::List(vec![]));
 }
 
-pub(crate) fn build_bus_playheads_value(app: &tui::App) -> Value {
+pub(crate) fn build_bus_playheads_value(app: &app::App) -> Value {
     Value::List(
         bus_playhead_snapshot(app)
             .into_iter()
@@ -4668,7 +4668,7 @@ pub(crate) fn build_bus_playheads_value(app: &tui::App) -> Value {
     )
 }
 
-pub(crate) fn bus_playhead_snapshot(app: &tui::App) -> Vec<usize> {
+pub(crate) fn bus_playhead_snapshot(app: &app::App) -> Vec<usize> {
     let playheads = app.graph.bus_gate_playheads.lock().unwrap();
     app.buses
         .iter()
@@ -4682,7 +4682,7 @@ pub(crate) fn bus_playhead_snapshot(app: &tui::App) -> Vec<usize> {
         .collect()
 }
 
-pub(crate) fn build_bus_steps_value(app: &tui::App) -> Value {
+pub(crate) fn build_bus_steps_value(app: &app::App) -> Value {
     Value::List(
         app.buses
             .iter()
@@ -4699,7 +4699,7 @@ pub(crate) fn build_bus_steps_value(app: &tui::App) -> Value {
     )
 }
 
-pub(crate) fn build_bus_param_lists(app: &tui::App, param: &str) -> Value {
+pub(crate) fn build_bus_param_lists(app: &app::App, param: &str) -> Value {
     Value::List(
         app.buses
             .iter()
@@ -4720,7 +4720,7 @@ pub(crate) fn build_bus_param_lists(app: &tui::App, param: &str) -> Value {
     )
 }
 
-pub(crate) fn build_bus_num_steps_value(app: &tui::App) -> Value {
+pub(crate) fn build_bus_num_steps_value(app: &app::App) -> Value {
     Value::List(
         app.buses
             .iter()
@@ -4733,7 +4733,7 @@ pub(crate) fn build_bus_num_steps_value(app: &tui::App) -> Value {
     )
 }
 
-pub(crate) fn build_bus_timebase_value(app: &tui::App) -> Value {
+pub(crate) fn build_bus_timebase_value(app: &app::App) -> Value {
     Value::List(
         app.buses
             .iter()
@@ -4746,7 +4746,7 @@ pub(crate) fn build_bus_timebase_value(app: &tui::App) -> Value {
     )
 }
 
-pub(crate) fn build_bus_swing_value(app: &tui::App) -> Value {
+pub(crate) fn build_bus_swing_value(app: &app::App) -> Value {
     Value::List(
         app.buses
             .iter()
@@ -4755,7 +4755,7 @@ pub(crate) fn build_bus_swing_value(app: &tui::App) -> Value {
     )
 }
 
-pub(crate) fn build_bus_swing_resolution_value(app: &tui::App) -> Value {
+pub(crate) fn build_bus_swing_resolution_value(app: &app::App) -> Value {
     Value::List(
         app.buses
             .iter()
@@ -4768,7 +4768,7 @@ pub(crate) fn build_bus_swing_resolution_value(app: &tui::App) -> Value {
     )
 }
 
-pub(crate) fn build_bus_step_has_plocks(app: &tui::App) -> Value {
+pub(crate) fn build_bus_step_has_plocks(app: &app::App) -> Value {
     Value::List(
         app.buses
             .iter()
@@ -4881,7 +4881,7 @@ pub(crate) fn rack_slot_peak_field(track: usize, slot_idx: usize) -> String {
 /// Tracks without a rack yield an empty inner vec.
 pub(crate) fn read_rack_slot_peak_levels(
     lg: sequencer::audiograph::LiveGraphPtr,
-    app: &tui::App,
+    app: &app::App,
 ) -> Vec<Vec<f64>> {
     app.graph
         .track_node_ids
@@ -4936,7 +4936,7 @@ pub(crate) fn sync_rack_slot_peak_field_delta(
 
 pub(crate) fn read_bus_peak_levels(
     lg: sequencer::audiograph::LiveGraphPtr,
-    bus_nodes: &[tui::BusNodeIds],
+    bus_nodes: &[app::BusNodeIds],
 ) -> Vec<f64> {
     bus_nodes
         .iter()
@@ -4958,7 +4958,7 @@ pub(crate) fn modulator_level_field(track: usize) -> String {
 
 pub(crate) fn read_modulator_display_values(
     lg: sequencer::audiograph::LiveGraphPtr,
-    app: &tui::App,
+    app: &app::App,
 ) -> (Vec<f64>, Vec<f64>) {
     let mut phases = Vec::with_capacity(app.graph.track_node_ids.len());
     let mut levels = Vec::with_capacity(app.graph.track_node_ids.len());
@@ -5291,7 +5291,7 @@ pub(crate) fn sync_playhead_field_delta(
 
 pub(crate) fn sync_track_topology_state(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track_names: &mut Vec<String>,
     current_track_idx: usize,
@@ -6576,12 +6576,12 @@ pub(crate) fn build_effects_value(
     Value::List(slots)
 }
 
-pub(crate) fn build_bus_effects_value(app: &tui::App) -> Value {
+pub(crate) fn build_bus_effects_value(app: &app::App) -> Value {
     build_bus_effects_value_for_selection(app, None)
 }
 
 pub(crate) fn build_bus_effects_value_for_selection(
-    app: &tui::App,
+    app: &app::App,
     selected: Option<&Arc<Mutex<HashSet<usize>>>>,
 ) -> Value {
     use sequencer::effects::{ParamKind, SyncDivision};
@@ -7325,7 +7325,7 @@ pub(crate) fn build_midi_effects_value(
 }
 
 pub(crate) fn build_sampler_panel_value(
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     selected: &Arc<Mutex<HashSet<usize>>>,
 ) -> Value {
@@ -7879,7 +7879,7 @@ pub(crate) fn build_sampler_panel_value(
 }
 
 pub(crate) fn build_instrument_panel_value(
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     selected: &Arc<Mutex<HashSet<usize>>>,
 ) -> Value {
@@ -8592,7 +8592,7 @@ fn rack_slot_type_name(slot: &sequencer::sequencer::RackSlotSnapshot) -> &'stati
 }
 
 fn rack_slot_raw_name(
-    app: &tui::App,
+    app: &app::App,
     slot_idx: usize,
     slot: &sequencer::sequencer::RackSlotSnapshot,
 ) -> String {
@@ -8643,7 +8643,7 @@ fn drum_rack_pad_bank_label(bank_start: i32) -> String {
     )
 }
 
-fn drum_rack_uses_pad_notes(app: &tui::App, track: usize) -> bool {
+fn drum_rack_uses_pad_notes(app: &app::App, track: usize) -> bool {
     app.state
         .pattern
         .rack_tracks
@@ -8654,7 +8654,7 @@ fn drum_rack_uses_pad_notes(app: &tui::App, track: usize) -> bool {
         .is_some_and(|rack| rack.routing == sequencer::sequencer::RackRouting::ByPitch)
 }
 
-pub(crate) fn build_track_drum_racks_value(app: &tui::App) -> Value {
+pub(crate) fn build_track_drum_racks_value(app: &app::App) -> Value {
     Value::List(
         (0..app.tracks.len())
             .map(|track| value_cell(Value::Bool(drum_rack_uses_pad_notes(app, track))))
@@ -8690,7 +8690,7 @@ fn drum_rack_sound_short_label(name: &str) -> String {
     }
 }
 
-pub(crate) fn drum_rack_sound_options(app: &tui::App, track: usize) -> Vec<DrumRackSoundOption> {
+pub(crate) fn drum_rack_sound_options(app: &app::App, track: usize) -> Vec<DrumRackSoundOption> {
     let rack = app
         .state
         .pattern
@@ -8782,7 +8782,7 @@ fn drum_rack_sound_value(track: usize, option: DrumRackSoundOption) -> Rc<RefCel
     Rc::new(RefCell::new(Value::Map(value)))
 }
 
-pub(crate) fn build_all_track_drum_sounds_value(app: &tui::App) -> Value {
+pub(crate) fn build_all_track_drum_sounds_value(app: &app::App) -> Value {
     Value::List(
         (0..app.tracks.len())
             .map(|track| {
@@ -8801,7 +8801,7 @@ pub(crate) fn build_all_track_drum_sounds_value(app: &tui::App) -> Value {
 /// pad note, so resolve it through the rack snapshot before lighting a slot.
 pub(crate) fn sync_all_rack_slot_selection_binding_fields(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
 ) -> bool {
     let racks = app.state.pattern.rack_tracks.lock().unwrap();
     let mut dirty = false;
@@ -8869,7 +8869,7 @@ pub(crate) fn drum_lane_step_duration_covered(
 pub(crate) fn sync_drum_lane_step_binding_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     only_step: Option<usize>,
 ) -> bool {
@@ -8924,7 +8924,7 @@ pub(crate) fn sync_drum_lane_step_binding_fields(
 pub(crate) fn sync_drum_lane_step_binding_fields_for_steps(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     steps: &[usize],
 ) -> bool {
@@ -8975,7 +8975,7 @@ pub(crate) fn sync_drum_lane_step_binding_fields_for_steps(
 pub(crate) fn sync_all_drum_lane_step_binding_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
 ) -> bool {
     let mut dirty = false;
     for track in 0..app.tracks.len() {
@@ -8999,7 +8999,7 @@ fn drum_rack_pad_bank_value(bank_start: i32, selected_bank_start: i32) -> Rc<Ref
 }
 
 fn rack_pad_value(
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     rack: &sequencer::sequencer::RackTrackSnapshot,
     pad_note: i32,
@@ -9268,7 +9268,7 @@ fn selected_rack_slot_voice_mod_source_indices(
 }
 
 fn build_selected_rack_slot_instrument_value(
-    app: &tui::App,
+    app: &app::App,
     rack: &sequencer::sequencer::RackTrackSnapshot,
     track: usize,
     slot_idx: usize,
@@ -9927,7 +9927,7 @@ fn build_rack_slot_effect_value(
 }
 
 fn rack_macro_mapping_display_metadata(
-    app: &tui::App,
+    app: &app::App,
     rack: &sequencer::sequencer::RackTrackSnapshot,
     mapping: &sequencer::sequencer::RackMacroMapping,
 ) -> (String, String, f32, f32, f32, f32, f32, u8, String) {
@@ -10024,7 +10024,7 @@ fn rack_macro_mapping_display_metadata(
 }
 
 fn build_rack_panel_value(
-    app: &tui::App,
+    app: &app::App,
     track: usize,
     selected: &Arc<Mutex<HashSet<usize>>>,
 ) -> Value {
@@ -10573,7 +10573,7 @@ pub(crate) fn meter_display_level(peak: f32) -> f64 {
     quantize_meter_level(master_meter_level(peak))
 }
 
-pub(crate) fn sync_project_state(rt: &mut Runtime, app: &tui::App) {
+pub(crate) fn sync_project_state(rt: &mut Runtime, app: &app::App) {
     rt.set_reactive(
         "SEQ",
         "current-project-name",
@@ -10681,7 +10681,7 @@ pub(crate) fn remove_project_script_from_scratch(editor: &mut Editor, source_pat
     removed
 }
 
-pub(crate) fn push_project_scratch_to_named_buffer(editor: &mut Editor, app: &tui::App) {
+pub(crate) fn push_project_scratch_to_named_buffer(editor: &mut Editor, app: &app::App) {
     let scratch_text = app.editor.scratch_buffer.clone();
     let scratch_cursor = app.editor.scratch_cursor;
 
@@ -10701,7 +10701,7 @@ pub(crate) fn push_project_scratch_to_named_buffer(editor: &mut Editor, app: &tu
 
 pub(crate) fn evaluate_project_scratch_on_ui_runtime(
     editor: &mut Editor,
-    app: &tui::App,
+    app: &app::App,
 ) -> Result<(), String> {
     let scratch_text = app.editor.scratch_buffer.clone();
     if scratch_text.trim().is_empty() {
@@ -10726,7 +10726,7 @@ pub(crate) fn evaluate_project_scratch_on_ui_runtime(
     result
 }
 
-pub(crate) fn pull_named_scratch_buffer_into_project(editor: &Editor, app: &mut tui::App) {
+pub(crate) fn pull_named_scratch_buffer_into_project(editor: &Editor, app: &mut app::App) {
     let Some(buffer) = editor
         .buffers
         .iter()
@@ -10745,7 +10745,7 @@ pub(crate) fn pull_named_scratch_buffer_into_project(editor: &Editor, app: &mut 
     }
 }
 
-pub(crate) fn current_custom_instrument_name(app: &tui::App, track: usize) -> Option<String> {
+pub(crate) fn current_custom_instrument_name(app: &app::App, track: usize) -> Option<String> {
     if app.tracks.is_empty() || app.is_sampler_track(track) {
         None
     } else if let Some(Some(engine_id)) = app.graph.track_engine_ids.get(track) {
@@ -10758,7 +10758,7 @@ pub(crate) fn current_custom_instrument_name(app: &tui::App, track: usize) -> Op
     }
 }
 
-pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &tui::App, track: usize) {
+pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &app::App, track: usize) {
     rt.set_reactive(
         "SEQ",
         "project-instrument-engines",
@@ -10847,7 +10847,7 @@ pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &tui::App, track: usiz
 }
 
 pub(crate) fn load_instrument_preset_into_track(
-    app: &mut tui::App,
+    app: &mut app::App,
     track: usize,
     preset_name: &str,
 ) -> Result<(), String> {
@@ -10868,7 +10868,7 @@ pub(crate) fn load_instrument_preset_into_track(
 
     let engine_id = app.graph.track_engine_ids.get(track).and_then(|id| *id);
     let preset_label = preset.name.clone();
-    sequencer::tui::edit::apply_recorded_instrument_values_mutation(
+    sequencer::app::edit::apply_recorded_instrument_values_mutation(
         app,
         track,
         format!("Load preset '{preset_label}'"),
@@ -10972,7 +10972,7 @@ pub(crate) fn extract_bool_from_payload(payload: &Value, key: &str) -> bool {
 /// Push individual tp-* reactive fields for the current track.
 pub(crate) fn sync_track_params(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     selected: &Arc<Mutex<HashSet<usize>>>,
@@ -11135,7 +11135,7 @@ pub(crate) fn sync_track_selection_param_binding_fields(
 
 pub(crate) fn sync_track_params_with_neural_selection(
     rt: &mut Runtime,
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     selected: &Arc<Mutex<HashSet<usize>>>,
@@ -11504,7 +11504,7 @@ fn rack_slot_param_options(param: sequencer::sequencer::RackSlotParam) -> Option
 }
 
 fn build_track_plock_preview_row_for_variant_entry(
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     label: &str,
@@ -11829,7 +11829,7 @@ fn build_track_plock_preview_row_for_variant_entry(
 }
 
 pub(crate) fn build_track_plocks_value_for_variant_label(
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     label: &str,
@@ -11861,7 +11861,7 @@ pub(crate) fn build_track_plocks_value_for_variant_label(
 }
 
 pub(crate) fn build_track_plocks_value_with_neural_selection(
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     selected: &Arc<Mutex<HashSet<usize>>>,
@@ -11883,7 +11883,7 @@ pub(crate) fn build_track_plocks_value_with_neural_selection(
 }
 
 fn build_selected_neural_plocks_value(
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     selection: &std::collections::BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
 ) -> Value {
@@ -11999,7 +11999,7 @@ fn build_selected_neural_plocks_value(
 }
 
 pub(crate) fn build_track_plocks_value(
-    app: &tui::App,
+    app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     selected: &Arc<Mutex<HashSet<usize>>>,
@@ -12352,7 +12352,7 @@ pub(crate) fn build_track_plock_variants_value_with_preview(
     Value::List(items)
 }
 
-fn build_track_output_label(app: &tui::App, tp: &sequencer::sequencer::TrackParams) -> Value {
+fn build_track_output_label(app: &app::App, tp: &sequencer::sequencer::TrackParams) -> Value {
     let label = match tp.output() {
         sequencer::sequencer::TrackOutput::Mix => "main".to_string(),
         sequencer::sequencer::TrackOutput::None => "sends only".to_string(),
@@ -12366,7 +12366,7 @@ fn build_track_output_label(app: &tui::App, tp: &sequencer::sequencer::TrackPara
     Value::String(label)
 }
 
-fn build_track_output_options(app: &tui::App) -> Value {
+fn build_track_output_options(app: &app::App) -> Value {
     let mut labels = vec![
         Rc::new(RefCell::new(Value::String("main".to_string()))),
         Rc::new(RefCell::new(Value::String("sends only".to_string()))),
@@ -12380,7 +12380,7 @@ fn build_track_output_options(app: &tui::App) -> Value {
     Value::List(labels)
 }
 
-fn build_track_bus_sends(app: &tui::App, _tp: &sequencer::sequencer::TrackParams) -> Value {
+fn build_track_bus_sends(app: &app::App, _tp: &sequencer::sequencer::TrackParams) -> Value {
     use std::collections::HashMap;
 
     let items = app
@@ -12563,7 +12563,7 @@ pub(crate) fn build_step_variant_color_channel(
 
 pub(crate) fn build_all_track_step_plock_kinds(
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
 ) -> Value {
     Value::List(
         (0..app.tracks.len())
@@ -12574,7 +12574,7 @@ pub(crate) fn build_all_track_step_plock_kinds(
 
 pub(crate) fn build_all_track_step_variant_color_channel(
     state: &Arc<SequencerState>,
-    app: &tui::App,
+    app: &app::App,
     channel: usize,
 ) -> Value {
     Value::List(
@@ -12771,7 +12771,7 @@ pub(crate) fn auto_follow_enabled(override_until: &Arc<Mutex<Option<Instant>>>) 
 }
 
 pub(crate) fn poll_pending_compile_status(
-    app: &mut tui::App,
+    app: &mut app::App,
     editor: &mut Editor,
     state: &Arc<SequencerState>,
     current_track: &Arc<AtomicUsize>,

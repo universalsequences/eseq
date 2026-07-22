@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use eseqlisp::vm::Value;
 
 use sequencer::sample_db::{SampleDb, SampleRow, TagFacet};
-use sequencer::tui;
+use sequencer::app;
 
 use super::current_custom_instrument_name;
 use super::values::{build_icon_tree_items, list_value, map_value};
@@ -702,7 +702,7 @@ pub(crate) fn build_instrument_tree_value(query: &str, project_engines: &[String
     list_value(items)
 }
 
-pub(crate) fn project_instrument_engine_names(app: &tui::App) -> Vec<String> {
+pub(crate) fn project_instrument_engine_names(app: &app::App) -> Vec<String> {
     let mut engine_ids = Vec::new();
     for engine_id in app.graph.track_engine_ids.iter().flatten().copied() {
         if !engine_ids.contains(&engine_id) {
@@ -1078,7 +1078,7 @@ pub(crate) fn instrument_display_name(name: &str) -> String {
         .to_string()
 }
 
-pub(crate) fn visible_preset_items_for_track(app: &tui::App, track: usize) -> Vec<String> {
+pub(crate) fn visible_preset_items_for_track(app: &app::App, track: usize) -> Vec<String> {
     if app.graph.track_instrument_types.get(track)
         == Some(&sequencer::sequencer::InstrumentType::Rack)
     {
