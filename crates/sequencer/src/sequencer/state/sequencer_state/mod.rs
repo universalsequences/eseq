@@ -1,0 +1,11 @@
+mod accessors;
+mod instrument_reset;
+mod rack_editing;
+mod effect_propagation;
+mod repository_edit;
+mod publish;
+mod topology;
+mod process_chain;
+mod transport;
+mod scene_launch;
+mod step_edit;
