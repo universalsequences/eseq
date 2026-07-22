@@ -4361,6 +4361,10 @@ fn load_or_convert_sampler_track(
                     app.graph.track_buffer_ids[track] = new_buffer_id;
                     app.graph.track_sample_rates[track] = sample_rate;
                     app.tracks[track] = new_name.clone();
+                    app.state.seed_unset_pattern_sample_ids(
+                        track,
+                        (new_buffer_id, new_name.clone(), sample_rate),
+                    );
                     None
                 }
                 InstrumentType::Custom => Some(
@@ -19045,6 +19049,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Some((format!("Scene cell share failed: {error}"), Instant::now()));
                         }
                         app.push_all_restored_defaults();
+                        // Assigning into the current scene live-restores the
+                        // pattern's params + sample; the generic pattern-epoch
+                        // sync covers steps/params/mixer but not the fx and
+                        // instrument-panel bindings, so refresh those here.
+                        if scene == app.state.current_scene_index() {
+                            if editor_has_visible_buffer(&editor, "*fx*") {
+                                let ct = current_track_for_app(&mut app, &current_track)
+                                    .unwrap_or(track);
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "effects",
+                                    build_effects_value(
+                                        &state,
+                                        ct,
+                                        &app.graph.effect_descriptors,
+                                        &selected_steps,
+                                    ),
+                                );
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "midi-effects",
+                                    build_midi_effects_value(&state, ct, &selected_steps),
+                                );
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "instrument-panel",
+                                    build_instrument_panel_value(&app, ct, &selected_steps),
+                                );
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                            } else {
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
                         editor.handle_host_event(HostEvent::Status(format!(
                             "Shared track {} pattern {} into scene {}",
                             track + 1,

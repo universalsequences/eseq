@@ -5792,6 +5792,103 @@ fn focused_number_picker_escape_cancels_edit_and_runs_global_escape_binding() {
 }
 
 #[test]
+fn click_outside_focused_number_picker_blurs_it() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(30, 8);
+    let tree = editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+                (number-picker
+                  :key "drag-picker"
+                  :value 12
+                  :min 0
+                  :max 99
+                  :decimals 0
+                  :width 8
+                  :height 1.4)
+                "#,
+        )
+        .expect("build number picker")
+        .expect("number picker should produce a widget tree");
+    editor
+        .active_buffer_mut()
+        .set_widget_tree(Some(tree.clone()), None);
+    editor.runtime_mut().set_widget_tree(tree);
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(30, 8);
+    let layout = editor.widget_layout().expect("number picker layout");
+    let picker = super::find_layout_node_by_stable_key(layout.as_ref(), "drag-picker")
+        .expect("picker node");
+    let (col, row) = (
+        picker.rect.col + picker.rect.width * 0.5,
+        picker.rect.row + picker.rect.height * 0.5,
+    );
+
+    // Drag on the picker (mouse down + drag + up) — this focuses it.
+    editor.handle_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            col as u16,
+            row as u16,
+        ),
+        0,
+        0,
+        30,
+        8,
+        col,
+        row,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            col as u16,
+            (row + 1.0) as u16,
+        ),
+        0,
+        0,
+        30,
+        8,
+        col,
+        row + 1.0,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            col as u16,
+            (row + 1.0) as u16,
+        ),
+        0,
+        0,
+        30,
+        8,
+        col,
+        row + 1.0,
+    );
+    assert!(
+        editor.focused_widget_id().is_some(),
+        "dragging the picker should focus it"
+    );
+
+    // Click well outside the picker — focus must clear.
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 25, 6),
+        0,
+        0,
+        30,
+        8,
+        25.0,
+        6.0,
+    );
+    assert_eq!(
+        editor.focused_widget_id(),
+        None,
+        "clicking outside the focused picker should blur it"
+    );
+}
+
+#[test]
 fn editable_buffers_keep_text_navigation_when_widget_is_unfocused() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

@@ -930,6 +930,10 @@ impl App {
                         if track < self.sampler_paths.len() {
                             self.sampler_paths[track] = Some(path.to_path_buf());
                         }
+                        self.state.seed_unset_pattern_sample_ids(
+                            track,
+                            (new_buffer_id, new_name.clone(), sample_rate),
+                        );
                         self.reset_sampler_bpm_for_analysis(track);
                         self.publish_sampler_analysis_runtime(track);
                         self.editor.status_message =

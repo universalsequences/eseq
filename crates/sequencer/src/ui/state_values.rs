@@ -30854,6 +30854,120 @@ mod tests {
     }
 
     #[test]
+    fn click_outside_focused_transport_bpm_picker_blurs_and_restores_dot_shortcut() {
+        use crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                  (def record-toggle-count (state 0))
+                  (def seq-toggle-record () (set! record-toggle-count (+ record-toggle-count 1)))
+                "#,
+            )
+            .expect("install record toggle test hook");
+        editor.refresh_runtime_side_effects();
+
+        let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+        let transport = frame
+            .tiles
+            .iter()
+            .find(|tile| tile.frame.buffer_name == "*transport*")
+            .expect("transport tile")
+            .rect;
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*transport*")"#)
+            .expect("switch to transport");
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("transport layout");
+        fn find_picker(
+            node: &eseqlisp::layout::LayoutNode,
+        ) -> Option<eseqlisp::layout::LayoutNode> {
+            if node.widget_type == "number-picker" {
+                return Some(node.clone());
+            }
+            node.children.iter().find_map(find_picker)
+        }
+        let picker = find_picker(layout.as_ref()).expect("bpm picker");
+        let click_col = transport.col + picker.rect.col + picker.rect.width * 0.5;
+        let click_row = transport.row + picker.rect.row + picker.rect.height * 0.5;
+
+        let mouse = |kind, col: f32, row: f32| MouseEvent {
+            kind,
+            column: col as u16,
+            row: row as u16,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        // Drag on the BPM picker: down + drag + up. This focuses it.
+        editor.handle_tiled_mouse_precise(
+            mouse(MouseEventKind::Down(MouseButton::Left), click_col, click_row),
+            click_col,
+            click_row,
+            0,
+        );
+        editor.handle_tiled_mouse_precise(
+            mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                click_col,
+                click_row + 0.3,
+            ),
+            click_col,
+            click_row + 0.3,
+            0,
+        );
+        editor.handle_tiled_mouse_precise(
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                click_col,
+                click_row + 0.3,
+            ),
+            click_col,
+            click_row + 0.3,
+            0,
+        );
+        assert!(
+            editor.focused_widget_id().is_some(),
+            "dragging the bpm picker should focus it"
+        );
+
+        // Click on the sequencer grid area (another tile, empty space).
+        for (col, row) in [(100.0_f32, 30.0_f32)] {
+            editor.handle_tiled_mouse_precise(
+                mouse(MouseEventKind::Down(MouseButton::Left), col, row),
+                col,
+                row,
+                0,
+            );
+            editor.handle_tiled_mouse_precise(
+                mouse(MouseEventKind::Up(MouseButton::Left), col, row),
+                col,
+                row,
+                0,
+            );
+        }
+        assert_eq!(
+            editor.focused_widget_id(),
+            None,
+            "clicking outside the picker should blur it"
+        );
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("record-toggle-count")
+                .unwrap(),
+            Some(Value::Number(1.0)),
+            "the record shortcut should work after blurring"
+        );
+    }
+
+    #[test]
     fn metal_seq_dot_global_binding_toggles_recording_outside_editable_text_buffers() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 

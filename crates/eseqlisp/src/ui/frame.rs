@@ -851,6 +851,61 @@ mod tests {
     }
 
     #[test]
+    fn cached_active_ui_frame_tracks_widget_focus_changes() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                  (effect
+                    (v-stack
+                      (number-picker :key "picker-a" :value 1 :min 0 :max 9
+                                     :decimals 0 :width 8 :height 1.4)
+                      (number-picker :key "picker-b" :value 2 :min 0 :max 9
+                                     :decimals 0 :width 8 :height 1.4)))
+                "#,
+            )
+            .unwrap();
+        editor.refresh_runtime_side_effects();
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+
+        let initial = build_tiled_render_frame_borderless(&mut editor, 30, 9);
+        assert_eq!(initial.tiles[0].frame.focused_widget_id, None);
+        assert!(editor.active_leaf().cached_inactive_frame.is_some());
+
+        assert!(editor.focus_widget_by_stable_key("picker-a", Some("number-picker")));
+        let picker_a = editor.focused_widget_id().expect("picker-a focused");
+        let focused = build_tiled_render_frame_borderless(&mut editor, 30, 9);
+        assert_eq!(
+            focused.tiles[0].frame.focused_widget_id,
+            Some(picker_a),
+            "frame cache must rebuild when a widget gains focus"
+        );
+
+        assert!(editor.focus_widget_by_stable_key("picker-b", Some("number-picker")));
+        let picker_b = editor.focused_widget_id().expect("picker-b focused");
+        assert_ne!(picker_a, picker_b);
+        let moved = build_tiled_render_frame_borderless(&mut editor, 30, 9);
+        assert_eq!(
+            moved.tiles[0].frame.focused_widget_id,
+            Some(picker_b),
+            "frame cache must rebuild when focus moves to another widget"
+        );
+
+        editor.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(editor.focused_widget_id(), None);
+        let blurred = build_tiled_render_frame_borderless(&mut editor, 30, 9);
+        assert_eq!(
+            blurred.tiles[0].frame.focused_widget_id, None,
+            "frame cache must rebuild when the focused widget blurs"
+        );
+    }
+
+    #[test]
     fn cached_active_ui_frame_tracks_widget_viewport_scroll() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -1156,6 +1211,7 @@ fn build_tiled_render_frame_impl(
             text_cell_width_scale_bits: text_cell_width_scale.to_bits(),
             text_cell_height_scale_bits: text_cell_height_scale.to_bits(),
             view_mode,
+            focused_widget_id,
         };
         let cached = cached_frame
             .as_ref()

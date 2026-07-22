@@ -8069,6 +8069,17 @@ impl GraphController<'_> {
                 .as_ref()
                 .map(|(desc, node_id, instrument_type)| (desc, *node_id, *instrument_type)),
         );
+        if let (Some(&buffer_id), Some(&sample_rate)) = (
+            self.app.graph.track_buffer_ids.get(idx),
+            self.app.graph.track_sample_rates.get(idx),
+        ) {
+            if buffer_id >= 0 {
+                self.app.state.seed_unset_pattern_sample_ids(
+                    idx,
+                    (buffer_id, self.app.tracks[idx].clone(), sample_rate),
+                );
+            }
+        }
         self.app.refresh_effect_sidechain_labels();
 
         self.app

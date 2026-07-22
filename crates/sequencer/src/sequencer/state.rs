@@ -5318,6 +5318,31 @@ impl SequencerState {
         }
     }
 
+    /// Seed `sample_id` onto every stored pattern of `track` that has never had
+    /// a real sample chosen (negative buffer id). Patterns with an explicit
+    /// sample keep it. Returns the number of patterns seeded.
+    pub fn seed_unset_pattern_sample_ids(
+        &self,
+        track: usize,
+        sample_id: (i32, String, u32),
+    ) -> usize {
+        if sample_id.0 < 0 {
+            return 0;
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(pool) = scenes.track_pools.get_mut(track) else {
+            return 0;
+        };
+        let mut seeded = 0;
+        for data in pool.patterns.values_mut() {
+            if data.sample_id.0 < 0 {
+                data.sample_id = sample_id.clone();
+                seeded += 1;
+            }
+        }
+        seeded
+    }
+
     pub fn set_rack_track_for_all_pattern_snapshots(
         &self,
         track: usize,
@@ -12605,6 +12630,44 @@ mod tests {
             assert_eq!(snapshot.instrument_slots[0].node_id, 800);
             assert_eq!(snapshot.instrument_slots[0].modulator_node_id, 801);
         }
+    }
+
+    #[test]
+    fn seeding_unset_sample_ids_fills_only_patterns_without_a_real_sample() {
+        let snapshots = (0..3)
+            .map(|scene| {
+                let mut snapshot = sample_pattern_snapshot(1);
+                snapshot.track_bits[0][0] = 10 + scene;
+                snapshot.sample_ids[0] = if scene == 1 {
+                    (7, "kick".to_string(), 44_100)
+                } else {
+                    (-1, String::new(), 44_100)
+                };
+                snapshot
+            })
+            .collect::<Vec<_>>();
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(snapshots, 0);
+
+        let seeded =
+            state.seed_unset_pattern_sample_ids(0, (42, "eight-oh-eight".to_string(), 48_000));
+
+        assert_eq!(seeded, 2);
+        let exported = state.export_pattern_repository();
+        assert_eq!(
+            exported[0].sample_ids[0],
+            (42, "eight-oh-eight".to_string(), 48_000)
+        );
+        assert_eq!(exported[1].sample_ids[0], (7, "kick".to_string(), 44_100));
+        assert_eq!(
+            exported[2].sample_ids[0],
+            (42, "eight-oh-eight".to_string(), 48_000)
+        );
+
+        assert_eq!(
+            state.seed_unset_pattern_sample_ids(0, (-1, String::new(), 44_100)),
+            0
+        );
     }
 
     fn sample_rack_track_snapshot() -> RackTrackSnapshot {

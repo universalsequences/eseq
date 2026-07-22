@@ -27,6 +27,7 @@ pub struct TileFrameCacheKey {
     pub text_cell_width_scale_bits: u32,
     pub text_cell_height_scale_bits: u32,
     pub view_mode: crate::editor::ViewMode,
+    pub focused_widget_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
