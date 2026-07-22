@@ -270,7 +270,7 @@
       (muted-col (rgba 0.25 0.25 0.20 1.0))
       (bg-col (if (= active 1)
           :mixer-strip-selected-bg
-          :buffer-bg
+          :transparent
           ))
       (panel-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
@@ -307,7 +307,7 @@
       (muted-col (rgba 0.25 0.25 0.20 1.0))
       (bg-col (if (= active 1)
           :mixer-strip-selected-bg
-          :buffer-bg
+          :transparent
           ))
       (panel-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
@@ -344,7 +344,7 @@
       (muted-col (rgba 0.25 0.25 0.20 1.0))
       (bg-col (if (= active 1)
           :mixer-strip-selected-bg
-          :buffer-bg
+          :transparent
           ))
       (panel-col (if (= active 1) fg-col muted-col)))
     (sdf/layer
