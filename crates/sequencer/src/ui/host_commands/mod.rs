@@ -1,4 +1,18 @@
+mod agent;
+mod bus_steps;
 mod dispatch;
+mod effects;
+mod instrument_authoring;
+mod instrument_params;
+mod misc;
+mod project;
+mod rack;
+mod routing;
+mod samples;
+mod scenes;
+mod scripts;
+mod step_history;
+mod tracks;
 
 pub(crate) use dispatch::dispatch_custom_host_command;
 
