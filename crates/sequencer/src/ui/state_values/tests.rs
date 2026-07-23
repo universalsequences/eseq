@@ -20270,6 +20270,33 @@
             "seqv-track-header is reused unchanged in the arrangement row"
         );
 
+        // Shared-axis geometry: every lane spans the identical x-range, no
+        // lane overflows the buffer pane (overflow made the viewport scroll
+        // horizontally and hid the track headers), and the scene lane and
+        // first track lane are vertically flush so pointer scroll/zoom is
+        // always captured by a timeline instance.
+        assert_eq!(scene_lane.rect.col, track_lane.rect.col);
+        assert_eq!(scene_lane.rect.width, track_lane.rect.width);
+        let pane_right = layout.rect.col + layout.rect.width;
+        let lane_right = scene_lane.rect.col + scene_lane.rect.width;
+        assert!(
+            lane_right <= pane_right + 0.01,
+            "lanes must not extend past the pane ({lane_right} > {pane_right})"
+        );
+        assert!(
+            scene_lane.rect.width >= layout.rect.width * 0.4,
+            "the flexed lane must absorb the width remaining after the header \
+             column, not collapse to its intrinsic size (lane width {}, pane {})",
+            scene_lane.rect.width,
+            layout.rect.width
+        );
+        let scene_bottom = scene_lane.rect.row + scene_lane.rect.height;
+        assert!(
+            (track_lane.rect.row - scene_bottom).abs() < 0.01,
+            "track lane must sit flush under the scene lane (scene bottom {scene_bottom}, track top {})",
+            track_lane.rect.row
+        );
+
         // Sparse lanes (spec 6): the nil-pattern span produces NO item.
         let read = |editor: &mut eseqlisp::Editor, expr: &str| {
             editor

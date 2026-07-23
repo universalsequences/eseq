@@ -364,8 +364,13 @@
 
 ;; The scene lane is the ONLY instance with a header/time ruler; it doubles
 ;; as the arrangement's bar/beat ruler.
+;; Every lane is a flex child (:width 0 :flex 1) of its row: it absorbs
+;; exactly the width remaining after the fixed header column, so no row can
+;; overflow the pane and drag the buffer viewport into horizontal scrolling.
 (def arrangement-scene-lane ()
   (timeline
+    :key "arrangement-scene-lane"
+    :width 0 :flex 1
     :height arrangement-scene-lane-height
     :focusable true
     :sidebar-width 0
@@ -401,6 +406,8 @@
 ;; scrolling is inert; the outer buffer viewport owns vertical navigation.
 (def arrangement-track-lane (i)
   (timeline
+    :key (str "arrangement-track-lane-" i)
+    :width 0 :flex 1
     :height arrangement-track-lane-height
     :sidebar-width 0
     :header-height 0
@@ -453,23 +460,31 @@
       :key "arrangement-empty-banner-label"
       :font-size 11 :color :dim :bg :transparent)))
 
+;; Rows wrap their h-stack in a :width :fill box (the sequencer.lisp track-row
+;; idiom): the box stretches to the pane, which gives the inner h-stack a
+;; bounded width for flex distribution — without it the row collapses to its
+;; fixed content and the flexed lane measures ~zero wide.
 (def arrangement-track-row (i)
-  (h-stack :width :fill :gap 0.6 :align :start
-    (box :width arrangement-header-width
-      (seqv-track-header i))
-    (arrangement-track-lane i)))
+  (box :width :fill
+    (h-stack :width :fill :gap 0.6 :align :start
+      (box :width arrangement-header-width
+        (seqv-track-header i))
+      (arrangement-track-lane i))))
 
+;; Rows stack with :gap 0 so the timeline instances are vertically flush —
+;; the pointer is always over a lane, keeping scroll/zoom gestures captured
+;; by the timelines instead of leaking to the buffer viewport.
 (effect-buffer "*arrangement*"
-  (v-stack :padding 0.0 :gap 0.2
+  (v-stack :padding 0.0 :gap 0.0
     (arrangement-toolbar)
     (if SEQ.song-exists
       (box :width 0 :height 0 :bg :transparent)
       (arrangement-empty-banner))
-    (h-stack :width :fill :gap 0.6 :align :start
-      (box :key "arrangement-scene-header-spacer"
-        :width arrangement-header-width :height arrangement-scene-lane-height
-        :bg :transparent)
-      (box :width :fill :key "arrangement-scene-lane"
+    (box :width :fill
+      (h-stack :width :fill :gap 0.6 :align :start
+        (box :key "arrangement-scene-header-spacer"
+          :width arrangement-header-width :height arrangement-scene-lane-height
+          :bg :transparent)
         (arrangement-scene-lane)))
     (each (seq-visible-track-indices) |i|
       (subtree :key (str "arr-track-" (nth SEQ.track-ids i))
