@@ -5,7 +5,9 @@
 use super::*;
 
 use sequencer::app::song_transport::SongTransportMode;
-use sequencer::sequencer::{state_at_beat, ProjectSong, ProjectSongRow};
+use sequencer::sequencer::{
+    project_lanes, state_at_beat, LaneClip, ProjectSong, ProjectSongRow,
+};
 
 /// Scalar song bindings published to `SEQ.*`, snapshotted per frame so each
 /// reactive is only rewritten when its value changed.
@@ -30,12 +32,18 @@ pub(crate) struct SongBindingsSnapshot {
 }
 
 /// Per-frame diff state for the song bindings: the committed song is cached
-/// and `song-rows` rebuilt only when `committed_song_revision` changes.
+/// and `song-rows` rebuilt only when `committed_song_revision` changes. The
+/// lane projection (`song-lanes`) and `scene-names` also depend on the live
+/// scenes, which have no revision counter, so they diff by value: recomputed
+/// each frame (cheap — rows x tracks `Copy` spans) but republished to Lisp
+/// only when the derived data actually changed.
 #[derive(Default)]
 pub(crate) struct SongFrameState {
     pub(crate) revision: Option<u64>,
     pub(crate) cached_song: Option<ProjectSong>,
     pub(crate) prev: Option<SongBindingsSnapshot>,
+    pub(crate) cached_lanes: Option<Vec<Vec<LaneClip>>>,
+    pub(crate) cached_scene_names: Option<Vec<String>>,
 }
 
 /// The row governing `beats` for display purposes: `state_at_beat` semantics
@@ -133,15 +141,74 @@ pub(crate) fn build_song_rows_value(song: Option<&ProjectSong>) -> Value {
     Value::List(rows)
 }
 
+/// Read-only `song-lanes` value (docs/arrangement-timeline-ui-spec.md 5.5/6):
+/// the per-track lane projection as a list (one entry per track) of clip-span
+/// lists. Each clip is `{row-id, start-beat, end-beat, pattern-id, from-override}`
+/// with `pattern-id` `Nil` for spans where the row resolves no pattern for the
+/// track (sparse lanes render nothing for those spans).
+pub(crate) fn build_song_lanes_value(lanes: Option<&Vec<Vec<LaneClip>>>) -> Value {
+    let Some(lanes) = lanes else {
+        return Value::List(vec![]);
+    };
+    let tracks = lanes
+        .iter()
+        .map(|clips| {
+            let clips = clips
+                .iter()
+                .map(|clip| {
+                    let mut map = HashMap::new();
+                    map.insert(
+                        "row-id".to_string(),
+                        Rc::new(RefCell::new(Value::Number(clip.row_id.0 as f64))),
+                    );
+                    map.insert(
+                        "start-beat".to_string(),
+                        Rc::new(RefCell::new(Value::Number(clip.start_beat))),
+                    );
+                    map.insert(
+                        "end-beat".to_string(),
+                        Rc::new(RefCell::new(Value::Number(clip.end_beat))),
+                    );
+                    map.insert(
+                        "pattern-id".to_string(),
+                        Rc::new(RefCell::new(match clip.pattern {
+                            Some(id) => Value::Number(id.0 as f64),
+                            None => Value::Nil,
+                        })),
+                    );
+                    map.insert(
+                        "from-override".to_string(),
+                        Rc::new(RefCell::new(Value::Bool(clip.from_override))),
+                    );
+                    Rc::new(RefCell::new(Value::Map(map)))
+                })
+                .collect();
+            Rc::new(RefCell::new(Value::List(clips)))
+        })
+        .collect();
+    Value::List(tracks)
+}
+
+fn build_scene_names_value(names: &[String]) -> Value {
+    Value::List(
+        names
+            .iter()
+            .map(|name| Rc::new(RefCell::new(Value::String(name.clone()))))
+            .collect(),
+    )
+}
+
 /// Per-frame publish of the song bindings (spec 12). `song-rows` is rebuilt
-/// only when the committed-song revision changes; scalars publish on change;
-/// the render-rate `song-position-beats` publishes only while the transport
-/// panel is visible. Returns true when a reactive cycle is needed.
+/// only when the committed-song revision changes; the lane projection and
+/// scene names diff by value (the scenes side has no revision counter);
+/// scalars publish on change; the render-rate `song-position-beats` publishes
+/// only while a panel that renders it (transport or arrangement) is visible.
+/// Returns true when a reactive cycle is needed.
 pub(crate) fn sync_song_state(
     rt: &mut Runtime,
     app: &app::App,
     frame: &mut SongFrameState,
-    transport_visible: bool,
+    song_position_visible: bool,
 ) -> bool {
     let mut dirty = false;
     let revision = app.state.committed_song_revision();
@@ -153,6 +220,29 @@ pub(crate) fn sync_song_state(
             build_song_rows_value(frame.cached_song.as_ref()),
         );
         frame.revision = Some(revision);
+        dirty = true;
+    }
+    let (lanes, scene_names) = app.state.with_project_scenes(|scenes| {
+        (
+            frame
+                .cached_song
+                .as_ref()
+                .map(|song| project_lanes(song, scenes)),
+            scenes
+                .scenes
+                .iter()
+                .map(|scene| scene.name.clone())
+                .collect::<Vec<_>>(),
+        )
+    });
+    if frame.cached_lanes != lanes {
+        rt.set_reactive("SEQ", "song-lanes", build_song_lanes_value(lanes.as_ref()));
+        frame.cached_lanes = lanes;
+        dirty = true;
+    }
+    if frame.cached_scene_names.as_ref() != Some(&scene_names) {
+        rt.set_reactive("SEQ", "scene-names", build_scene_names_value(&scene_names));
+        frame.cached_scene_names = Some(scene_names);
         dirty = true;
     }
     let next = build_song_bindings_snapshot(app, frame.cached_song.as_ref());
@@ -201,7 +291,7 @@ pub(crate) fn sync_song_state(
     let position_changed = prev
         .map(|prev| prev.position_beats != next.position_beats)
         .unwrap_or(true);
-    if position_changed && transport_visible {
+    if position_changed && song_position_visible {
         rt.set_reactive(
             "SEQ",
             "song-position-beats",

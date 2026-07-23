@@ -337,11 +337,14 @@ pub(crate) fn reactive_tick_and_render(
         }
         // Song-mode bindings (docs/song-mode-spec.md 12): diff-published each
         // frame; `song-rows` rebuilds only on committed-song revision change.
+        // The render-rate song position drives the transport readout and the
+        // arrangement playhead, so it publishes while either is visible.
+        let arrangement_visible = editor_has_visible_buffer(&editor, "*arrangement*");
         needs_reactive_cycle |= sync_song_state(
             editor.runtime_mut(),
             &app,
             &mut ctx.frame.song,
-            transport_visible,
+            transport_visible || arrangement_visible,
         );
         if master_meter_visible && ctx.meters.cached_peak_l_level != ctx.frame.prev_peak_l_level {
             needs_reactive_cycle |= editor

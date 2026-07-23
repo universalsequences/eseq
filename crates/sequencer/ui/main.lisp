@@ -125,7 +125,8 @@
       (list (seq-step-tab-label tab) buffer))))
 
 (def seq-main-step-tabs ()
-  (append (list (list "Seq" "*sequencer*")) (map seq-render-step-tab seq-registered-step-tabs)))
+  (append (list (list "Seq" "*sequencer*") (list "Arr" "*arrangement*"))
+    (map seq-render-step-tab seq-registered-step-tabs)))
 
 (def seq-main-step-tab-buffer? (buffer)
   (> (len (filter (lambda (tab) (seq-step-tab-matches-buffer? tab buffer))
@@ -152,6 +153,7 @@
 (def seq-refresh-step-tabs-if-present ()
   (do
     (set-window-tabs-for "*sequencer*" (seq-main-step-tabs))
+    (set-window-tabs-for "*arrangement*" (seq-main-step-tabs))
     (for-each
       (lambda (tab) (set-window-tabs-for (seq-step-tab-buffer tab) (seq-main-step-tabs)))
       seq-registered-step-tabs)))
@@ -184,10 +186,9 @@
     (if (= step-panel-buffer buffer) (set! step-panel-buffer "*sequencer*") nil)
     (if (= remembered-step-panel-buffer buffer) (set! remembered-step-panel-buffer "*sequencer*") nil)
     (set-window-buffer-for buffer "*sequencer*")
-    (seq-refresh-step-tabs-if-present)
-    (if (= (len seq-registered-step-tabs) 0)
-      (clear-window-tabs-for "*sequencer*")
-      false)))
+    ;; The static Seq/Arr tabs always remain, so a refresh (never a clear)
+    ;; is the correct post-unregister state.
+    (seq-refresh-step-tabs-if-present)))
 
 (def seq-clear-project-script-tabs ()
   (let ((script-tabs (filter seq-script-step-tab? seq-registered-step-tabs)))
@@ -768,6 +769,20 @@
       (if (= lower-panel-buffer "*piano-roll*")
         (seq-apply-piano-roll-layout)
         (seq-apply-fx-layout)))))
+
+;; Open the arrangement timeline (docs/arrangement-timeline-ui-spec.md) in
+;; the main step panel — the same slot the "Arr" tab next to "Seq" selects.
+(def seq-open-arrangement ()
+  (do
+    (set! step-panel-buffer "*arrangement*")
+    (set! remembered-step-panel-buffer "*arrangement*")
+    (set-window-buffer "*arrangement*")
+    (seq-refresh-step-tabs-if-present)))
+
+(def seq-toggle-arrangement ()
+  (if (= (current-buffer-name) "*arrangement*")
+    (seq-show-sequencer-main)
+    (seq-open-arrangement)))
 
 (def seq-toggle-current-track-expanded-main ()
   (do
@@ -1981,6 +1996,7 @@
 
 (load "@/ui/step-grid.lisp")
 (load "@/ui/sequencer.lisp")
+(load "@/ui/arrangement.lisp")
 (load "@/ui/effects/step-buffer.lisp")
 
 ; Startup layout is applied by Rust after this file loads. Keep this file free of

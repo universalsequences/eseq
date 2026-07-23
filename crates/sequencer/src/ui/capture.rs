@@ -472,6 +472,13 @@ fn apply_capture_macro_host_commands(
         let HostCommand::Custom { name, payload } = command else {
             continue;
         };
+        // Song editing primitives (def-song lowers to song-replace) so
+        // arrangement fixtures can commit a song during capture setup.
+        if let Some(result) = crate::host_commands::apply_song_edit_command(&name, &payload, app) {
+            result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
+            applied = true;
+            continue;
+        }
         match handle_macro_host_command(&name, &payload, app, state, current_track) {
             MacroHostCommandOutcome::Applied => applied = true,
             MacroHostCommandOutcome::Ignored => {
@@ -614,6 +621,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
             "bus-effects",
             build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
         );
+        sync_song_state(runtime, &app, &mut SongFrameState::default(), true);
         runtime.run_reactive_cycle();
     }
     editor.refresh_runtime_side_effects();
@@ -623,6 +631,12 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| format!("capture-after-sync failed: {error:?}"))?;
     if apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)? {
         sync_macro_state(editor.runtime_mut(), &app);
+        sync_song_state(
+            editor.runtime_mut(),
+            &app,
+            &mut SongFrameState::default(),
+            true,
+        );
     }
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();

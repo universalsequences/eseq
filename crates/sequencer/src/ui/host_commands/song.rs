@@ -283,6 +283,20 @@ fn song_status_summary(app: &app::App) -> String {
     }
 }
 
+/// Apply a song editing-primitive command outside the interactive event loop
+/// (headless capture setup). Transport commands need the shared loop context
+/// and are not supported there; returns `None` for any non-song-edit command.
+pub(crate) fn apply_song_edit_command(
+    name: &str,
+    payload: &Value,
+    app: &mut app::App,
+) -> Option<Result<String, String>> {
+    if !COMMANDS.contains(&name) || TRANSPORT_COMMANDS.contains(&name) {
+        return None;
+    }
+    Some(run(name, payload, app))
+}
+
 const TRANSPORT_COMMANDS: &[&str] = &[
     "song-transport-toggle-play",
     "song-transport-play",

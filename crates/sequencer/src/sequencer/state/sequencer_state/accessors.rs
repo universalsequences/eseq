@@ -444,6 +444,13 @@ impl SequencerState {
         self.pattern.song_revision.load(Ordering::Acquire)
     }
 
+    /// Run `f` against the live project scenes without cloning them. Read-only
+    /// seam for per-frame UI sync that derives scene-dependent projections
+    /// (docs/song-mode-spec.md 5.5); the scenes lock is held only for `f`.
+    pub fn with_project_scenes<R>(&self, f: impl FnOnce(&ProjectScenes) -> R) -> R {
+        f(&self.pattern.scenes.lock().unwrap())
+    }
+
     /// Edit the committed song in place (topology remaps, future editing
     /// primitives). Callers are responsible for keeping the song valid.
     pub(crate) fn with_committed_song_mut<R>(

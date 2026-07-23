@@ -675,6 +675,7 @@
             "ui/agent.lisp",
             "ui/step-grid.lisp",
             "ui/sequencer.lisp",
+            "ui/arrangement.lisp",
             "ui/main.lisp",
         ] {
             let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
@@ -12976,6 +12977,8 @@
                 ("song-capture-failed", Value::Bool(false)),
                 ("song-capture-error", Value::Nil),
                 ("song-rows", Value::List(vec![])),
+                ("song-lanes", Value::List(vec![])),
+                ("scene-names", Value::List(vec![])),
                 ("sampler-playhead", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
                 ("master-peak-r", Value::Number(0.0)),
@@ -18005,7 +18008,9 @@
         );
         assert_eq!(
             editor.active_leaf().selected_tab,
-            Some(1),
+            // Static tabs are Seq (0) and Arr (1); the registered fake tab
+            // appends after them.
+            Some(2),
             "the visible selected tab should remain the clicked step tab"
         );
     }
@@ -19652,6 +19657,270 @@
             panic!("song-rows must be a list");
         };
         assert!(rows.is_empty());
+    }
+
+    /// Lane-projection read surface for the arrangement timeline
+    /// (docs/arrangement-timeline-ui-spec.md; song-mode-spec 5.5): `song-lanes`
+    /// publishes the per-track clip spans derived from the committed song plus
+    /// the live scenes, `scene-names` publishes the scene display names, and
+    /// both diff by value — an unchanged frame publishes nothing, a scene
+    /// rename republishes names, a song edit republishes lanes.
+    #[test]
+    fn metal_seq_song_lanes_and_scene_names_publish_on_change() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        let state = sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut test_app = sequencer::app::App::new(
+            std::sync::Arc::new(state),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        test_app.tracks = vec!["Track 1".to_string()];
+        test_app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        let row = |start_beat: f64, scene: usize| sequencer::app::song_edit::SongRowSpec {
+            start_beat,
+            scene,
+            overrides: Vec::new(),
+        };
+        test_app
+            .song_replace(vec![row(0.0, 0), row(4.0, 1), row(8.0, 2)], 16.0, false)
+            .expect("song committed");
+
+        let mut frame = SongFrameState::default();
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("binding read evaluates")
+                .expect("binding read returns a value")
+        };
+
+        // One lane per track; one clip span per row covering [0, end_beat).
+        assert_eq!(read(&mut editor, "(len SEQ.song-lanes)"), Value::Number(1.0));
+        assert_eq!(
+            read(&mut editor, "(len (nth SEQ.song-lanes 0))"),
+            Value::Number(3.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 1) :start-beat)"),
+            Value::Number(4.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 1) :end-beat)"),
+            Value::Number(8.0)
+        );
+        // Rebuilt-on-load scene cells resolve scene j to PatternId(j + 1).
+        assert_eq!(
+            read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 2) :pattern-id)"),
+            Value::Number(3.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 2) :from-override)"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            read(&mut editor, "(len SEQ.scene-names)"),
+            Value::Number(3.0)
+        );
+
+        // Value diffing: an unchanged frame publishes nothing.
+        assert!(
+            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            "an unchanged frame must not republish lanes or names"
+        );
+
+        // A scenes-side change (no song revision bump) republishes names.
+        assert!(test_app.state.rename_scene(1, "Drop".to_string()));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(nth SEQ.scene-names 1)"),
+            Value::String("Drop".to_string())
+        );
+
+        // A song edit republishes the projection.
+        test_app.song_set_end(24.0).expect("end moved");
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 2) :end-beat)"),
+            Value::Number(24.0)
+        );
+    }
+
+    /// Arrangement layout (docs/arrangement-timeline-ui-spec.md 4-6): the
+    /// scene lane is the only timeline instance with a header/time ruler,
+    /// track lanes are headerless and sidebar-less, both have finite nonzero
+    /// geometry, the shared playhead prop is a ReactiveRef binding
+    /// (AGENTS.md bindable-props mandate), and nil-pattern spans render
+    /// sparsely (no item).
+    #[test]
+    fn metal_seq_arrangement_layout_one_ruler_headerless_lanes_and_sparse_items() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        let song_row = |id: f64, start: f64, scene: f64| {
+            map_value(vec![
+                ("id", Value::Number(id)),
+                ("start-beat", Value::Number(start)),
+                ("scene", Value::Number(scene)),
+                ("overrides", Value::List(vec![])),
+            ])
+        };
+        let lane_clip = |row_id: f64, start: f64, end: f64, pattern: Value| {
+            map_value(vec![
+                ("row-id", Value::Number(row_id)),
+                ("start-beat", Value::Number(start)),
+                ("end-beat", Value::Number(end)),
+                ("pattern-id", pattern),
+                ("from-override", Value::Bool(false)),
+            ])
+        };
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
+        rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
+        rt.set_reactive(
+            "SEQ",
+            "song-rows",
+            test_list(vec![song_row(0.0, 0.0, 0.0), song_row(1.0, 8.0, 1.0)]),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "song-lanes",
+            test_list(vec![test_list(vec![
+                lane_clip(0.0, 0.0, 8.0, Value::Number(1.0)),
+                lane_clip(1.0, 8.0, 16.0, Value::Nil),
+            ])]),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "scene-names",
+            test_string_list(&["Intro", "Drop"]),
+        );
+        rt.run_reactive_cycle();
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-open-arrangement)")
+            .expect("open arrangement view");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("arrangement layout");
+        let scene_container = find_layout_node_by_stable_key(&layout, "arrangement-scene-lane")
+            .expect("scene lane container");
+        assert_finite_nonzero_rect(scene_container, "arrangement-scene-lane");
+        let scene_lane = find_layout_node_by_widget_type(scene_container, "timeline")
+            .expect("scene timeline instance");
+        assert_finite_nonzero_rect(scene_lane, "scene timeline instance");
+        assert_eq!(
+            layout_prop_number(scene_lane, "header-height"),
+            Some(1.6),
+            "the scene lane draws the arrangement's one ruler"
+        );
+        assert!(
+            matches!(scene_lane.props.get("time-ruler"), Some(Value::Map(_))),
+            "the scene lane carries the bars-beats ruler"
+        );
+        assert!(
+            matches!(
+                scene_lane.props.get("playhead-time"),
+                Some(Value::ReactiveRef { .. })
+            ),
+            "playhead-time must bind reactively (render-rate sweep without rebuilds)"
+        );
+        assert_eq!(layout_prop_number(scene_lane, "content-length"), Some(16.0));
+
+        // The subtree key names the row (the subtree wrapper owns the stable
+        // key of its root child): "arr-track-<track-id>".
+        let track_container = find_layout_node_by_stable_key(&layout, "arr-track-0")
+            .expect("track lane container");
+        assert_finite_nonzero_rect(track_container, "arrangement-track-lane-0");
+        let track_lane = find_layout_node_by_widget_type(track_container, "timeline")
+            .expect("track timeline instance");
+        assert_finite_nonzero_rect(track_lane, "track timeline instance");
+        assert_eq!(
+            layout_prop_number(track_lane, "header-height"),
+            Some(0.0),
+            "track lanes are headerless (spec 4.2)"
+        );
+        assert_eq!(
+            layout_prop_number(track_lane, "sidebar-width"),
+            Some(0.0),
+            "the composed seqv-track-header plays the sidebar role"
+        );
+        assert!(
+            track_lane.props.get("time-ruler").is_none(),
+            "only the scene lane draws a ruler"
+        );
+        assert!(
+            matches!(
+                track_lane.props.get("playhead-time"),
+                Some(Value::ReactiveRef { .. })
+            ),
+            "every lane shares the same render-rate playhead binding"
+        );
+        assert_eq!(layout_prop_number(track_lane, "content-length"), Some(16.0));
+
+        // The reused track header renders beside the lane.
+        assert!(
+            find_layout_node_by_stable_key(&layout, "seqv-track-header-0").is_some(),
+            "seqv-track-header is reused unchanged in the arrangement row"
+        );
+
+        // Sparse lanes (spec 6): the nil-pattern span produces NO item.
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("expr evaluates")
+                .expect("expr returns a value")
+        };
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-track-items 0))"),
+            Value::Number(1.0)
+        );
+        // Scene-lane items span row-start to next row-start with scene names.
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-scene-items))"),
+            Value::Number(2.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 0) :label)"),
+            Value::String("Intro".to_string())
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 0) :end)"),
+            Value::Number(8.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :end)"),
+            Value::Number(16.0)
+        );
     }
 
     #[test]
