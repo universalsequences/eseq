@@ -69,8 +69,8 @@ pub mod sample_db;
 pub mod sample_import;
 pub mod sampler;
 mod scale;
-mod scheduled_event;
 mod scheduler;
+pub use scheduler::scheduled_event;
 #[allow(dead_code)]
 pub mod sequencer;
 pub mod track_color;
@@ -82,4 +82,3 @@ mod voice;
 #[allow(dead_code)]
 pub mod voice_modulator;
 pub mod warp_grid;
-
