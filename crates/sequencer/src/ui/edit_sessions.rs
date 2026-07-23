@@ -1079,7 +1079,7 @@ pub(super) fn metal_agent_instrument_preset_schema(
 
     let mut params = Vec::new();
     for (idx, param) in desc.params.iter().enumerate() {
-        let group = if param.node_param_idx >= sequencer::voice_modulator::MOD_PARAM_BASE {
+        let group = if param.node_param_idx >= sequencer::instruments::voice_modulator::MOD_PARAM_BASE {
             "source"
         } else if param.name.starts_with("mod ") {
             "mod"

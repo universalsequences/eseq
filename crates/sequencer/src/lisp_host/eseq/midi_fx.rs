@@ -932,10 +932,10 @@ pub(in crate::lisp_host) fn instrument_param_target_and_idx(
         .copied()
         .unwrap_or(1)
         .max(1);
-    let (target, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+    let (target, idx) = if raw_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
         (
             ScheduledInstrumentParamTarget::Modulator,
-            (raw_idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
+            (raw_idx - crate::instruments::voice_modulator::MOD_PARAM_BASE) as u64,
         )
     } else {
         (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)

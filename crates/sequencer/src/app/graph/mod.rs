@@ -13,7 +13,7 @@ use crate::sequencer::{
     DRUM_RACK_LAST_PAD_NOTE, DRUM_RACK_TOTAL_PAD_NOTES, EXT_MOD_INPUT_COUNT, MAX_RACK_SLOTS,
     MAX_SAMPLER_POOLS, MAX_TRACKS,
 };
-use crate::voice::MAX_VOICES;
+use crate::audio::MAX_VOICES;
 
 use super::fx_chain::{
     connect_fx_chain_gap, connect_fx_chain_host, rewire_fx_chain, ChainSuccessor, FxChainHost,
@@ -386,7 +386,7 @@ fn custom_host_input_routes(
                 modulator.name, modulator.input_channel, manifest.n_inputs
             ));
         }
-        if modulator.slot == 0 || modulator.slot > crate::voice_modulator::NUM_OUTPUTS {
+        if modulator.slot == 0 || modulator.slot > crate::instruments::voice_modulator::NUM_OUTPUTS {
             return Err(format!(
                 "{context}: modulator '{}' has invalid slot {}",
                 modulator.name, modulator.slot
@@ -455,7 +455,7 @@ fn sampler_voice_build_capacities(voice_count: usize) -> (usize, usize) {
     let voice_count = voice_count.clamp(1, MAX_VOICES);
     let nodes_per_voice = 3;
     let connections_per_voice =
-        4 + 2 + crate::voice_modulator::NUM_OUTPUTS + EXT_MOD_INPUT_COUNT + 2;
+        4 + 2 + crate::instruments::voice_modulator::NUM_OUTPUTS + EXT_MOD_INPUT_COUNT + 2;
     (
         voice_count * nodes_per_voice,
         voice_count * connections_per_voice,

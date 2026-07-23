@@ -1694,7 +1694,7 @@ impl App {
         }
     }
 
-    pub fn submit_sample_analysis(&self, loaded: &crate::sampler::LoadedSample) {
+    pub fn submit_sample_analysis(&self, loaded: &crate::instruments::sampler::LoadedSample) {
         self.sample_analysis.submit(AnalysisJob {
             buffer_id: loaded.buffer_id,
             samples: Arc::new(loaded.mono_samples.clone()),

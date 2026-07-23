@@ -1,3 +1,5 @@
+//! Built-in sample playback instrument and sample-buffer loading.
+
 use crate::audiograph::*;
 use std::ffi::CString;
 use std::os::raw::{c_int, c_void};
@@ -168,7 +170,7 @@ const MIN_RELEASE_SAMPLES: f32 = 64.0;
 // first fades the previous output to silence, then starts the new amp envelope.
 const RETRIGGER_FADE_SECONDS: f32 = 0.004;
 const WARP_XFADE_SECONDS: f32 = 0.005;
-const MOD_INPUT_COUNT: usize = crate::voice_modulator::SLOT_COUNT;
+const MOD_INPUT_COUNT: usize = crate::instruments::voice_modulator::SLOT_COUNT;
 const SR_MIN_HZ: f32 = 2_000.0;
 const SR_MAX_HZ: f32 = 44_100.0;
 const SPEED_MIN: f32 = -4.0;
@@ -185,7 +187,7 @@ pub const WARP_MODE_REPITCH: i32 = 3;
 pub const SEG_LOOP_OFF: i32 = 0;
 pub const SEG_LOOP_FORWARD: i32 = 1;
 pub const SEG_LOOP_PINGPONG: i32 = 2;
-pub const WARP_PRESERVE_DEFAULT: i32 = crate::warp_grid::PRESERVE_TRANSIENTS;
+pub const WARP_PRESERVE_DEFAULT: i32 = crate::instruments::warp_grid::PRESERVE_TRANSIENTS;
 pub const WARP_SEG_LOOP_MODE_DEFAULT: i32 = SEG_LOOP_FORWARD;
 pub const WARP_SEG_ENVELOPE_DEFAULT: f32 = 0.0;
 const SCRUB_SMOOTH_TIME_MS_DEFAULT: f32 = 6.0;
@@ -916,7 +918,7 @@ unsafe fn sampler_process_segment(
         .map(|table| table.onsets_frames.as_slice())
         .unwrap_or(&[]);
     let next_seg_boundary = |after_src: f32| -> f32 {
-        crate::warp_grid::next_segment_boundary(
+        crate::instruments::warp_grid::next_segment_boundary(
             after_src as f64,
             warp_anchor,
             warp_sample_bpm as f64,
@@ -1829,7 +1831,7 @@ mod tests {
         event.aux[SAMPLER_EVENT_AUX_WARP_PTR_LO] = 0.0;
         event.aux[SAMPLER_EVENT_AUX_WARP_PTR_HI] = 0.0;
         event.aux[SAMPLER_EVENT_AUX_SCRUB_OFFSET] = 0.0;
-        event.aux[SAMPLER_EVENT_AUX_WARP_PRESERVE] = crate::warp_grid::PRESERVE_TRANSIENTS as f32;
+        event.aux[SAMPLER_EVENT_AUX_WARP_PRESERVE] = crate::instruments::warp_grid::PRESERVE_TRANSIENTS as f32;
         event.aux[SAMPLER_EVENT_AUX_WARP_SEG_LOOP_MODE] = SEG_LOOP_FORWARD as f32;
         event.aux[SAMPLER_EVENT_AUX_WARP_SEG_ENVELOPE] = 0.0;
         event
@@ -1986,7 +1988,7 @@ mod tests {
         state[STATE_END_POINT] = 1.0;
         state[STATE_WARP_ENABLED] = 1.0;
         state[STATE_WARP_MODE] = WARP_MODE_BEATS as f32;
-        state[STATE_WARP_PRESERVE] = crate::warp_grid::PRESERVE_1_4 as f32;
+        state[STATE_WARP_PRESERVE] = crate::instruments::warp_grid::PRESERVE_1_4 as f32;
         state[STATE_WARP_SEG_LOOP_MODE] = seg_loop_mode as f32;
         state[STATE_WARP_SAMPLE_BPM] = 60.0;
         state[STATE_WARP_PROJECT_BPM] = project_bpm;
@@ -2119,7 +2121,7 @@ mod tests {
         // new segment plays natively for 100 frames. Unwarped playback would
         // read source frame 600.
         let mut state = beats_warp_test_state(30.0, SEG_LOOP_FORWARD);
-        state[STATE_WARP_PRESERVE] = crate::warp_grid::PRESERVE_1_16 as f32;
+        state[STATE_WARP_PRESERVE] = crate::instruments::warp_grid::PRESERVE_1_16 as f32;
         let mut sample: Vec<f32> = (0..4_000).map(|i| i as f32 * 0.001).collect();
         let out = render_beats(&mut state, &mut sample, 700);
 
@@ -2151,16 +2153,16 @@ mod tests {
             source_sample_rate,
             sample_bpm,
             project_bpm,
-            crate::warp_grid::PRESERVE_1_4,
+            crate::instruments::warp_grid::PRESERVE_1_4,
             SEG_LOOP_FORWARD,
         );
         plain_state[STATE_WARP_ENABLED] = 0.0;
         let plain = render_beats(&mut plain_state, &mut sample.clone(), 24_000);
 
         for preserve in [
-            crate::warp_grid::PRESERVE_1_8,
-            crate::warp_grid::PRESERVE_1_16,
-            crate::warp_grid::PRESERVE_TRANSIENTS,
+            crate::instruments::warp_grid::PRESERVE_1_8,
+            crate::instruments::warp_grid::PRESERVE_1_16,
+            crate::instruments::warp_grid::PRESERVE_TRANSIENTS,
         ] {
             let mut state = beats_warp_test_state_at_rate(
                 host_sample_rate,
@@ -2201,7 +2203,7 @@ mod tests {
             source_sample_rate,
             sample_bpm,
             project_bpm,
-            crate::warp_grid::PRESERVE_1_16,
+            crate::instruments::warp_grid::PRESERVE_1_16,
             SEG_LOOP_FORWARD,
         );
         state[STATE_START_POINT] = start_sample / sample_len as f32;
@@ -2295,11 +2297,11 @@ mod tests {
             rendered
         };
 
-        let plain = render_scheduled(crate::warp_grid::PRESERVE_1_4, false);
+        let plain = render_scheduled(crate::instruments::warp_grid::PRESERVE_1_4, false);
         for preserve in [
-            crate::warp_grid::PRESERVE_1_8,
-            crate::warp_grid::PRESERVE_1_16,
-            crate::warp_grid::PRESERVE_TRANSIENTS,
+            crate::instruments::warp_grid::PRESERVE_1_8,
+            crate::instruments::warp_grid::PRESERVE_1_16,
+            crate::instruments::warp_grid::PRESERVE_TRANSIENTS,
         ] {
             let warped = render_scheduled(preserve, true);
             let rms_diff = plain[8_000..24_000]
@@ -2322,8 +2324,8 @@ mod tests {
     #[test]
     fn beats_warp_live_preserve_change_recomputes_current_segment_grid() {
         let mut state = beats_warp_test_state(30.0, SEG_LOOP_FORWARD);
-        state[STATE_WARP_PRESERVE] = crate::warp_grid::PRESERVE_1_4 as f32;
-        state[STATE_WARP_LAST_PRESERVE] = crate::warp_grid::PRESERVE_1_4 as f32;
+        state[STATE_WARP_PRESERVE] = crate::instruments::warp_grid::PRESERVE_1_4 as f32;
+        state[STATE_WARP_LAST_PRESERVE] = crate::instruments::warp_grid::PRESERVE_1_4 as f32;
         let mut sample: Vec<f32> = (0..4_000).map(|i| i as f32 * 0.001).collect();
 
         let _ = render_beats(&mut state, &mut sample, 100);
@@ -2332,12 +2334,12 @@ mod tests {
             "1/4 grid should still target source 1000 before the live edit"
         );
 
-        state[STATE_WARP_PRESERVE] = crate::warp_grid::PRESERVE_1_16 as f32;
+        state[STATE_WARP_PRESERVE] = crate::instruments::warp_grid::PRESERVE_1_16 as f32;
         let _ = render_beats(&mut state, &mut sample, 8);
 
         assert_eq!(
             state[STATE_WARP_LAST_PRESERVE],
-            crate::warp_grid::PRESERVE_1_16 as f32
+            crate::instruments::warp_grid::PRESERVE_1_16 as f32
         );
         assert!(
             (state[STATE_WARP_NEXT_BOUNDARY] - 250.0).abs() < 0.001,
@@ -2457,9 +2459,9 @@ mod tests {
     #[test]
     fn sampler_note_on_aux_applies_beats_preserve_before_segment_reset() {
         for (preserve, expected_boundary) in [
-            (crate::warp_grid::PRESERVE_1_8, 500.0_f32),
-            (crate::warp_grid::PRESERVE_1_16, 250.0_f32),
-            (crate::warp_grid::PRESERVE_TRANSIENTS, 250.0_f32),
+            (crate::instruments::warp_grid::PRESERVE_1_8, 500.0_f32),
+            (crate::instruments::warp_grid::PRESERVE_1_16, 250.0_f32),
+            (crate::instruments::warp_grid::PRESERVE_TRANSIENTS, 250.0_f32),
         ] {
             let mut state = [0.0_f32; SAMPLER_STATE_SIZE];
             let initial = [0.0_f32, 1_000.0];
@@ -2473,7 +2475,7 @@ mod tests {
             }
             // Prove the note-on aux value, not the initialized state, drives
             // the first boundary.
-            state[STATE_WARP_PRESERVE] = crate::warp_grid::PRESERVE_1_4 as f32;
+            state[STATE_WARP_PRESERVE] = crate::instruments::warp_grid::PRESERVE_1_4 as f32;
 
             let mut sample = vec![1.0_f32; 4_000];
             let mut buffers = [BufferDesc {

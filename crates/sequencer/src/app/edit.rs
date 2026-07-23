@@ -2269,7 +2269,7 @@ impl App {
                 crate::effects::EffectDescriptor::builtin_sampler()
             }
             TrackInstrumentSource::Rack { .. } => unreachable!(),
-            TrackInstrumentSource::Modulator => crate::track_modulator::descriptor(),
+            TrackInstrumentSource::Modulator => crate::instruments::track_modulator::descriptor(),
         };
         self.state.validate_track_instrument_pattern_state(
             track,

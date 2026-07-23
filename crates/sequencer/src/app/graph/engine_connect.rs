@@ -358,7 +358,7 @@ impl GraphController<'_> {
                 crate::audiograph::graph_disconnect(self.app.graph.lg.0, gp_id, 1, old_synth, 1);
                 crate::audiograph::graph_disconnect(self.app.graph.lg.0, gp_id, 2, old_synth, 2);
                 crate::audiograph::graph_disconnect(self.app.graph.lg.0, gp_id, 3, old_synth, 3);
-                for mod_out in 0..crate::voice_modulator::NUM_OUTPUTS {
+                for mod_out in 0..crate::instruments::voice_modulator::NUM_OUTPUTS {
                     crate::audiograph::graph_disconnect(
                         self.app.graph.lg.0,
                         mod_id,

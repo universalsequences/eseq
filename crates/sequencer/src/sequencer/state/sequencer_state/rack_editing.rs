@@ -205,7 +205,7 @@ impl SequencerState {
                 pan: 0.0,
                 mute: false,
                 solo: false,
-                max_polyphony: crate::voice::MAX_VOICES,
+                max_polyphony: crate::audio::MAX_VOICES,
                 param_plocks: RackSlotParamPlocks::new(),
                 instrument_slot: data.instrument_slot.clone(),
                 effect_slots: data.effect_slots.clone(),

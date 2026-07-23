@@ -1,6 +1,6 @@
 use crate::accumulator::ResolvedStep;
 use crate::effects::{MAX_SLOT_PARAMS, MAX_SLOT_TENSOR_PARAMS};
-use crate::voice::MAX_VOICES;
+use crate::audio::MAX_VOICES;
 use arrayvec::ArrayVec;
 use std::cell::UnsafeCell;
 use std::cmp::Ordering as CmpOrdering;
@@ -94,9 +94,9 @@ impl Default for ScheduledSamplerParams {
             sample_bpm: 120.0,
             playback_speed: 1.0,
             scrub: 0.0,
-            warp_preserve: crate::sampler::WARP_PRESERVE_DEFAULT as f32,
-            warp_seg_loop_mode: crate::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
-            warp_seg_envelope: crate::sampler::WARP_SEG_ENVELOPE_DEFAULT,
+            warp_preserve: crate::instruments::sampler::WARP_PRESERVE_DEFAULT as f32,
+            warp_seg_loop_mode: crate::instruments::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
+            warp_seg_envelope: crate::instruments::sampler::WARP_SEG_ENVELOPE_DEFAULT,
         }
     }
 }
@@ -267,7 +267,7 @@ mod tests {
         ScheduledInstrumentParams, ScheduledInstrumentTensorParams, ScheduledSamplerParams,
     };
     use crate::accumulator::ResolvedStep;
-    use crate::voice::MAX_VOICES;
+    use crate::audio::MAX_VOICES;
 
     fn empty_effect_params() -> Vec<ScheduledEffectParam> {
         Vec::new()

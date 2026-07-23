@@ -68,8 +68,8 @@ impl GraphController<'_> {
             unsafe {
                 crate::audiograph::add_node(
                     self.app.graph.lg.0,
-                    crate::track_modulator::mod_in_clip_vtable(),
-                    crate::track_modulator::MOD_IN_CLIP_STATE_SIZE * std::mem::size_of::<f32>(),
+                    crate::instruments::track_modulator::mod_in_clip_vtable(),
+                    crate::instruments::track_modulator::MOD_IN_CLIP_STATE_SIZE * std::mem::size_of::<f32>(),
                     mod_in_name.as_ptr(),
                     1,
                     1,
@@ -82,8 +82,8 @@ impl GraphController<'_> {
         let mod_env_id = unsafe {
             crate::audiograph::add_node(
                 self.app.graph.lg.0,
-                crate::track_modulator::modulator_envelope_vtable(),
-                crate::track_modulator::MODULATOR_ENVELOPE_STATE_SIZE * std::mem::size_of::<f32>(),
+                crate::instruments::track_modulator::modulator_envelope_vtable(),
+                crate::instruments::track_modulator::MODULATOR_ENVELOPE_STATE_SIZE * std::mem::size_of::<f32>(),
                 mod_env_name.as_ptr(),
                 0,
                 1,
@@ -434,22 +434,22 @@ impl GraphController<'_> {
 
             let mod_name = CString::new(format!("{}_mod_{}", track_name, v)).unwrap();
             let mod_initial_state =
-                crate::voice_modulator::sampler_voice_initial_state(sampler_pool_id, v);
+                crate::instruments::voice_modulator::sampler_voice_initial_state(sampler_pool_id, v);
             check_test_graph_build_node_add(&format!(
                 "build_sampler_voices pool {sampler_pool_id} voice {v} modulator"
             ))?;
             let mod_id = unsafe {
                 crate::audiograph::add_node(
                     self.app.graph.lg.0,
-                    crate::voice_modulator::voice_modulator_vtable(),
-                    crate::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
+                    crate::instruments::voice_modulator::voice_modulator_vtable(),
+                    crate::instruments::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
                     mod_name.as_ptr(),
-                    crate::voice_modulator::INPUT_COUNT as i32,
-                    crate::voice_modulator::NUM_OUTPUTS as i32,
+                    crate::instruments::voice_modulator::INPUT_COUNT as i32,
+                    crate::instruments::voice_modulator::NUM_OUTPUTS as i32,
                     (&mod_initial_state
-                        as *const crate::voice_modulator::VoiceModulatorInitialState)
+                        as *const crate::instruments::voice_modulator::VoiceModulatorInitialState)
                         .cast(),
-                    std::mem::size_of::<crate::voice_modulator::VoiceModulatorInitialState>(),
+                    std::mem::size_of::<crate::instruments::voice_modulator::VoiceModulatorInitialState>(),
                 )
             };
             if mod_id < 0 {
@@ -462,7 +462,7 @@ impl GraphController<'_> {
             check_test_graph_build_node_add(&format!(
                 "build_sampler_voices pool {sampler_pool_id} voice {v} sampler"
             ))?;
-            let st = crate::sampler::create_sampler_node(
+            let st = crate::instruments::sampler::create_sampler_node(
                 self.app.graph.lg.0,
                 buffer_id,
                 sample_rate,
@@ -482,17 +482,17 @@ impl GraphController<'_> {
                 gp_id,
                 crate::effects::gatepitch::PARAM_CLOCK_PHASE as i32,
                 mod_id,
-                crate::voice_modulator::INPUT_TRANSPORT_BAR_PHASE as i32,
+                crate::instruments::voice_modulator::INPUT_TRANSPORT_BAR_PHASE as i32,
                 &format!("build_sampler_voices voice {v} transport clock"),
             )?;
             transaction.connect(
                 gp_id,
                 crate::effects::gatepitch::PARAM_CLOCK_INC as i32,
                 mod_id,
-                crate::voice_modulator::INPUT_TRANSPORT_BAR_PHASE_INC as i32,
+                crate::instruments::voice_modulator::INPUT_TRANSPORT_BAR_PHASE_INC as i32,
                 &format!("build_sampler_voices voice {v} transport clock increment"),
             )?;
-            for port in 0..crate::voice_modulator::NUM_OUTPUTS {
+            for port in 0..crate::instruments::voice_modulator::NUM_OUTPUTS {
                 transaction.connect(
                     mod_id,
                     port as i32,
@@ -537,7 +537,7 @@ impl GraphController<'_> {
                 crate::audiograph::params_push_wrapper(
                     self.app.graph.lg.0,
                     crate::audiograph::ParamMsg {
-                        idx: crate::voice_modulator::PARAM_BPM as u64,
+                        idx: crate::instruments::voice_modulator::PARAM_BPM as u64,
                         logical_id: mod_id as u64,
                         fvalue: bpm,
                     },
@@ -719,20 +719,20 @@ impl GraphController<'_> {
             let mod_name = CString::new(format!("{}_mod_{}", name, v))
                 .map_err(|_| format!("{voice_context}: modulator node name contains NUL"))?;
             let mod_initial_state =
-                crate::voice_modulator::custom_engine_initial_state(engine_id, v);
+                crate::instruments::voice_modulator::custom_engine_initial_state(engine_id, v);
             check_test_graph_build_node_add(&format!("{voice_context} modulator"))?;
             let mod_id = unsafe {
                 crate::audiograph::add_node(
                     self.app.graph.lg.0,
-                    crate::voice_modulator::voice_modulator_vtable(),
-                    crate::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
+                    crate::instruments::voice_modulator::voice_modulator_vtable(),
+                    crate::instruments::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
                     mod_name.as_ptr(),
-                    crate::voice_modulator::INPUT_COUNT as i32,
-                    crate::voice_modulator::NUM_OUTPUTS as i32,
+                    crate::instruments::voice_modulator::INPUT_COUNT as i32,
+                    crate::instruments::voice_modulator::NUM_OUTPUTS as i32,
                     (&mod_initial_state
-                        as *const crate::voice_modulator::VoiceModulatorInitialState)
+                        as *const crate::instruments::voice_modulator::VoiceModulatorInitialState)
                         .cast(),
-                    std::mem::size_of::<crate::voice_modulator::VoiceModulatorInitialState>(),
+                    std::mem::size_of::<crate::instruments::voice_modulator::VoiceModulatorInitialState>(),
                 )
             };
             if mod_id < 0 {
@@ -788,14 +788,14 @@ impl GraphController<'_> {
                 gp_id,
                 crate::effects::gatepitch::PARAM_CLOCK_PHASE as i32,
                 mod_id,
-                crate::voice_modulator::INPUT_TRANSPORT_BAR_PHASE as i32,
+                crate::instruments::voice_modulator::INPUT_TRANSPORT_BAR_PHASE as i32,
                 &format!("{voice_context} transport clock"),
             )?;
             transaction.connect(
                 gp_id,
                 crate::effects::gatepitch::PARAM_CLOCK_INC as i32,
                 mod_id,
-                crate::voice_modulator::INPUT_TRANSPORT_BAR_PHASE_INC as i32,
+                crate::instruments::voice_modulator::INPUT_TRANSPORT_BAR_PHASE_INC as i32,
                 &format!("{voice_context} transport clock increment"),
             )?;
             gatepitch_ids.push(gp_id);
@@ -818,7 +818,7 @@ impl GraphController<'_> {
             push_graph_param(
                 self.app.graph.lg.0,
                 mod_id as u64,
-                crate::voice_modulator::PARAM_BPM as u64,
+                crate::instruments::voice_modulator::PARAM_BPM as u64,
                 bpm,
             );
         }

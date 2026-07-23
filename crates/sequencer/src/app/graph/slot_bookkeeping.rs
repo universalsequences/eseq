@@ -232,7 +232,7 @@ impl GraphController<'_> {
                 self.app.graph.track_synth_node_ids.push(Vec::new());
                 self.app.graph.track_gatepitch_node_ids.push(Vec::new());
                 self.app.graph.track_engine_ids.push(None);
-                let desc = crate::track_modulator::descriptor();
+                let desc = crate::instruments::track_modulator::descriptor();
                 self.app.state.pattern.instrument_slots[idx]
                     .apply_descriptor(&desc, shell.mod_env_id as u32);
                 self.app.graph.instrument_descriptors.push(desc);

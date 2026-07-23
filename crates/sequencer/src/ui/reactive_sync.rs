@@ -2156,7 +2156,7 @@ pub(super) fn load_or_convert_sampler_track(
         .map(Path::to_path_buf)
         .or_else(|| app.sampler_path_for_track(track));
     let (new_buffer_id, sample_rate, new_name) = if let Some(path) = resolved_path.as_deref() {
-        let loaded = sequencer::sampler::load_wav_buffer(lg_raw, path)?;
+        let loaded = sequencer::instruments::sampler::load_wav_buffer(lg_raw, path)?;
         app.submit_sample_analysis(&loaded);
         let name = sequencer::sample_db::display_title_for_sample_path(path)
             .unwrap_or(loaded.name.clone());
@@ -2164,7 +2164,7 @@ pub(super) fn load_or_convert_sampler_track(
         (loaded.buffer_id, loaded.sample_rate, name)
     } else {
         (
-            sequencer::sampler::create_silent_buffer(lg_raw)?,
+            sequencer::instruments::sampler::create_silent_buffer(lg_raw)?,
             app.graph.sample_rate,
             format!("Sampler {}", track + 1),
         )

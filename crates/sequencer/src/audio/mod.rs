@@ -22,8 +22,8 @@ Submodule map (each file's header has details):
   and choke groups).
 - `params` — plock/key-lock/default parameter resolution for instruments,
   samplers, and rack slots.
-- `voice_pool` — custom-engine voice pools: allocation, stealing, release,
-  and topology sync when tracks change.
+- `voices` — sampler/graph-node allocation plus custom-engine allocation,
+  stealing, release tails, and topology sync when tracks change.
 - `graph_dispatch` — unsafe wrappers that push params, block events, and
   triggers into the live graph.
 - `render` — block rendering, metronome mix, peak metering, and bus-gate/
@@ -46,7 +46,9 @@ mod rack;
 mod render;
 mod state;
 mod stream;
-mod voice_pool;
+mod voices;
+
+pub use voices::MAX_VOICES;
 
 // Flat namespace across the audio submodules: every file starts with
 // `use super::*;`, so items resolve exactly as they did in the old
@@ -54,7 +56,7 @@ mod voice_pool;
 #[allow(unused_imports)]
 use {
     callback::*, device::*, events::*, fire::*, graph_dispatch::*, params::*, rack::*, render::*,
-    state::*, stream::*, voice_pool::*,
+    state::*, stream::*, voices::*,
 };
 
 use arrayvec::ArrayVec;
@@ -70,7 +72,7 @@ use crate::audiograph::*;
 use crate::effects::gatepitch;
 use crate::effects::{EffectSlotSnapshot, EffectSlotState, MAX_SLOT_PARAMS};
 use crate::recorder::MasterRecorder;
-use crate::sampler::{
+use crate::instruments::sampler::{
     PARAM_ATTACK_SAMPLES, PARAM_LOOP_XFADE_SAMPLES, PARAM_RELEASE_SAMPLES, PARAM_WARP_PROJECT_BPM,
     SAMPLER_EVENT_AUX_ATTACK_SAMPLES, SAMPLER_EVENT_AUX_ENABLED, SAMPLER_EVENT_AUX_END_POINT,
     SAMPLER_EVENT_AUX_GATE_MODE, SAMPLER_EVENT_AUX_GATE_SAMPLES, SAMPLER_EVENT_AUX_LOOP_MODE,
@@ -96,7 +98,6 @@ use crate::sequencer::{
     MAX_RACK_SLOTS, MAX_SAMPLER_POOLS, MAX_TRACKS,
 };
 use crate::app::BusGateRuntimeState;
-use crate::voice::{VoicePool, MAX_VOICES};
 
 const FALLBACK_SAMPLE_RATE: u32 = 44_100;
 const CUSTOM_ENGINE_RELEASE_TAIL_SECONDS: f64 = 20.0;

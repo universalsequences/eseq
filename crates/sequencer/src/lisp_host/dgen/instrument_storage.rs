@@ -14,7 +14,7 @@ counts, process-call stats) that the audio thread reads through
 
 use super::super::*;
 use crate::sequencer::MAX_INSTRUMENT_ENGINES;
-use crate::voice::MAX_VOICES;
+use crate::audio::MAX_VOICES;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct InstrumentPreset {

@@ -204,26 +204,26 @@ pub(super) fn fire_resolved(
             warp_preserve: live_slot_resolved_node_param_value(
                 inst_slot,
                 step,
-                crate::sampler::PARAM_WARP_PRESERVE,
-                crate::sampler::WARP_PRESERVE_DEFAULT as f32,
+                crate::instruments::sampler::PARAM_WARP_PRESERVE,
+                crate::instruments::sampler::WARP_PRESERVE_DEFAULT as f32,
             ),
             warp_seg_loop_mode: live_slot_resolved_node_param_value(
                 inst_slot,
                 step,
-                crate::sampler::PARAM_WARP_SEG_LOOP_MODE,
-                crate::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
+                crate::instruments::sampler::PARAM_WARP_SEG_LOOP_MODE,
+                crate::instruments::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
             ),
             warp_seg_envelope: live_slot_resolved_node_param_value(
                 inst_slot,
                 step,
-                crate::sampler::PARAM_WARP_SEG_ENVELOPE,
-                crate::sampler::WARP_SEG_ENVELOPE_DEFAULT,
+                crate::instruments::sampler::PARAM_WARP_SEG_ENVELOPE,
+                crate::instruments::sampler::WARP_SEG_ENVELOPE_DEFAULT,
             ),
         }
     };
     let scheduled_source = scheduled_sampler_params.is_some();
     let sampler_params = scheduled_sampler_params.unwrap_or_else(fallback_sampler_params);
-    if crate::sampler::srange_debug_enabled() {
+    if crate::instruments::sampler::srange_debug_enabled() {
         eprintln!(
             "[srange] trigger dispatch track={} step={} source={} start={} end={}",
             track_idx,
@@ -823,7 +823,7 @@ pub(super) fn dispatch_chop_event(data: &mut AudioCallbackData, event: ChopEvent
             params_push_wrapper(
                 data.lg.0,
                 ParamMsg {
-                    idx: crate::track_modulator::PARAM_RISE_MS,
+                    idx: crate::instruments::track_modulator::PARAM_RISE_MS,
                     logical_id: lid,
                     fvalue: rise,
                 },
@@ -831,7 +831,7 @@ pub(super) fn dispatch_chop_event(data: &mut AudioCallbackData, event: ChopEvent
             params_push_wrapper(
                 data.lg.0,
                 ParamMsg {
-                    idx: crate::track_modulator::PARAM_FALL_MS,
+                    idx: crate::instruments::track_modulator::PARAM_FALL_MS,
                     logical_id: lid,
                     fvalue: fall,
                 },
@@ -906,20 +906,20 @@ pub(super) fn dispatch_chop_event(data: &mut AudioCallbackData, event: ChopEvent
     let chop_warp_preserve = live_slot_resolved_node_param_value(
         chop_inst_slot,
         event.step,
-        crate::sampler::PARAM_WARP_PRESERVE,
-        crate::sampler::WARP_PRESERVE_DEFAULT as f32,
+        crate::instruments::sampler::PARAM_WARP_PRESERVE,
+        crate::instruments::sampler::WARP_PRESERVE_DEFAULT as f32,
     );
     let chop_warp_seg_loop_mode = live_slot_resolved_node_param_value(
         chop_inst_slot,
         event.step,
-        crate::sampler::PARAM_WARP_SEG_LOOP_MODE,
-        crate::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
+        crate::instruments::sampler::PARAM_WARP_SEG_LOOP_MODE,
+        crate::instruments::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
     );
     let chop_warp_seg_envelope = live_slot_resolved_node_param_value(
         chop_inst_slot,
         event.step,
-        crate::sampler::PARAM_WARP_SEG_ENVELOPE,
-        crate::sampler::WARP_SEG_ENVELOPE_DEFAULT,
+        crate::instruments::sampler::PARAM_WARP_SEG_ENVELOPE,
+        crate::instruments::sampler::WARP_SEG_ENVELOPE_DEFAULT,
     );
     let (
         chop_warp_enabled,

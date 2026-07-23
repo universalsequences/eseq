@@ -9,7 +9,7 @@ impl GraphController<'_> {
         self.force_reap_all_rack_teardowns();
         let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
 
-        let loaded = crate::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
+        let loaded = crate::instruments::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
         self.app.submit_sample_analysis(&loaded);
         let buffer_id = loaded.buffer_id;
         let sample_rate = loaded.sample_rate;
@@ -58,7 +58,7 @@ impl GraphController<'_> {
         self.force_reap_all_rack_teardowns();
         let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
 
-        let buffer_id = crate::sampler::create_silent_buffer(self.app.graph.lg.0)?;
+        let buffer_id = crate::instruments::sampler::create_silent_buffer(self.app.graph.lg.0)?;
         let sample_rate = self.app.graph.sample_rate;
         let track_name = format!("Sampler {}", idx + 1);
         let shell = self.create_track_shell(idx, &track_name)?;
@@ -1488,7 +1488,7 @@ impl GraphController<'_> {
 
         let mut loaded_slots = Vec::with_capacity(sample_paths.len());
         for path in sample_paths {
-            let loaded = crate::sampler::load_wav_buffer(self.app.graph.lg.0, path)?;
+            let loaded = crate::instruments::sampler::load_wav_buffer(self.app.graph.lg.0, path)?;
             self.app.submit_sample_analysis(&loaded);
             let sample_name =
                 crate::sample_db::display_title_for_sample_path(path).unwrap_or(loaded.name);
@@ -1548,7 +1548,7 @@ impl GraphController<'_> {
         if !validate_drum_rack_pad_note(pad_note) {
             return Err(format!("Unsupported drum rack pad note {pad_note}"));
         }
-        let loaded = crate::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
+        let loaded = crate::instruments::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
         self.app.submit_sample_analysis(&loaded);
         let sample_name =
             crate::sample_db::display_title_for_sample_path(wav_path).unwrap_or(loaded.name);

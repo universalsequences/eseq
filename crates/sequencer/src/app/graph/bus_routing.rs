@@ -28,8 +28,8 @@ impl GraphController<'_> {
             unsafe {
                 crate::audiograph::add_node(
                     self.app.graph.lg.0,
-                    crate::track_modulator::mod_in_clip_vtable(),
-                    crate::track_modulator::MOD_IN_CLIP_STATE_SIZE * std::mem::size_of::<f32>(),
+                    crate::instruments::track_modulator::mod_in_clip_vtable(),
+                    crate::instruments::track_modulator::MOD_IN_CLIP_STATE_SIZE * std::mem::size_of::<f32>(),
                     mod_in_name.as_ptr(),
                     1,
                     1,

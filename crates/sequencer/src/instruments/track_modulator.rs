@@ -1,3 +1,5 @@
+//! Built-in modulator-track instrument and modulation-input DSP nodes.
+
 use std::os::raw::{c_int, c_void};
 
 use crate::audiograph::{GraphBlockEvent, NodeVTable, GBE_PULSE};

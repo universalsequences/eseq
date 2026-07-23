@@ -20,11 +20,11 @@ pub(crate) fn build_sampler_panel_value(
     }
 
     fn is_source_param(node_param_idx: u32) -> bool {
-        sequencer::voice_modulator::is_source_param(node_param_idx)
+        sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
     }
 
     fn rename_source_param(name: &str) -> String {
-        sequencer::voice_modulator::source_param_display_name(name)
+        sequencer::instruments::voice_modulator::source_param_display_name(name)
     }
 
     app.publish_sampler_analysis_runtime(track);
@@ -347,10 +347,10 @@ pub(crate) fn build_sampler_panel_value(
                     Rc::new(RefCell::new(Value::String(rename_source_param(&name)))),
                 );
             }
-            if let Some(slot_number) = sequencer::voice_modulator::slot_from_param_name(&pdesc.name)
+            if let Some(slot_number) = sequencer::instruments::voice_modulator::slot_from_param_name(&pdesc.name)
             {
                 let param_value = Rc::new(RefCell::new(Value::Map(pmap)));
-                if sequencer::voice_modulator::source_type_name_from_param_name(&pdesc.name)
+                if sequencer::instruments::voice_modulator::source_type_name_from_param_name(&pdesc.name)
                     == Some("source")
                 {
                     source_type_param_by_slot.insert(slot_number, param_value);
@@ -381,8 +381,8 @@ pub(crate) fn build_sampler_panel_value(
 
     let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
-    for slot_number in 1..=sequencer::voice_modulator::SLOT_COUNT {
-        let section_name = sequencer::voice_modulator::modulator_slot_label(slot_number, "");
+    for slot_number in 1..=sequencer::instruments::voice_modulator::SLOT_COUNT {
+        let section_name = sequencer::instruments::voice_modulator::modulator_slot_label(slot_number, "");
         let params = source_params_by_slot
             .remove(&slot_number)
             .unwrap_or_default();
@@ -765,11 +765,11 @@ pub(crate) fn build_instrument_panel_value(
     }
 
     fn is_source_param(node_param_idx: u32) -> bool {
-        sequencer::voice_modulator::is_source_param(node_param_idx)
+        sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
     }
 
     fn rename_source_param(name: &str) -> String {
-        sequencer::voice_modulator::source_param_display_name(name)
+        sequencer::instruments::voice_modulator::source_param_display_name(name)
     }
 
     let source_actual = selected_voice_mod_source_indices(desc, slot, plock_step);
@@ -1042,15 +1042,15 @@ pub(crate) fn build_instrument_panel_value(
 
     let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
-    for slot_number in 1..=sequencer::voice_modulator::SLOT_COUNT {
-        let section_name = sequencer::voice_modulator::modulator_slot_label(slot_number, "");
+    for slot_number in 1..=sequencer::instruments::voice_modulator::SLOT_COUNT {
+        let section_name = sequencer::instruments::voice_modulator::modulator_slot_label(slot_number, "");
         let mut params: Vec<Rc<RefCell<Value>>> = Vec::new();
         let mut source_param: Option<Rc<RefCell<Value>>> = None;
         for &param_idx in &source_actual {
             let Some(pdesc) = desc.params.get(param_idx) else {
                 continue;
             };
-            if sequencer::voice_modulator::slot_from_param_name(&pdesc.name) != Some(slot_number) {
+            if sequencer::instruments::voice_modulator::slot_from_param_name(&pdesc.name) != Some(slot_number) {
                 continue;
             }
             let default_val = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
@@ -1082,7 +1082,7 @@ pub(crate) fn build_instrument_panel_value(
                     .map(Vec::as_slice)
                     .unwrap_or(&[]),
             );
-            if sequencer::voice_modulator::source_type_name_from_param_name(&pdesc.name)
+            if sequencer::instruments::voice_modulator::source_type_name_from_param_name(&pdesc.name)
                 == Some("source")
             {
                 source_param = params.pop();

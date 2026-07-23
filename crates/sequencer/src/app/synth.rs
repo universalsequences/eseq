@@ -54,7 +54,7 @@ impl App {
             return Vec::new();
         };
         let slot = &self.state.pattern.instrument_slots[track];
-        crate::voice_modulator::selected_source_param_indices(&desc.params, |idx, param| {
+        crate::instruments::voice_modulator::selected_source_param_indices(&desc.params, |idx, param| {
             if idx < slot.num_params.load(Ordering::Relaxed) as usize {
                 slot.defaults.get(idx)
             } else {
@@ -69,8 +69,8 @@ impl App {
     ) -> Vec<(Option<&'static str>, Option<usize>)> {
         let actual = self.source_param_actual_indices(track);
         let mut rows = Vec::new();
-        for source_slot in 1..=crate::voice_modulator::SLOT_COUNT {
-            let Some(section) = crate::voice_modulator::modulator_slot_label_static(source_slot)
+        for source_slot in 1..=crate::instruments::voice_modulator::SLOT_COUNT {
+            let Some(section) = crate::instruments::voice_modulator::modulator_slot_label_static(source_slot)
             else {
                 continue;
             };
@@ -82,7 +82,7 @@ impl App {
                         .instrument_descriptors
                         .get(track)
                         .and_then(|desc| desc.params.get(actual_idx))
-                        .and_then(|param| crate::voice_modulator::slot_from_param_name(&param.name))
+                        .and_then(|param| crate::instruments::voice_modulator::slot_from_param_name(&param.name))
                         .is_some_and(|slot| slot == source_slot)
                         .then_some(row_idx)
                 })
@@ -108,7 +108,7 @@ impl App {
     }
 
     fn is_mod_source_param(node_param_idx: u32) -> bool {
-        node_param_idx >= crate::voice_modulator::MOD_PARAM_BASE
+        node_param_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE
     }
 
     pub(super) fn synth_param_indices(&self, track: usize) -> Vec<usize> {
@@ -225,7 +225,7 @@ impl App {
             .into_iter()
             .filter_map(|i| desc.params.get(i).cloned())
             .map(|mut p| {
-                p.name = crate::voice_modulator::source_param_display_name(&p.name);
+                p.name = crate::instruments::voice_modulator::source_param_display_name(&p.name);
                 if p.name == "rate" && matches!(p.kind, crate::effects::ParamKind::Enum { .. }) {
                     p.scaling = crate::effects::ParamScaling::Linear;
                 }
@@ -481,36 +481,36 @@ impl App {
         let slot = &self.state.pattern.instrument_slots[track];
         let idx = slot.resolve_node_idx(param_idx);
         let span = slot.resolve_node_span(param_idx);
-        if crate::voice_modulator::is_bar_resync_param(idx as u32) {
+        if crate::instruments::voice_modulator::is_bar_resync_param(idx as u32) {
             self.state.schedule_mod_resync();
         }
         if self.is_sampler_track(track) {
             let sample_rate = self.graph.sample_rate as f32;
             let (idx, fvalue) = match param_idx {
                 0 => (
-                    crate::sampler::PARAM_ATTACK_SAMPLES,
+                    crate::instruments::sampler::PARAM_ATTACK_SAMPLES,
                     value * sample_rate / 1000.0,
                 ),
                 1 => (
-                    crate::sampler::PARAM_RELEASE_SAMPLES,
+                    crate::instruments::sampler::PARAM_RELEASE_SAMPLES,
                     value * sample_rate / 1000.0,
                 ),
-                2 => (crate::sampler::PARAM_START_POINT, value),
-                3 => (crate::sampler::PARAM_END_POINT, value),
-                4 => (crate::sampler::PARAM_ENABLED, value),
-                5 => (crate::sampler::PARAM_REVERSE, value),
-                6 => (crate::sampler::PARAM_LOOP_MODE, value),
+                2 => (crate::instruments::sampler::PARAM_START_POINT, value),
+                3 => (crate::instruments::sampler::PARAM_END_POINT, value),
+                4 => (crate::instruments::sampler::PARAM_ENABLED, value),
+                5 => (crate::instruments::sampler::PARAM_REVERSE, value),
+                6 => (crate::instruments::sampler::PARAM_LOOP_MODE, value),
                 7 => (
-                    crate::sampler::PARAM_LOOP_XFADE_SAMPLES,
+                    crate::instruments::sampler::PARAM_LOOP_XFADE_SAMPLES,
                     value * sample_rate / 1000.0,
                 ),
-                8 => (crate::sampler::PARAM_SR_HZ, value),
-                9 => (crate::sampler::PARAM_WARP_ENABLED, value),
-                10 => (crate::sampler::PARAM_WARP_MODE, value),
-                11 => (crate::sampler::PARAM_WARP_SAMPLE_BPM, value),
+                8 => (crate::instruments::sampler::PARAM_SR_HZ, value),
+                9 => (crate::instruments::sampler::PARAM_WARP_ENABLED, value),
+                10 => (crate::instruments::sampler::PARAM_WARP_MODE, value),
+                11 => (crate::instruments::sampler::PARAM_WARP_SAMPLE_BPM, value),
                 _ => (idx, value),
             };
-            if crate::sampler::srange_debug_enabled() && (param_idx == 2 || param_idx == 3) {
+            if crate::instruments::sampler::srange_debug_enabled() && (param_idx == 2 || param_idx == 3) {
                 eprintln!(
                     "[srange] live push track={} param={} value={} voice_lids={}",
                     track,
@@ -522,9 +522,9 @@ impl App {
                         .map_or(0, |lids| lids.len()),
                 );
             }
-            let is_mod_param = idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE;
+            let is_mod_param = idx as u32 >= crate::instruments::voice_modulator::MOD_PARAM_BASE;
             let resolved_idx = if is_mod_param {
-                idx - crate::voice_modulator::MOD_PARAM_BASE as u64
+                idx - crate::instruments::voice_modulator::MOD_PARAM_BASE as u64
             } else {
                 idx
             };
@@ -583,9 +583,9 @@ impl App {
         else {
             return;
         };
-        let is_mod_param = idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE;
+        let is_mod_param = idx as u32 >= crate::instruments::voice_modulator::MOD_PARAM_BASE;
         let resolved_idx = if is_mod_param {
-            idx - crate::voice_modulator::MOD_PARAM_BASE as u64
+            idx - crate::instruments::voice_modulator::MOD_PARAM_BASE as u64
         } else {
             idx
         };
@@ -879,7 +879,7 @@ impl App {
         // built voices allow" rather than silently snapping the UI control
         // back down.
         self.state.update_live_rack_slot(track, slot_idx, |slot| {
-            slot.max_polyphony = value.clamp(1, crate::voice::MAX_VOICES);
+            slot.max_polyphony = value.clamp(1, crate::audio::MAX_VOICES);
         })
     }
 
@@ -938,7 +938,7 @@ impl App {
         };
         let idx = route.node_param_idx;
         let span = route.node_param_span;
-        if crate::voice_modulator::is_bar_resync_param(idx as u32) {
+        if crate::instruments::voice_modulator::is_bar_resync_param(idx as u32) {
             self.state.schedule_mod_resync();
         }
         if route.instrument_type == InstrumentType::Sampler {
@@ -947,29 +947,29 @@ impl App {
                 .unwrap_or(self.graph.sample_rate.max(1) as f32);
             let (idx, fvalue) = match param_idx {
                 0 => (
-                    crate::sampler::PARAM_ATTACK_SAMPLES,
+                    crate::instruments::sampler::PARAM_ATTACK_SAMPLES,
                     value * sample_rate / 1000.0,
                 ),
                 1 => (
-                    crate::sampler::PARAM_RELEASE_SAMPLES,
+                    crate::instruments::sampler::PARAM_RELEASE_SAMPLES,
                     value * sample_rate / 1000.0,
                 ),
-                2 => (crate::sampler::PARAM_START_POINT, value),
-                3 => (crate::sampler::PARAM_END_POINT, value),
-                4 => (crate::sampler::PARAM_ENABLED, value),
-                5 => (crate::sampler::PARAM_REVERSE, value),
-                6 => (crate::sampler::PARAM_LOOP_MODE, value),
+                2 => (crate::instruments::sampler::PARAM_START_POINT, value),
+                3 => (crate::instruments::sampler::PARAM_END_POINT, value),
+                4 => (crate::instruments::sampler::PARAM_ENABLED, value),
+                5 => (crate::instruments::sampler::PARAM_REVERSE, value),
+                6 => (crate::instruments::sampler::PARAM_LOOP_MODE, value),
                 7 => (
-                    crate::sampler::PARAM_LOOP_XFADE_SAMPLES,
+                    crate::instruments::sampler::PARAM_LOOP_XFADE_SAMPLES,
                     value * sample_rate / 1000.0,
                 ),
-                8 => (crate::sampler::PARAM_SR_HZ, value),
-                9 => (crate::sampler::PARAM_WARP_ENABLED, value),
-                10 => (crate::sampler::PARAM_WARP_MODE, value),
-                11 => (crate::sampler::PARAM_WARP_SAMPLE_BPM, value),
+                8 => (crate::instruments::sampler::PARAM_SR_HZ, value),
+                9 => (crate::instruments::sampler::PARAM_WARP_ENABLED, value),
+                10 => (crate::instruments::sampler::PARAM_WARP_MODE, value),
+                11 => (crate::instruments::sampler::PARAM_WARP_SAMPLE_BPM, value),
                 _ => (idx, value),
             };
-            if crate::sampler::srange_debug_enabled() && (param_idx == 2 || param_idx == 3) {
+            if crate::instruments::sampler::srange_debug_enabled() && (param_idx == 2 || param_idx == 3) {
                 eprintln!(
                     "[srange] rack live push track={} slot={} param={} value={} sampler_ids={}",
                     track,
@@ -979,9 +979,9 @@ impl App {
                     nodes.sampler_ids.len(),
                 );
             }
-            let is_mod_param = idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE;
+            let is_mod_param = idx as u32 >= crate::instruments::voice_modulator::MOD_PARAM_BASE;
             let resolved_idx = if is_mod_param {
-                idx - crate::voice_modulator::MOD_PARAM_BASE as u64
+                idx - crate::instruments::voice_modulator::MOD_PARAM_BASE as u64
             } else {
                 idx
             };
@@ -1018,9 +1018,9 @@ impl App {
         else {
             return;
         };
-        let is_mod_param = idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE;
+        let is_mod_param = idx as u32 >= crate::instruments::voice_modulator::MOD_PARAM_BASE;
         let resolved_idx = if is_mod_param {
-            idx - crate::voice_modulator::MOD_PARAM_BASE as u64
+            idx - crate::instruments::voice_modulator::MOD_PARAM_BASE as u64
         } else {
             idx
         };

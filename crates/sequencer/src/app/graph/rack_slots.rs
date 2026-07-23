@@ -6,7 +6,7 @@ impl GraphController<'_> {
         track_idx: usize,
         wav_path: &Path,
     ) -> Result<usize, String> {
-        let loaded = crate::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
+        let loaded = crate::instruments::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
         self.app.submit_sample_analysis(&loaded);
         let sample_name =
             crate::sample_db::display_title_for_sample_path(wav_path).unwrap_or(loaded.name);
@@ -440,7 +440,7 @@ impl GraphController<'_> {
             return Err("Invalid instrument rack layer".to_string());
         }
 
-        let loaded = crate::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
+        let loaded = crate::instruments::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
         self.app.submit_sample_analysis(&loaded);
         let sample_name =
             crate::sample_db::display_title_for_sample_path(wav_path).unwrap_or(loaded.name);
@@ -620,7 +620,7 @@ impl GraphController<'_> {
         wav_path: &Path,
         pad_note: i32,
     ) -> Result<usize, String> {
-        let loaded = crate::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
+        let loaded = crate::instruments::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
         self.app.submit_sample_analysis(&loaded);
         let sample_name =
             crate::sample_db::display_title_for_sample_path(wav_path).unwrap_or(loaded.name);

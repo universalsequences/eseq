@@ -105,7 +105,7 @@ pub(crate) fn run_event_loop(
     let mut live_audio_analyzer = LiveAudioAnalyzerManager::new(app.graph.lg);
     let log_voice_counts = std::env::var_os("TINYSEQ_LOG_VOICE_COUNTS").is_some();
     if log_voice_counts {
-        sequencer::voice_modulator::set_process_stats_enabled(true);
+        sequencer::instruments::voice_modulator::set_process_stats_enabled(true);
     }
 
     eprintln!("metal_seq: entering event loop");

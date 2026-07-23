@@ -80,10 +80,10 @@
 
     #[test]
     fn modulator_display_level_uses_current_envelope_value() {
-        let mut state = [0.0_f32; sequencer::track_modulator::MODULATOR_ENVELOPE_STATE_SIZE];
-        state[sequencer::track_modulator::STATE_VALUE] = 0.25;
-        state[sequencer::track_modulator::STATE_DISPLAY_PHASE] = 0.5;
-        state[sequencer::track_modulator::PARAM_PULSE_LEVEL as usize] = 0.875;
+        let mut state = [0.0_f32; sequencer::instruments::track_modulator::MODULATOR_ENVELOPE_STATE_SIZE];
+        state[sequencer::instruments::track_modulator::STATE_VALUE] = 0.25;
+        state[sequencer::instruments::track_modulator::STATE_DISPLAY_PHASE] = 0.5;
+        state[sequencer::instruments::track_modulator::PARAM_PULSE_LEVEL as usize] = 0.875;
 
         let (phase, level) = decode_modulator_display_state(&state);
 
@@ -5652,8 +5652,8 @@
 
     fn test_multiverb_params() -> Vec<Value> {
         let depth_start = 14
-            + sequencer::voice_modulator::SLOT_COUNT
-                * sequencer::voice_modulator::PARAM_SLOT_STRIDE;
+            + sequencer::instruments::voice_modulator::SLOT_COUNT
+                * sequencer::instruments::voice_modulator::PARAM_SLOT_STRIDE;
 
         fn mod_target(depth_idx: usize, source_slot: usize) -> Value {
             Value::Map(HashMap::from([
@@ -5689,7 +5689,7 @@
             param.insert(
                 "mod-targets".to_string(),
                 Rc::new(RefCell::new(test_list(
-                    (0..sequencer::voice_modulator::SLOT_COUNT)
+                    (0..sequencer::instruments::voice_modulator::SLOT_COUNT)
                         .map(|slot| mod_target(depth_start + slot, slot + 1))
                         .collect(),
                 ))),
@@ -5725,9 +5725,9 @@
         let source_labels = vec![
             "off", "lfo", "env", "rand", "drift", "ext1", "ext2", "ext3", "ext4",
         ];
-        let sources = (0..sequencer::voice_modulator::SLOT_COUNT)
+        let sources = (0..sequencer::instruments::voice_modulator::SLOT_COUNT)
             .map(|slot| {
-                let source_idx = 14 + slot * sequencer::voice_modulator::PARAM_SLOT_STRIDE;
+                let source_idx = 14 + slot * sequencer::instruments::voice_modulator::PARAM_SLOT_STRIDE;
                 Value::Map(HashMap::from([
                     (
                         "name".to_string(),
@@ -9923,7 +9923,7 @@
         };
         assert_eq!(
             sources.len(),
-            sequencer::voice_modulator::SLOT_COUNT,
+            sequencer::instruments::voice_modulator::SLOT_COUNT,
             "rack selected sampler should expose one source section per mod slot"
         );
         let Value::Map(first_source) = &*sources[0].borrow() else {
@@ -28091,8 +28091,8 @@
             "Xtal Wash should reset all modulation depths, set 13 base controls, and assign one modulation depth"
         );
         let depth_start = 14
-            + sequencer::voice_modulator::SLOT_COUNT
-                * sequencer::voice_modulator::PARAM_SLOT_STRIDE;
+            + sequencer::instruments::voice_modulator::SLOT_COUNT
+                * sequencer::instruments::voice_modulator::PARAM_SLOT_STRIDE;
         for idx in depth_start..depth_start + 16 {
             assert!(
                 writes.contains(&(idx, 0.0)),
@@ -28104,10 +28104,10 @@
             Some(&(depth_start, 0.08)),
             "Xtal Wash should route host modulator 1 to decay through descriptor metadata"
         );
-        let expected_source_writes = (0..sequencer::voice_modulator::SLOT_COUNT)
+        let expected_source_writes = (0..sequencer::instruments::voice_modulator::SLOT_COUNT)
             .map(|slot| {
                 (
-                    14 + slot * sequencer::voice_modulator::PARAM_SLOT_STRIDE,
+                    14 + slot * sequencer::instruments::voice_modulator::PARAM_SLOT_STRIDE,
                     "off".to_string(),
                 )
             })
@@ -35134,7 +35134,7 @@
         let Value::List(sources) = &*sources else {
             panic!("Multiverb mod sources should be a list: {sources:?}");
         };
-        assert_eq!(sources.len(), sequencer::voice_modulator::SLOT_COUNT);
+        assert_eq!(sources.len(), sequencer::instruments::voice_modulator::SLOT_COUNT);
         for (slot, source) in sources.iter().enumerate() {
             let source = source.borrow();
             let source_param = map_get(&source, "source-param").unwrap_or_else(|| {
@@ -35207,7 +35207,7 @@
             let Value::List(targets) = &*targets else {
                 panic!("{name:?} mod targets should be a list: {targets:?}");
             };
-            assert_eq!(targets.len(), sequencer::voice_modulator::SLOT_COUNT);
+            assert_eq!(targets.len(), sequencer::instruments::voice_modulator::SLOT_COUNT);
         }
 
         let mut app = test_app_with_instrument_descriptor(desc.clone());
@@ -35388,7 +35388,7 @@
         let Value::List(targets) = &*targets else {
             panic!("cutoff mod-targets should be a list: {targets:?}");
         };
-        assert_eq!(targets.len(), sequencer::voice_modulator::SLOT_COUNT);
+        assert_eq!(targets.len(), sequencer::instruments::voice_modulator::SLOT_COUNT);
     }
 
     #[test]

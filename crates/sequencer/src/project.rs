@@ -1404,7 +1404,7 @@ impl From<ProjectTrackParams> for TrackParamsSnapshot {
                 .map(TrackSendSnapshot::from)
                 .collect(),
             polyphonic: value.polyphonic,
-            max_polyphony: value.max_polyphony.clamp(1, crate::voice::MAX_VOICES),
+            max_polyphony: value.max_polyphony.clamp(1, crate::audio::MAX_VOICES),
             timebase: Timebase::from_index(value.timebase as u32),
             accumulator_idx: value.accumulator_idx,
             script_accumulator_name: value.script_accumulator_name,
@@ -1800,7 +1800,7 @@ impl From<ProjectRackSlotPattern> for RackSlotSnapshot {
             pan: value.pan.clamp(-1.0, 1.0),
             mute: value.mute,
             solo: value.solo,
-            max_polyphony: value.max_polyphony.clamp(1, crate::voice::MAX_VOICES),
+            max_polyphony: value.max_polyphony.clamp(1, crate::audio::MAX_VOICES),
             param_plocks: RackSlotParamPlocks::from_rows(value.param_plocks),
             instrument_slot: value.instrument_slot.into_snapshot_with_node_ids(0, 0),
             effect_slots: value

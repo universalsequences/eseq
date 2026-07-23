@@ -1,3 +1,5 @@
+//! Per-voice modulation DSP and modulation-parameter metadata.
+
 use std::os::raw::{c_int, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 

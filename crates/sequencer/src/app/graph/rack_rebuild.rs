@@ -102,7 +102,7 @@ impl GraphController<'_> {
                             crate::audiograph::params_push_wrapper(
                                 self.app.graph.lg.0,
                                 crate::audiograph::ParamMsg {
-                                    idx: crate::sampler::PARAM_BUFFER_ID,
+                                    idx: crate::instruments::sampler::PARAM_BUFFER_ID,
                                     logical_id,
                                     fvalue: *buffer_id as f32,
                                 },
@@ -110,7 +110,7 @@ impl GraphController<'_> {
                             crate::audiograph::params_push_wrapper(
                                 self.app.graph.lg.0,
                                 crate::audiograph::ParamMsg {
-                                    idx: crate::sampler::PARAM_SOURCE_SAMPLE_RATE,
+                                    idx: crate::instruments::sampler::PARAM_SOURCE_SAMPLE_RATE,
                                     logical_id,
                                     fvalue: (*sample_rate).max(1) as f32,
                                 },

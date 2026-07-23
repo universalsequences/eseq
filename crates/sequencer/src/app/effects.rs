@@ -1366,11 +1366,11 @@ impl App {
         let mod_id = unsafe {
             crate::audiograph::add_node(
                 self.graph.lg.0,
-                crate::voice_modulator::effect_modulator_vtable(),
-                crate::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
+                crate::instruments::voice_modulator::effect_modulator_vtable(),
+                crate::instruments::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
                 mod_name.as_ptr(),
-                crate::voice_modulator::INPUT_COUNT as i32,
-                crate::voice_modulator::NUM_OUTPUTS as i32,
+                crate::instruments::voice_modulator::INPUT_COUNT as i32,
+                crate::instruments::voice_modulator::NUM_OUTPUTS as i32,
                 std::ptr::null(),
                 0,
             )
@@ -1382,7 +1382,7 @@ impl App {
                 crate::audiograph::params_push_wrapper(
                     self.graph.lg.0,
                     crate::audiograph::ParamMsg {
-                        idx: crate::voice_modulator::PARAM_BPM as u64,
+                        idx: crate::instruments::voice_modulator::PARAM_BPM as u64,
                         logical_id: mod_id as u64,
                         fvalue: self.state.transport.bpm.load(Ordering::Relaxed) as f32,
                     },
@@ -1424,7 +1424,7 @@ impl App {
         slots.sort_unstable();
         slots.dedup();
         for slot in slots {
-            if !(1..=crate::voice_modulator::SLOT_COUNT).contains(&slot) {
+            if !(1..=crate::instruments::voice_modulator::SLOT_COUNT).contains(&slot) {
                 continue;
             }
             if !crate::audiograph::graph_connect(
@@ -1481,7 +1481,7 @@ impl App {
                             self.graph.lg.0,
                             crate::audiograph::ParamMsg {
                                 logical_id: modulator_node_id as u64,
-                                idx: crate::voice_modulator::PARAM_BPM as u64,
+                                idx: crate::instruments::voice_modulator::PARAM_BPM as u64,
                                 fvalue: bpm,
                             },
                         );
@@ -1525,7 +1525,7 @@ impl App {
                                 self.graph.lg.0,
                                 crate::audiograph::ParamMsg {
                                     logical_id: slot.modulator_node_id as u64,
-                                    idx: crate::voice_modulator::PARAM_BPM as u64,
+                                    idx: crate::instruments::voice_modulator::PARAM_BPM as u64,
                                     fvalue: bpm,
                                 },
                             );
@@ -2895,7 +2895,7 @@ impl App {
                 .params
                 .get(param_idx)
                 .ok_or_else(|| format!("Bus effect param {} out of range", param_idx + 1))?;
-            if crate::voice_modulator::is_envelope_source_param_value(param.node_param_idx, value) {
+            if crate::instruments::voice_modulator::is_envelope_source_param_value(param.node_param_idx, value) {
                 return Err(
                     "Group/bus effect modulation does not support envelope sources".to_string(),
                 );
@@ -2948,7 +2948,7 @@ impl App {
             .params
             .get(param_idx)
             .ok_or_else(|| format!("Bus effect param {} out of range", param_idx + 1))?;
-        if crate::voice_modulator::is_envelope_source_param_value(param.node_param_idx, value) {
+        if crate::instruments::voice_modulator::is_envelope_source_param_value(param.node_param_idx, value) {
             return Err(
                 "Group/bus effect modulation does not support envelope sources".to_string(),
             );
@@ -3118,7 +3118,7 @@ impl App {
             .get(param_idx)
             .and_then(|p| match &p.kind {
                 ParamKind::Enum { labels } => {
-                    if crate::voice_modulator::is_source_param(p.node_param_idx) && label == "env" {
+                    if crate::instruments::voice_modulator::is_source_param(p.node_param_idx) && label == "env" {
                         None
                     } else {
                         labels.iter().position(|item| item == label)
@@ -3155,7 +3155,7 @@ impl App {
                 }
                 continue;
             }
-            if crate::voice_modulator::is_envelope_source_param_value(
+            if crate::instruments::voice_modulator::is_envelope_source_param_value(
                 param.node_param_idx,
                 slot.defaults[param_idx],
             ) {
@@ -3625,7 +3625,7 @@ impl App {
         if matches!(param.host_control, Some(HostControl::FxSidechain { .. })) {
             return Err("Sidechain routing into rack-slot effects is not supported".to_string());
         }
-        if crate::voice_modulator::is_envelope_source_param_value(param.node_param_idx, value) {
+        if crate::instruments::voice_modulator::is_envelope_source_param_value(param.node_param_idx, value) {
             return Err(
                 "Rack-slot effect modulation does not support envelope sources".to_string(),
             );
@@ -3765,7 +3765,7 @@ impl App {
         if matches!(param.host_control, Some(HostControl::FxSidechain { .. })) {
             return Err("Sidechain routing into rack-slot effects is not supported".to_string());
         }
-        if crate::voice_modulator::is_envelope_source_param_value(param.node_param_idx, value) {
+        if crate::instruments::voice_modulator::is_envelope_source_param_value(param.node_param_idx, value) {
             return Err(
                 "Rack-slot effect modulation does not support envelope sources".to_string(),
             );
@@ -4337,7 +4337,7 @@ mod tests {
             },
         )
         .expect("initial custom track should load");
-        let buffer_id = crate::sampler::create_silent_buffer(graph.ptr.0)
+        let buffer_id = crate::instruments::sampler::create_silent_buffer(graph.ptr.0)
             .expect("silent sampler buffer should allocate");
 
         app.apply_recorded_instrument_binding_mutation(
@@ -4521,7 +4521,7 @@ mod tests {
                 crate::effects::str8_delay::str8_delay_vtable(),
                 crate::effects::str8_delay::STR8_DELAY_STATE_SIZE * std::mem::size_of::<f32>(),
                 name.as_ptr(),
-                2 + crate::voice_modulator::NUM_OUTPUTS as i32,
+                2 + crate::instruments::voice_modulator::NUM_OUTPUTS as i32,
                 2,
                 std::ptr::null(),
                 0,

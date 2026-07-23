@@ -6,9 +6,9 @@
 >
 > - **No `WarpGridShared`.** The uniform grid is pure arithmetic, so the audio
 >   thread computes boundaries on the fly from `sample_bpm` + preserve
->   (`src/warp_grid.rs`, pure functions + tests). No publish/rebuild channel;
->   bpm and preserve edits take effect live. Preserve=Transients snaps each
->   grid boundary to the nearest onset (±25 ms) via binary search over the
+>   (`src/instruments/warp_grid.rs`, pure functions + tests). No
+>   publish/rebuild channel; bpm and preserve edits take effect live.
+>   Preserve=Transients snaps each grid boundary to the nearest onset (±25 ms) via binary search over the
 >   already-published `OnsetTableShared` — snapping only, no onset insertion.
 > - **The grid anchors at the region start point** (trim start to the downbeat
 >   to align the grid), not an analysis-provided downbeat. Downbeat anchoring

@@ -179,7 +179,7 @@ pub(super) fn selected_voice_mod_source_indices(
     slot: &sequencer::effects::EffectSlotState,
     plock_step: Option<usize>,
 ) -> Vec<usize> {
-    sequencer::voice_modulator::selected_source_param_indices(&desc.params, |idx, _| {
+    sequencer::instruments::voice_modulator::selected_source_param_indices(&desc.params, |idx, _| {
         instrument_slot_param_value(slot, desc, idx, plock_step)
     })
 }
@@ -192,7 +192,7 @@ pub(super) fn selected_voice_mod_source_indices_for_optional_slot(
     if let Some(slot) = slot {
         return selected_voice_mod_source_indices(desc, slot, plock_step);
     }
-    sequencer::voice_modulator::selected_source_param_indices(&desc.params, |_, param| {
+    sequencer::instruments::voice_modulator::selected_source_param_indices(&desc.params, |_, param| {
         param.default
     })
 }

@@ -50,6 +50,7 @@ pub mod audio_tap;
 pub mod crash;
 #[allow(dead_code)]
 pub mod effects;
+pub mod instruments;
 #[allow(dead_code)]
 pub mod lisp_host;
 pub mod macro_engine;
@@ -67,18 +68,10 @@ pub mod runtime;
 pub use runtime::{accumulator, generator, graph, process};
 pub mod sample_db;
 pub mod sample_import;
-pub mod sampler;
 mod scale;
 mod scheduler;
 pub use scheduler::scheduled_event;
 #[allow(dead_code)]
 pub mod sequencer;
 pub mod track_color;
-#[allow(dead_code)]
-pub mod track_modulator;
 pub mod app;
-#[allow(dead_code)]
-mod voice;
-#[allow(dead_code)]
-pub mod voice_modulator;
-pub mod warp_grid;

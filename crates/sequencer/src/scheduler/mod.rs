@@ -55,7 +55,7 @@ use crate::sequencer::{
     sync_beats, InstrumentType, KeyboardTrigger, MidiFxPosition, SequencerSnapshot, SequencerState,
     StepParam, SwingResolution, TrackOutputEvent, MAX_STEPS, MAX_TRACKS,
 };
-use crate::voice::MAX_VOICES;
+use crate::audio::MAX_VOICES;
 
 // The scheduler lookahead pass carries sizeable event values in debug builds, and
 // tests call the same extracted production pass. Keep the stack budget explicit

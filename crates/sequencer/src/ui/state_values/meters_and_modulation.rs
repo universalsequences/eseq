@@ -191,7 +191,7 @@ pub(super) fn read_modulator_display_value(
     lg: sequencer::audiograph::LiveGraphPtr,
     node_id: i32,
 ) -> (f64, f64) {
-    const STATE_LEN: usize = sequencer::track_modulator::MODULATOR_ENVELOPE_STATE_SIZE;
+    const STATE_LEN: usize = sequencer::instruments::track_modulator::MODULATOR_ENVELOPE_STATE_SIZE;
     const STATE_BYTES: usize = STATE_LEN * std::mem::size_of::<f32>();
     if node_id < 0 {
         return (0.0, 0.0);
@@ -215,11 +215,11 @@ pub(super) fn read_modulator_display_value(
 
 pub(super) fn decode_modulator_display_state(state: &[f32]) -> (f64, f64) {
     let phase = state
-        .get(sequencer::track_modulator::STATE_DISPLAY_PHASE)
+        .get(sequencer::instruments::track_modulator::STATE_DISPLAY_PHASE)
         .copied()
         .unwrap_or(0.0);
     let level = state
-        .get(sequencer::track_modulator::STATE_VALUE)
+        .get(sequencer::instruments::track_modulator::STATE_VALUE)
         .copied()
         .unwrap_or(0.0);
     (

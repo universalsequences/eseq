@@ -207,8 +207,8 @@ fn slot_param_node_relative_idx(raw_idx: u32) -> Option<u32> {
     if raw_idx == u32::MAX {
         return None;
     }
-    Some(if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
-        raw_idx - crate::voice_modulator::MOD_PARAM_BASE
+    Some(if raw_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
+        raw_idx - crate::instruments::voice_modulator::MOD_PARAM_BASE
     } else {
         raw_idx
     })
@@ -381,7 +381,7 @@ fn legacy_dgen_header_delta() -> u32 {
 }
 
 fn shifted_legacy_dgen_node_index(idx: u32) -> Option<u32> {
-    (idx >= LEGACY_DGEN_HEADER_SLOTS && idx < crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE)
+    (idx >= LEGACY_DGEN_HEADER_SLOTS && idx < crate::instruments::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE)
         .then(|| idx + legacy_dgen_header_delta())
 }
 
@@ -578,8 +578,8 @@ fn project_custom_instrument_slot_into_synced_snapshot(
 
     let new_np = desc.params.len();
     let has_legacy_fixed_voice_mod_params = slot.param_node_indices.iter().any(|&node_idx| {
-        node_idx >= crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE
-            && node_idx < crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE_END
+        node_idx >= crate::instruments::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE
+            && node_idx < crate::instruments::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE_END
     });
     let has_generated_mod_params = desc
         .params
@@ -613,7 +613,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
 
     let old_idx_for = |new_idx: usize, param: &crate::effects::ParamDescriptor| -> Option<usize> {
         if has_legacy_fixed_voice_mod_params
-            && param.node_param_idx >= crate::voice_modulator::MOD_PARAM_BASE
+            && param.node_param_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE
         {
             return None;
         }
@@ -629,7 +629,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
         if let Some(enabled_idx) = inserted_enabled {
             if !has_generated_mod_params {
                 if param.node_param_idx >= crate::lisp_host::HEADER_SLOTS as u32
-                    && param.node_param_idx < crate::voice_modulator::MOD_PARAM_BASE
+                    && param.node_param_idx < crate::instruments::voice_modulator::MOD_PARAM_BASE
                 {
                     if let Some(old_idx) = find_old_idx_by_node(param.node_param_idx - 1) {
                         return Some(old_idx);
@@ -1323,7 +1323,7 @@ impl App {
                     pan: 0.0,
                     mute: false,
                     solo: false,
-                    max_polyphony: crate::voice::MAX_VOICES,
+                    max_polyphony: crate::audio::MAX_VOICES,
                     param_plocks: Vec::new(),
                     instrument_slot: pattern.instrument_slots[track].clone(),
                     effect_slots: pattern.effect_slots[track].clone(),
@@ -1374,7 +1374,7 @@ impl App {
                     pan: 0.0,
                     mute: false,
                     solo: false,
-                    max_polyphony: crate::voice::MAX_VOICES,
+                    max_polyphony: crate::audio::MAX_VOICES,
                     param_plocks: Vec::new(),
                     instrument_slot: pattern.instrument_slots[track].clone(),
                     effect_slots: pattern.effect_slots[track].clone(),
@@ -1479,7 +1479,7 @@ impl App {
                         .as_deref()
                         .ok_or_else(|| format!("Sound slot {} has no sample path", slot_idx + 1))?;
                     let loaded =
-                        crate::sampler::load_wav_buffer(self.graph.lg.0, Path::new(sample_path))
+                        crate::instruments::sampler::load_wav_buffer(self.graph.lg.0, Path::new(sample_path))
                             .map_err(|error| {
                                 format!(
                                     "Failed to load Sound sample '{}' for slot {}: {error}",
@@ -2442,7 +2442,7 @@ impl App {
                                                     slot_idx + 1
                                                 )
                                             })?;
-                                        let loaded = crate::sampler::load_wav_buffer(
+                                        let loaded = crate::instruments::sampler::load_wav_buffer(
                                             self.graph.lg.0,
                                             Path::new(sample_path),
                                         )
@@ -2554,7 +2554,7 @@ impl App {
                                     max_polyphony: saved_slot
                                         .as_ref()
                                         .map(|slot| slot.max_polyphony)
-                                        .unwrap_or(crate::voice::MAX_VOICES),
+                                        .unwrap_or(crate::audio::MAX_VOICES),
                                     param_plocks: saved_slot
                                         .as_ref()
                                         .map(|slot| slot.param_plocks.clone()),
@@ -3190,7 +3190,7 @@ impl App {
                         track_idx + 1
                     ));
                 };
-                let loaded = crate::sampler::load_wav_buffer(self.graph.lg.0, &path_buf).map_err(
+                let loaded = crate::instruments::sampler::load_wav_buffer(self.graph.lg.0, &path_buf).map_err(
                     |error| {
                         format!(
                             "Failed to load sample '{}' for track {}: {}",
@@ -3741,7 +3741,7 @@ mod tests {
             )]),
             tensor_params: Vec::new(),
             // enabled param (4), two dgen cells (6, 9), one modulator param.
-            param_node_indices: vec![4, 6, 9, crate::voice_modulator::MOD_PARAM_BASE + 3],
+            param_node_indices: vec![4, 6, 9, crate::instruments::voice_modulator::MOD_PARAM_BASE + 3],
             param_node_spans: vec![1; 4],
             ir: None,
         };
@@ -3750,7 +3750,7 @@ mod tests {
 
         assert_eq!(
             slot.param_node_indices,
-            vec![4, 10, 13, crate::voice_modulator::MOD_PARAM_BASE + 3]
+            vec![4, 10, 13, crate::instruments::voice_modulator::MOD_PARAM_BASE + 3]
         );
         assert_eq!(
             slot.plock_param_ids[0][1],
@@ -3924,7 +3924,7 @@ mod tests {
             Some(ParamNodeId {
                 logical_id: 202,
                 node_param_idx: restored.param_node_indices[source_idx]
-                    - crate::voice_modulator::MOD_PARAM_BASE,
+                    - crate::instruments::voice_modulator::MOD_PARAM_BASE,
             })
         );
         assert_eq!(
@@ -4307,8 +4307,8 @@ mod tests {
             param_node_indices: vec![
                 (crate::lisp_host::HEADER_SLOTS - 1) as u32,
                 crate::lisp_host::HEADER_SLOTS as u32,
-                crate::voice_modulator::MOD_PARAM_BASE,
-                crate::voice_modulator::MOD_PARAM_BASE + 1,
+                crate::instruments::voice_modulator::MOD_PARAM_BASE,
+                crate::instruments::voice_modulator::MOD_PARAM_BASE + 1,
             ],
             param_node_spans: vec![1, 1, 1, 1],
             tensor_params: Vec::new(),
@@ -4329,11 +4329,11 @@ mod tests {
                     crate::lisp_host::DGEN_ENABLED_PARAM_IDX as u32,
                     1.0,
                 ),
-                test_param("lfo rate", 0.03, crate::voice_modulator::MOD_PARAM_BASE),
+                test_param("lfo rate", 0.03, crate::instruments::voice_modulator::MOD_PARAM_BASE),
                 test_param(
                     "lfo depth",
                     0.04,
-                    crate::voice_modulator::MOD_PARAM_BASE + 1,
+                    crate::instruments::voice_modulator::MOD_PARAM_BASE + 1,
                 ),
             ],
         };
@@ -4351,8 +4351,8 @@ mod tests {
                 crate::lisp_host::HEADER_SLOTS as u32,
                 crate::lisp_host::HEADER_SLOTS as u32 + 1,
                 crate::lisp_host::DGEN_ENABLED_PARAM_IDX as u32,
-                crate::voice_modulator::MOD_PARAM_BASE,
-                crate::voice_modulator::MOD_PARAM_BASE + 1,
+                crate::instruments::voice_modulator::MOD_PARAM_BASE,
+                crate::instruments::voice_modulator::MOD_PARAM_BASE + 1,
             ]
         );
     }
@@ -4372,8 +4372,8 @@ mod tests {
             param_node_indices: vec![
                 crate::lisp_host::HEADER_SLOTS as u32,
                 crate::lisp_host::HEADER_SLOTS as u32 + 1,
-                crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE,
-                crate::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE + 1,
+                crate::instruments::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE,
+                crate::instruments::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE + 1,
             ],
             param_node_spans: vec![1, 1, 1, 1],
             tensor_params: Vec::new(),
@@ -4390,11 +4390,11 @@ mod tests {
             params: vec![
                 test_param("attack", 0.01, crate::lisp_host::HEADER_SLOTS as u32),
                 test_param("tone", 0.02, crate::lisp_host::HEADER_SLOTS as u32 + 1),
-                test_param("mod 1 source", 1.0, crate::voice_modulator::MOD_PARAM_BASE),
+                test_param("mod 1 source", 1.0, crate::instruments::voice_modulator::MOD_PARAM_BASE),
                 test_param(
                     "mod 1 lfo rate",
                     5.0,
-                    crate::voice_modulator::MOD_PARAM_BASE + 1,
+                    crate::instruments::voice_modulator::MOD_PARAM_BASE + 1,
                 ),
             ],
         };
@@ -4409,8 +4409,8 @@ mod tests {
             vec![
                 crate::lisp_host::HEADER_SLOTS as u32,
                 crate::lisp_host::HEADER_SLOTS as u32 + 1,
-                crate::voice_modulator::MOD_PARAM_BASE,
-                crate::voice_modulator::MOD_PARAM_BASE + 1,
+                crate::instruments::voice_modulator::MOD_PARAM_BASE,
+                crate::instruments::voice_modulator::MOD_PARAM_BASE + 1,
             ]
         );
     }

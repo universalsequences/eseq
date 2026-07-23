@@ -1,3 +1,8 @@
+//! Fixed-capacity voice allocation for sampler and graph-node instruments.
+//!
+//! Custom DGen engines need route assignment and release-tail bookkeeping;
+//! that higher-level lifecycle lives in the sibling `runtime` module.
+
 pub const MAX_VOICES: usize = 12;
 
 pub struct VoiceSlot {

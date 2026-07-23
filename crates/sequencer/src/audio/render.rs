@@ -78,7 +78,7 @@ pub(super) fn publish_sampler_modulator_activity(data: &AudioCallbackData) {
                 mask |= 1u64 << voice_idx;
             }
         }
-        crate::voice_modulator::set_sampler_active_mask(pool_id, mask);
+        crate::instruments::voice_modulator::set_sampler_active_mask(pool_id, mask);
     }
 }
 
@@ -180,13 +180,13 @@ pub(super) unsafe fn dispatch_snapshot_effect_params_at_step(
             if idx == u32::MAX || param_idx >= slot.defaults.len() {
                 continue;
             }
-            let (logical_id, idx) = if idx >= crate::voice_modulator::MOD_PARAM_BASE {
+            let (logical_id, idx) = if idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
                 if slot.modulator_node_id == 0 {
                     continue;
                 }
                 (
                     slot.modulator_node_id as u64,
-                    (idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
+                    (idx - crate::instruments::voice_modulator::MOD_PARAM_BASE) as u64,
                 )
             } else {
                 (slot.node_id as u64, idx as u64)

@@ -187,18 +187,18 @@
             let name = CString::new(format!("test_modulator_{voice}"))
                 .expect("test modulator name should not contain NUL");
             let initial_state =
-                crate::voice_modulator::custom_engine_initial_state(engine_id, voice);
+                crate::instruments::voice_modulator::custom_engine_initial_state(engine_id, voice);
             let node_id = unsafe {
                 crate::audiograph::add_node(
                     self.ptr.0,
-                    crate::voice_modulator::voice_modulator_vtable(),
-                    crate::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
+                    crate::instruments::voice_modulator::voice_modulator_vtable(),
+                    crate::instruments::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
                     name.as_ptr(),
-                    crate::voice_modulator::INPUT_COUNT as i32,
-                    crate::voice_modulator::NUM_OUTPUTS as i32,
-                    (&initial_state as *const crate::voice_modulator::VoiceModulatorInitialState)
+                    crate::instruments::voice_modulator::INPUT_COUNT as i32,
+                    crate::instruments::voice_modulator::NUM_OUTPUTS as i32,
+                    (&initial_state as *const crate::instruments::voice_modulator::VoiceModulatorInitialState)
                         .cast(),
-                    std::mem::size_of::<crate::voice_modulator::VoiceModulatorInitialState>(),
+                    std::mem::size_of::<crate::instruments::voice_modulator::VoiceModulatorInitialState>(),
                 )
             };
             assert!(node_id >= 0, "test modulator node should be queued");
@@ -1238,7 +1238,7 @@
         let old_sampler_id = app.graph.track_node_ids[0].rack_slots[0].sampler_ids[0];
         assert!(unsafe { crate::audiograph::add_node_to_watchlist(graph.ptr.0, old_sampler_id) });
         graph.process_block();
-        let mut sampler_state = vec![0.0_f32; crate::sampler::SAMPLER_STATE_SIZE];
+        let mut sampler_state = vec![0.0_f32; crate::instruments::sampler::SAMPLER_STATE_SIZE];
         let mut state_size = 0;
         assert!(unsafe {
             crate::audiograph::get_node_state_into(
@@ -2836,7 +2836,7 @@
         let before_nodes = app.graph.track_node_ids[0].rack_slots.clone();
         let before_rack = app.state.pattern.rack_tracks.lock().unwrap()[0]
             .clone().expect("rack should be live");
-        let buffer_id = crate::sampler::create_silent_buffer(graph.ptr.0)
+        let buffer_id = crate::instruments::sampler::create_silent_buffer(graph.ptr.0)
             .expect("silent sampler buffer should be created");
         set_test_graph_build_failure_after(4);
 
@@ -2939,7 +2939,7 @@
         install_custom_track_swap_fixture(&mut app, &graph, 1, &manifest, &lib);
         let voice_sum_id = app.graph.track_node_ids[0].voice_sum_id;
         let voice_sum_r_id = app.graph.track_node_ids[0].voice_sum_r_id;
-        let buffer_id = crate::sampler::create_silent_buffer(graph.ptr.0)
+        let buffer_id = crate::instruments::sampler::create_silent_buffer(graph.ptr.0)
             .expect("silent sampler buffer should be created");
 
         let summary = app
@@ -3009,7 +3009,7 @@
         install_custom_track_swap_fixture(&mut app, &graph, 1, &manifest, &lib);
         let old_slot = EffectSlotSnapshot::capture(&app.state.pattern.instrument_slots[0]);
         let old_sum = app.graph.track_node_ids[0].voice_sum_id;
-        let buffer_id = crate::sampler::create_silent_buffer(graph.ptr.0)
+        let buffer_id = crate::instruments::sampler::create_silent_buffer(graph.ptr.0)
             .expect("silent sampler buffer should be created");
         set_test_graph_build_failure_after(4);
 

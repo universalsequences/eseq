@@ -55,14 +55,14 @@ impl ParamNodeId {
         if raw_param_idx == u32::MAX {
             return None;
         }
-        if raw_param_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+        if raw_param_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
             let logical_id = modulator_node_id as u64;
             if logical_id == 0 {
                 return None;
             }
             Some(Self {
                 logical_id,
-                node_param_idx: raw_param_idx - crate::voice_modulator::MOD_PARAM_BASE,
+                node_param_idx: raw_param_idx - crate::instruments::voice_modulator::MOD_PARAM_BASE,
             })
         } else {
             let logical_id = node_id as u64;
@@ -1101,7 +1101,7 @@ mod tests {
         EventSource, ScheduledChordData, ScheduledInstrumentParams,
         ScheduledInstrumentTensorParams, ScheduledSamplerParams, StepEvent,
     };
-    use crate::voice::MAX_VOICES;
+    use crate::audio::MAX_VOICES;
 
     fn test_event(track: usize) -> StepEvent {
         StepEvent {

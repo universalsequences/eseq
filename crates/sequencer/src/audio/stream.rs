@@ -80,7 +80,7 @@ pub fn build_output_stream(
     let initial_scheduler_snapshot_version = state.scheduler_snapshot_version();
     let initial_scheduler_snapshot = state.latest_scheduler_snapshot();
     let trace_audio = env_flag("TINYSEQ_AUDIO_TRACE", false);
-    crate::voice_modulator::set_process_stats_enabled(trace_audio);
+    crate::instruments::voice_modulator::set_process_stats_enabled(trace_audio);
     if trace_audio {
         eprintln!("audio-trace: enabled");
     }

@@ -88,7 +88,7 @@ pub(super) fn handle(
                 ));
                 return;
             };
-            match sequencer::sampler::load_wav_buffer(lg_raw, &path) {
+            match sequencer::instruments::sampler::load_wav_buffer(lg_raw, &path) {
                 Ok(loaded) => {
                     app.submit_sample_analysis(&loaded);
                     let new_buffer_id = loaded.buffer_id;

@@ -1143,10 +1143,10 @@ pub(super) fn push_fx_param(
     node_param_span: u32,
     value: f32,
 ) {
-    let target = if node_param_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+    let target = if node_param_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
         (modulator_node_id != 0).then_some((
             modulator_node_id as u64,
-            node_param_idx as u64 - crate::voice_modulator::MOD_PARAM_BASE as u64,
+            node_param_idx as u64 - crate::instruments::voice_modulator::MOD_PARAM_BASE as u64,
         ))
     } else if node_id != 0 && node_param_idx != u32::MAX {
         Some((node_id as u64, node_param_idx as u64))

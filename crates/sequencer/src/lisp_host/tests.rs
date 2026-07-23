@@ -4447,7 +4447,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert!(super::effect_has_host_modulation(&manifest));
         assert_eq!(
             desc.instrument_modulators.len(),
-            crate::voice_modulator::SLOT_COUNT
+            crate::instruments::voice_modulator::SLOT_COUNT
         );
         let mod1_source = desc
             .params
@@ -4455,7 +4455,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .find(|param| param.name == "mod1_source")
             .expect("effect descriptor should expose Mod 1 source");
         assert_eq!(mod1_source.default, 0.0);
-        assert!(mod1_source.node_param_idx >= crate::voice_modulator::MOD_PARAM_BASE);
+        assert!(mod1_source.node_param_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE);
 
         let depth = desc
             .params

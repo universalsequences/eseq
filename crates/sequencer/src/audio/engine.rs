@@ -233,8 +233,8 @@ fn init_engine_parts(
         unsafe {
             audiograph::add_node(
                 lg,
-                crate::track_modulator::mod_in_clip_vtable(),
-                crate::track_modulator::MOD_IN_CLIP_STATE_SIZE * std::mem::size_of::<f32>(),
+                crate::instruments::track_modulator::mod_in_clip_vtable(),
+                crate::instruments::track_modulator::MOD_IN_CLIP_STATE_SIZE * std::mem::size_of::<f32>(),
                 name.as_ptr(),
                 1,
                 1,
@@ -327,8 +327,8 @@ fn init_engine_parts(
                 unsafe {
                     audiograph::add_node(
                         lg,
-                        crate::track_modulator::mod_in_clip_vtable(),
-                        crate::track_modulator::MOD_IN_CLIP_STATE_SIZE * std::mem::size_of::<f32>(),
+                        crate::instruments::track_modulator::mod_in_clip_vtable(),
+                        crate::instruments::track_modulator::MOD_IN_CLIP_STATE_SIZE * std::mem::size_of::<f32>(),
                         name.as_ptr(),
                         1,
                         1,

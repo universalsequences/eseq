@@ -246,9 +246,9 @@
                 resolved,
                 chord: ScheduledChordData {
                     count: 0,
-                    notes: [0.0; crate::voice::MAX_VOICES],
-                    durations: [0.0; crate::voice::MAX_VOICES],
-                    delays: [0.0; crate::voice::MAX_VOICES],
+                    notes: [0.0; crate::audio::MAX_VOICES],
+                    durations: [0.0; crate::audio::MAX_VOICES],
+                    delays: [0.0; crate::audio::MAX_VOICES],
                     step_transpose: 0.0,
                 },
                 effect_params: Vec::new(),
@@ -408,9 +408,9 @@
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
                 count: 0,
-                notes: [0.0; crate::voice::MAX_VOICES],
-                durations: [0.0; crate::voice::MAX_VOICES],
-                delays: [0.0; crate::voice::MAX_VOICES],
+                notes: [0.0; crate::audio::MAX_VOICES],
+                durations: [0.0; crate::audio::MAX_VOICES],
+                delays: [0.0; crate::audio::MAX_VOICES],
                 step_transpose: 0.0,
             },
             effect_params: Vec::new(),
@@ -757,9 +757,9 @@
         };
         let mut chord = ScheduledChordData {
             count: 2,
-            notes: [0.0; crate::voice::MAX_VOICES],
-            durations: [1.0; crate::voice::MAX_VOICES],
-            delays: [0.0; crate::voice::MAX_VOICES],
+            notes: [0.0; crate::audio::MAX_VOICES],
+            durations: [1.0; crate::audio::MAX_VOICES],
+            delays: [0.0; crate::audio::MAX_VOICES],
             step_transpose: 0.0,
         };
         chord.notes[1] = 7.0;
@@ -819,9 +819,9 @@
             test_resolved_step(),
             ScheduledChordData {
                 count: 0,
-                notes: [0.0; crate::voice::MAX_VOICES],
-                durations: [0.0; crate::voice::MAX_VOICES],
-                delays: [0.0; crate::voice::MAX_VOICES],
+                notes: [0.0; crate::audio::MAX_VOICES],
+                durations: [0.0; crate::audio::MAX_VOICES],
+                delays: [0.0; crate::audio::MAX_VOICES],
                 step_transpose: 0.0,
             },
             Vec::new(),
@@ -864,9 +864,9 @@
             test_resolved_step(),
             ScheduledChordData {
                 count: 0,
-                notes: [0.0; crate::voice::MAX_VOICES],
-                durations: [0.0; crate::voice::MAX_VOICES],
-                delays: [0.0; crate::voice::MAX_VOICES],
+                notes: [0.0; crate::audio::MAX_VOICES],
+                durations: [0.0; crate::audio::MAX_VOICES],
+                delays: [0.0; crate::audio::MAX_VOICES],
                 step_transpose: 0.0,
             },
             Vec::new(),
@@ -898,9 +898,9 @@
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
                 count: 0,
-                notes: [0.0; crate::voice::MAX_VOICES],
-                durations: [0.0; crate::voice::MAX_VOICES],
-                delays: [0.0; crate::voice::MAX_VOICES],
+                notes: [0.0; crate::audio::MAX_VOICES],
+                durations: [0.0; crate::audio::MAX_VOICES],
+                delays: [0.0; crate::audio::MAX_VOICES],
                 step_transpose: 0.0,
             },
             effect_params: Vec::new(),
@@ -954,9 +954,9 @@
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
                 count: 0,
-                notes: [0.0; crate::voice::MAX_VOICES],
-                durations: [0.0; crate::voice::MAX_VOICES],
-                delays: [0.0; crate::voice::MAX_VOICES],
+                notes: [0.0; crate::audio::MAX_VOICES],
+                durations: [0.0; crate::audio::MAX_VOICES],
+                delays: [0.0; crate::audio::MAX_VOICES],
                 step_transpose: 0.0,
             },
             effect_params: Vec::new(),
@@ -1075,7 +1075,7 @@
                 assert_eq!(sampler_params.playback_speed, 2.5);
                 assert!(instrument_params.iter().any(|param| {
                     param.target == ScheduledInstrumentParamTarget::Synth
-                        && param.idx == crate::sampler::PARAM_SPEED
+                        && param.idx == crate::instruments::sampler::PARAM_SPEED
                         && param.value == 2.5
                 }));
             }
@@ -1740,7 +1740,7 @@
                     sampler_speed: None,
                     has_speed_param: instrument_params.iter().any(|param| {
                         param.target == ScheduledInstrumentParamTarget::Synth
-                            && param.idx == crate::sampler::PARAM_SPEED
+                            && param.idx == crate::instruments::sampler::PARAM_SPEED
                             && param.value == 2.5
                     }),
                 }),
@@ -1759,7 +1759,7 @@
                     sampler_speed: Some(sampler_params.playback_speed),
                     has_speed_param: instrument_params.iter().any(|param| {
                         param.target == ScheduledInstrumentParamTarget::Synth
-                            && param.idx == crate::sampler::PARAM_SPEED
+                            && param.idx == crate::instruments::sampler::PARAM_SPEED
                             && param.value == 2.5
                     }),
                 }),
@@ -3267,7 +3267,7 @@
                 } => {
                     assert!(instrument_params.iter().any(|param| {
                         param.target == ScheduledInstrumentParamTarget::Synth
-                            && param.idx == crate::sampler::PARAM_SPEED
+                            && param.idx == crate::instruments::sampler::PARAM_SPEED
                             && (param.value - 4.0).abs() < 1e-6
                     }));
                     assert!(
@@ -3363,7 +3363,7 @@
                     assert!((resolved.transpose - 4.0).abs() < 1e-6, "{resolved:?}");
                     assert!(instrument_params.iter().any(|param| {
                         param.target == ScheduledInstrumentParamTarget::Synth
-                            && param.idx == crate::sampler::PARAM_SPEED
+                            && param.idx == crate::instruments::sampler::PARAM_SPEED
                             && (param.value - 2.0).abs() < 1e-6
                     }));
                     assert!(
@@ -3621,9 +3621,9 @@
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
                 count: 0,
-                notes: [0.0; crate::voice::MAX_VOICES],
-                durations: [0.0; crate::voice::MAX_VOICES],
-                delays: [0.0; crate::voice::MAX_VOICES],
+                notes: [0.0; crate::audio::MAX_VOICES],
+                durations: [0.0; crate::audio::MAX_VOICES],
+                delays: [0.0; crate::audio::MAX_VOICES],
                 step_transpose: 0.0,
             },
             effect_params: Vec::new(),
@@ -3707,9 +3707,9 @@
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
                 count: 0,
-                notes: [0.0; crate::voice::MAX_VOICES],
-                durations: [0.0; crate::voice::MAX_VOICES],
-                delays: [0.0; crate::voice::MAX_VOICES],
+                notes: [0.0; crate::audio::MAX_VOICES],
+                durations: [0.0; crate::audio::MAX_VOICES],
+                delays: [0.0; crate::audio::MAX_VOICES],
                 step_transpose: 0.0,
             },
             effect_params: Vec::new(),
@@ -3787,9 +3787,9 @@
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
                 count: 0,
-                notes: [0.0; crate::voice::MAX_VOICES],
-                durations: [0.0; crate::voice::MAX_VOICES],
-                delays: [0.0; crate::voice::MAX_VOICES],
+                notes: [0.0; crate::audio::MAX_VOICES],
+                durations: [0.0; crate::audio::MAX_VOICES],
+                delays: [0.0; crate::audio::MAX_VOICES],
                 step_transpose: 0.0,
             },
             effect_params: Vec::new(),
@@ -3909,9 +3909,9 @@
         resolved.transpose = 3.2;
         let mut chord = ScheduledChordData {
             count: 2,
-            notes: [0.0; crate::voice::MAX_VOICES],
-            durations: [1.0; crate::voice::MAX_VOICES],
-            delays: [0.0; crate::voice::MAX_VOICES],
+            notes: [0.0; crate::audio::MAX_VOICES],
+            durations: [1.0; crate::audio::MAX_VOICES],
+            delays: [0.0; crate::audio::MAX_VOICES],
             step_transpose: 2.0,
         };
         chord.notes[0] = 3.0;
@@ -4001,7 +4001,7 @@
         assert!(target
             .instrument_params
             .iter()
-            .any(|param| param.idx == crate::sampler::PARAM_SPEED as u64 && param.value == 2.5));
+            .any(|param| param.idx == crate::instruments::sampler::PARAM_SPEED as u64 && param.value == 2.5));
     }
 
     #[test]
@@ -4056,13 +4056,13 @@
             vec![
                 ScheduledInstrumentParam {
                     target: ScheduledInstrumentParamTarget::Synth,
-                    idx: crate::sampler::PARAM_SPEED,
+                    idx: crate::instruments::sampler::PARAM_SPEED,
                     span: 1,
                     value: 2.0,
                 },
                 ScheduledInstrumentParam {
                     target: ScheduledInstrumentParamTarget::Synth,
-                    idx: crate::sampler::PARAM_SCRUB_OFFSET,
+                    idx: crate::instruments::sampler::PARAM_SCRUB_OFFSET,
                     span: 1,
                     value: 0.25,
                 },
@@ -4116,36 +4116,36 @@
                 .position(|param| param.node_param_idx == node_idx as u32)
                 .expect("sampler param should exist")
         };
-        let preserve_idx = param_idx(crate::sampler::PARAM_WARP_PRESERVE);
-        let fill_idx = param_idx(crate::sampler::PARAM_WARP_SEG_LOOP_MODE);
-        let decay_idx = param_idx(crate::sampler::PARAM_WARP_SEG_ENVELOPE);
+        let preserve_idx = param_idx(crate::instruments::sampler::PARAM_WARP_PRESERVE);
+        let fill_idx = param_idx(crate::instruments::sampler::PARAM_WARP_SEG_LOOP_MODE);
+        let decay_idx = param_idx(crate::instruments::sampler::PARAM_WARP_SEG_ENVELOPE);
         let slot = &state.pattern.instrument_slots[track];
         slot.apply_descriptor(&desc, 12);
         slot.defaults
-            .set(preserve_idx, crate::warp_grid::PRESERVE_1_8 as f32);
+            .set(preserve_idx, crate::instruments::warp_grid::PRESERVE_1_8 as f32);
         slot.defaults
-            .set(fill_idx, crate::sampler::SEG_LOOP_PINGPONG as f32);
+            .set(fill_idx, crate::instruments::sampler::SEG_LOOP_PINGPONG as f32);
         slot.defaults.set(decay_idx, 0.25);
 
         let snapshot = state.publish_scheduler_snapshot();
         let params = resolve_sampler_params(&snapshot, track, step);
-        assert_eq!(params.warp_preserve, crate::warp_grid::PRESERVE_1_8 as f32);
+        assert_eq!(params.warp_preserve, crate::instruments::warp_grid::PRESERVE_1_8 as f32);
         assert_eq!(
             params.warp_seg_loop_mode,
-            crate::sampler::SEG_LOOP_PINGPONG as f32
+            crate::instruments::sampler::SEG_LOOP_PINGPONG as f32
         );
         assert!((params.warp_seg_envelope - 0.25).abs() < 0.0001);
 
-        slot.set_plock(step, preserve_idx, crate::warp_grid::PRESERVE_1_16 as f32);
-        slot.set_plock(step, fill_idx, crate::sampler::SEG_LOOP_OFF as f32);
+        slot.set_plock(step, preserve_idx, crate::instruments::warp_grid::PRESERVE_1_16 as f32);
+        slot.set_plock(step, fill_idx, crate::instruments::sampler::SEG_LOOP_OFF as f32);
         slot.set_plock(step, decay_idx, 0.75);
 
         let snapshot = state.publish_scheduler_snapshot();
         let params = resolve_sampler_params(&snapshot, track, step);
-        assert_eq!(params.warp_preserve, crate::warp_grid::PRESERVE_1_16 as f32);
+        assert_eq!(params.warp_preserve, crate::instruments::warp_grid::PRESERVE_1_16 as f32);
         assert_eq!(
             params.warp_seg_loop_mode,
-            crate::sampler::SEG_LOOP_OFF as f32
+            crate::instruments::sampler::SEG_LOOP_OFF as f32
         );
         assert!((params.warp_seg_envelope - 0.75).abs() < 0.0001);
     }
@@ -4158,10 +4158,10 @@
         let mut track_output_events = Vec::new();
         let mut sampler_params = ScheduledSamplerParams::default();
         sampler_params.warp_enabled = 1.0;
-        sampler_params.warp_mode = crate::sampler::WARP_MODE_BEATS as f32;
+        sampler_params.warp_mode = crate::instruments::sampler::WARP_MODE_BEATS as f32;
         sampler_params.sample_bpm = 174.0;
-        sampler_params.warp_preserve = crate::warp_grid::PRESERVE_1_16 as f32;
-        sampler_params.warp_seg_loop_mode = crate::sampler::SEG_LOOP_PINGPONG as f32;
+        sampler_params.warp_preserve = crate::instruments::warp_grid::PRESERVE_1_16 as f32;
+        sampler_params.warp_seg_loop_mode = crate::instruments::sampler::SEG_LOOP_PINGPONG as f32;
         sampler_params.warp_seg_envelope = 0.5;
 
         let event = StepEvent {
@@ -4170,9 +4170,9 @@
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
                 count: 0,
-                notes: [0.0; crate::voice::MAX_VOICES],
-                durations: [0.0; crate::voice::MAX_VOICES],
-                delays: [0.0; crate::voice::MAX_VOICES],
+                notes: [0.0; crate::audio::MAX_VOICES],
+                durations: [0.0; crate::audio::MAX_VOICES],
+                delays: [0.0; crate::audio::MAX_VOICES],
                 step_transpose: 0.0,
             },
             effect_params: Vec::new(),
@@ -4205,11 +4205,11 @@
         };
         assert_eq!(
             sampler_params.warp_preserve,
-            crate::warp_grid::PRESERVE_1_16 as f32
+            crate::instruments::warp_grid::PRESERVE_1_16 as f32
         );
         assert_eq!(
             sampler_params.warp_seg_loop_mode,
-            crate::sampler::SEG_LOOP_PINGPONG as f32
+            crate::instruments::sampler::SEG_LOOP_PINGPONG as f32
         );
         assert!((sampler_params.warp_seg_envelope - 0.5).abs() < 0.0001);
     }
@@ -4248,8 +4248,8 @@
                         labels: vec!["off".to_string(), "lfo".to_string()],
                     },
                     scaling: ParamScaling::Linear,
-                    node_param_idx: crate::voice_modulator::MOD_PARAM_BASE
-                        + crate::voice_modulator::PARAM_SLOT_SOURCE as u32,
+                    node_param_idx: crate::instruments::voice_modulator::MOD_PARAM_BASE
+                        + crate::instruments::voice_modulator::PARAM_SLOT_SOURCE as u32,
                     node_param_span: 1,
                     host_control: None,
                     ui_metadata: None,
@@ -4273,7 +4273,7 @@
                 },
                 ScheduledEffectParam {
                     logical_id: 77,
-                    idx: crate::voice_modulator::PARAM_SLOT_SOURCE as u64,
+                    idx: crate::instruments::voice_modulator::PARAM_SLOT_SOURCE as u64,
                     value: 1.0,
                 },
             ]
@@ -4295,7 +4295,7 @@
                 target_track: track,
                 param_id: ParamNodeId {
                     logical_id: 12,
-                    node_param_idx: crate::sampler::PARAM_SPEED as u32,
+                    node_param_idx: crate::instruments::sampler::PARAM_SPEED as u32,
                 },
                 param_index: 12,
                 value: 2.5,
@@ -4315,9 +4315,9 @@
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
                 count: 0,
-                notes: [0.0; crate::voice::MAX_VOICES],
-                durations: [0.0; crate::voice::MAX_VOICES],
-                delays: [0.0; crate::voice::MAX_VOICES],
+                notes: [0.0; crate::audio::MAX_VOICES],
+                durations: [0.0; crate::audio::MAX_VOICES],
+                delays: [0.0; crate::audio::MAX_VOICES],
                 step_transpose: 0.0,
             },
             effect_params: Vec::new(),
@@ -4342,7 +4342,7 @@
             event.instrument_params.as_slice(),
             &[ScheduledInstrumentParam {
                 target: ScheduledInstrumentParamTarget::Synth,
-                idx: crate::sampler::PARAM_SPEED,
+                idx: crate::instruments::sampler::PARAM_SPEED,
                 span: 1,
                 value: 2.5,
             }]
@@ -4354,7 +4354,7 @@
             .instrument[0]
             .param_id = ParamNodeId {
             logical_id: 99,
-            node_param_idx: crate::sampler::PARAM_SPEED as u32,
+            node_param_idx: crate::instruments::sampler::PARAM_SPEED as u32,
         };
         let mut stale_event = event.clone();
         stale_event.instrument_params.clear();
@@ -4393,8 +4393,8 @@
                     labels: vec!["off".to_string(), "lfo".to_string()],
                 },
                 scaling: ParamScaling::Linear,
-                node_param_idx: crate::voice_modulator::MOD_PARAM_BASE
-                    + crate::voice_modulator::PARAM_SLOT_SOURCE as u32,
+                node_param_idx: crate::instruments::voice_modulator::MOD_PARAM_BASE
+                    + crate::instruments::voice_modulator::PARAM_SLOT_SOURCE as u32,
                 node_param_span: 1,
                 host_control: None,
                 ui_metadata: None,
@@ -4411,7 +4411,7 @@
                 slot_index: 0,
                 param_id: ParamNodeId {
                     logical_id: 77,
-                    node_param_idx: crate::voice_modulator::PARAM_SLOT_SOURCE as u32,
+                    node_param_idx: crate::instruments::voice_modulator::PARAM_SLOT_SOURCE as u32,
                 },
                 param_index: 0,
                 value: 1.0,
@@ -4431,9 +4431,9 @@
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
                 count: 0,
-                notes: [0.0; crate::voice::MAX_VOICES],
-                durations: [0.0; crate::voice::MAX_VOICES],
-                delays: [0.0; crate::voice::MAX_VOICES],
+                notes: [0.0; crate::audio::MAX_VOICES],
+                durations: [0.0; crate::audio::MAX_VOICES],
+                delays: [0.0; crate::audio::MAX_VOICES],
                 step_transpose: 0.0,
             },
             effect_params: Vec::new(),
@@ -4457,7 +4457,7 @@
             event.effect_params,
             vec![ScheduledEffectParam {
                 logical_id: 77,
-                idx: crate::voice_modulator::PARAM_SLOT_SOURCE as u64,
+                idx: crate::instruments::voice_modulator::PARAM_SLOT_SOURCE as u64,
                 value: 1.0,
             }]
         );
@@ -4468,7 +4468,7 @@
             .effects[0]
             .param_id = ParamNodeId {
             logical_id: 42,
-            node_param_idx: crate::voice_modulator::PARAM_SLOT_SOURCE as u32,
+            node_param_idx: crate::instruments::voice_modulator::PARAM_SLOT_SOURCE as u32,
         };
         event.effect_params.clear();
 
@@ -4542,9 +4542,9 @@
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
                 count: 0,
-                notes: [0.0; crate::voice::MAX_VOICES],
-                durations: [0.0; crate::voice::MAX_VOICES],
-                delays: [0.0; crate::voice::MAX_VOICES],
+                notes: [0.0; crate::audio::MAX_VOICES],
+                durations: [0.0; crate::audio::MAX_VOICES],
+                delays: [0.0; crate::audio::MAX_VOICES],
                 step_transpose: 0.0,
             },
             effect_params: Vec::new(),
@@ -4668,9 +4668,9 @@
             resolved: test_resolved_step(),
             chord: ScheduledChordData {
                 count: 0,
-                notes: [0.0; crate::voice::MAX_VOICES],
-                durations: [0.0; crate::voice::MAX_VOICES],
-                delays: [0.0; crate::voice::MAX_VOICES],
+                notes: [0.0; crate::audio::MAX_VOICES],
+                durations: [0.0; crate::audio::MAX_VOICES],
+                delays: [0.0; crate::audio::MAX_VOICES],
                 step_transpose: 0.0,
             },
             effect_params: Vec::new(),

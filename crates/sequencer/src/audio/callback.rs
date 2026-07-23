@@ -278,18 +278,18 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 let kb_playback_speed = kb_default(12);
                 let kb_warp_preserve = snapshot_slot_default_node_param_value(
                     kb_inst_slot,
-                    crate::sampler::PARAM_WARP_PRESERVE,
-                    crate::sampler::WARP_PRESERVE_DEFAULT as f32,
+                    crate::instruments::sampler::PARAM_WARP_PRESERVE,
+                    crate::instruments::sampler::WARP_PRESERVE_DEFAULT as f32,
                 );
                 let kb_warp_seg_loop_mode = snapshot_slot_default_node_param_value(
                     kb_inst_slot,
-                    crate::sampler::PARAM_WARP_SEG_LOOP_MODE,
-                    crate::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
+                    crate::instruments::sampler::PARAM_WARP_SEG_LOOP_MODE,
+                    crate::instruments::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
                 );
                 let kb_warp_seg_envelope = snapshot_slot_default_node_param_value(
                     kb_inst_slot,
-                    crate::sampler::PARAM_WARP_SEG_ENVELOPE,
-                    crate::sampler::WARP_SEG_ENVELOPE_DEFAULT,
+                    crate::instruments::sampler::PARAM_WARP_SEG_ENVELOPE,
+                    crate::instruments::sampler::WARP_SEG_ENVELOPE_DEFAULT,
                 );
                 let (
                     kb_warp_enabled,
@@ -463,7 +463,7 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         params_push_wrapper(
                             data.lg.0,
                             ParamMsg {
-                                idx: crate::voice_modulator::PARAM_RESET_COUNTER as u64,
+                                idx: crate::instruments::voice_modulator::PARAM_RESET_COUNTER as u64,
                                 logical_id: logical_id as u64,
                                 fvalue: mod_reset_counter as f32,
                             },
@@ -618,7 +618,7 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 topology_epoch,
                 f32::from_bits(data.state.transport.cpu_load_pct.load(Ordering::Relaxed)),
             );
-            let mod_stats = crate::voice_modulator::take_process_stats();
+            let mod_stats = crate::instruments::voice_modulator::take_process_stats();
             if mod_stats.calls > 0 {
                 eprintln!(
                     "audio-trace: modulator-stats calls={} rendered={} disabled_custom={} disabled_sampler={} all_slots_off={} unbound_rendered={} rendered_frames={} disabled_frames={} all_slots_off_frames={}",

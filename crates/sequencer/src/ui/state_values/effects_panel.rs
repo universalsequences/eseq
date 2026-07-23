@@ -39,11 +39,11 @@ pub(crate) fn build_effects_value(
     }
 
     fn is_source_param(node_param_idx: u32) -> bool {
-        sequencer::voice_modulator::is_source_param(node_param_idx)
+        sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
     }
 
     fn rename_source_param(name: &str) -> String {
-        sequencer::voice_modulator::source_param_display_name(name)
+        sequencer::instruments::voice_modulator::source_param_display_name(name)
     }
 
     fn insert_mod_metadata(
@@ -408,16 +408,16 @@ pub(crate) fn build_effects_value(
                 selected_voice_mod_source_indices_for_optional_slot(desc, slot, plock_step);
             let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
             let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
-            for slot_number in 1..=sequencer::voice_modulator::SLOT_COUNT {
+            for slot_number in 1..=sequencer::instruments::voice_modulator::SLOT_COUNT {
                 let section_name =
-                    sequencer::voice_modulator::modulator_slot_label(slot_number, "");
+                    sequencer::instruments::voice_modulator::modulator_slot_label(slot_number, "");
                 let mut section_params: Vec<Rc<RefCell<Value>>> = Vec::new();
                 let mut source_param: Option<Rc<RefCell<Value>>> = None;
                 for &param_idx in &source_actual {
                     let Some(pdesc) = desc.params.get(param_idx) else {
                         continue;
                     };
-                    if sequencer::voice_modulator::slot_from_param_name(&pdesc.name)
+                    if sequencer::instruments::voice_modulator::slot_from_param_name(&pdesc.name)
                         != Some(slot_number)
                     {
                         continue;
@@ -497,7 +497,7 @@ pub(crate) fn build_effects_value(
                         track_effect_param_value_field(track, slot_idx, param_idx, &pdesc.name),
                     );
                     let param_value = Rc::new(RefCell::new(Value::Map(pmap)));
-                    if sequencer::voice_modulator::source_type_name_from_param_name(&pdesc.name)
+                    if sequencer::instruments::voice_modulator::source_type_name_from_param_name(&pdesc.name)
                         == Some("source")
                     {
                         source_param = Some(param_value);
@@ -599,11 +599,11 @@ pub(crate) fn build_bus_effects_value_for_selection(
     }
 
     fn is_source_param(node_param_idx: u32) -> bool {
-        sequencer::voice_modulator::is_source_param(node_param_idx)
+        sequencer::instruments::voice_modulator::is_source_param(node_param_idx)
     }
 
     fn rename_source_param(name: &str) -> String {
-        sequencer::voice_modulator::source_param_display_name(name)
+        sequencer::instruments::voice_modulator::source_param_display_name(name)
     }
 
     fn bus_slot_param_stored_value(
@@ -640,7 +640,7 @@ pub(crate) fn build_bus_effects_value_for_selection(
         slot: Option<&sequencer::effects::EffectSlotSnapshot>,
         plock_step: Option<usize>,
     ) -> Vec<usize> {
-        sequencer::voice_modulator::selected_source_param_indices(&desc.params, |idx, param| {
+        sequencer::instruments::voice_modulator::selected_source_param_indices(&desc.params, |idx, param| {
             slot.map(|_| bus_slot_param_stored_value(slot, desc, idx, plock_step))
                 .unwrap_or(param.default)
         })
@@ -987,16 +987,16 @@ pub(crate) fn build_bus_effects_value_for_selection(
                         selected_bus_voice_mod_source_indices(desc, slot, plock_step);
                     let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
                     let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
-                    for slot_number in 1..=sequencer::voice_modulator::SLOT_COUNT {
+                    for slot_number in 1..=sequencer::instruments::voice_modulator::SLOT_COUNT {
                         let section_name =
-                            sequencer::voice_modulator::modulator_slot_label(slot_number, "");
+                            sequencer::instruments::voice_modulator::modulator_slot_label(slot_number, "");
                         let mut section_params: Vec<Rc<RefCell<Value>>> = Vec::new();
                         let mut source_param: Option<Rc<RefCell<Value>>> = None;
                         for &param_idx in &source_actual {
                             let Some(pdesc) = desc.params.get(param_idx) else {
                                 continue;
                             };
-                            if sequencer::voice_modulator::slot_from_param_name(&pdesc.name)
+                            if sequencer::instruments::voice_modulator::slot_from_param_name(&pdesc.name)
                                 != Some(slot_number)
                             {
                                 continue;
@@ -1075,7 +1075,7 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                 ),
                             );
                             let param_value = Rc::new(RefCell::new(Value::Map(pmap)));
-                            if sequencer::voice_modulator::source_type_name_from_param_name(
+                            if sequencer::instruments::voice_modulator::source_type_name_from_param_name(
                                 &pdesc.name,
                             ) == Some("source")
                             {

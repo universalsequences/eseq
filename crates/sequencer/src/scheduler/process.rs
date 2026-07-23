@@ -214,10 +214,10 @@ pub(super) fn process_scheduled_instrument_param(
         .copied()
         .unwrap_or(1)
         .max(1);
-    let (target, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+    let (target, idx) = if raw_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
         (
             ScheduledInstrumentParamTarget::Modulator,
-            (raw_idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
+            (raw_idx - crate::instruments::voice_modulator::MOD_PARAM_BASE) as u64,
         )
     } else {
         (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
@@ -1493,18 +1493,18 @@ pub(super) fn resolve_sampler_defaults(
         scrub: value(13, 0.0),
         warp_preserve: default_slot_node_param_value(
             slot,
-            crate::sampler::PARAM_WARP_PRESERVE as u32,
-            crate::sampler::WARP_PRESERVE_DEFAULT as f32,
+            crate::instruments::sampler::PARAM_WARP_PRESERVE as u32,
+            crate::instruments::sampler::WARP_PRESERVE_DEFAULT as f32,
         ),
         warp_seg_loop_mode: default_slot_node_param_value(
             slot,
-            crate::sampler::PARAM_WARP_SEG_LOOP_MODE as u32,
-            crate::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
+            crate::instruments::sampler::PARAM_WARP_SEG_LOOP_MODE as u32,
+            crate::instruments::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
         ),
         warp_seg_envelope: default_slot_node_param_value(
             slot,
-            crate::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
-            crate::sampler::WARP_SEG_ENVELOPE_DEFAULT,
+            crate::instruments::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
+            crate::instruments::sampler::WARP_SEG_ENVELOPE_DEFAULT,
         ),
     }
 }
@@ -1587,10 +1587,10 @@ pub(super) fn resolve_neuron_instrument_override(
         .copied()
         .unwrap_or(1)
         .max(1);
-    let (target, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+    let (target, idx) = if raw_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
         (
             ScheduledInstrumentParamTarget::Modulator,
-            (raw_idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
+            (raw_idx - crate::instruments::voice_modulator::MOD_PARAM_BASE) as u64,
         )
     } else {
         (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
@@ -1620,13 +1620,13 @@ pub(super) fn resolve_neuron_effect_override(
     if expected_id != override_param.param_id {
         return None;
     }
-    let (logical_id, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+    let (logical_id, idx) = if raw_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
         if slot.modulator_node_id == 0 {
             return None;
         }
         (
             slot.modulator_node_id as u64,
-            raw_idx as u64 - crate::voice_modulator::MOD_PARAM_BASE as u64,
+            raw_idx as u64 - crate::instruments::voice_modulator::MOD_PARAM_BASE as u64,
         )
     } else {
         (slot.node_id as u64, raw_idx as u64)
@@ -1762,25 +1762,25 @@ pub(super) fn apply_sampler_state_param_override(
     value: f32,
 ) -> bool {
     match node_param_idx {
-        idx if idx == crate::sampler::PARAM_ATTACK_SAMPLES => params.attack_ms = value,
-        idx if idx == crate::sampler::PARAM_RELEASE_SAMPLES => params.release_ms = value,
-        idx if idx == crate::sampler::PARAM_START_POINT => params.start_point = value,
-        idx if idx == crate::sampler::PARAM_END_POINT => params.end_point = value,
-        idx if idx == crate::sampler::PARAM_ENABLED => params.instrument_enabled = value,
-        idx if idx == crate::sampler::PARAM_REVERSE => params.reverse = value,
-        idx if idx == crate::sampler::PARAM_LOOP_MODE => params.loop_mode = value,
-        idx if idx == crate::sampler::PARAM_LOOP_XFADE_SAMPLES => params.loop_xfade_ms = value,
-        idx if idx == crate::sampler::PARAM_SR_HZ => params.sr_hz = value,
-        idx if idx == crate::sampler::PARAM_WARP_ENABLED => params.warp_enabled = value,
-        idx if idx == crate::sampler::PARAM_WARP_MODE => params.warp_mode = value,
-        idx if idx == crate::sampler::PARAM_WARP_SAMPLE_BPM => params.sample_bpm = value,
-        idx if idx == crate::sampler::PARAM_SPEED => params.playback_speed = value,
-        idx if idx == crate::sampler::PARAM_SCRUB_OFFSET => params.scrub = value,
-        idx if idx == crate::sampler::PARAM_WARP_PRESERVE => params.warp_preserve = value,
-        idx if idx == crate::sampler::PARAM_WARP_SEG_LOOP_MODE => {
+        idx if idx == crate::instruments::sampler::PARAM_ATTACK_SAMPLES => params.attack_ms = value,
+        idx if idx == crate::instruments::sampler::PARAM_RELEASE_SAMPLES => params.release_ms = value,
+        idx if idx == crate::instruments::sampler::PARAM_START_POINT => params.start_point = value,
+        idx if idx == crate::instruments::sampler::PARAM_END_POINT => params.end_point = value,
+        idx if idx == crate::instruments::sampler::PARAM_ENABLED => params.instrument_enabled = value,
+        idx if idx == crate::instruments::sampler::PARAM_REVERSE => params.reverse = value,
+        idx if idx == crate::instruments::sampler::PARAM_LOOP_MODE => params.loop_mode = value,
+        idx if idx == crate::instruments::sampler::PARAM_LOOP_XFADE_SAMPLES => params.loop_xfade_ms = value,
+        idx if idx == crate::instruments::sampler::PARAM_SR_HZ => params.sr_hz = value,
+        idx if idx == crate::instruments::sampler::PARAM_WARP_ENABLED => params.warp_enabled = value,
+        idx if idx == crate::instruments::sampler::PARAM_WARP_MODE => params.warp_mode = value,
+        idx if idx == crate::instruments::sampler::PARAM_WARP_SAMPLE_BPM => params.sample_bpm = value,
+        idx if idx == crate::instruments::sampler::PARAM_SPEED => params.playback_speed = value,
+        idx if idx == crate::instruments::sampler::PARAM_SCRUB_OFFSET => params.scrub = value,
+        idx if idx == crate::instruments::sampler::PARAM_WARP_PRESERVE => params.warp_preserve = value,
+        idx if idx == crate::instruments::sampler::PARAM_WARP_SEG_LOOP_MODE => {
             params.warp_seg_loop_mode = value;
         }
-        idx if idx == crate::sampler::PARAM_WARP_SEG_ENVELOPE => {
+        idx if idx == crate::instruments::sampler::PARAM_WARP_SEG_ENVELOPE => {
             params.warp_seg_envelope = value;
         }
         _ => return false,

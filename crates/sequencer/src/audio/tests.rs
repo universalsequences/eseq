@@ -40,12 +40,12 @@ use crate::sequencer::{
     RackMacroMapping, RackMacroTarget, RackRouting, RackSlotParam, RackSlotParamPlocks,
     RackSlotSnapshot, RackTrackSnapshot, SequencerState, SwingResolution, TrackSoundState,
 };
-use crate::voice::VoicePool;
+use super::VoicePool;
 
 fn active_keyboard_notes_fixture(
-) -> [[Option<ActiveKeyboardNote>; crate::voice::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
+) -> [[Option<ActiveKeyboardNote>; crate::audio::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
 {
-    [[None; crate::voice::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
+    [[None; crate::audio::MAX_VOICES]; crate::sequencer::MAX_TRACKS]
 }
 
 #[test]
@@ -833,9 +833,9 @@ fn test_block_trigger(seq: u64, track: usize) -> BlockEvent {
                 },
                 chord: ScheduledChordData {
                     count: 0,
-                    notes: [0.0; crate::voice::MAX_VOICES],
-                    durations: [0.0; crate::voice::MAX_VOICES],
-                    delays: [0.0; crate::voice::MAX_VOICES],
+                    notes: [0.0; crate::audio::MAX_VOICES],
+                    durations: [0.0; crate::audio::MAX_VOICES],
+                    delays: [0.0; crate::audio::MAX_VOICES],
                     step_transpose: 0.0,
                 },
                 effect_params: Vec::new(),
@@ -873,9 +873,9 @@ fn test_block_network_trigger(seq: u64, track: usize) -> BlockEvent {
                 },
                 chord: ScheduledChordData {
                     count: 0,
-                    notes: [0.0; crate::voice::MAX_VOICES],
-                    durations: [0.0; crate::voice::MAX_VOICES],
-                    delays: [0.0; crate::voice::MAX_VOICES],
+                    notes: [0.0; crate::audio::MAX_VOICES],
+                    durations: [0.0; crate::audio::MAX_VOICES],
+                    delays: [0.0; crate::audio::MAX_VOICES],
                     step_transpose: 0.0,
                 },
                 effect_params: Vec::new(),
@@ -997,11 +997,11 @@ fn sampler_warp_repitch_mode_needs_no_analysis() {
         &state,
         0,
         1.0,
-        crate::sampler::WARP_MODE_REPITCH as f32,
+        crate::instruments::sampler::WARP_MODE_REPITCH as f32,
         174.0,
     );
     assert!(enabled > 0.5);
-    assert_eq!(mode.round() as i32, crate::sampler::WARP_MODE_REPITCH);
+    assert_eq!(mode.round() as i32, crate::instruments::sampler::WARP_MODE_REPITCH);
     // 174 BPM sample in a 120 BPM project: the read head must consume
     // source slower, at 120/174 ≈ 0.69 source frames per host frame.
     assert!((ratio - (120.0 / 174.0)).abs() < 0.0001);

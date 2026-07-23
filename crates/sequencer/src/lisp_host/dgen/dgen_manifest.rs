@@ -401,7 +401,7 @@ pub fn instrument_descriptor_from_manifest(
         &manifest.tensor_init_data,
     );
     desc.params
-        .extend(crate::voice_modulator::ui_param_descriptors());
+        .extend(crate::instruments::voice_modulator::ui_param_descriptors());
 
     append_dgen_modulator_descriptors(&mut desc, manifest);
     append_dgen_modulation_target_params(&mut desc, manifest);
@@ -475,11 +475,11 @@ pub fn append_effect_host_modulation_controls(
         return;
     }
     desc.params
-        .extend(crate::voice_modulator::effect_param_descriptors());
-    desc.instrument_modulators = (1..=crate::voice_modulator::SLOT_COUNT)
+        .extend(crate::instruments::voice_modulator::effect_param_descriptors());
+    desc.instrument_modulators = (1..=crate::instruments::voice_modulator::SLOT_COUNT)
         .map(|slot| crate::effects::InstrumentModulatorDescriptor {
             slot,
-            label: crate::voice_modulator::modulator_slot_label(slot, ""),
+            label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
         })
         .collect();
     append_dgen_modulation_target_params(desc, manifest);
@@ -495,7 +495,7 @@ pub(in crate::lisp_host) fn append_dgen_modulator_descriptors(
         .iter()
         .map(|m| crate::effects::InstrumentModulatorDescriptor {
             slot: m.slot,
-            label: crate::voice_modulator::modulator_slot_label(m.slot, &m.name),
+            label: crate::instruments::voice_modulator::modulator_slot_label(m.slot, &m.name),
         })
         .collect();
 }

@@ -261,11 +261,11 @@ pub unsafe fn add_effect_to_chain_at_successor(
         let mod_name = CString::new(format!("dgenlisp_fx_{}_mod", slot_id)).unwrap();
         let mod_id = audiograph::add_node(
             lg,
-            crate::voice_modulator::effect_modulator_vtable(),
-            crate::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
+            crate::instruments::voice_modulator::effect_modulator_vtable(),
+            crate::instruments::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
             mod_name.as_ptr(),
-            crate::voice_modulator::INPUT_COUNT as c_int,
-            crate::voice_modulator::NUM_OUTPUTS as c_int,
+            crate::instruments::voice_modulator::INPUT_COUNT as c_int,
+            crate::instruments::voice_modulator::NUM_OUTPUTS as c_int,
             std::ptr::null(),
             0,
         );
@@ -316,7 +316,7 @@ pub unsafe fn add_effect_to_chain_at_successor(
                 }
             }
             for modulator in &manifest.modulators {
-                if !(1..=crate::voice_modulator::SLOT_COUNT).contains(&modulator.slot) {
+                if !(1..=crate::instruments::voice_modulator::SLOT_COUNT).contains(&modulator.slot) {
                     continue;
                 }
                 connect_effect_port(

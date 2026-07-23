@@ -19,7 +19,7 @@ use crate::plock_variants::{
     live_track_variant_keys, PlockVariantAssignment, PlockVariantDomain, PlockVariantKey,
     PlockVariantRegistry,
 };
-use crate::voice::MAX_VOICES;
+use crate::audio::MAX_VOICES;
 
 use super::data::{
     sync_beats, ChordData, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, ModConnection,

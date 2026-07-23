@@ -70,7 +70,7 @@ pub(super) unsafe fn dispatch_voice_modulator_bpm(lg: *mut LiveGraph, modulator_
     params_push_wrapper(
         lg,
         ParamMsg {
-            idx: crate::voice_modulator::PARAM_BPM as u64,
+            idx: crate::instruments::voice_modulator::PARAM_BPM as u64,
             logical_id: modulator_id,
             fvalue: bpm.clamp(20.0, 400.0),
         },
@@ -88,7 +88,7 @@ pub(super) unsafe fn dispatch_voice_modulator_transport_clock(
     params_push_wrapper(
         lg,
         ParamMsg {
-            idx: crate::voice_modulator::PARAM_TRANSPORT_BAR_PHASE as u64,
+            idx: crate::instruments::voice_modulator::PARAM_TRANSPORT_BAR_PHASE as u64,
             logical_id: modulator_id,
             fvalue: clock.bar_phase,
         },
@@ -96,7 +96,7 @@ pub(super) unsafe fn dispatch_voice_modulator_transport_clock(
     params_push_wrapper(
         lg,
         ParamMsg {
-            idx: crate::voice_modulator::PARAM_TRANSPORT_BAR_PHASE_INC as u64,
+            idx: crate::instruments::voice_modulator::PARAM_TRANSPORT_BAR_PHASE_INC as u64,
             logical_id: modulator_id,
             fvalue: clock.bar_phase_increment,
         },
@@ -289,7 +289,7 @@ pub(super) unsafe fn set_modulator_gate(lg: *mut LiveGraph, modulator_lid: u64, 
     params_push_wrapper(
         lg,
         ParamMsg {
-            idx: crate::track_modulator::PARAM_GATE,
+            idx: crate::instruments::track_modulator::PARAM_GATE,
             logical_id: modulator_lid,
             fvalue: gate.clamp(0.0, 1.0),
         },
@@ -506,10 +506,10 @@ pub(super) unsafe fn dispatch_instrument_defaults_to_voice(
     param_indices.sort_by_key(|param_idx| slot.resolve_node_idx(*param_idx));
     for param_idx in param_indices {
         let idx = slot.resolve_node_idx(param_idx);
-        let is_mod_param = idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE;
+        let is_mod_param = idx as u32 >= crate::instruments::voice_modulator::MOD_PARAM_BASE;
         let logical_id = if is_mod_param { modulator_id } else { synth_id };
         let resolved_idx = if is_mod_param {
-            idx - crate::voice_modulator::MOD_PARAM_BASE as u64
+            idx - crate::instruments::voice_modulator::MOD_PARAM_BASE as u64
         } else {
             idx
         };
@@ -558,7 +558,7 @@ pub(super) unsafe fn dispatch_sampler_extra_params_to_voice(
         if param.target != ScheduledInstrumentParamTarget::Synth {
             continue;
         }
-        if param.idx < crate::sampler::PARAM_SCRUB_OFFSET {
+        if param.idx < crate::instruments::sampler::PARAM_SCRUB_OFFSET {
             continue;
         }
         push_param_span(lg, sampler_lid, param.idx, param.span, param.value);
@@ -718,13 +718,13 @@ pub(super) unsafe fn dispatch_sampler_modulator_defaults_to_voice(
     let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
     for param_idx in 0..num_params {
         let idx = slot.resolve_node_idx(param_idx);
-        if (idx as u32) < crate::voice_modulator::MOD_PARAM_BASE {
+        if (idx as u32) < crate::instruments::voice_modulator::MOD_PARAM_BASE {
             continue;
         }
         params_push_wrapper(
             lg,
             ParamMsg {
-                idx: idx - crate::voice_modulator::MOD_PARAM_BASE as u64,
+                idx: idx - crate::instruments::voice_modulator::MOD_PARAM_BASE as u64,
                 logical_id: modulator_id,
                 fvalue: slot.defaults.get(param_idx),
             },
@@ -742,8 +742,8 @@ pub(super) unsafe fn dispatch_sampler_extra_defaults_to_voice(
     let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
     for param_idx in 0..num_params {
         let idx = slot.resolve_node_idx(param_idx);
-        if idx < crate::sampler::PARAM_SCRUB_OFFSET
-            || idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE
+        if idx < crate::instruments::sampler::PARAM_SCRUB_OFFSET
+            || idx as u32 >= crate::instruments::voice_modulator::MOD_PARAM_BASE
         {
             continue;
         }

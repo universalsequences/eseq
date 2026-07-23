@@ -1,5 +1,5 @@
 /*!
-Voice pools for custom instrument engines, and runtime/topology sync.
+Custom-engine voice allocation and audio-runtime topology synchronization.
 
 `CustomEnginePool` tracks per-engine voice slots with allocation, LRU-ish
 stealing, release tails, and free-patch (always-running) voices. The sync
@@ -10,37 +10,38 @@ mute-group enforcement across tracks and racks.
 */
 
 #[allow(unused_imports)]
-use super::*;
+use super::{VoicePool, MAX_VOICES};
+use crate::audio::*;
 
-pub(super) struct CustomVoiceSlot {
-    pub(super) logical_id: u64,
-    pub(super) age: u64,
-    pub(super) active: bool,
-    pub(super) release_started_sample: Option<u64>,
-    pub(super) note: f32,
-    pub(super) assigned_track: Option<usize>,
-    pub(super) assigned_route: Option<usize>,
-    pub(super) fingerprint: u64,
+pub(in crate::audio) struct CustomVoiceSlot {
+    pub(in crate::audio) logical_id: u64,
+    pub(in crate::audio) age: u64,
+    pub(in crate::audio) active: bool,
+    pub(in crate::audio) release_started_sample: Option<u64>,
+    pub(in crate::audio) note: f32,
+    pub(in crate::audio) assigned_track: Option<usize>,
+    pub(in crate::audio) assigned_route: Option<usize>,
+    pub(in crate::audio) fingerprint: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct CustomVoiceAllocation {
-    pub(super) voice_idx: usize,
-    pub(super) logical_id: u64,
-    pub(super) previous_track: Option<usize>,
-    pub(super) previous_route: Option<usize>,
-    pub(super) stole_active_voice: bool,
+pub(in crate::audio) struct CustomVoiceAllocation {
+    pub(in crate::audio) voice_idx: usize,
+    pub(in crate::audio) logical_id: u64,
+    pub(in crate::audio) previous_track: Option<usize>,
+    pub(in crate::audio) previous_route: Option<usize>,
+    pub(in crate::audio) stole_active_voice: bool,
 }
 
-pub(super) struct CustomEnginePool {
-    pub(super) voices: [CustomVoiceSlot; MAX_VOICES],
-    pub(super) num_voices: usize,
-    pub(super) enabled_voice_count: usize,
-    pub(super) age_counter: u64,
+pub(in crate::audio) struct CustomEnginePool {
+    pub(in crate::audio) voices: [CustomVoiceSlot; MAX_VOICES],
+    pub(in crate::audio) num_voices: usize,
+    pub(in crate::audio) enabled_voice_count: usize,
+    pub(in crate::audio) age_counter: u64,
 }
 
 impl CustomEnginePool {
-    pub(super) fn new() -> Self {
+    pub(in crate::audio) fn new() -> Self {
         Self {
             voices: std::array::from_fn(|_| CustomVoiceSlot {
                 logical_id: 0,
@@ -58,7 +59,7 @@ impl CustomEnginePool {
         }
     }
 
-    pub(super) fn add_voice(&mut self, logical_id: u64) {
+    pub(in crate::audio) fn add_voice(&mut self, logical_id: u64) {
         if self.num_voices < MAX_VOICES {
             self.voices[self.num_voices] = CustomVoiceSlot {
                 logical_id,
@@ -74,7 +75,7 @@ impl CustomEnginePool {
         }
     }
 
-    pub(super) fn reset(&mut self) {
+    pub(in crate::audio) fn reset(&mut self) {
         self.num_voices = 0;
         self.enabled_voice_count = 1;
         self.age_counter = 0;
@@ -92,7 +93,7 @@ impl CustomEnginePool {
         }
     }
 
-    pub(super) fn allocate_voice(
+    pub(in crate::audio) fn allocate_voice(
         &mut self,
         track: usize,
         route_idx: usize,
@@ -242,7 +243,7 @@ impl CustomEnginePool {
         }
     }
 
-    pub(super) fn allocate_free_patch_voice(
+    pub(in crate::audio) fn allocate_free_patch_voice(
         &mut self,
         track: usize,
         route_idx: usize,
@@ -271,7 +272,7 @@ impl CustomEnginePool {
         })
     }
 
-    pub(super) fn release_voice_by_logical_id(&mut self, logical_id: u64, release_sample: u64) {
+    pub(in crate::audio) fn release_voice_by_logical_id(&mut self, logical_id: u64, release_sample: u64) {
         for i in 0..self.num_voices {
             if self.voices[i].logical_id == logical_id {
                 self.voices[i].active = false;
@@ -281,7 +282,7 @@ impl CustomEnginePool {
         }
     }
 
-    pub(super) fn release_free_patch_voice_by_logical_id(&mut self, logical_id: u64) {
+    pub(in crate::audio) fn release_free_patch_voice_by_logical_id(&mut self, logical_id: u64) {
         for i in 0..self.num_voices {
             if self.voices[i].logical_id == logical_id {
                 self.voices[i].active = false;
@@ -291,7 +292,7 @@ impl CustomEnginePool {
         }
     }
 
-    pub(super) fn note_voice_allocated(&mut self, engine_id: usize, voice_idx: usize) {
+    pub(in crate::audio) fn note_voice_allocated(&mut self, engine_id: usize, voice_idx: usize) {
         let needed = (voice_idx + 1).min(MAX_VOICES).max(1);
         if needed > self.enabled_voice_count {
             self.enabled_voice_count = needed;
@@ -299,11 +300,11 @@ impl CustomEnginePool {
         }
     }
 
-    pub(super) fn sync_enabled_voice_count(&mut self, engine_id: usize) {
+    pub(in crate::audio) fn sync_enabled_voice_count(&mut self, engine_id: usize) {
         self.enabled_voice_count = crate::lisp_host::get_dgen_engine_enabled_voices(engine_id);
     }
 
-    pub(super) fn shrink_released_voices(
+    pub(in crate::audio) fn shrink_released_voices(
         &mut self,
         engine_id: usize,
         current_sample: u64,
@@ -334,14 +335,14 @@ impl CustomEnginePool {
         }
     }
 
-    pub(super) fn invalidate_sound_cache(&mut self) {
+    pub(in crate::audio) fn invalidate_sound_cache(&mut self) {
         for i in 0..self.num_voices {
             self.voices[i].fingerprint = 0;
         }
     }
 }
 
-pub(super) fn custom_engine_requires_idle_voice(
+pub(in crate::audio) fn custom_engine_requires_idle_voice(
     data: &AudioCallbackData,
     engine_id: usize,
     num_tracks: usize,
@@ -365,7 +366,7 @@ pub(super) fn custom_engine_requires_idle_voice(
     })
 }
 
-pub(super) fn sync_sampler_voice_pool(state: &SequencerState, track: usize, pool: &mut VoicePool) {
+pub(in crate::audio) fn sync_sampler_voice_pool(state: &SequencerState, track: usize, pool: &mut VoicePool) {
     let desired_count = state.runtime.voice_counts[track].load(Ordering::Acquire) as usize;
     let desired_count = desired_count.min(MAX_VOICES);
 
@@ -405,7 +406,7 @@ pub(super) fn sync_sampler_voice_pool(state: &SequencerState, track: usize, pool
     }
 }
 
-pub(super) fn sync_custom_engine_pool(state: &SequencerState, engine_id: usize, pool: &mut CustomEnginePool) {
+pub(in crate::audio) fn sync_custom_engine_pool(state: &SequencerState, engine_id: usize, pool: &mut CustomEnginePool) {
     let desired_count =
         state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) as usize;
     let desired_count = desired_count.min(MAX_VOICES);
@@ -435,7 +436,7 @@ pub(super) fn sync_custom_engine_pool(state: &SequencerState, engine_id: usize, 
     }
 }
 
-pub(super) fn sync_rack_voice_pools(data: &mut AudioCallbackData, num_tracks: usize) {
+pub(in crate::audio) fn sync_rack_voice_pools(data: &mut AudioCallbackData, num_tracks: usize) {
     // Iterate the snapshot by reference instead of cloning each RackTrackSnapshot
     // (and its nested EffectSlotSnapshot/Vec fields). This runs every audio
     // callback, so a deep clone here was a real-time-thread heap-allocation
@@ -480,7 +481,7 @@ pub(super) fn sync_rack_voice_pools(data: &mut AudioCallbackData, num_tracks: us
     }
 }
 
-pub(super) fn free_patch_route_lids_hash(
+pub(in crate::audio) fn free_patch_route_lids_hash(
     state: &SequencerState,
     engine_id: usize,
     num_tracks: usize,
@@ -508,7 +509,7 @@ pub(super) fn free_patch_route_lids_hash(
     Some(hasher.finish())
 }
 
-pub(super) fn free_patch_transport_route_target(
+pub(in crate::audio) fn free_patch_transport_route_target(
     state: &SequencerState,
     track: usize,
     num_tracks: usize,
@@ -535,7 +536,7 @@ pub(super) fn free_patch_transport_route_target(
     })
 }
 
-pub(super) fn free_patch_transport_route_cache_is_fresh(
+pub(in crate::audio) fn free_patch_transport_route_cache_is_fresh(
     cached: FreePatchTransportRouteState,
     target: FreePatchTransportRouteTarget,
 ) -> bool {
@@ -546,7 +547,7 @@ pub(super) fn free_patch_transport_route_cache_is_fresh(
         && target.open
 }
 
-pub(super) unsafe fn set_free_patch_transport_route(
+pub(in crate::audio) unsafe fn set_free_patch_transport_route(
     lg: *mut LiveGraph,
     state: &SequencerState,
     engine_id: usize,
@@ -607,7 +608,7 @@ pub(super) unsafe fn set_free_patch_transport_route(
     }
 }
 
-pub(super) fn sync_free_patch_transport_routes(data: &mut AudioCallbackData, num_tracks: usize) {
+pub(in crate::audio) fn sync_free_patch_transport_routes(data: &mut AudioCallbackData, num_tracks: usize) {
     let playing = data.state.transport.playing.load(Ordering::Acquire);
     for track in 0..MAX_TRACKS {
         let Some(target) =
@@ -641,7 +642,7 @@ pub(super) fn sync_free_patch_transport_routes(data: &mut AudioCallbackData, num
     }
 }
 
-pub(super) fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_tracks: usize) {
+pub(in crate::audio) fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_tracks: usize) {
     // Topology edits can invalidate the per-track gate-off bookkeeping for
     // already-ringing custom voices. Explicitly send gate-off to every live
     // custom engine voice before resetting callback-local state so notes do
@@ -694,7 +695,7 @@ pub(super) fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackDat
     sync_rack_voice_pools(data, num_tracks);
 }
 
-pub(super) fn publish_active_voice_counts(data: &AudioCallbackData, num_tracks: usize) {
+pub(in crate::audio) fn publish_active_voice_counts(data: &AudioCallbackData, num_tracks: usize) {
     for track in 0..MAX_TRACKS {
         let active = if track < num_tracks {
             match InstrumentType::from_runtime_flag(
@@ -761,7 +762,7 @@ pub(super) fn publish_active_voice_counts(data: &AudioCallbackData, num_tracks: 
     }
 }
 
-pub(super) fn release_rack_slot_active_voices(
+pub(in crate::audio) fn release_rack_slot_active_voices(
     data: &mut AudioCallbackData,
     track_idx: usize,
     slot_idx: usize,
@@ -782,7 +783,7 @@ pub(super) fn release_rack_slot_active_voices(
     dispatch_rack_slot_note_offs(data, frame_offset, note_offs);
 }
 
-pub(super) fn release_rack_active_voices(
+pub(in crate::audio) fn release_rack_active_voices(
     data: &mut AudioCallbackData,
     track_idx: usize,
     release_sample: u64,
@@ -808,7 +809,7 @@ pub(super) fn release_rack_active_voices(
     }
 }
 
-pub(super) fn release_track_active_voices(
+pub(in crate::audio) fn release_track_active_voices(
     data: &mut AudioCallbackData,
     track_idx: usize,
     release_sample: u64,
@@ -886,7 +887,7 @@ pub(super) fn release_track_active_voices(
     }
 }
 
-pub(super) fn enforce_mute_group_for_winning_track(
+pub(in crate::audio) fn enforce_mute_group_for_winning_track(
     data: &mut AudioCallbackData,
     winning_track: usize,
     release_sample: u64,

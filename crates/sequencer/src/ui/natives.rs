@@ -684,11 +684,11 @@ fn effect_param_target(
     if idx == u32::MAX as u64 {
         return None;
     }
-    if idx as u32 >= sequencer::voice_modulator::MOD_PARAM_BASE {
+    if idx as u32 >= sequencer::instruments::voice_modulator::MOD_PARAM_BASE {
         let modulator_node_id = slot_state.modulator_node_id.load(Ordering::Relaxed);
         (modulator_node_id != 0).then_some((
             modulator_node_id as u64,
-            idx - sequencer::voice_modulator::MOD_PARAM_BASE as u64,
+            idx - sequencer::instruments::voice_modulator::MOD_PARAM_BASE as u64,
         ))
     } else {
         let node_id = slot_state.node_id.load(Ordering::Relaxed);

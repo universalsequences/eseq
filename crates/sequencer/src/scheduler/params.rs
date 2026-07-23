@@ -87,13 +87,13 @@ pub(super) fn slot_param_identity(node_id: u32, modulator_node_id: u32, raw_idx:
     if raw_idx == u32::MAX {
         return None;
     }
-    if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+    if raw_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
         if modulator_node_id == 0 {
             return None;
         }
         Some(ParamNodeId {
             logical_id: modulator_node_id as u64,
-            node_param_idx: raw_idx - crate::voice_modulator::MOD_PARAM_BASE,
+            node_param_idx: raw_idx - crate::instruments::voice_modulator::MOD_PARAM_BASE,
         })
     } else {
         if node_id == 0 {
@@ -217,13 +217,13 @@ pub(super) fn resolve_effect_params(
             if raw_idx == u32::MAX {
                 continue;
             }
-            let (logical_id, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+            let (logical_id, idx) = if raw_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
                 if slot.modulator_node_id == 0 {
                     continue;
                 }
                 (
                     slot.modulator_node_id as u64,
-                    raw_idx as u64 - crate::voice_modulator::MOD_PARAM_BASE as u64,
+                    raw_idx as u64 - crate::instruments::voice_modulator::MOD_PARAM_BASE as u64,
                 )
             } else {
                 (slot.node_id as u64, raw_idx as u64)
@@ -263,10 +263,10 @@ pub(super) fn resolve_instrument_params(
             .copied()
             .unwrap_or(1)
             .max(1);
-        let (target, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+        let (target, idx) = if raw_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
             (
                 ScheduledInstrumentParamTarget::Modulator,
-                (raw_idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
+                (raw_idx - crate::instruments::voice_modulator::MOD_PARAM_BASE) as u64,
             )
         } else {
             (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
@@ -308,10 +308,10 @@ pub(super) fn resolve_instrument_defaults(
             .copied()
             .unwrap_or(1)
             .max(1);
-        let (target, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+        let (target, idx) = if raw_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
             (
                 ScheduledInstrumentParamTarget::Modulator,
-                (raw_idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
+                (raw_idx - crate::instruments::voice_modulator::MOD_PARAM_BASE) as u64,
             )
         } else {
             (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
@@ -433,13 +433,13 @@ pub(super) fn resolve_effect_defaults(
             if raw_idx == u32::MAX {
                 continue;
             }
-            let (logical_id, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+            let (logical_id, idx) = if raw_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
                 if slot.modulator_node_id == 0 {
                     continue;
                 }
                 (
                     slot.modulator_node_id as u64,
-                    raw_idx as u64 - crate::voice_modulator::MOD_PARAM_BASE as u64,
+                    raw_idx as u64 - crate::instruments::voice_modulator::MOD_PARAM_BASE as u64,
                 )
             } else {
                 (slot.node_id as u64, raw_idx as u64)
@@ -488,10 +488,10 @@ pub(super) fn resolve_instrument_plocks(
             .copied()
             .unwrap_or(1)
             .max(1);
-        let (target, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+        let (target, idx) = if raw_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
             (
                 ScheduledInstrumentParamTarget::Modulator,
-                (raw_idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
+                (raw_idx - crate::instruments::voice_modulator::MOD_PARAM_BASE) as u64,
             )
         } else {
             (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
@@ -786,20 +786,20 @@ pub(super) fn resolve_sampler_params(
         warp_preserve: resolved_slot_node_param_value(
             slot,
             step_idx,
-            crate::sampler::PARAM_WARP_PRESERVE as u32,
-            crate::sampler::WARP_PRESERVE_DEFAULT as f32,
+            crate::instruments::sampler::PARAM_WARP_PRESERVE as u32,
+            crate::instruments::sampler::WARP_PRESERVE_DEFAULT as f32,
         ),
         warp_seg_loop_mode: resolved_slot_node_param_value(
             slot,
             step_idx,
-            crate::sampler::PARAM_WARP_SEG_LOOP_MODE as u32,
-            crate::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
+            crate::instruments::sampler::PARAM_WARP_SEG_LOOP_MODE as u32,
+            crate::instruments::sampler::WARP_SEG_LOOP_MODE_DEFAULT as f32,
         ),
         warp_seg_envelope: resolved_slot_node_param_value(
             slot,
             step_idx,
-            crate::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
-            crate::sampler::WARP_SEG_ENVELOPE_DEFAULT,
+            crate::instruments::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
+            crate::instruments::sampler::WARP_SEG_ENVELOPE_DEFAULT,
         ),
     }
 }

@@ -2906,7 +2906,7 @@
                     let is_haptic_free_continuous =
                         matches!(param.kind, sequencer::effects::ParamKind::Continuous { .. })
                             && (param.max - param.min).abs() <= 1.0
-                            && !sequencer::voice_modulator::is_bar_resync_param(
+                            && !sequencer::instruments::voice_modulator::is_bar_resync_param(
                                 param.node_param_idx,
                             );
                     let suffix = format!("-{}", param.name);

@@ -59,7 +59,7 @@ impl RackSlotParam {
             Self::BaseNote => value.clamp(-48.0, 48.0),
             Self::Gain => value.clamp(0.0, 2.0),
             Self::Pan => value.clamp(-1.0, 1.0),
-            Self::MaxPolyphony => value.round().clamp(1.0, crate::voice::MAX_VOICES as f32),
+            Self::MaxPolyphony => value.round().clamp(1.0, crate::audio::MAX_VOICES as f32),
             Self::Mute | Self::Solo => {
                 if value > 0.5 {
                     1.0

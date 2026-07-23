@@ -203,7 +203,7 @@ pub(super) fn selected_rack_slot_voice_mod_source_indices(
     slot: &sequencer::sequencer::RackSlotSnapshot,
     selected_step: Option<usize>,
 ) -> Vec<usize> {
-    sequencer::voice_modulator::selected_source_param_indices(&desc.params, |idx, _| {
+    sequencer::instruments::voice_modulator::selected_source_param_indices(&desc.params, |idx, _| {
         rack_slot_param_value(rack, slot_idx, slot, desc, idx, selected_step)
     })
 }
@@ -320,7 +320,7 @@ pub(super) fn build_selected_rack_slot_instrument_value(
     ));
 
     for (param_idx, pdesc) in desc.params.iter().enumerate() {
-        if sequencer::voice_modulator::is_source_param(pdesc.node_param_idx)
+        if sequencer::instruments::voice_modulator::is_source_param(pdesc.node_param_idx)
             || pdesc.name.starts_with("__host_mod__")
             || pdesc.name.starts_with("__dgen_mod_active__")
         {
@@ -372,15 +372,15 @@ pub(super) fn build_selected_rack_slot_instrument_value(
         selected_rack_slot_voice_mod_source_indices(rack, slot_idx, &desc, slot, selected_step);
     let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
-    for slot_number in 1..=sequencer::voice_modulator::SLOT_COUNT {
-        let section_name = sequencer::voice_modulator::modulator_slot_label(slot_number, "");
+    for slot_number in 1..=sequencer::instruments::voice_modulator::SLOT_COUNT {
+        let section_name = sequencer::instruments::voice_modulator::modulator_slot_label(slot_number, "");
         let mut params: Vec<Rc<RefCell<Value>>> = Vec::new();
         let mut source_param: Option<Rc<RefCell<Value>>> = None;
         for &param_idx in &source_actual {
             let Some(pdesc) = desc.params.get(param_idx) else {
                 continue;
             };
-            if sequencer::voice_modulator::slot_from_param_name(&pdesc.name) != Some(slot_number) {
+            if sequencer::instruments::voice_modulator::slot_from_param_name(&pdesc.name) != Some(slot_number) {
                 continue;
             }
             let current =
@@ -392,7 +392,7 @@ pub(super) fn build_selected_rack_slot_instrument_value(
             let param = rack_slot_param_map(
                 track,
                 slot_idx,
-                sequencer::voice_modulator::source_param_display_name(&pdesc.name),
+                sequencer::instruments::voice_modulator::source_param_display_name(&pdesc.name),
                 "param",
                 Some(param_idx),
                 rack_slot_instrument_param_value_field(track, slot_idx, param_idx, &pdesc.name),
@@ -403,7 +403,7 @@ pub(super) fn build_selected_rack_slot_instrument_value(
                 None,
                 None,
             );
-            if sequencer::voice_modulator::source_type_name_from_param_name(&pdesc.name)
+            if sequencer::instruments::voice_modulator::source_type_name_from_param_name(&pdesc.name)
                 == Some("source")
             {
                 source_param = Some(param);
@@ -679,7 +679,7 @@ pub(super) fn build_rack_slot_effect_value(
         .enumerate()
         .filter_map(|(param_idx, param)| {
             if param.node_param_idx == u32::MAX
-                || (sequencer::voice_modulator::is_source_param(param.node_param_idx)
+                || (sequencer::instruments::voice_modulator::is_source_param(param.node_param_idx)
                     && !matches!(
                         param.host_control,
                         Some(sequencer::effects::HostControl::FxSidechain { .. })
@@ -733,7 +733,7 @@ pub(super) fn build_rack_slot_effect_value(
         .collect::<Vec<_>>();
 
     let source_actual =
-        sequencer::voice_modulator::selected_source_param_indices(&descriptor.params, |idx, _| {
+        sequencer::instruments::voice_modulator::selected_source_param_indices(&descriptor.params, |idx, _| {
             rack_effect_param_value(
                 rack,
                 rack_slot,
@@ -746,15 +746,15 @@ pub(super) fn build_rack_slot_effect_value(
         });
     let mut source_sections = Vec::new();
     let mut source_names = Vec::new();
-    for slot_number in 1..=sequencer::voice_modulator::SLOT_COUNT {
-        let section_name = sequencer::voice_modulator::modulator_slot_label(slot_number, "");
+    for slot_number in 1..=sequencer::instruments::voice_modulator::SLOT_COUNT {
+        let section_name = sequencer::instruments::voice_modulator::modulator_slot_label(slot_number, "");
         let mut section_params = Vec::new();
         let mut source_param = None;
         for &param_idx in &source_actual {
             let Some(param) = descriptor.params.get(param_idx) else {
                 continue;
             };
-            if sequencer::voice_modulator::slot_from_param_name(&param.name) != Some(slot_number) {
+            if sequencer::instruments::voice_modulator::slot_from_param_name(&param.name) != Some(slot_number) {
                 continue;
             }
             let current = rack_effect_param_value(
@@ -773,7 +773,7 @@ pub(super) fn build_rack_slot_effect_value(
             let value = rack_slot_param_map(
                 track,
                 rack_slot,
-                sequencer::voice_modulator::source_param_display_name(&param.name),
+                sequencer::instruments::voice_modulator::source_param_display_name(&param.name),
                 "param",
                 Some(param_idx),
                 rack_slot_effect_param_value_field(
@@ -790,7 +790,7 @@ pub(super) fn build_rack_slot_effect_value(
                 None,
                 None,
             );
-            if sequencer::voice_modulator::source_type_name_from_param_name(&param.name)
+            if sequencer::instruments::voice_modulator::source_type_name_from_param_name(&param.name)
                 == Some("source")
             {
                 source_param = Some(value);
