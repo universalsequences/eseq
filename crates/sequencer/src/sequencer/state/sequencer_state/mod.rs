@@ -8,4 +8,5 @@ mod topology;
 mod process_chain;
 mod transport;
 mod scene_launch;
+mod song_playback;
 mod step_edit;

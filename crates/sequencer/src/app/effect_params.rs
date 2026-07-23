@@ -730,7 +730,12 @@ impl App {
             return_token: None,
             target_applied: config.target_scene == self.state.current_scene_index(),
         };
-        if config.steal_patterns && config.target_scene != runtime.origin_scene {
+        // Spec 7.3: no scene-macro pattern steals while song playback is the
+        // launch authority (the macro's param morphs still apply).
+        if config.steal_patterns
+            && config.target_scene != runtime.origin_scene
+            && self.manual_launch_rejection().is_none()
+        {
             let target = scene_macro_launch_target(config);
             let quantize = scene_macro_launch_quantize(config.quantize);
             runtime.target_token = self

@@ -2688,7 +2688,11 @@ mod tests {
 pub(crate) fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
     !matches!(
         cmd,
-        AppCommand::SetTrackVolume { .. }
+        // TogglePlay routes through the song transport state machine, which
+        // publishes its own scheduler snapshot (start_playback/stop_playback);
+        // a second generic publish here would double-publish per toggle.
+        AppCommand::TogglePlay
+            | AppCommand::SetTrackVolume { .. }
             | AppCommand::AdjustTrackVolume { .. }
             | AppCommand::SetTrackPan { .. }
             | AppCommand::AdjustTrackPan { .. }
@@ -3826,7 +3830,12 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
 
         // ── Transport ─────────────────────────────────────────────────────
         AppCommand::TogglePlay => {
-            app.state.toggle_play_no_publish();
+            // Route through the song transport state machine
+            // (docs/song-mode-spec.md 13) so Use Arrangement selects session
+            // vs song playback for this path too.
+            if let Err(error) = app.song_transport_toggle_play(app.song_capture_armed) {
+                eprintln!("toggle-play failed: {error}");
+            }
         }
 
         AppCommand::SetBpm { bpm } => {

@@ -543,6 +543,572 @@ fn register_ui_def_accumulator_dispatch(
     );
 }
 
+fn song_payload(fields: Vec<(&str, Value)>) -> Value {
+    let mut payload = HashMap::new();
+    for (name, value) in fields {
+        payload.insert(name.to_string(), Rc::new(RefCell::new(value)));
+    }
+    Value::Map(payload)
+}
+
+fn song_beat_arg(name: &str, value: Option<&Value>) -> Result<f64, String> {
+    match value {
+        Some(Value::Number(beat)) if beat.is_finite() && *beat >= 0.0 => Ok(*beat),
+        _ => Err(format!("{name} must be a finite, non-negative beat number")),
+    }
+}
+
+/// A parsed `(track pattern-id)` pair from a song overrides/patterns list.
+fn song_override_pair(value: &Value) -> Result<(usize, u64), String> {
+    let Value::List(items) = value else {
+        return Err("expected a (track pattern-id) pair".to_string());
+    };
+    let numbers: Vec<f64> = items
+        .iter()
+        .filter_map(|item| match &*item.borrow() {
+            Value::Number(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    if numbers.len() != 2 || items.len() != 2 {
+        return Err("expected a (track pattern-id) pair of numbers".to_string());
+    }
+    let (track, pattern) = (numbers[0], numbers[1]);
+    if !track.is_finite() || track < 0.0 || track.fract() != 0.0 {
+        return Err("override track must be a non-negative integer".to_string());
+    }
+    if !pattern.is_finite() || pattern < 1.0 || pattern.fract() != 0.0 {
+        return Err("override pattern-id must be a positive integer".to_string());
+    }
+    Ok((track as usize, pattern as u64))
+}
+
+/// Parse an optional overrides argument: nil/absent, or a list of
+/// `(track pattern-id)` pairs.
+fn song_overrides_arg(value: Option<&Value>) -> Result<Vec<(usize, u64)>, String> {
+    match value {
+        None | Some(Value::Nil) => Ok(Vec::new()),
+        Some(Value::List(items)) => items
+            .iter()
+            .map(|item| song_override_pair(&item.borrow()))
+            .collect(),
+        _ => Err("overrides must be a list of (track pattern-id) pairs".to_string()),
+    }
+}
+
+fn song_overrides_value(overrides: &[(usize, u64)]) -> Value {
+    Value::List(
+        overrides
+            .iter()
+            .map(|(track, pattern)| {
+                Rc::new(RefCell::new(Value::List(vec![
+                    Rc::new(RefCell::new(Value::Number(*track as f64))),
+                    Rc::new(RefCell::new(Value::Number(*pattern as f64))),
+                ])))
+            })
+            .collect(),
+    )
+}
+
+fn song_row_id_arg(name: &str, value: Option<&Value>) -> Result<u64, String> {
+    match value {
+        Some(Value::Number(id)) if id.is_finite() && *id >= 0.0 && id.fract() == 0.0 => {
+            Ok(*id as u64)
+        }
+        _ => Err(format!("{name} must be a non-negative integer row id")),
+    }
+}
+
+fn song_scene_arg(name: &str, value: Option<&Value>) -> Result<usize, String> {
+    match value {
+        Some(Value::Number(scene))
+            if scene.is_finite() && *scene >= 0.0 && scene.fract() == 0.0 =>
+        {
+            Ok(*scene as usize)
+        }
+        _ => Err(format!("{name} must be a non-negative integer scene index")),
+    }
+}
+
+/// One parsed `(at <beat> :scene n [:patterns ((track pat)...)])` row of a
+/// `def-song` definition (docs/song-mode-spec.md section 6).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DefSongRow {
+    pub(crate) start_beat: f64,
+    pub(crate) scene: usize,
+    pub(crate) patterns: Vec<(usize, u64)>,
+}
+
+/// A fully parsed `def-song` definition, validated for shape before any host
+/// command is emitted. Model-level validation (scene/pattern existence,
+/// ordering, end > last start) happens in `App::song_replace`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DefSongSpec {
+    pub(crate) name: String,
+    pub(crate) rows: Vec<DefSongRow>,
+    pub(crate) end_beat: f64,
+    pub(crate) loop_enabled: bool,
+}
+
+fn def_song_bool(value: &Value) -> Result<bool, String> {
+    match value {
+        Value::Bool(flag) => Ok(*flag),
+        Value::Symbol(s) | Value::Keyword(s) | Value::String(s) => match s.trim_start_matches(':') {
+            "true" | "on" | "yes" => Ok(true),
+            "false" | "off" | "no" | "nil" => Ok(false),
+            other => Err(format!(":loop expects true/false, got {other}")),
+        },
+        Value::Number(n) => Ok(*n != 0.0),
+        Value::Nil => Ok(false),
+        _ => Err(":loop expects true/false".to_string()),
+    }
+}
+
+fn parse_def_song_row(items: &[Rc<RefCell<Value>>]) -> Result<DefSongRow, String> {
+    let start_beat = {
+        let beat = items.get(1).map(|cell| cell.borrow().clone());
+        song_beat_arg("(at <beat> ...)", beat.as_ref())?
+    };
+    let mut scene: Option<usize> = None;
+    let mut patterns: Vec<(usize, u64)> = Vec::new();
+    let mut idx = 2;
+    while idx < items.len() {
+        let key = match &*items[idx].borrow() {
+            Value::Keyword(key) | Value::Symbol(key) | Value::String(key) => {
+                key.trim_start_matches(':').to_ascii_lowercase()
+            }
+            other => {
+                return Err(format!(
+                    "row at beat {start_beat}: expected a keyword, got {other:?}"
+                ))
+            }
+        };
+        let Some(value) = items.get(idx + 1) else {
+            return Err(format!("row at beat {start_beat}: missing value for :{key}"));
+        };
+        let value = value.borrow();
+        match key.as_str() {
+            "scene" => {
+                scene = Some(song_scene_arg(
+                    &format!("row at beat {start_beat}: :scene"),
+                    Some(&value),
+                )?);
+            }
+            "patterns" => {
+                patterns = song_overrides_arg(Some(&value))
+                    .map_err(|error| format!("row at beat {start_beat}: :patterns {error}"))?;
+            }
+            other => {
+                return Err(format!(
+                    "row at beat {start_beat}: unknown key :{other} (expected :scene or :patterns)"
+                ));
+            }
+        }
+        idx += 2;
+    }
+    let Some(scene) = scene else {
+        return Err(format!("row at beat {start_beat}: missing :scene"));
+    };
+    Ok(DefSongRow {
+        start_beat,
+        scene,
+        patterns,
+    })
+}
+
+/// Parse the complete `def-song` argument list:
+/// `(def-song "name" (at <beat> :scene n [:patterns ((track pat)...)])... :end <beat> [:loop bool])`.
+/// All-or-nothing: any malformed element fails the whole definition.
+pub(crate) fn parse_def_song_args(args: &[Value]) -> Result<DefSongSpec, String> {
+    let name = match args.first() {
+        Some(Value::String(name) | Value::Symbol(name)) if !name.trim().is_empty() => {
+            name.trim().to_string()
+        }
+        _ => return Err("expected a song name string as the first argument".to_string()),
+    };
+    let mut rows = Vec::new();
+    let mut end_beat: Option<f64> = None;
+    let mut loop_enabled = false;
+    let mut idx = 1;
+    while idx < args.len() {
+        match &args[idx] {
+            Value::List(items) => {
+                let head = items.first().map(|cell| cell.borrow().clone());
+                let is_at_form = matches!(
+                    &head,
+                    Some(Value::Symbol(s) | Value::String(s) | Value::Keyword(s))
+                        if s.trim_start_matches(':').eq_ignore_ascii_case("at")
+                );
+                if !is_at_form {
+                    return Err(
+                        "rows must be (at <beat> :scene n [:patterns ((track pat)...)]) forms"
+                            .to_string(),
+                    );
+                }
+                rows.push(parse_def_song_row(items)?);
+                idx += 1;
+            }
+            Value::Keyword(key) | Value::Symbol(key) => {
+                let key = key.trim_start_matches(':').to_ascii_lowercase();
+                let Some(value) = args.get(idx + 1) else {
+                    return Err(format!("missing value for :{key}"));
+                };
+                match key.as_str() {
+                    "end" => end_beat = Some(song_beat_arg(":end", Some(value))?),
+                    "loop" => loop_enabled = def_song_bool(value)?,
+                    other => {
+                        return Err(format!("unknown key :{other} (expected :end or :loop)"));
+                    }
+                }
+                idx += 2;
+            }
+            other => {
+                return Err(format!(
+                    "unexpected argument {other:?}; expected (at ...) rows, :end, or :loop"
+                ));
+            }
+        }
+    }
+    if rows.is_empty() {
+        return Err("a song needs at least one (at <beat> :scene n) row".to_string());
+    }
+    let Some(end_beat) = end_beat else {
+        return Err("missing :end <beat>".to_string());
+    };
+    Ok(DefSongSpec {
+        name,
+        rows,
+        end_beat,
+        loop_enabled,
+    })
+}
+
+/// Lower a parsed `def-song` definition to the `song-replace` host-command
+/// payload (spec 6: def-song lowers to song-replace — fresh row ids, one
+/// undo entry).
+pub(crate) fn def_song_replace_payload(spec: &DefSongSpec) -> Value {
+    let rows = Value::List(
+        spec.rows
+            .iter()
+            .map(|row| {
+                Rc::new(RefCell::new(song_payload(vec![
+                    ("start-beat", Value::Number(row.start_beat)),
+                    ("scene", Value::Number(row.scene as f64)),
+                    ("overrides", song_overrides_value(&row.patterns)),
+                ])))
+            })
+            .collect(),
+    );
+    song_payload(vec![
+        ("name", Value::String(spec.name.clone())),
+        ("rows", rows),
+        ("end-beat", Value::Number(spec.end_beat)),
+        ("loop", Value::Bool(spec.loop_enabled)),
+    ])
+}
+
+/// Song-mode natives (docs/song-mode-spec.md 6/12): `seq-song-*` wrappers for
+/// every editing primitive plus declarative `def-song`. Each enqueues one
+/// custom host command handled by `ui/host_commands/song.rs`; success and
+/// failure surface on the status line there.
+/// `seq-toggle-play` — Play/Stop route through the song transport state
+/// machine (docs/song-mode-spec.md 12/13): the host command handler in
+/// host_commands/song.rs applies the transition on App so Use Arrangement
+/// and record select session playback, song playback, or capture.
+pub(crate) fn register_transport_toggle_play_native(
+    runtime: &mut Runtime,
+    state: Arc<SequencerState>,
+) {
+    runtime.register_native("seq-toggle-play", move |_args, ctx| {
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "song-transport-toggle-play".to_string(),
+            payload: Value::Nil,
+        });
+        Ok(Value::Bool(!state.is_playing()))
+    });
+}
+
+pub(crate) fn register_song_natives(runtime: &mut Runtime) {
+    runtime.register_native_with_docs(
+        "seq-song-row-insert",
+        "(seq-song-row-insert start-beat scene [overrides])",
+        "Insert a song row at an absolute beat, splitting the governing span. \
+         overrides is a list of (track pattern-id) pairs. On an empty song the \
+         insert must be at beat 0.0.",
+        move |args, ctx| {
+            let start_beat = song_beat_arg("seq-song-row-insert: start-beat", args.first())?;
+            let scene = song_scene_arg("seq-song-row-insert: scene", args.get(1))?;
+            let overrides = song_overrides_arg(args.get(2))
+                .map_err(|error| format!("seq-song-row-insert: {error}"))?;
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-row-insert".to_string(),
+                payload: song_payload(vec![
+                    ("start-beat", Value::Number(start_beat)),
+                    ("scene", Value::Number(scene as f64)),
+                    ("overrides", song_overrides_value(&overrides)),
+                ]),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-row-remove",
+        "(seq-song-row-remove row-id)",
+        "Remove a song row by stable id; the previous row's span extends over \
+         it. Removing the last remaining row clears the song.",
+        move |args, ctx| {
+            let row_id = song_row_id_arg("seq-song-row-remove: row-id", args.first())?;
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-row-remove".to_string(),
+                payload: song_payload(vec![("row-id", Value::Number(row_id as f64))]),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-row-move",
+        "(seq-song-row-move row-id new-start-beat)",
+        "Move a song row to a new absolute beat; ordering is re-derived. \
+         Moving row zero off 0.0 or onto another row's beat is rejected.",
+        move |args, ctx| {
+            let row_id = song_row_id_arg("seq-song-row-move: row-id", args.first())?;
+            let start_beat = song_beat_arg("seq-song-row-move: new-start-beat", args.get(1))?;
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-row-move".to_string(),
+                payload: song_payload(vec![
+                    ("row-id", Value::Number(row_id as f64)),
+                    ("start-beat", Value::Number(start_beat)),
+                ]),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-row-set-state",
+        "(seq-song-row-set-state row-id scene [overrides])",
+        "Replace a song row's complete launch state (base scene plus the full \
+         override set), preserving its id and position.",
+        move |args, ctx| {
+            let row_id = song_row_id_arg("seq-song-row-set-state: row-id", args.first())?;
+            let scene = song_scene_arg("seq-song-row-set-state: scene", args.get(1))?;
+            let overrides = song_overrides_arg(args.get(2))
+                .map_err(|error| format!("seq-song-row-set-state: {error}"))?;
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-row-set-state".to_string(),
+                payload: song_payload(vec![
+                    ("row-id", Value::Number(row_id as f64)),
+                    ("scene", Value::Number(scene as f64)),
+                    ("overrides", song_overrides_value(&overrides)),
+                ]),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-set-end",
+        "(seq-song-set-end end-beat)",
+        "Set the song's explicit end beat (must stay greater than the last \
+         row's start beat).",
+        move |args, ctx| {
+            let end_beat = song_beat_arg("seq-song-set-end: end-beat", args.first())?;
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-set-end".to_string(),
+                payload: song_payload(vec![("end-beat", Value::Number(end_beat))]),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-set-loop",
+        "(seq-song-set-loop enabled)",
+        "Enable or disable song looping.",
+        move |args, ctx| {
+            let enabled = match args.first() {
+                Some(value) => def_song_bool(value)
+                    .map_err(|_| "seq-song-set-loop: expected true/false".to_string())?,
+                None => return Err("seq-song-set-loop: expected true/false".into()),
+            };
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-set-loop".to_string(),
+                payload: song_payload(vec![("enabled", Value::Bool(enabled))]),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-replace",
+        "(seq-song-replace rows end-beat [loop])",
+        "Replace the song wholesale. rows is a list of \
+         (start-beat scene [((track pattern-id)...)]) lists; fresh row ids are \
+         allocated and the whole replacement is one undo entry.",
+        move |args, ctx| {
+            let Some(Value::List(rows)) = args.first() else {
+                return Err("seq-song-replace: expected a list of rows".into());
+            };
+            let mut row_values = Vec::with_capacity(rows.len());
+            for row in rows {
+                let row = row.borrow();
+                let Value::List(items) = &*row else {
+                    return Err(
+                        "seq-song-replace: each row must be (start-beat scene [overrides])".into(),
+                    );
+                };
+                let start = items.first().map(|cell| cell.borrow().clone());
+                let start_beat = song_beat_arg("seq-song-replace: row start-beat", start.as_ref())?;
+                let scene = items.get(1).map(|cell| cell.borrow().clone());
+                let scene = song_scene_arg("seq-song-replace: row scene", scene.as_ref())?;
+                let overrides = items.get(2).map(|cell| cell.borrow().clone());
+                let overrides = song_overrides_arg(overrides.as_ref())
+                    .map_err(|error| format!("seq-song-replace: {error}"))?;
+                row_values.push(Rc::new(RefCell::new(song_payload(vec![
+                    ("start-beat", Value::Number(start_beat)),
+                    ("scene", Value::Number(scene as f64)),
+                    ("overrides", song_overrides_value(&overrides)),
+                ]))));
+            }
+            let end_beat = song_beat_arg("seq-song-replace: end-beat", args.get(1))?;
+            let loop_enabled = match args.get(2) {
+                Some(value) => def_song_bool(value)
+                    .map_err(|error| format!("seq-song-replace: {error}"))?,
+                None => false,
+            };
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-replace".to_string(),
+                payload: song_payload(vec![
+                    ("rows", Value::List(row_values)),
+                    ("end-beat", Value::Number(end_beat)),
+                    ("loop", Value::Bool(loop_enabled)),
+                ]),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-clear",
+        "(seq-song-clear)",
+        "Remove the committed song entirely.",
+        move |_args, ctx| {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-clear".to_string(),
+                payload: Value::Nil,
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    // Transport-facing song commands (spec 12/13): each routes through the
+    // song transport state machine in app/song_transport.rs via the host
+    // command handler; rejections surface on the status line there.
+    runtime.register_native_with_docs(
+        "seq-use-arrangement",
+        "(seq-use-arrangement enabled)",
+        "Set the persisted Use Arrangement transport preference (session vs \
+         song behavior for the next Play). Rejected while playing.",
+        move |args, ctx| {
+            let enabled = match args.first() {
+                Some(value) => def_song_bool(value)
+                    .map_err(|_| "seq-use-arrangement: expected true/false".to_string())?,
+                None => return Err("seq-use-arrangement: expected true/false".into()),
+            };
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-use-arrangement".to_string(),
+                payload: song_payload(vec![("enabled", Value::Bool(enabled))]),
+            });
+            Ok(Value::Bool(enabled))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-play",
+        "(seq-song-play)",
+        "Play through the song transport state machine: session playback, \
+         song playback, or arrangement capture per Use Arrangement + record \
+         (docs/song-mode-spec.md section 1). Errors if already playing.",
+        move |_args, ctx| {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-transport-play".to_string(),
+                payload: Value::Nil,
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-capture-arm",
+        "(seq-song-capture-arm armed)",
+        "Arm or disarm arrangement capture for the next Play (Use \
+         Arrangement + record selects capture). Only changes while stopped.",
+        move |args, ctx| {
+            let armed = match args.first() {
+                Some(value) => def_song_bool(value)
+                    .map_err(|_| "seq-song-capture-arm: expected true/false".to_string())?,
+                None => return Err("seq-song-capture-arm: expected true/false".into()),
+            };
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-capture-arm".to_string(),
+                payload: song_payload(vec![("armed", Value::Bool(armed))]),
+            });
+            Ok(Value::Bool(armed))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-capture-cancel",
+        "(seq-song-capture-cancel)",
+        "Cancel arrangement capture: discard the take, preserve the committed \
+         song, stop the transport. Only valid during arrangement capture.",
+        move |_args, ctx| {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-capture-cancel".to_string(),
+                payload: Value::Nil,
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-status",
+        "(seq-song-status)",
+        "Report the song transport status on the status line: mode, row \
+         count, end beat, and loop state.",
+        move |_args, ctx| {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-status".to_string(),
+                payload: Value::Nil,
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    // Declarative authoring (spec section 6). The compiler auto-quotes every
+    // def-song argument, so the `(at ...)` rows arrive here as list data.
+    // The complete definition is parsed and shape-validated before the
+    // single song-replace command is emitted; a failed definition emits
+    // nothing and leaves the committed song unchanged.
+    runtime.register_native_with_docs(
+        "def-song",
+        "(def-song \"name\" (at 0 :scene 0) (at 32 :scene 1 :patterns ((1 3))) :end 64 [:loop true])",
+        "Define the project song declaratively from absolute beat positions. \
+         Lowers to the song-replace primitive: fresh row ids, one undo entry. \
+         A failed definition leaves the previous song unchanged.",
+        move |args, ctx| {
+            let spec = parse_def_song_args(&args).map_err(|error| format!("def-song: {error}"))?;
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-replace".to_string(),
+                payload: def_song_replace_payload(&spec),
+            });
+            Ok(Value::String(spec.name))
+        },
+    );
+}
+
 fn toggle_master_recording_capture(
     master_recording: &AtomicBool,
     master_recorder: &sequencer::recorder::MasterRecorder,
@@ -953,6 +1519,19 @@ pub(crate) fn init_runtime(
                 ("record-quantize", Value::String("1/16".to_string())),
                 ("metronome", Value::Bool(false)),
                 ("queued-scene", Value::Number(-1.0)),
+                // Song mode observability (docs/song-mode-spec.md 12).
+                ("song-exists", Value::Bool(false)),
+                ("use-arrangement", Value::Bool(false)),
+                ("song-mode", Value::String("session".to_string())),
+                ("song-current-row", Value::Number(-1.0)),
+                ("song-current-row-id", Value::Number(-1.0)),
+                ("song-row-count", Value::Number(0.0)),
+                ("song-position-beats", Value::Number(0.0)),
+                ("song-end-beat", Value::Number(0.0)),
+                ("song-loop-enabled", Value::Bool(false)),
+                ("song-capture-failed", Value::Bool(false)),
+                ("song-capture-error", Value::Nil),
+                ("song-rows", Value::List(vec![])),
                 ("num-steps", Value::Number(PAGE_SIZE as f64)),
                 ("num-tracks", Value::Number(track_count as f64)),
                 ("current-track", Value::Number(0.0)),
@@ -4037,11 +4616,7 @@ pub(crate) fn init_runtime(
         Ok(Value::Number(val as f64))
     });
 
-    // seq-toggle-play
-    let st = state.clone();
-    runtime.register_native("seq-toggle-play", move |_args, _ctx| {
-        Ok(Value::Bool(st.toggle_play()))
-    });
+    register_transport_toggle_play_native(&mut runtime, state.clone());
 
     runtime.register_native("seq-set-bpm", move |args, ctx| {
         let Some(Value::Number(bpm)) = args.first() else {
@@ -4331,6 +4906,8 @@ pub(crate) fn init_runtime(
         ui_ep_def_sequencer.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(name))
     });
+
+    register_song_natives(&mut runtime);
 
     let st_unpublish_sequencer = state.clone();
     let ui_ep_unpublish_sequencer = ui_epoch.clone();
@@ -5955,6 +6532,138 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn def_song_value_number(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> f64 {
+        match &*map.get(key).expect(key).borrow() {
+            Value::Number(value) => *value,
+            other => panic!("{key} should be a number, got {other:?}"),
+        }
+    }
+
+    /// End-to-end: the compiler auto-quotes every def-song argument, so the
+    /// `(at ...)` rows arrive at the native as list data and a full spec
+    /// parses, including fractional beats preserved exactly.
+    #[test]
+    fn def_song_form_is_captured_as_data_and_parses() {
+        let mut runtime = Runtime::new();
+        let captured: Rc<RefCell<Option<DefSongSpec>>> = Rc::new(RefCell::new(None));
+        let captured_in = Rc::clone(&captured);
+        runtime.register_native("def-song", move |args, _ctx| {
+            let spec = parse_def_song_args(&args)?;
+            *captured_in.borrow_mut() = Some(spec.clone());
+            Ok(Value::String(spec.name))
+        });
+        runtime
+            .eval_str(
+                r#"(def-song "bossa-1"
+                     (at 0 :scene 0)
+                     (at 32 :scene 1 :patterns ((1 3)))
+                     (at 47.5 :scene 2 :patterns ((1 5) (3 2)))
+                     :end 64
+                     :loop true)"#,
+            )
+            .expect("def-song evaluates");
+        let spec = captured.borrow().clone().expect("def-song native ran");
+        assert_eq!(spec.name, "bossa-1");
+        assert_eq!(spec.end_beat, 64.0);
+        assert!(spec.loop_enabled);
+        assert_eq!(spec.rows.len(), 3);
+        assert_eq!(spec.rows[0], DefSongRow { start_beat: 0.0, scene: 0, patterns: vec![] });
+        assert_eq!(
+            spec.rows[1],
+            DefSongRow { start_beat: 32.0, scene: 1, patterns: vec![(1, 3)] }
+        );
+        assert_eq!(
+            spec.rows[2],
+            DefSongRow {
+                start_beat: 47.5,
+                scene: 2,
+                patterns: vec![(1, 5), (3, 2)],
+            }
+        );
+    }
+
+    #[test]
+    fn def_song_invalid_definitions_are_rejected_wholesale() {
+        let mut runtime = Runtime::new();
+        let calls = Rc::new(RefCell::new(0usize));
+        let calls_in = Rc::clone(&calls);
+        let errors = Rc::new(RefCell::new(Vec::<String>::new()));
+        let errors_in = Rc::clone(&errors);
+        runtime.register_native("def-song", move |args, _ctx| {
+            match parse_def_song_args(&args) {
+                Ok(_) => {
+                    *calls_in.borrow_mut() += 1;
+                    Ok(Value::Bool(true))
+                }
+                Err(error) => {
+                    errors_in.borrow_mut().push(error.clone());
+                    Err(error)
+                }
+            }
+        });
+        // Missing :end.
+        let _ = runtime.eval_str(r#"(def-song "x" (at 0 :scene 0))"#);
+        // Row missing :scene.
+        let _ = runtime.eval_str(r#"(def-song "x" (at 0) :end 8)"#);
+        // Unknown row key.
+        let _ = runtime.eval_str(r#"(def-song "x" (at 0 :scene 0 :bogus 1) :end 8)"#);
+        // No rows.
+        let _ = runtime.eval_str(r#"(def-song "x" :end 8)"#);
+        // Malformed pattern pair.
+        let _ = runtime.eval_str(r#"(def-song "x" (at 0 :scene 0 :patterns ((1))) :end 8)"#);
+        assert_eq!(*calls.borrow(), 0, "no invalid definition may parse");
+        assert_eq!(errors.borrow().len(), 5, "each failure reports why");
+        assert!(errors.borrow()[0].contains(":end"), "{:?}", errors.borrow()[0]);
+        assert!(errors.borrow()[1].contains(":scene"), "{:?}", errors.borrow()[1]);
+        assert!(errors.borrow()[2].contains(":bogus"), "{:?}", errors.borrow()[2]);
+        assert!(errors.borrow()[3].contains("at least one"), "{:?}", errors.borrow()[3]);
+        assert!(errors.borrow()[4].contains("pair"), "{:?}", errors.borrow()[4]);
+    }
+
+    #[test]
+    fn def_song_lowers_to_song_replace_payload() {
+        let spec = DefSongSpec {
+            name: "bossa-1".to_string(),
+            rows: vec![
+                DefSongRow { start_beat: 0.0, scene: 0, patterns: vec![] },
+                DefSongRow { start_beat: 47.5, scene: 2, patterns: vec![(1, 5)] },
+            ],
+            end_beat: 64.0,
+            loop_enabled: true,
+        };
+        let Value::Map(payload) = def_song_replace_payload(&spec) else {
+            panic!("payload must be a map");
+        };
+        assert_eq!(def_song_value_number(&payload, "end-beat"), 64.0);
+        assert_eq!(
+            payload.get("loop").map(|cell| cell.borrow().clone()),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            payload.get("name").map(|cell| cell.borrow().clone()),
+            Some(Value::String("bossa-1".to_string()))
+        );
+        let rows = payload.get("rows").unwrap().borrow().clone();
+        let Value::List(rows) = rows else {
+            panic!("rows must be a list");
+        };
+        assert_eq!(rows.len(), 2);
+        let Value::Map(second) = rows[1].borrow().clone() else {
+            panic!("row payload must be a map");
+        };
+        assert_eq!(
+            def_song_value_number(&second, "start-beat"),
+            47.5,
+            "fractional beats must be preserved exactly"
+        );
+        assert_eq!(def_song_value_number(&second, "scene"), 2.0);
+        let overrides = second.get("overrides").unwrap().borrow().clone();
+        let Value::List(overrides) = overrides else {
+            panic!("overrides must be a list");
+        };
+        assert_eq!(overrides.len(), 1);
+    }
 
     #[test]
     fn custom_effect_plock_native_dispatches_frozen_history_target() {

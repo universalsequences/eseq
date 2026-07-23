@@ -942,6 +942,9 @@ impl App {
     pub fn start_new_project(&mut self) {
         self.editor.pending_project_load = None;
         self.groups.clear();
+        self.state.set_committed_song(None);
+        self.use_arrangement = false;
+        self.song_capture_armed = false;
 
         {
             let mut graph = self.graph_controller();
@@ -1811,6 +1814,18 @@ impl App {
             },
             patterns,
             groups: self.groups.clone(),
+            song: match self.state.committed_song() {
+                // Serialization maps live pattern-pool ids into the
+                // deterministic ids the loader rebuilds from scene cells;
+                // a song referencing an unpersistable pattern fails the save
+                // with the referencing row positions instead of silently
+                // dropping the reference.
+                Some(song) => Some(crate::sequencer::song_for_serialization(
+                    &song,
+                    &self.state.capture_project_scenes(),
+                )?),
+                None => None,
+            },
             macros: self
                 .macro_engine
                 .macros()
@@ -1818,6 +1833,7 @@ impl App {
                 .map(ProjectMacro::from)
                 .collect(),
             next_macro_id: self.macro_engine.next_id(),
+            use_arrangement: self.use_arrangement,
         })
     }
 
@@ -2780,8 +2796,10 @@ impl App {
             device_instances,
             patterns: _,
             groups,
+            song,
             macros,
             next_macro_id,
+            use_arrangement,
         } = pending.project;
         let bank = pending.built_patterns;
         let bus_pattern_bank = pending.built_bus_patterns;
@@ -2805,6 +2823,19 @@ impl App {
         };
         self.state
             .replace_pattern_repository(pattern_repository, current_pattern);
+        // The serialized song was validated at deserialize time against the
+        // deterministic rebuilt-pool id domain, which is exactly what
+        // `replace_pattern_repository` just installed; re-check against the
+        // live scenes and reject the load rather than installing a song that
+        // dangles.
+        if let Some(song) = &song {
+            song.validate(&self.state.capture_project_scenes())
+                .map_err(|error| format!("Project song failed to load: {error}"))?;
+        }
+        self.state.set_committed_song(song);
+        // Persisted transport preference (docs/song-mode-spec.md 7.1); loads
+        // happen with the transport stopped, so setting it directly is safe.
+        self.use_arrangement = use_arrangement;
         self.state
             .transport
             .pattern_epoch
@@ -4094,6 +4125,7 @@ mod tests {
             master_volume: 1.0,
             current_pattern: 0,
             current_track: Some(0),
+            song: None,
             reverb: ProjectReverbState {
                 size: 0.2,
                 brightness: 0.8,
@@ -4145,6 +4177,7 @@ mod tests {
             }],
             macros: Vec::new(),
             next_macro_id: 1,
+            use_arrangement: false,
         }
     }
 

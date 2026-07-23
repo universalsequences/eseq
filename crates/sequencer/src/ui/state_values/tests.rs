@@ -12962,6 +12962,20 @@
                 ("record-quantize", Value::String("1/16".to_string())),
                 ("metronome", Value::Bool(false)),
                 ("queued-scene", Value::Number(-1.0)),
+                // Song-mode bindings (docs/song-mode-spec.md 12), mirroring
+                // the real registration in natives.rs.
+                ("song-exists", Value::Bool(false)),
+                ("use-arrangement", Value::Bool(false)),
+                ("song-mode", Value::String("session".to_string())),
+                ("song-current-row", Value::Number(-1.0)),
+                ("song-current-row-id", Value::Number(-1.0)),
+                ("song-row-count", Value::Number(0.0)),
+                ("song-position-beats", Value::Number(0.0)),
+                ("song-end-beat", Value::Number(0.0)),
+                ("song-loop-enabled", Value::Bool(false)),
+                ("song-capture-failed", Value::Bool(false)),
+                ("song-capture-error", Value::Nil),
+                ("song-rows", Value::List(vec![])),
                 ("sampler-playhead", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
                 ("master-peak-r", Value::Number(0.0)),
@@ -19333,6 +19347,311 @@
             }
             other => panic!("expected reorder-scene host command, got {other:?}"),
         }
+    }
+
+    /// Song-mode transport controls (docs/song-mode-spec.md 11/14.5): the
+    /// Use Arrangement toggle and song status indicator have finite nonzero
+    /// rects, and the toggle's active state is a `ReactiveRef` bound to
+    /// `SEQ.use-arrangement` (not a literal).
+    #[test]
+    fn metal_seq_transport_use_arrangement_toggle_binds_reactive_active_state() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*transport*")"#)
+            .expect("switch to transport buffer");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("transport layout");
+        let toggle =
+            find_layout_node_by_debug_name(&layout, "transport-use-arrangement-toggle")
+                .expect("use arrangement toggle");
+        assert_finite_nonzero_rect(toggle, "transport-use-arrangement-toggle");
+        assert!(
+            matches!(toggle.props.get("active"), Some(Value::ReactiveRef { .. })),
+            "the toggle's active state must bind SEQ.use-arrangement as a ReactiveRef, got {:?}",
+            toggle.props.get("active")
+        );
+        assert_eq!(layout_prop_number(toggle, "active"), Some(0.0));
+        let session_label = toggle
+            .children
+            .iter()
+            .find_map(|child| find_layout_node_by_widget_type(child, "label"))
+            .expect("toggle label");
+        assert!(
+            matches!(session_label.props.get("text"), Some(Value::String(text)) if text == "SESSION"),
+            "arrangement off must read SESSION: {:?}",
+            session_label.props.get("text")
+        );
+
+        // Setting the reactive drives the bound slot; the redundant subtree
+        // rerun also flips the label to SONG.
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "use-arrangement", Value::Bool(true));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("transport layout");
+        let toggle =
+            find_layout_node_by_debug_name(&layout, "transport-use-arrangement-toggle")
+                .expect("use arrangement toggle");
+        assert_eq!(
+            layout_prop_number(toggle, "active"),
+            Some(1.0),
+            "the ReactiveRef slot must read the updated use-arrangement value"
+        );
+        let song_label = toggle
+            .children
+            .iter()
+            .find_map(|child| find_layout_node_by_widget_type(child, "label"))
+            .expect("toggle label");
+        assert!(
+            matches!(song_label.props.get("text"), Some(Value::String(text)) if text == "SONG"),
+            "arrangement on must read SONG: {:?}",
+            song_label.props.get("text")
+        );
+    }
+
+    /// Song status readout (docs/song-mode-spec.md 7.5/11): SESSION by
+    /// default; SONG plus current-row/row-count during song playback; a
+    /// dedicated ARR REC indicator during arrangement capture.
+    #[test]
+    fn metal_seq_transport_song_status_shows_session_song_and_arr_rec_states() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*transport*")"#)
+            .expect("switch to transport buffer");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("transport layout");
+        let status = find_layout_node_by_debug_name(&layout, "transport-song-status")
+            .expect("song status container");
+        assert_finite_nonzero_rect(status, "transport-song-status");
+        let mode_label = find_layout_node_by_debug_name(&layout, "transport-song-mode-label")
+            .expect("song mode label");
+        assert_finite_nonzero_rect(mode_label, "transport-song-mode-label");
+        assert!(
+            matches!(mode_label.props.get("text"), Some(Value::String(text)) if text == "SESSION")
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "transport-song-row-indicator").is_none(),
+            "no row indicator outside song playback"
+        );
+
+        // Song playback: SONG plus current row / total rows.
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "song-mode", Value::String("song-playback".to_string()));
+        rt.set_reactive("SEQ", "song-current-row", Value::Number(1.0));
+        rt.set_reactive("SEQ", "song-row-count", Value::Number(3.0));
+        rt.run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("transport layout");
+        let mode_label = find_layout_node_by_debug_name(&layout, "transport-song-mode-label")
+            .expect("song mode label");
+        assert!(
+            matches!(mode_label.props.get("text"), Some(Value::String(text)) if text == "SONG")
+        );
+        let row_indicator =
+            find_layout_node_by_debug_name(&layout, "transport-song-row-indicator")
+                .expect("current row indicator during song playback");
+        assert_finite_nonzero_rect(row_indicator, "transport-song-row-indicator");
+        assert!(
+            matches!(row_indicator.props.get("text"), Some(Value::String(text)) if text == "2/3"),
+            "row indicator must show ordinal+1 / count: {:?}",
+            row_indicator.props.get("text")
+        );
+
+        // Arrangement capture: ARR REC is its own clearly visible state
+        // (spec 7.5), not the generic record icon.
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "song-mode",
+            Value::String("arrangement-capture".to_string()),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("transport layout");
+        let arr_rec = find_layout_node_by_debug_name(&layout, "transport-arr-rec-indicator")
+            .expect("ARR REC indicator during arrangement capture");
+        assert_finite_nonzero_rect(arr_rec, "transport-arr-rec-indicator");
+        assert!(
+            matches!(arr_rec.props.get("text"), Some(Value::String(text)) if text == "ARR REC")
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "transport-song-mode-label").is_none(),
+            "the plain mode label is replaced by ARR REC during capture"
+        );
+    }
+
+    /// The transport Play controls route through the song transport state
+    /// machine: `seq-toggle-play` emits the `song-transport-toggle-play`
+    /// custom host command instead of toggling the transport atomic, and the
+    /// arrangement/capture natives emit their commands (docs/song-mode-spec.md
+    /// 12: normal Play/Record route through the state machine).
+    #[test]
+    fn metal_seq_transport_play_and_song_natives_emit_state_machine_commands() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        // Install the REAL transport/song natives (the grid helper only
+        // registers stubs for unrelated natives).
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        crate::natives::register_transport_toggle_play_native(editor.runtime_mut(), state);
+        crate::natives::register_song_natives(editor.runtime_mut());
+        let _ = editor.drain_host_commands();
+
+        for (expr, expected) in [
+            ("(seq-toggle-play)", "song-transport-toggle-play"),
+            ("(seq-song-play)", "song-transport-play"),
+            ("(seq-use-arrangement true)", "song-use-arrangement"),
+            ("(seq-song-capture-arm true)", "song-capture-arm"),
+            ("(seq-song-capture-cancel)", "song-capture-cancel"),
+            ("(seq-song-status)", "song-status"),
+        ] {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .unwrap_or_else(|error| panic!("{expr} evaluates: {error:?}"));
+            let commands = editor.drain_host_commands();
+            assert!(
+                commands.iter().any(|command| matches!(
+                    command,
+                    eseqlisp::host::HostCommand::Custom { name, .. } if name == expected
+                )),
+                "{expr} must emit the {expected} host command, got {commands:?}"
+            );
+        }
+    }
+
+    /// Reactive-bindings smoke test (docs/song-mode-spec.md 12) at the
+    /// `sync_song_state` seam the event loop calls each frame: after entering
+    /// song playback the mode binding reads "song-playback", `song-rows` is
+    /// rebuilt only when the committed-song revision changes, and stop
+    /// returns the bindings to "session". The exact `song-current-row`
+    /// display value needs the scheduler's position atomics, which stay
+    /// inactive in this headless test, so it must read -1 here.
+    #[test]
+    fn metal_seq_song_reactive_bindings_reflect_transport_mode() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        let state = sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut test_app = sequencer::app::App::new(
+            std::sync::Arc::new(state),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        test_app.tracks = vec!["Track 1".to_string()];
+        test_app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        let row = |start_beat: f64, scene: usize| sequencer::app::song_edit::SongRowSpec {
+            start_beat,
+            scene,
+            overrides: Vec::new(),
+        };
+        test_app
+            .song_replace(vec![row(0.0, 0), row(4.0, 1), row(8.0, 2)], 16.0, true)
+            .expect("song committed");
+
+        let mut frame = SongFrameState::default();
+        assert!(
+            sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            "the first sync publishes everything"
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("binding read evaluates")
+                .expect("binding read returns a value")
+        };
+        assert_eq!(read(&mut editor, "SEQ.song-exists"), Value::Bool(true));
+        assert_eq!(read(&mut editor, "SEQ.song-mode"), Value::String("session".into()));
+        assert_eq!(read(&mut editor, "SEQ.use-arrangement"), Value::Bool(false));
+        assert_eq!(read(&mut editor, "SEQ.song-row-count"), Value::Number(3.0));
+        assert_eq!(read(&mut editor, "SEQ.song-end-beat"), Value::Number(16.0));
+        assert_eq!(read(&mut editor, "SEQ.song-loop-enabled"), Value::Bool(true));
+        assert_eq!(read(&mut editor, "SEQ.song-current-row"), Value::Number(-1.0));
+        assert_eq!(read(&mut editor, "SEQ.song-capture-failed"), Value::Bool(false));
+        let Value::List(rows) = read(&mut editor, "SEQ.song-rows") else {
+            panic!("song-rows must be a list");
+        };
+        assert_eq!(rows.len(), 3, "song-rows carries one entry per row");
+
+        // No change: no publish, and song-rows is not rebuilt (revision key).
+        assert!(
+            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            "an unchanged frame publishes nothing"
+        );
+
+        // Enter song playback through the state machine.
+        test_app.set_use_arrangement(true).expect("toggle while stopped");
+        test_app.song_transport_play(false).expect("song playback starts");
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "SEQ.song-mode"),
+            Value::String("song-playback".into())
+        );
+        assert_eq!(read(&mut editor, "SEQ.use-arrangement"), Value::Bool(true));
+
+        // Stop returns the bindings to session.
+        test_app.song_transport_stop().expect("stop succeeds");
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(read(&mut editor, "SEQ.song-mode"), Value::String("session".into()));
+
+        // A latched capture failure publishes both failure bindings.
+        test_app.song_capture_failed = true;
+        test_app.song_capture_error = Some("take could not be committed".to_string());
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(read(&mut editor, "SEQ.song-capture-failed"), Value::Bool(true));
+        assert_eq!(
+            read(&mut editor, "SEQ.song-capture-error"),
+            Value::String("take could not be committed".into())
+        );
+        test_app.song_capture_failed = false;
+        test_app.song_capture_error = None;
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(read(&mut editor, "SEQ.song-capture-failed"), Value::Bool(false));
+        assert_eq!(read(&mut editor, "SEQ.song-capture-error"), Value::Nil);
+
+        // Clearing the song flips song-exists and empties song-rows.
+        test_app.song_clear().expect("clear succeeds");
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(read(&mut editor, "SEQ.song-exists"), Value::Bool(false));
+        let Value::List(rows) = read(&mut editor, "SEQ.song-rows") else {
+            panic!("song-rows must be a list");
+        };
+        assert!(rows.is_empty());
     }
 
     #[test]

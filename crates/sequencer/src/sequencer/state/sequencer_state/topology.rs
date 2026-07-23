@@ -512,6 +512,11 @@ impl SequencerState {
         let live = scenes.scene_snapshot(current)
             .ok_or_else(|| "Current scene is missing during track insertion".to_string())?;
         drop(scenes);
+        self.with_committed_song_mut(|song| {
+            if let Some(song) = song {
+                remap_song_overrides_after_track_move(song, last, target);
+            }
+        });
         live.restore(self);
         self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.schedule_mod_resync();
@@ -565,6 +570,11 @@ impl SequencerState {
             }
             scenes.remove_track(track_idx);
         }
+        self.with_committed_song_mut(|song| {
+            if let Some(song) = song {
+                remap_song_overrides_after_track_delete(song, track_idx);
+            }
+        });
 
         remap_snapshot_sidechain_references_after_track_delete(
             &mut current_snapshot,

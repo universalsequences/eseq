@@ -83,6 +83,50 @@ pub(super) fn remap_mod_connection_after_track_delete(
     })
 }
 
+/// Spec 5.4 (docs/song-mode-spec.md): deleting a track removes that track's
+/// song-row overrides and decrements higher track indices in the same
+/// transaction as the topology change. Removing overrides can leave adjacent
+/// rows with identical launch states, so the song is re-normalized (the
+/// earlier row's id survives).
+pub(super) fn remap_song_overrides_after_track_delete(
+    song: &mut ProjectSong,
+    deleted_track: usize,
+) {
+    for row in &mut song.rows {
+        row.overrides.retain(|over| over.track != deleted_track);
+        for over in &mut row.overrides {
+            if over.track > deleted_track {
+                over.track -= 1;
+            }
+        }
+    }
+    song.normalize();
+}
+
+/// Remap song-row override track indices after a track moves from index
+/// `from` to index `to` (same index math as `ProjectScenes::reorder_scene`).
+/// A pure permutation: no overrides are dropped and no normalization is
+/// needed, but overrides are re-sorted to keep ascending track order.
+pub(super) fn remap_song_overrides_after_track_move(song: &mut ProjectSong, from: usize, to: usize) {
+    if from == to {
+        return;
+    }
+    for row in &mut song.rows {
+        for over in &mut row.overrides {
+            over.track = if over.track == from {
+                to
+            } else if from < over.track && over.track <= to {
+                over.track - 1
+            } else if to <= over.track && over.track < from {
+                over.track + 1
+            } else {
+                over.track
+            };
+        }
+        row.overrides.sort_by_key(|over| over.track);
+    }
+}
+
 pub(super) fn mod_destination_valid_for_track_count(
     destination: crate::sequencer::ModDestination,
     track_count: usize,

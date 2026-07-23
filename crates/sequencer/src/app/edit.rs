@@ -7280,6 +7280,19 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             app.restore_scene_structure_state(target)
                 .map_err(EditError::ReplayFailed)
         }
+        EditPatch::Song(patch) => {
+            let target = match mode {
+                ApplyMode::Undo => &patch.before,
+                ApplyMode::Redo => &patch.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "song replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            app.restore_committed_song_state(target)
+                .map_err(EditError::ReplayFailed)
+        }
         EditPatch::BusGroupStructure(patch) => {
             let target = match mode {
                 ApplyMode::Undo => &patch.before,
@@ -7372,6 +7385,8 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::TrackDeletion(_) => true,
         EditPatch::TrackPresentation(_) => false,
         EditPatch::SceneStructure(_) => true,
+        // Slice A: the committed song has no scheduler runtime yet.
+        EditPatch::Song(_) => false,
         EditPatch::BusGroupStructure(_) => true,
         EditPatch::MacroConfiguration(_) => true,
         EditPatch::EffectChain(_) => true,
@@ -7460,6 +7475,7 @@ fn edit_patch_retained_bytes(patch: &EditPatch) -> usize {
         EditPatch::TrackDeletion(patch) => patch.retained_bytes(),
         EditPatch::TrackPresentation(patch) => patch.retained_bytes(),
         EditPatch::SceneStructure(patch) => patch.retained_bytes(),
+        EditPatch::Song(patch) => patch.retained_bytes(),
         EditPatch::BusGroupStructure(patch) => patch.retained_bytes(),
         EditPatch::MacroConfiguration(patch) => patch.retained_bytes(),
         EditPatch::TransportParams(patch) => patch.retained_bytes(),
@@ -7597,6 +7613,9 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::SceneStructure(_) => {
+            replay_patch(app, &patch, ApplyMode::Undo)?;
+        }
+        EditPatch::Song(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::BusGroupStructure(_) => {

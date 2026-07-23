@@ -17,6 +17,15 @@ pub struct PatternState {
     pub effect_chains: Vec<Vec<EffectSlotState>>,
     pub midi_fx_slots: Vec<Vec<EffectSlotState>>,
     pub(super) scenes: Mutex<ProjectScenes>,
+    /// The committed song (docs/song-mode-spec.md section 5), or `None` when
+    /// the project has no song. Stored beside — not inside — `ProjectScenes`
+    /// because several paths rebuild `ProjectScenes` wholesale from snapshots
+    /// (`from_pattern_snapshots`) and would silently drop an embedded song.
+    pub(super) song: Mutex<Option<ProjectSong>>,
+    /// Bumped on every committed-song replacement/edit so per-frame UI code
+    /// can rebuild song-derived reactive values (`song-rows`) only when the
+    /// song actually changed (docs/song-mode-spec.md 12).
+    pub(super) song_revision: AtomicU64,
     pub(super) current_pattern: AtomicU32,
     pub(super) num_patterns: AtomicU32,
     pub timebase_plocks: Vec<TimebasePLockData>,
@@ -220,6 +229,13 @@ pub struct SequencerState {
     pub(super) active_note_until_samples: Vec<[AtomicU64; 128]>,
     pub(super) live_note_masks: Vec<[AtomicU64; 2]>,
     pub(super) audio_rendered_sample: AtomicU64,
+    /// The scheduler's rendered-beat clock (`rendered_total_beats` in
+    /// scheduler/worker.rs), published every scheduler loop. This is the same
+    /// clock quantized-launch deadlines are computed against
+    /// (`quantized_launch::launch_deadline`), so song capture reads it as the
+    /// audible beat for immediate/unquantized launches
+    /// (docs/song-mode-spec.md 8.2). Stored as `f64::to_bits`.
+    pub(super) scheduler_rendered_beats_bits: AtomicU64,
     pub(super) scratch_source: Mutex<String>,
     pub(super) scratch_source_version: AtomicU64,
     pub(super) published_sequencers: Mutex<Vec<PublishedSequencer>>,
@@ -232,6 +248,9 @@ pub struct SequencerState {
     pub(super) pending_accumulator_reset_all: AtomicBool,
     pub(super) pending_accumulator_reset_tracks: [AtomicBool; MAX_TRACKS],
     pub(super) quantized_launches: crate::quantized_launch::QuantizedLaunchMailbox,
+    /// Song playback command/notice channels plus render-rate position
+    /// atomics (docs/song-mode-spec.md 10.2).
+    pub(super) song_playback: SongPlaybackMailbox,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

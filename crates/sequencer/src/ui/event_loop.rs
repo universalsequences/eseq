@@ -83,6 +83,7 @@ pub(crate) fn run_event_loop(
         prev_sampler_analysis_key: None,
         prev_auto_follow: true,
         prev_queued_transport_scene: None,
+        song: SongFrameState::default(),
         watched_sampler_voice_track: None,
         watched_sampler_voice_ids: Vec::new(),
     };
@@ -123,6 +124,36 @@ pub(crate) fn run_event_loop(
                 Err(error) => editor.handle_host_event(HostEvent::Error(format!(
                     "Quantized pattern launch failed: {error:?}"
                 ))),
+            }
+        }
+        // Song playback notices (docs/song-mode-spec.md 10.2): mirror
+        // scheduler-authoritative row transitions control-side (no epoch
+        // bump), stop through the state machine on end, surface start
+        // failures. Slice C capture will additionally consume `RowApplied`
+        // records and must check `song_playback().take_notice_overflow()`
+        // before committing a take.
+        for notice in shared.state.drain_song_playback_notices() {
+            match notice {
+                sequencer::sequencer::SongPlaybackNotice::RowApplied(applied) => {
+                    if let Err(error) = app.mirror_song_row_applied(&applied) {
+                        editor.handle_host_event(HostEvent::Error(format!(
+                            "Song row apply failed: {error}"
+                        )));
+                    }
+                }
+                sequencer::sequencer::SongPlaybackNotice::Ended { .. } => {
+                    match app.handle_song_playback_ended() {
+                        Ok(Some(status)) => editor.handle_host_event(HostEvent::Status(status)),
+                        Ok(None) => {}
+                        Err(error) => editor.handle_host_event(HostEvent::Error(format!(
+                            "Song playback stop failed: {error}"
+                        ))),
+                    }
+                }
+                sequencer::sequencer::SongPlaybackNotice::StartFailed { error } => {
+                    let message = app.handle_song_playback_start_failed(&error);
+                    editor.handle_host_event(HostEvent::Error(message));
+                }
             }
         }
         app.graph_controller().reap_due_rack_teardowns();

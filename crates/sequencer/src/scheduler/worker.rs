@@ -62,6 +62,52 @@ pub fn spawn_scheduler_thread(
                     .load(Ordering::Acquire);
                 let topology_edit_in_flight = state.topology_edit_in_flight();
 
+                // Song playback commands (docs/song-mode-spec.md 10.2): the
+                // control thread hands over a preflighted immutable song; the
+                // scheduler owns row boundaries from here. Installing a song
+                // rebuilds the horizon so scheduling starts from the song's
+                // row snapshots immediately.
+                for command in state.song_playback().drain_commands() {
+                    match command {
+                        crate::sequencer::SongPlaybackCommand::Start { song, start_beat } => {
+                            let samples_per_quarter =
+                                sample_rate as f64 * 60.0 / snapshot.transport.bpm.max(1) as f64;
+                            match crate::sequencer::SongPlaybackRuntime::new(
+                                song,
+                                start_beat,
+                                samples_per_quarter,
+                            ) {
+                                Ok(runtime) => {
+                                    lookahead_state.song = Some(runtime);
+                                    queue.clear();
+                                    lookahead_state.clock.reset();
+                                    lookahead_state.midi_fx_quantizer_state.reset();
+                                    scheduled_until_sample = rendered;
+                                    lookahead_state.pending_accum_reset = [true; MAX_TRACKS];
+                                    lookahead_state.neural_runtime.reset_state(0.0);
+                                    lookahead_state.generator_runtime.reset(0.0);
+                                    lookahead_state.process_runtime.reset_transport(0.0);
+                                    for graph in &mut lookahead_state.graph_runtimes {
+                                        graph.reset(0.0);
+                                    }
+                                }
+                                Err(error) => {
+                                    state.song_playback().push_notice(
+                                        crate::sequencer::SongPlaybackNotice::StartFailed {
+                                            error,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        crate::sequencer::SongPlaybackCommand::Stop => {
+                            lookahead_state.song = None;
+                            state.song_playback().clear_position();
+                        }
+                    }
+                }
+                let song_playback_active = lookahead_state.song.is_some();
+
                 let latest_published_sequencers_version = state.published_sequencers_version();
                 let latest_published_process_authoring_version =
                     state.published_process_authoring_version();
@@ -245,6 +291,10 @@ pub fn spawn_scheduler_thread(
                 let scheduled_ahead_beats =
                     scheduled_until_sample.saturating_sub(rendered) as f64 / samples_per_quarter;
                 let rendered_total_beats = (lookahead_state.clock.total_beats - scheduled_ahead_beats).max(0.0);
+                // Publish the launch-deadline beat clock so the control
+                // thread can stamp immediate launches with a
+                // scheduler-derived audible beat (song capture, spec 8.2).
+                state.set_scheduler_rendered_beats(rendered_total_beats);
                 state.quantized_launches().process_scheduler(
                     &mut lookahead_state.quantized_launches,
                     rendered_total_beats,
@@ -265,6 +315,11 @@ pub fn spawn_scheduler_thread(
                         debug_accum,
                     );
                     lookahead_state.clock.reset();
+                    // Keep an installed song but rewind it to its start so a
+                    // later Play begins the song from its start position.
+                    if let Some(song) = lookahead_state.song.as_mut() {
+                        song.reset();
+                    }
                     scheduled_until_sample = rendered;
                     last_playing = false;
                     last_pattern = pattern;
@@ -373,10 +428,14 @@ pub fn spawn_scheduler_thread(
                         .process_runtime
                         .reset_transport(lookahead_state.clock.total_beats);
                     state.set_neural_visualization(lookahead_state.neural_runtime.visualization_snapshot());
-                } else if last_pattern_epoch != pattern_epoch {
+                } else if !song_playback_active && last_pattern_epoch != pattern_epoch {
                     // Track topology edits bump pattern_epoch without changing the
                     // pattern index. Rebuild the scheduler horizon immediately so
                     // future triggers target the compacted live track layout.
+                    // During song playback the scheduler is the launch
+                    // authority: the control-side apply_song_row mirror keeps
+                    // UI state in sync without invalidating the split
+                    // schedule, so pattern/scene resyncs are suppressed here.
                     let previous_scheduled_until = scheduled_until_sample;
                     queue.clear();
                     lookahead_state.midi_fx_quantizer_state.reset();
@@ -388,7 +447,7 @@ pub fn spawn_scheduler_thread(
                         .process_runtime
                         .reset_transport(lookahead_state.clock.total_beats);
                     state.set_neural_visualization(lookahead_state.neural_runtime.visualization_snapshot());
-                } else if last_pattern != pattern {
+                } else if !song_playback_active && last_pattern != pattern {
                     // Pattern switches should replace future scheduled content without
                     // disturbing the current musical phase.
                     let previous_scheduled_until = scheduled_until_sample;

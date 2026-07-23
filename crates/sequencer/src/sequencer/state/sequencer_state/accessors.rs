@@ -72,6 +72,8 @@ impl SequencerState {
                     &[PatternSnapshot::new_default(num_tracks, &slot_descriptors)],
                     0,
                 )),
+                song: Mutex::new(None),
+                song_revision: AtomicU64::new(0),
                 current_pattern: AtomicU32::new(0),
                 num_patterns: AtomicU32::new(1),
                 timebase_plocks: (0..MAX_TRACKS).map(|_| TimebasePLockData::new()).collect(),
@@ -236,6 +238,7 @@ impl SequencerState {
                 .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
                 .collect(),
             audio_rendered_sample: AtomicU64::new(0),
+            scheduler_rendered_beats_bits: AtomicU64::new(0.0_f64.to_bits()),
             scratch_source: Mutex::new(String::new()),
             scratch_source_version: AtomicU64::new(0),
             published_sequencers: Mutex::new(Vec::new()),
@@ -252,6 +255,7 @@ impl SequencerState {
             pending_accumulator_reset_all: AtomicBool::new(false),
             pending_accumulator_reset_tracks: std::array::from_fn(|_| AtomicBool::new(false)),
             quantized_launches: crate::quantized_launch::QuantizedLaunchMailbox::default(),
+            song_playback: SongPlaybackMailbox::default(),
         };
         state.publish_scheduler_snapshot();
         state
@@ -421,6 +425,34 @@ impl SequencerState {
     #[doc(hidden)]
     pub fn capture_project_scenes(&self) -> ProjectScenes {
         self.pattern.scenes.lock().unwrap().clone()
+    }
+
+    /// Clone of the committed song, or `None` when the project has no song.
+    pub fn committed_song(&self) -> Option<ProjectSong> {
+        self.pattern.song.lock().unwrap().clone()
+    }
+
+    /// Replace the committed song wholesale (project load / new project).
+    pub fn set_committed_song(&self, song: Option<ProjectSong>) {
+        *self.pattern.song.lock().unwrap() = song;
+        self.pattern.song_revision.fetch_add(1, Ordering::Release);
+    }
+
+    /// Monotonic counter bumped on every committed-song change; per-frame UI
+    /// code keys song-derived rebuild work off it (docs/song-mode-spec.md 12).
+    pub fn committed_song_revision(&self) -> u64 {
+        self.pattern.song_revision.load(Ordering::Acquire)
+    }
+
+    /// Edit the committed song in place (topology remaps, future editing
+    /// primitives). Callers are responsible for keeping the song valid.
+    pub(crate) fn with_committed_song_mut<R>(
+        &self,
+        f: impl FnOnce(&mut Option<ProjectSong>) -> R,
+    ) -> R {
+        let result = f(&mut self.pattern.song.lock().unwrap());
+        self.pattern.song_revision.fetch_add(1, Ordering::Release);
+        result
     }
 
     #[cfg(test)]

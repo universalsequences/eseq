@@ -222,7 +222,7 @@ pub(super) fn handle(
             let deleted = app.apply_recorded_scene_structure_mutation(
                 "Delete track pattern",
                 |app| {
-                    if !app.state.delete_track_pattern(
+                    app.state.delete_track_pattern(
                         track,
                         PatternId(pattern_id),
                         num_tracks,
@@ -230,13 +230,7 @@ pub(super) fn handle(
                         &app.graph.track_sample_rates,
                         &app.tracks,
                         &app.graph.track_instrument_types,
-                    ) {
-                        return Err(format!(
-                            "Could not delete track {} pattern {}",
-                            track + 1,
-                            pattern_id
-                        ));
-                    }
+                    )?;
                     // The live sample arrays must match the restored
                     // replacement pattern before the wrapper
                     // re-snapshots live state into it, or the old
@@ -247,11 +241,9 @@ pub(super) fn handle(
                     Ok(())
                 },
             );
-            if deleted.is_err() {
+            if let Err(error) = deleted {
                 editor.handle_host_event(HostEvent::Status(format!(
-                    "Track pattern delete failed: track {}, pattern {}",
-                    track + 1,
-                    pattern_id
+                    "Track pattern delete failed: {error}"
                 )));
                 return;
             }
@@ -443,6 +435,12 @@ pub(super) fn handle(
             )));
         }
         "launch-track-pattern" => {
+            // Spec 7.3: manual track-pattern launches are rejected while song
+            // playback is the launch authority.
+            if let Some(message) = app.manual_launch_rejection() {
+                editor.handle_host_event(HostEvent::Error(message.to_string()));
+                return;
+            }
             let Value::Map(ref map) = payload else {
                 editor.handle_host_event(HostEvent::Status(
                     "Track pattern launch failed: invalid payload".to_string(),
@@ -602,6 +600,12 @@ pub(super) fn handle(
                     _ => None,
                 });
                 if let Some(idx) = idx {
+                    // Spec 7.3: the song is the only launch authority during
+                    // song playback.
+                    if let Some(message) = app.manual_launch_rejection() {
+                        editor.handle_host_event(HostEvent::Error(message.to_string()));
+                        return;
+                    }
                     let quantize_label =
                         extract_string_from_payload(&payload, "quantize")
                             .unwrap_or_else(|| "off".to_string());
@@ -985,7 +989,7 @@ pub(super) fn handle(
                         &app.graph.track_sample_rates,
                         &app.tracks,
                         &app.graph.track_instrument_types,
-                    ).ok_or_else(|| "The last scene cannot be deleted".to_string())?;
+                    )?;
                     app.handle_scene_deleted(deleted_pattern);
                     app.graph_controller().apply_sample_ids(&sample_ids);
                     app.graph_controller().sync_current_pattern_mod_routes();
@@ -995,6 +999,11 @@ pub(super) fn handle(
                     Ok(())
                 },
             );
+            if let Err(error) = &deleted {
+                editor.handle_host_event(HostEvent::Status(format!(
+                    "Scene delete failed: {error}"
+                )));
+            }
             if deleted.is_ok() {
                 let ct = current_track.load(Ordering::Relaxed);
                 let rt = editor.runtime_mut();

@@ -5367,3 +5367,490 @@
             rendered_sample + 4_800
         );
     }
+
+    // ------------------------------------------------------------------
+    // Song mode: deterministic scheduler tests (docs/song-mode-spec.md 14.3)
+    // ------------------------------------------------------------------
+
+    fn song_mode_configure_pattern(data: &mut crate::sequencer::TrackPatternData, transpose: f32) {
+        data.track_params.num_steps = 16;
+        for step in 0..16 {
+            data.track_bits[step / 64] |= 1 << (step % 64);
+            data.step_data[step][StepParam::Transpose.index()] = transpose;
+        }
+    }
+
+    /// Two tracks, three scenes. Scene `s` resolves every track to a fully
+    /// active 16-step pattern with transpose `s + 1`, so an observed trigger
+    /// identifies which row's snapshot scheduled it. Track 0 additionally has
+    /// an extra pool pattern (transpose 9) used as a row override target;
+    /// its id is returned.
+    fn song_mode_fixture() -> (Arc<SequencerState>, crate::sequencer::PatternId) {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        let override_id = state.with_scenes_mut(|scenes| {
+            let snapshots = vec![
+                crate::sequencer::PatternSnapshot::new_default(2, &[]),
+                crate::sequencer::PatternSnapshot::new_default(2, &[]),
+                crate::sequencer::PatternSnapshot::new_default(2, &[]),
+            ];
+            *scenes = crate::sequencer::ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+            for scene in 0..3 {
+                for track in 0..2 {
+                    let id = scenes.scenes[scene].cells[track].expect("scene cell");
+                    let data = scenes.track_pools[track].get_mut(id).expect("pool pattern");
+                    song_mode_configure_pattern(data, (scene + 1) as f32);
+                }
+            }
+            let mut extra = scenes.track_pools[0]
+                .get(crate::sequencer::PatternId(1))
+                .expect("source pattern")
+                .clone();
+            song_mode_configure_pattern(&mut extra, 9.0);
+            scenes.track_pools[0].insert(extra)
+        });
+        (state, override_id)
+    }
+
+    fn song_mode_row(
+        id: u64,
+        start_beat: f64,
+        scene: usize,
+        overrides: Vec<(usize, u64)>,
+    ) -> crate::sequencer::ProjectSongRow {
+        crate::sequencer::ProjectSongRow {
+            id: crate::sequencer::SongRowId(id),
+            start_beat,
+            scene,
+            overrides: overrides
+                .into_iter()
+                .map(|(track, pattern_id)| crate::sequencer::ProjectSongTrackOverride {
+                    track,
+                    pattern_id,
+                })
+                .collect(),
+        }
+    }
+
+    fn song_mode_commit(
+        state: &SequencerState,
+        rows: Vec<crate::sequencer::ProjectSongRow>,
+        end_beat: f64,
+        loop_enabled: bool,
+    ) {
+        let next_row_id = rows.iter().map(|row| row.id.0 + 1).max().unwrap_or(0);
+        state.set_committed_song(Some(crate::sequencer::ProjectSong {
+            rows,
+            end_beat,
+            loop_enabled,
+            next_row_id,
+        }));
+    }
+
+    /// Run the production lookahead pass in song mode from sample 0 and
+    /// return the observed triggers plus the scheduler-authoritative song
+    /// notices. `samples_per_quarter` is 24_000 (48 kHz at the default
+    /// 120 BPM), so one default 16th step is 6_000 samples.
+    fn drive_song_lookahead(
+        state: &Arc<SequencerState>,
+        runtime: Arc<crate::sequencer::RuntimeSong>,
+        block: usize,
+        lookahead: u64,
+    ) -> (
+        Vec<ObservedTrigger>,
+        Vec<crate::sequencer::SongPlaybackNotice>,
+    ) {
+        state.transport.playing.store(true, Ordering::Relaxed);
+        let base = state.publish_scheduler_snapshot();
+        let samples_per_quarter = 48_000.0 * 60.0 / base.transport.bpm as f64;
+        // Heap-allocated: the inline event slots are too large for the
+        // harness thread stack alongside the lookahead pass itself.
+        let queue = Box::new(ScheduledEventQueue::<128>::new());
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        scheduler.song = Some(
+            crate::sequencer::SongPlaybackRuntime::new(runtime, 0.0, samples_per_quarter)
+                .expect("song playback runtime"),
+        );
+        let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| LiveMidiFxTrackState::default());
+        let mut scratch_runtime = None;
+        schedule_playing_lookahead(
+            &mut scheduler,
+            state,
+            &base,
+            &queue,
+            &mut scratch_runtime,
+            &live_midi_fx_tracks,
+            base.transport.pattern_epoch,
+            0,
+            lookahead,
+            48_000,
+            block,
+            samples_per_quarter,
+            0,
+            false,
+            false,
+        );
+        (
+            observed_triggers(&queue),
+            state.drain_song_playback_notices(),
+        )
+    }
+
+    fn song_row_applied(
+        notices: &[crate::sequencer::SongPlaybackNotice],
+    ) -> Vec<crate::sequencer::AudibleSongRowApplied> {
+        notices
+            .iter()
+            .filter_map(|notice| match notice {
+                crate::sequencer::SongPlaybackNotice::RowApplied(applied) => Some(*applied),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Row ordinal governing `sample` per the scheduler's own application
+    /// records (the latest record at or before the sample).
+    fn song_row_at_sample(
+        applied: &[crate::sequencer::AudibleSongRowApplied],
+        sample: u64,
+    ) -> usize {
+        applied
+            .iter()
+            .filter(|record| record.effective_sample <= sample)
+            .next_back()
+            .expect("a row must govern every scheduled sample")
+            .row_ordinal
+    }
+
+    #[test]
+    fn song_row_boundary_inside_block_splits_scheduling() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            song_mode_commit(
+                &state,
+                vec![
+                    song_mode_row(0, 0.0, 0, Vec::new()),
+                    song_mode_row(1, 1.5, 1, Vec::new()),
+                ],
+                4.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            let (events, notices) = drive_song_lookahead(&state, runtime, 16_000, 96_000);
+            let applied = song_row_applied(&notices);
+            assert_eq!(applied[0].row_ordinal, 0);
+            assert_eq!(applied[0].effective_sample, 0);
+            let row1 = applied
+                .iter()
+                .find(|record| record.row_ordinal == 1)
+                .expect("row 1 applied");
+            // Beat 1.5 at 24_000 samples per quarter: exactly where the
+            // scheduler clock crosses beat 1.5, inside the [32_000, 48_000)
+            // processing block — not at either block edge.
+            assert!(
+                (35_999..=36_000).contains(&row1.effective_sample),
+                "{row1:?}"
+            );
+            assert!((row1.effective_beat - 1.5).abs() < 1e-9);
+            assert!(!row1.wrapped);
+            let boundary = row1.effective_sample;
+            let track0: Vec<_> = events.iter().filter(|event| event.track == 0).collect();
+            assert!(
+                track0.iter().any(|event| event.sample_time < boundary),
+                "expected pre-boundary steps: {track0:#?}"
+            );
+            assert!(
+                track0.iter().any(|event| event.sample_time == boundary),
+                "expected the coincident step exactly at the boundary: {track0:#?}"
+            );
+            for event in &track0 {
+                let expected = if event.sample_time < boundary { 1.0 } else { 2.0 };
+                assert_eq!(
+                    event.transpose, expected,
+                    "split at {boundary}: {event:?}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn song_unquantized_row_boundary_keeps_sample_offset() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            // 1.50037 beats * 24_000 samples/beat = 36_008.88: on no step,
+            // block, or launch-quantize grid (spec 8.2).
+            song_mode_commit(
+                &state,
+                vec![
+                    song_mode_row(0, 0.0, 0, Vec::new()),
+                    song_mode_row(1, 1.50037, 1, Vec::new()),
+                ],
+                4.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            let (events, notices) = drive_song_lookahead(&state, runtime, 16_000, 96_000);
+            let applied = song_row_applied(&notices);
+            let row1 = applied
+                .iter()
+                .find(|record| record.row_ordinal == 1)
+                .expect("row 1 applied");
+            assert!(
+                (36_008..=36_009).contains(&row1.effective_sample),
+                "unquantized boundary must keep its sub-block sample offset: {row1:?}"
+            );
+            assert!((row1.effective_beat - 1.50037).abs() < 1e-9);
+            assert_ne!(row1.effective_sample % 16_000, 0, "must not snap to block edges");
+            assert_ne!(row1.effective_sample % 6_000, 0, "must not snap to the step grid");
+            let boundary = row1.effective_sample;
+            // The step just before the boundary still comes from the old
+            // row; the next step is scheduled from the new row.
+            let track0: Vec<_> = events.iter().filter(|event| event.track == 0).collect();
+            let before = track0
+                .iter()
+                .filter(|event| event.sample_time < boundary)
+                .max_by_key(|event| event.sample_time)
+                .expect("step before the boundary");
+            assert!((35_999..=36_000).contains(&before.sample_time), "{before:?}");
+            assert_eq!(before.transpose, 1.0);
+            let after = track0
+                .iter()
+                .filter(|event| event.sample_time >= boundary)
+                .min_by_key(|event| event.sample_time)
+                .expect("step after the boundary");
+            assert!((41_999..=42_000).contains(&after.sample_time), "{after:?}");
+            assert_eq!(after.transpose, 2.0);
+        });
+    }
+
+    #[test]
+    fn song_row_scene_plus_override_applies_atomically() {
+        run_with_scheduler_stack(|| {
+            let (state, override_id) = song_mode_fixture();
+            song_mode_commit(
+                &state,
+                vec![
+                    song_mode_row(0, 0.0, 0, Vec::new()),
+                    song_mode_row(1, 1.0, 1, vec![(0, override_id.0)]),
+                ],
+                2.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            assert_eq!(runtime.rows[1].resolved_pattern_ids[0], Some(override_id));
+            let (events, notices) = drive_song_lookahead(&state, runtime, 16_000, 48_000);
+            let applied = song_row_applied(&notices);
+            let boundary = applied
+                .iter()
+                .find(|record| record.row_ordinal == 1)
+                .expect("row 1 applied")
+                .effective_sample;
+            assert!((23_999..=24_000).contains(&boundary));
+            for event in &events {
+                let expected = match (event.track, event.sample_time < boundary) {
+                    (0, true) => 1.0,
+                    // The override is part of the row's single state: track 0
+                    // schedules from the override pattern from the first
+                    // post-boundary sample on.
+                    (0, false) => 9.0,
+                    (1, true) => 1.0,
+                    (1, false) => 2.0,
+                    _ => continue,
+                };
+                assert_eq!(event.transpose, expected, "split at {boundary}: {event:?}");
+            }
+            assert!(
+                events.iter().all(|event| !(event.track == 0 && event.transpose == 2.0)),
+                "track 0 must never expose an intermediate scene-without-override state: {events:#?}"
+            );
+            // Both halves of the row state flip at the same boundary sample.
+            assert!(events
+                .iter()
+                .any(|e| e.track == 0 && e.sample_time == boundary && e.transpose == 9.0));
+            assert!(events
+                .iter()
+                .any(|e| e.track == 1 && e.sample_time == boundary && e.transpose == 2.0));
+        });
+    }
+
+    #[test]
+    fn song_loop_reapplies_row_zero_without_stale_override_or_duplicate_trigger() {
+        run_with_scheduler_stack(|| {
+            let (state, override_id) = song_mode_fixture();
+            song_mode_commit(
+                &state,
+                vec![
+                    song_mode_row(0, 0.0, 0, Vec::new()),
+                    song_mode_row(1, 1.0, 0, vec![(0, override_id.0)]),
+                ],
+                2.0,
+                true,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            // 2.5 song cycles: two loop wraps inside the horizon.
+            let (events, notices) = drive_song_lookahead(&state, runtime, 16_000, 120_000);
+            let applied = song_row_applied(&notices);
+            let wraps: Vec<_> = applied.iter().filter(|record| record.wrapped).collect();
+            assert!(wraps.len() >= 2, "expected two wraps: {applied:#?}");
+            let first_wrap = wraps[0];
+            assert_eq!(first_wrap.row_ordinal, 0);
+            assert_eq!(first_wrap.effective_beat, 0.0);
+            assert!((47_999..=48_000).contains(&first_wrap.effective_sample), "{first_wrap:?}");
+            // Row assignment follows the scheduler's own application records:
+            // after each wrap, row zero governs again (no stale override).
+            let track0: Vec<_> = events.iter().filter(|event| event.track == 0).collect();
+            for event in &track0 {
+                let expected = match song_row_at_sample(&applied, event.sample_time) {
+                    0 => 1.0,
+                    1 => 9.0,
+                    other => panic!("unexpected row ordinal {other}"),
+                };
+                assert_eq!(
+                    event.transpose, expected,
+                    "override must not leak across the wrap: {event:?}"
+                );
+            }
+            // Exactly one edge trigger at the wrap sample, from row zero.
+            let wrap_edge: Vec<_> = track0
+                .iter()
+                .filter(|event| event.sample_time == first_wrap.effective_sample)
+                .collect();
+            assert_eq!(
+                wrap_edge.len(),
+                1,
+                "exactly one edge trigger at the wrap: {wrap_edge:#?}"
+            );
+            assert_eq!(wrap_edge[0].transpose, 1.0);
+        });
+    }
+
+    #[test]
+    fn song_large_lookahead_window_does_not_apply_rows_early() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            song_mode_commit(
+                &state,
+                vec![
+                    song_mode_row(0, 0.0, 0, Vec::new()),
+                    song_mode_row(1, 1.5, 1, Vec::new()),
+                ],
+                4.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            // One scheduling block covers the whole song; the boundary must
+            // still split it at its exact sample rather than moving to
+            // either edge of the huge block (spec 14.3).
+            let (events, notices) = drive_song_lookahead(&state, runtime, 96_000, 96_000);
+            let applied = song_row_applied(&notices);
+            let row1 = applied
+                .iter()
+                .find(|record| record.row_ordinal == 1)
+                .expect("row 1 applied");
+            assert!((35_999..=36_000).contains(&row1.effective_sample), "{row1:?}");
+            let boundary = row1.effective_sample;
+            let track0: Vec<_> = events.iter().filter(|event| event.track == 0).collect();
+            for event in &track0 {
+                let expected = if event.sample_time < boundary { 1.0 } else { 2.0 };
+                assert_eq!(event.transpose, expected, "{event:?}");
+            }
+            assert!(track0.iter().any(|event| event.sample_time < boundary));
+            assert!(track0.iter().any(|event| event.sample_time >= boundary));
+        });
+    }
+
+    #[test]
+    fn song_end_stops_scheduling_and_notifies_control() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            song_mode_commit(
+                &state,
+                vec![
+                    song_mode_row(0, 0.0, 0, Vec::new()),
+                    song_mode_row(1, 1.0, 1, Vec::new()),
+                ],
+                2.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            let (events, notices) = drive_song_lookahead(&state, runtime, 16_000, 96_000);
+            let end_sample = notices
+                .iter()
+                .find_map(|notice| match notice {
+                    crate::sequencer::SongPlaybackNotice::Ended {
+                        end_beat,
+                        end_sample,
+                    } => {
+                        assert!((*end_beat - 2.0).abs() < 1e-9);
+                        Some(*end_sample)
+                    }
+                    _ => None,
+                })
+                .expect("end notice");
+            assert!((47_999..=48_000).contains(&end_sample), "{end_sample}");
+            assert!(
+                events.iter().all(|event| event.sample_time < end_sample),
+                "nothing may be scheduled at or past end_beat: {events:#?}"
+            );
+            assert!(events
+                .iter()
+                .any(|event| (41_999..=42_000).contains(&event.sample_time)));
+        });
+    }
+
+    #[test]
+    fn song_preflight_rejects_dangling_row_reference() {
+        let (state, _) = song_mode_fixture();
+        song_mode_commit(
+            &state,
+            vec![song_mode_row(0, 0.0, 0, vec![(0, 99)])],
+            4.0,
+            false,
+        );
+        let err = state.preflight_runtime_song().expect_err("dangling override");
+        assert!(err.contains("pattern 99"), "{err}");
+        assert!(err.contains("row 1"), "{err}");
+    }
+
+    #[test]
+    fn song_apply_row_is_one_atomic_control_transition() {
+        let (state, override_id) = song_mode_fixture();
+        // A stale live override on track 1 must not survive the row.
+        state.with_scenes_mut(|scenes| {
+            scenes.track_overrides[1] = Some(crate::sequencer::PatternId(2));
+        });
+        let epoch_before = state.transport.pattern_epoch.load(Ordering::Relaxed);
+        let version_before = state.scheduler_snapshot_version();
+        let sample_ids = state
+            .apply_song_row(1, &[(0, override_id)], 2, &[], &[], &[], &[], true)
+            .expect("apply song row");
+        assert_eq!(sample_ids.len(), 2);
+        state.with_scenes_mut(|scenes| {
+            assert_eq!(scenes.current_scene, 1);
+            assert_eq!(scenes.track_overrides[0], Some(override_id));
+            assert_eq!(scenes.track_overrides[1], None, "stale override must be cleared");
+        });
+        assert_eq!(state.current_scene_index(), 1);
+        assert_eq!(
+            state.transport.pattern_epoch.load(Ordering::Relaxed),
+            epoch_before + 1,
+            "one epoch bump for the whole transition"
+        );
+        assert_eq!(
+            state.scheduler_snapshot_version(),
+            version_before + 1,
+            "one snapshot publish for the whole transition"
+        );
+
+        // A rejected row is side-effect free.
+        let version_before = state.scheduler_snapshot_version();
+        let err = state
+            .apply_song_row(7, &[], 2, &[], &[], &[], &[], true)
+            .expect_err("missing scene");
+        assert!(err.contains("scene 8"), "{err}");
+        assert_eq!(state.scheduler_snapshot_version(), version_before);
+        assert_eq!(state.current_scene_index(), 1);
+    }

@@ -15,8 +15,9 @@ use crate::neural::{ParamNodeId, ProjectNeuralNetwork};
 use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
     BusId, ChordSnapshot, CustomInstrumentRunMode, InstrumentType, MidiFxPosition, ModConnection,
-    ModDestination, PatternSnapshot, RackRouting, RackSlotParamPlocks, RackSlotSnapshot,
-    RackTrackSnapshot, SwingResolution, Timebase, TrackId, TrackOutput, TrackParamsSnapshot,
+    ModDestination, PatternSnapshot, ProjectSong, RackRouting, RackSlotParamPlocks,
+    RackSlotSnapshot, RackTrackSnapshot, SerializedSongContext, SwingResolution, Timebase,
+    TrackId, TrackOutput, TrackParamsSnapshot,
     TrackRegistry, TrackSendSnapshot, TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use crate::track_color::TrackColor;
@@ -79,6 +80,14 @@ pub struct ProjectFile {
     pub macros: Vec<ProjectMacro>,
     #[serde(default = "default_next_macro_id")]
     pub next_macro_id: u32,
+    /// Committed song (docs/song-mode-spec.md section 5); absent in projects
+    /// saved before song mode existed.
+    #[serde(default)]
+    pub song: Option<ProjectSong>,
+    /// Persisted `Use Arrangement` transport preference (docs/song-mode-spec.md
+    /// 7.1): selects session vs song behavior for the next Play.
+    #[serde(default)]
+    pub use_arrangement: bool,
 }
 
 #[derive(Deserialize)]
@@ -108,6 +117,10 @@ struct ProjectFileWire {
     macros: Vec<ProjectMacro>,
     #[serde(default = "default_next_macro_id")]
     next_macro_id: u32,
+    #[serde(default)]
+    song: Option<ProjectSong>,
+    #[serde(default)]
+    use_arrangement: bool,
 }
 
 impl<'de> Deserialize<'de> for ProjectFile {
@@ -134,8 +147,22 @@ impl<'de> Deserialize<'de> for ProjectFile {
             groups: wire.groups,
             macros: wire.macros,
             next_macro_id: wire.next_macro_id,
+            song: wire.song,
+            use_arrangement: wire.use_arrangement,
         };
         project.normalize_device_instances().map_err(D::Error::custom)?;
+        // Reject malformed song data with an actionable error rather than
+        // clamping, reordering, or dropping invalid references (spec 5.3).
+        // Pattern pools are rebuilt from scene cells on load, so track pools
+        // hold exactly the ids 1..=scene_count (`SerializedSongContext`).
+        if let Some(song) = &project.song {
+            let context = SerializedSongContext {
+                scene_count: project.patterns.len().max(1),
+                track_count: project.tracks.len(),
+            };
+            song.validate(&context)
+                .map_err(|error| D::Error::custom(format!("invalid project song: {error}")))?;
+        }
         Ok(project)
     }
 }
@@ -2923,6 +2950,123 @@ mod tests {
             }],
             macros: Vec::new(),
             next_macro_id: 1,
+            song: None,
+            use_arrangement: false,
+        }
+    }
+
+    fn sample_song() -> ProjectSong {
+        use crate::sequencer::{ProjectSongRow, ProjectSongTrackOverride, SongRowId};
+        ProjectSong {
+            rows: vec![
+                ProjectSongRow {
+                    id: SongRowId(0),
+                    start_beat: 0.0,
+                    scene: 0,
+                    overrides: vec![ProjectSongTrackOverride {
+                        track: 1,
+                        pattern_id: 1,
+                    }],
+                },
+                ProjectSongRow {
+                    id: SongRowId(3),
+                    start_beat: 12.5,
+                    scene: 0,
+                    overrides: Vec::new(),
+                },
+            ],
+            end_beat: 33.25,
+            loop_enabled: true,
+            next_row_id: 4,
+        }
+    }
+
+    #[test]
+    fn project_song_round_trips_through_serialization() {
+        let mut project = sample_project();
+        project.song = Some(sample_song());
+        let json = serde_json::to_string(&project).expect("serialize project with song");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize song project");
+        assert_eq!(restored.song, Some(sample_song()));
+    }
+
+    #[test]
+    fn project_without_song_field_deserializes_with_no_song() {
+        let project = sample_project();
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        value
+            .as_object_mut()
+            .expect("project is a json object")
+            .remove("song");
+        let restored: ProjectFile =
+            serde_json::from_value(value).expect("deserialize pre-song project");
+        assert!(restored.song.is_none());
+    }
+
+    /// `use_arrangement` is a persisted project preference
+    /// (docs/song-mode-spec.md 7.1): it round-trips, and projects saved
+    /// before song mode load with it off.
+    #[test]
+    fn use_arrangement_preference_round_trips_and_defaults_off() {
+        let mut project = sample_project();
+        project.use_arrangement = true;
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+        assert!(restored.use_arrangement);
+
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        value
+            .as_object_mut()
+            .expect("project is a json object")
+            .remove("use_arrangement");
+        let restored: ProjectFile =
+            serde_json::from_value(value).expect("deserialize pre-song-mode project");
+        assert!(!restored.use_arrangement);
+    }
+
+    #[test]
+    fn project_with_invalid_song_is_rejected_on_load() {
+        // The sample project has one scene and two tracks; each case below
+        // violates one spec 5.3 rule and must fail deserialization with an
+        // actionable error instead of being clamped or dropped.
+        let cases: Vec<(&str, Box<dyn Fn(&mut ProjectSong)>)> = vec![
+            ("scene", Box::new(|song| song.rows[1].scene = 7)),
+            (
+                "pattern",
+                Box::new(|song| song.rows[0].overrides[0].pattern_id = 9),
+            ),
+            (
+                "track",
+                Box::new(|song| song.rows[0].overrides[0].track = 5),
+            ),
+            (
+                "ordered",
+                Box::new(|song| song.rows[1].start_beat = 0.0),
+            ),
+            ("end beat", Box::new(|song| song.end_beat = 1.0)),
+            (
+                "override",
+                Box::new(|song| {
+                    let over = song.rows[0].overrides[0];
+                    song.rows[0].overrides.push(over);
+                }),
+            ),
+        ];
+        for (needle, corrupt) in cases {
+            let mut project = sample_project();
+            let mut song = sample_song();
+            corrupt(&mut song);
+            project.song = Some(song);
+            let json = serde_json::to_string(&project).expect("serialize project");
+            let error = match serde_json::from_str::<ProjectFile>(&json) {
+                Ok(_) => panic!("case {needle}: invalid song must be rejected"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains("invalid project song") && error.contains(needle),
+                "case {needle}: {error}"
+            );
         }
     }
 
