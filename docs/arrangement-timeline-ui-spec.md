@@ -422,3 +422,41 @@ them, §5.6 accepts them); snap is a gesture default, not a model constraint.
 - Peak-cache generation on asset load.
 - `Peaks` rendering wired to real audio clips once audio tracks exist
   (`song-mode-spec.md` §16 lists audio tracks/clips as a future extension).
+
+## 11. Deferred work (agreed, not yet built)
+
+Decisions made during the track-clip editing rounds (2026-07), in rough
+priority order. None require stored-model changes; each is its own slice.
+
+1. **Per-clip phase anchoring** — patterns are transport-phase-locked
+   (`pos_in_cycle = total_beats % cycle`, scheduler clock), so a clip
+   placed at a non-multiple of its pattern length enters mid-pattern.
+   Agreed fix: a preflight-DERIVED per-track anchor — phase zero is the
+   beat where the track's resolved pattern last changed (walk rows,
+   carry the anchor; unchanged pattern inherits it, which preserves the
+   verified seamless row-split property). Clock becomes
+   `(total_beats - anchor).rem_euclid(cycle)`. Scheduler-path slice with
+   the mandated regression suite; care around sync-to-grid steps and the
+   accumulator `cycle` counter.
+2. **Whole-clip move on track lanes** — `:move-items-absolute` /
+   `:finish-move-items` on track lanes are deliberately not lowered
+   (§9.2). A moved clip should restart from its beginning, which is
+   exactly what phase anchoring provides, so build the two together
+   (lowering: silence the old span + paint the new one, or a dedicated
+   compound primitive if two undo entries feel wrong).
+3. **Editing during song playback** — primitives are locked while
+   `SongPlayback`/`ArrangementCapture` are active (single launch
+   authority; the scheduler plays prebuilt row snapshots). Rejections
+   are now VISIBLE via `SEQ.song-edit-error` + the arrangement banner.
+   Making edits audible mid-playback needs prepared-swap machinery:
+   diff the committed song against the active `RuntimeSong`, rebuild
+   affected row snapshots off the audio thread, hand over atomically
+   (see the live-set prepared-swap design). Deliberately deferred until
+   the stopped-transport interactions are settled.
+4. **Clip copy/paste at the per-track cursor** — the cursor already
+   carries (time, track) for this; paste = `song-track-paint` of the
+   copied clip's pattern over [cursor, cursor + span).
+5. **Polish backlog** — scene-label width clipping/eliding on narrow
+   spans; an Ableton-style drop-hover insertion preview line while
+   dragging a scene pill; scene-lane vertical scroll pass-through to
+   the sibling track scroll container.
