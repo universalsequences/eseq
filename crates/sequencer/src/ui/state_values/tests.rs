@@ -12978,6 +12978,7 @@
                 ("song-capture-error", Value::Nil),
                 ("song-rows", Value::List(vec![])),
                 ("song-lanes", Value::List(vec![])),
+                ("song-lane-events", Value::List(vec![])),
                 ("scene-names", Value::List(vec![])),
                 ("sampler-playhead", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
@@ -19749,6 +19750,17 @@
             Value::Number(3.0)
         );
 
+        // The lane-event read surface publishes one entry per referenced
+        // pool pattern (three scenes -> three patterns on the one track).
+        assert_eq!(
+            read(&mut editor, "(len SEQ.song-lane-events)"),
+            Value::Number(1.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(len (nth SEQ.song-lane-events 0))"),
+            Value::Number(3.0)
+        );
+
         // Value diffing: an unchanged frame publishes nothing.
         assert!(
             !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
@@ -19771,6 +19783,103 @@
         assert_eq!(
             read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 2) :end-beat)"),
             Value::Number(24.0)
+        );
+    }
+
+    /// MIDI dot flattening (docs/arrangement-timeline-ui-spec.md 7.1): the
+    /// view flattens raw (time transpose velocity) pattern events into
+    /// normalized (offset, value) dots — offsets over the pattern length,
+    /// values spread across the pattern's own transpose range — capped per
+    /// item by time-bucket collapse (dense clusters thin first).
+    #[test]
+    fn metal_seq_arrangement_dots_flatten_normalized_and_capped() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        let lane_clip = |row_id: f64, start: f64, end: f64, pattern: Value| {
+            map_value(vec![
+                ("row-id", Value::Number(row_id)),
+                ("start-beat", Value::Number(start)),
+                ("end-beat", Value::Number(end)),
+                ("pattern-id", pattern),
+                ("from-override", Value::Bool(false)),
+            ])
+        };
+        let sparse = LanePatternEvents {
+            pattern_id: 1,
+            num_steps: 16,
+            events: vec![(0.0, 0.0, 1.0), (4.0, 12.0, 1.0), (8.0, -12.0, 1.0)],
+        };
+        let dense = LanePatternEvents {
+            pattern_id: 2,
+            num_steps: 64,
+            events: (0..600)
+                .map(|index| (index as f64 * 0.1, 0.0, 1.0))
+                .collect(),
+        };
+        let rt = editor.runtime_mut();
+        rt.set_reactive(
+            "SEQ",
+            "song-lanes",
+            test_list(vec![test_list(vec![lane_clip(
+                0.0,
+                0.0,
+                16.0,
+                Value::Number(1.0),
+            )])]),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "song-lane-events",
+            build_song_lane_events_value(&[vec![sparse, dense]]),
+        );
+        rt.run_reactive_cycle();
+
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("expr evaluates")
+                .expect("expr returns a value")
+        };
+        // Track items carry the MIDI kind and the flattened dots payload.
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :kind)"),
+            Value::Keyword("midi".to_string())
+        );
+        let dots = "(get (get (nth (arrangement-track-items 0) 0) :content) :dots)";
+        assert_eq!(
+            read(&mut editor, &format!("(len {dots})")),
+            Value::Number(3.0)
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots} 1) :offset)")),
+            Value::Number(0.25),
+            "offset normalizes event time over the pattern length"
+        );
+        // Transpose range -12..12 spreads to 0.15..0.85 with 0 mid-range.
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots} 0) :value)")),
+            Value::Number(0.5)
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots} 1) :value)")),
+            Value::Number(0.85)
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots} 2) :value)")),
+            Value::Number(0.15)
+        );
+
+        // 600 events collapse into <= 256 time buckets.
+        let Value::Number(capped) = read(
+            &mut editor,
+            "(len (arrangement-pattern-dots (arrangement-lane-pattern-events 0 2)))",
+        ) else {
+            panic!("dot count must be a number");
+        };
+        assert!(
+            capped <= 256.0 && capped > 200.0,
+            "dense pattern must cap near the bucket count, got {capped}"
         );
     }
 

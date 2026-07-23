@@ -110,6 +110,7 @@
           :start (get row :start-beat)
           :end (arrangement-row-end-beat index)
           :label (arrangement-scene-name (get row :scene))
+          :kind :scene
           :selected (arrangement-row-selected? (get row :id))
           :color (list 0.52 0.56 0.62))))
     (range 0 (len SEQ.song-rows))))
@@ -138,6 +139,63 @@
     (nth SEQ.song-lanes i)
     '()))
 
+;; ── MIDI content flattening (spec 7.1) ─────────────────────────────────────
+;; SEQ.song-lane-events carries, per track, raw (time transpose velocity)
+;; events for every pool pattern the lane projection references. The view
+;; flattens one pattern cycle into normalized (offset, value) dots — a
+;; snapshot-time preview, deliberately impressionistic at arrangement zoom.
+
+(def arrangement-dot-cap 256)
+
+(def arrangement-lane-pattern-events (track pattern-id)
+  (let ((entries (if (< track (len SEQ.song-lane-events))
+                   (nth SEQ.song-lane-events track)
+                   '())))
+    (let ((matches (filter (lambda (entry) (= (get entry :pattern-id) pattern-id))
+                     entries)))
+      (if (> (len matches) 0) (nth matches 0) nil))))
+
+;; Vertical placement: spread the pattern's own transpose range across the
+;; item rect (single-pitch patterns sit mid-rect).
+(def arrangement-dot-value (note lo hi)
+  (if (= hi lo)
+    0.5
+    (+ 0.15 (* 0.7 (/ (- note lo) (- hi lo))))))
+
+;; Cap dots per item at arrangement-dot-cap, densest-first: events collapse
+;; into 1/cap-wide time buckets (one dot per bucket), so dense clusters thin
+;; out first while isolated events always survive. Events arrive step-ordered
+;; from the read surface.
+(def arrangement-pattern-dots (entry)
+  (let ((events (get entry :events))
+        (num-steps (max 1 (get entry :num-steps))))
+    (if (= (len events) 0)
+      '()
+      (let ((lo (reduce |acc event| (min acc (nth event 1))
+                  (nth (nth events 0) 1) events))
+            (hi (reduce |acc event| (max acc (nth event 1))
+                  (nth (nth events 0) 1) events)))
+        (get
+          (reduce |acc event|
+            (let ((offset (max 0 (min 0.999 (/ (nth event 0) num-steps)))))
+              (let ((bucket (floor (* offset arrangement-dot-cap))))
+                (if (= bucket (get acc :last))
+                  acc
+                  (dict :last bucket
+                    :dots (append (get acc :dots)
+                            (list (dict :offset offset
+                                    :value (arrangement-dot-value (nth event 1) lo hi))))))))
+            (dict :last -1 :dots '())
+            events)
+          :dots)))))
+
+(def arrangement-clip-content (i clip)
+  (let ((entry (arrangement-lane-pattern-events i (get clip :pattern-id))))
+    (if (= entry nil)
+      nil
+      (let ((dots (arrangement-pattern-dots entry)))
+        (if (= (len dots) 0) nil (dict :dots dots))))))
+
 ;; Track-lane items (spec 6): spans whose resolved pattern is nil produce NO
 ;; item — a track with nothing playing renders as an empty lane.
 (def arrangement-track-items (i)
@@ -148,6 +206,8 @@
         :lane 0
         :start (get clip :start-beat)
         :end (get clip :end-beat)
+        :kind :midi
+        :content (arrangement-clip-content i clip)
         :color (arrangement-clip-color i (get clip :from-override))))
     (filter (lambda (clip) (not (= (get clip :pattern-id) nil)))
       (arrangement-track-clips i))))

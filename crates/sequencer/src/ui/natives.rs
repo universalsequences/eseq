@@ -1533,6 +1533,7 @@ pub(crate) fn init_runtime(
                 ("song-capture-error", Value::Nil),
                 ("song-rows", Value::List(vec![])),
                 ("song-lanes", Value::List(vec![])),
+                ("song-lane-events", Value::List(vec![])),
                 ("scene-names", Value::List(vec![])),
                 ("num-steps", Value::Number(PAGE_SIZE as f64)),
                 ("num-tracks", Value::Number(track_count as f64)),

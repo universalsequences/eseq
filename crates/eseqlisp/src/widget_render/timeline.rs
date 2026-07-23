@@ -37,6 +37,49 @@ struct TimelineItem {
     selected: bool,
     label: Option<String>,
     color: Option<crate::backend::Color>,
+    /// Rendering hint only (docs/arrangement-timeline-ui-spec.md 7): parsed
+    /// so hosts can tag clips today; kinds gain distinct visuals as clip
+    /// types diverge, so nothing consumes it yet.
+    #[allow(dead_code)]
+    kind: Option<TimelineItemKind>,
+    content: Option<TimelineItemContent>,
+}
+
+/// What kind of clip an item represents (docs/arrangement-timeline-ui-spec.md
+/// 7). Deliberately decoupled from `TimelineItemContent`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TimelineItemKind {
+    Midi,
+    Audio,
+    Scene,
+}
+
+/// Content drawn inside an item's rect. The widget stays dumb: dots and peak
+/// buckets are pre-normalized by the host; no musical or audio-decoding
+/// knowledge lives here.
+#[derive(Clone)]
+enum TimelineItemContent {
+    Dots(Vec<TimelineDot>),
+    Peaks(Vec<PeakBucket>),
+}
+
+#[derive(Clone, Copy)]
+struct TimelineDot {
+    /// 0.0..1.0 within the item's [start, end).
+    offset: f64,
+    /// 0.0..1.0 vertical placement within the item rect (1.0 = top).
+    value: f64,
+}
+
+/// One min/max amplitude bucket of a precomputed waveform peak cache
+/// (docs/arrangement-timeline-ui-spec.md 7.2). Parsed now; rendering lands
+/// with the audio-track asset pipeline (spec 3 non-goal), so the fields are
+/// not read yet.
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+struct PeakBucket {
+    min: f32, // -1.0..1.0
+    max: f32,
 }
 
 #[derive(Clone)]
@@ -923,6 +966,7 @@ fn build_metal_primitives(
                 ));
             }
         }
+        push_item_content_primitives(&mut primitives, &view, item, (x, y, width, height), viewport);
         item_rects.push((
             x,
             y,
@@ -998,6 +1042,69 @@ fn build_metal_primitives(
     }
 
     primitives
+}
+
+/// Minimum on-screen item width (px) below which item content is skipped
+/// entirely — narrower than this the dots/bars would only alias
+/// (docs/arrangement-timeline-ui-spec.md 7.3).
+#[cfg(target_os = "macos")]
+const ITEM_CONTENT_MIN_WIDTH_PX: f32 = 14.0;
+
+/// Draw an item's `content` payload as additional quads clipped to the item's
+/// on-screen rect (docs/arrangement-timeline-ui-spec.md 7.3). `rect` is the
+/// already view-clipped rect from `metal_item_rect`; dot x positions come
+/// from the item's unclipped time span so partially visible items keep their
+/// content aligned.
+#[cfg(target_os = "macos")]
+fn push_item_content_primitives(
+    primitives: &mut Vec<MetalPrimitive>,
+    view: &TimelineView,
+    item: &TimelineItem,
+    rect: (f32, f32, f32, f32),
+    viewport: super::WidgetViewport,
+) {
+    let (x, y, width, height) = rect;
+    if width * viewport.cell_w < ITEM_CONTENT_MIN_WIDTH_PX {
+        return;
+    }
+    match &item.content {
+        Some(TimelineItemContent::Dots(dots)) => {
+            let span = item.end - item.start;
+            if span <= 0.0 {
+                return;
+            }
+            let dot_width = (3.0 / viewport.cell_w).min(width);
+            let dot_height = (3.0 / viewport.cell_h).min(height);
+            let inner_height = (height - dot_height).max(0.0);
+            let view_end = view.view_start + view.view_duration;
+            let dot_color = crate::backend::Color {
+                r: 0.02,
+                g: 0.025,
+                b: 0.03,
+                a: 0.78,
+            };
+            for dot in dots {
+                let time = item.start + dot.offset * span;
+                if time < view.view_start || time >= view_end {
+                    continue;
+                }
+                let dot_x = view
+                    .x_for_time(time)
+                    .clamp(x, (x + width - dot_width).max(x));
+                let dot_y = y + (1.0 - dot.value) as f32 * inner_height;
+                primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                    x: dot_x,
+                    y: dot_y,
+                    width: dot_width,
+                    height: dot_height,
+                    color: dot_color,
+                }));
+            }
+        }
+        // Peaks rendering lands with the audio-track asset pipeline
+        // (docs/arrangement-timeline-ui-spec.md 3, Slice D).
+        Some(TimelineItemContent::Peaks(_)) | None => {}
+    }
 }
 
 impl TimelineView {
@@ -2363,9 +2470,56 @@ fn get_items(props: &HashMap<String, Value>) -> Vec<TimelineItem> {
                         theme::WIDGET_SLIDER_FILLED(),
                     )
                 }),
+                kind: map.get("kind").and_then(parse_item_kind),
+                content: map.get("content").and_then(parse_item_content),
             })
         })
         .collect()
+}
+
+/// Lenient `:kind` parse (docs/arrangement-timeline-ui-spec.md 7): unknown or
+/// malformed values are `None`, never a render error.
+fn parse_item_kind(value: &Value) -> Option<TimelineItemKind> {
+    match as_string(value)?.as_str() {
+        "midi" => Some(TimelineItemKind::Midi),
+        "audio" => Some(TimelineItemKind::Audio),
+        "scene" => Some(TimelineItemKind::Scene),
+        _ => None,
+    }
+}
+
+/// Lenient `:content` parse (docs/arrangement-timeline-ui-spec.md 7): a map
+/// with a `:dots` or `:peaks` list; malformed entries are skipped in the same
+/// `filter_map` spirit as `get_items`, and anything else is `None`.
+fn parse_item_content(value: &Value) -> Option<TimelineItemContent> {
+    let map = get_map(value)?;
+    if let Some(Value::List(entries)) = map.get("dots") {
+        let dots = entries
+            .iter()
+            .filter_map(|entry| {
+                let entry = get_map(&entry.borrow())?;
+                Some(TimelineDot {
+                    offset: entry.get("offset").and_then(as_number)?.clamp(0.0, 1.0),
+                    value: entry.get("value").and_then(as_number)?.clamp(0.0, 1.0),
+                })
+            })
+            .collect();
+        return Some(TimelineItemContent::Dots(dots));
+    }
+    if let Some(Value::List(entries)) = map.get("peaks") {
+        let peaks = entries
+            .iter()
+            .filter_map(|entry| {
+                let entry = get_map(&entry.borrow())?;
+                Some(PeakBucket {
+                    min: entry.get("min").and_then(as_number)?.clamp(-1.0, 1.0) as f32,
+                    max: entry.get("max").and_then(as_number)?.clamp(-1.0, 1.0) as f32,
+                })
+            })
+            .collect();
+        return Some(TimelineItemContent::Peaks(peaks));
+    }
+    None
 }
 
 fn get_selection(props: &HashMap<String, Value>) -> Vec<Value> {
@@ -2536,6 +2690,99 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    /// docs/arrangement-timeline-ui-spec.md 7: `:kind`/`:content` are
+    /// optional and lenient — absent keys parse exactly as before (piano-roll
+    /// regression), malformed values become `None`/get skipped, never a
+    /// render error.
+    #[test]
+    fn items_parse_optional_kind_and_content_leniently() {
+        let items = list_value_raw(vec![
+            // Piano-roll-shaped item: no kind/content keys at all.
+            map_value_raw(vec![
+                ("id", number_value(1.0)),
+                ("lane", number_value(0.0)),
+                ("start", number_value(0.0)),
+                ("end", number_value(4.0)),
+            ]),
+            // MIDI clip with dots; one malformed dot entry is skipped and
+            // out-of-range values clamp.
+            map_value_raw(vec![
+                ("id", number_value(2.0)),
+                ("start", number_value(4.0)),
+                ("end", number_value(8.0)),
+                ("kind", keyword_value("midi")),
+                (
+                    "content",
+                    map_value_raw(vec![(
+                        "dots",
+                        list_value_raw(vec![
+                            map_value_raw(vec![
+                                ("offset", number_value(0.25)),
+                                ("value", number_value(0.5)),
+                            ]),
+                            map_value_raw(vec![
+                                ("offset", number_value(2.0)),
+                                ("value", number_value(-1.0)),
+                            ]),
+                            map_value_raw(vec![("offset", number_value(0.5))]),
+                            Value::String("junk".to_string()),
+                        ]),
+                    )]),
+                ),
+            ]),
+            // Audio clip with peak buckets.
+            map_value_raw(vec![
+                ("id", number_value(3.0)),
+                ("start", number_value(8.0)),
+                ("end", number_value(12.0)),
+                ("kind", keyword_value("audio")),
+                (
+                    "content",
+                    map_value_raw(vec![(
+                        "peaks",
+                        list_value_raw(vec![map_value_raw(vec![
+                            ("min", number_value(-0.5)),
+                            ("max", number_value(0.5)),
+                        ])]),
+                    )]),
+                ),
+            ]),
+            // Unknown kind and malformed content are None, not errors.
+            map_value_raw(vec![
+                ("id", number_value(4.0)),
+                ("start", number_value(12.0)),
+                ("end", number_value(16.0)),
+                ("kind", keyword_value("automation")),
+                ("content", number_value(3.0)),
+            ]),
+        ]);
+        let props = HashMap::from([("items".to_string(), items)]);
+        let items = get_items(&props);
+        assert_eq!(items.len(), 4);
+
+        assert!(items[0].kind.is_none());
+        assert!(items[0].content.is_none());
+
+        assert_eq!(items[1].kind, Some(TimelineItemKind::Midi));
+        let Some(TimelineItemContent::Dots(dots)) = &items[1].content else {
+            panic!("expected dots content");
+        };
+        assert_eq!(dots.len(), 2, "malformed dot entries are skipped");
+        assert_eq!(dots[0].offset, 0.25);
+        assert_eq!(dots[0].value, 0.5);
+        assert_eq!(dots[1].offset, 1.0, "offset clamps to 0..1");
+        assert_eq!(dots[1].value, 0.0, "value clamps to 0..1");
+
+        assert_eq!(items[2].kind, Some(TimelineItemKind::Audio));
+        let Some(TimelineItemContent::Peaks(peaks)) = &items[2].content else {
+            panic!("expected peaks content");
+        };
+        assert_eq!(peaks.len(), 1);
+
+        assert!(items[3].kind.is_none(), "unknown kind parses to None");
+        assert!(items[3].content.is_none(), "malformed content parses to None");
     }
 
     #[test]

@@ -6,7 +6,8 @@ use super::*;
 
 use sequencer::app::song_transport::SongTransportMode;
 use sequencer::sequencer::{
-    project_lanes, state_at_beat, LaneClip, ProjectSong, ProjectSongRow,
+    project_lanes, state_at_beat, LaneClip, PatternId, ProjectScenes, ProjectSong,
+    ProjectSongRow, StepParam,
 };
 
 /// Scalar song bindings published to `SEQ.*`, snapshotted per frame so each
@@ -44,6 +45,140 @@ pub(crate) struct SongFrameState {
     pub(crate) prev: Option<SongBindingsSnapshot>,
     pub(crate) cached_lanes: Option<Vec<Vec<LaneClip>>>,
     pub(crate) cached_scene_names: Option<Vec<String>>,
+    /// Pattern-pool event snapshots for the patterns the lane projection
+    /// references (`song-lane-events`), rekeyed when the projection or the
+    /// pattern epoch changes — not per frame.
+    pub(crate) cached_lane_events: Option<Vec<Vec<LanePatternEvents>>>,
+    pub(crate) prev_pattern_epoch: Option<u64>,
+}
+
+/// Flattened preview events for one pool pattern referenced by a track's
+/// lane clips (docs/arrangement-timeline-ui-spec.md 7.1): raw musical events
+/// `(time-in-steps, transpose, velocity)` plus the pattern length. The Lisp
+/// view owns turning these into normalized dot payloads; the widget never
+/// sees steps or timebases.
+#[derive(Clone, PartialEq)]
+pub(crate) struct LanePatternEvents {
+    pub(crate) pattern_id: u64,
+    pub(crate) num_steps: usize,
+    pub(crate) events: Vec<(f64, f64, f64)>,
+}
+
+/// Bound on published events per pattern so a pathological pattern cannot
+/// bloat the reactive value; the view additionally caps dots per item.
+const LANE_PATTERN_EVENT_CAP: usize = 1024;
+
+/// Collect the distinct pool patterns each track's lane clips resolve to and
+/// flatten their step/chord snapshots into preview events.
+pub(crate) fn collect_lane_pattern_events(
+    lanes: &[Vec<LaneClip>],
+    scenes: &ProjectScenes,
+) -> Vec<Vec<LanePatternEvents>> {
+    lanes
+        .iter()
+        .enumerate()
+        .map(|(track, clips)| {
+            let mut ids: Vec<u64> = clips
+                .iter()
+                .filter_map(|clip| clip.pattern.map(|pattern| pattern.0))
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids.into_iter()
+                .filter_map(|id| {
+                    let data = scenes.track_pools.get(track)?.get(PatternId(id))?;
+                    let num_steps = data.track_params.num_steps.max(1);
+                    let mut events = Vec::new();
+                    for step in 0..num_steps.min(data.step_data.len()) {
+                        if events.len() >= LANE_PATTERN_EVENT_CAP {
+                            break;
+                        }
+                        let velocity =
+                            f64::from(data.step_data[step][StepParam::Velocity as usize]);
+                        let chord = data.chord_snapshot.steps.get(step);
+                        match chord {
+                            Some(notes) if !notes.is_empty() => {
+                                for (voice, transpose) in notes.iter().enumerate() {
+                                    let delay = data
+                                        .chord_snapshot
+                                        .delays
+                                        .get(step)
+                                        .and_then(|delays| delays.get(voice))
+                                        .copied()
+                                        .unwrap_or(0.0);
+                                    events.push((
+                                        step as f64 + f64::from(delay),
+                                        f64::from(*transpose),
+                                        velocity,
+                                    ));
+                                }
+                            }
+                            _ => {
+                                let active = (data.track_bits[step / 64] >> (step % 64)) & 1 == 1;
+                                if active {
+                                    let delay = f64::from(
+                                        data.step_data[step][StepParam::Delay as usize],
+                                    );
+                                    let transpose = f64::from(
+                                        data.step_data[step][StepParam::Transpose as usize],
+                                    );
+                                    events.push((step as f64 + delay, transpose, velocity));
+                                }
+                            }
+                        }
+                    }
+                    events.truncate(LANE_PATTERN_EVENT_CAP);
+                    Some(LanePatternEvents {
+                        pattern_id: id,
+                        num_steps,
+                        events,
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// `song-lane-events` value: per track, a list of
+/// `{pattern-id, num-steps, events: ((time transpose velocity)...)}` maps.
+pub(crate) fn build_song_lane_events_value(events: &[Vec<LanePatternEvents>]) -> Value {
+    let tracks = events
+        .iter()
+        .map(|patterns| {
+            let patterns = patterns
+                .iter()
+                .map(|pattern| {
+                    let events = pattern
+                        .events
+                        .iter()
+                        .map(|(time, transpose, velocity)| {
+                            Rc::new(RefCell::new(Value::List(vec![
+                                Rc::new(RefCell::new(Value::Number(*time))),
+                                Rc::new(RefCell::new(Value::Number(*transpose))),
+                                Rc::new(RefCell::new(Value::Number(*velocity))),
+                            ])))
+                        })
+                        .collect();
+                    let mut map = HashMap::new();
+                    map.insert(
+                        "pattern-id".to_string(),
+                        Rc::new(RefCell::new(Value::Number(pattern.pattern_id as f64))),
+                    );
+                    map.insert(
+                        "num-steps".to_string(),
+                        Rc::new(RefCell::new(Value::Number(pattern.num_steps as f64))),
+                    );
+                    map.insert(
+                        "events".to_string(),
+                        Rc::new(RefCell::new(Value::List(events))),
+                    );
+                    Rc::new(RefCell::new(Value::Map(map)))
+                })
+                .collect();
+            Rc::new(RefCell::new(Value::List(patterns)))
+        })
+        .collect();
+    Value::List(tracks)
 }
 
 /// The row governing `beats` for display purposes: `state_at_beat` semantics
@@ -235,7 +370,8 @@ pub(crate) fn sync_song_state(
                 .collect::<Vec<_>>(),
         )
     });
-    if frame.cached_lanes != lanes {
+    let lanes_changed = frame.cached_lanes != lanes;
+    if lanes_changed {
         rt.set_reactive("SEQ", "song-lanes", build_song_lanes_value(lanes.as_ref()));
         frame.cached_lanes = lanes;
         dirty = true;
@@ -244,6 +380,34 @@ pub(crate) fn sync_song_state(
         rt.set_reactive("SEQ", "scene-names", build_scene_names_value(&scene_names));
         frame.cached_scene_names = Some(scene_names);
         dirty = true;
+    }
+    // Preview events for the patterns the projection references: re-snapshot
+    // only when the projection itself or the pattern data (epoch) changed,
+    // then diff by value so an unchanged snapshot publishes nothing
+    // (docs/arrangement-timeline-ui-spec.md 7.1: recompute on pattern/row
+    // change, not per frame).
+    let pattern_epoch = app
+        .state
+        .transport
+        .pattern_epoch
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if lanes_changed || frame.prev_pattern_epoch != Some(pattern_epoch) {
+        let events = match frame.cached_lanes.as_ref() {
+            Some(lanes) => app
+                .state
+                .with_project_scenes(|scenes| collect_lane_pattern_events(lanes, scenes)),
+            None => Vec::new(),
+        };
+        if frame.cached_lane_events.as_ref() != Some(&events) {
+            rt.set_reactive(
+                "SEQ",
+                "song-lane-events",
+                build_song_lane_events_value(&events),
+            );
+            frame.cached_lane_events = Some(events);
+            dirty = true;
+        }
+        frame.prev_pattern_epoch = Some(pattern_epoch);
     }
     let next = build_song_bindings_snapshot(app, frame.cached_song.as_ref());
     let prev = frame.prev.as_ref();

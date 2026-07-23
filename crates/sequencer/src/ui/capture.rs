@@ -129,18 +129,22 @@ enum CaptureTrackKind {
     LayerRack,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct CaptureTrackSpec {
     kind: CaptureTrackKind,
     display_name: Option<String>,
     num_steps: Option<usize>,
+    /// `(step, transpose)` pairs authored via `:steps (0 (4 12) 8 ...)`;
+    /// applied to the live pattern and persisted into the scene's pattern
+    /// pool so pool-derived read surfaces (song lane previews) see them.
+    steps: Vec<(usize, f32)>,
     samples: Vec<String>,
     midi_fx: Vec<String>,
     audio_fx: Vec<String>,
     rack_slot_audio_fx: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct CaptureProjectSpec {
     tracks: Vec<CaptureTrackSpec>,
 }
@@ -265,6 +269,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
 
     let mut display_name = None;
     let mut num_steps = None;
+    let mut steps = Vec::new();
     let mut samples = Vec::new();
     let mut midi_fx = Vec::new();
     let mut audio_fx = Vec::new();
@@ -293,6 +298,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
                 }
                 num_steps = Some(steps);
             }
+            "steps" => steps = parse_capture_steps(value)?,
             "samples" => samples = expression_string_list(value, ":samples")?,
             "midi-fx" => midi_fx = expression_string_list(value, ":midi-fx")?,
             "audio-fx" => audio_fx = expression_string_list(value, ":audio-fx")?,
@@ -323,11 +329,61 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
         kind,
         display_name,
         num_steps,
+        steps,
         samples,
         midi_fx,
         audio_fx,
         rack_slot_audio_fx,
     })
+}
+
+fn expression_step_index(expression: &Expression) -> Option<usize> {
+    match expression {
+        Expression::Number(value)
+            if value.is_finite() && *value >= 0.0 && value.fract() == 0.0 =>
+        {
+            let step = usize::try_from(*value as u64).ok()?;
+            (step < MAX_STEPS).then_some(step)
+        }
+        _ => None,
+    }
+}
+
+fn expression_f32(expression: &Expression) -> Option<f32> {
+    match expression {
+        Expression::Number(value) if value.is_finite() => Some(*value as f32),
+        _ => None,
+    }
+}
+
+/// `:steps` entries are either a bare step index or a `(step transpose)` pair.
+fn parse_capture_steps(value: &Expression) -> Result<Vec<(usize, f32)>, String> {
+    let items = match value {
+        Expression::List(items) | Expression::QuoteList(items) => items,
+        _ => {
+            return Err(
+                ":steps expects a list of step indices or (step transpose) pairs".to_string()
+            );
+        }
+    };
+    items
+        .iter()
+        .map(|item| {
+            if let Some(step) = expression_step_index(item) {
+                return Ok((step, 0.0));
+            }
+            if let Expression::List(pair) | Expression::QuoteList(pair) = item {
+                if let [step, transpose] = pair.as_slice() {
+                    if let (Some(step), Some(transpose)) =
+                        (expression_step_index(step), expression_f32(transpose))
+                    {
+                        return Ok((step, transpose));
+                    }
+                }
+            }
+            Err(":steps entries must be a step index or a (step transpose) pair".to_string())
+        })
+        .collect()
 }
 
 fn expression_name(expression: Option<&Expression>) -> Option<&str> {
@@ -387,6 +443,10 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
         if let Some(num_steps) = spec.num_steps {
             app.state.pattern.track_params[track].set_num_steps(num_steps);
         }
+        for &(step, transpose) in &spec.steps {
+            app.state.pattern.patterns[track].set_step_active(step, true);
+            app.state.pattern.step_data[track].set(step, StepParam::Transpose, transpose);
+        }
         for (sample_idx, sample) in spec.samples.iter().enumerate() {
             let result = match spec.kind {
                 CaptureTrackKind::DrumRack => {
@@ -443,6 +503,25 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
                     )
                 })?;
         }
+    }
+    // :steps write the live pattern; persist them into the scene's pattern
+    // pool through the production scene-launch path (capture current
+    // snapshot, save, relaunch the same scene) so pool-derived read surfaces
+    // (song lane previews) observe them.
+    if project.tracks.iter().any(|spec| !spec.steps.is_empty()) {
+        let scene = app.state.current_scene_index();
+        app.state
+            .launch_scene(
+                scene,
+                app.tracks.len(),
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            )
+            .ok_or_else(|| {
+                format!("failed to persist :steps into scene {} pattern pool", scene + 1)
+            })?;
     }
     Ok(())
 }
@@ -696,6 +775,7 @@ mod tests {
                 kind: CaptureTrackKind::Sampler,
                 display_name: Some("Drums".to_string()),
                 num_steps: Some(8),
+                steps: vec![],
                 samples: vec![],
                 midi_fx: vec!["arp".to_string()],
                 audio_fx: vec!["filter".to_string()],
