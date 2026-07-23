@@ -20613,6 +20613,59 @@
         }
         recorded.lock().unwrap().clear();
 
+        // Hovering the clip's end edge at its RENDERED position must show
+        // the resize cursor (the hover path needs the same scroll-offset
+        // adjustment as the click path).
+        let hover_col = lane5.rect.col + lane5.rect.width * (16.0 / 64.0) - 0.2;
+        let hover_row = lane5.rect.row - offset + lane5.rect.height * 0.5;
+        editor.handle_mouse_precise(
+            mouse(crossterm::event::MouseEventKind::Moved, hover_col, hover_row),
+            0,
+            0,
+            72,
+            20,
+            hover_col,
+            hover_row,
+        );
+        assert_eq!(
+            editor.widget_cursor(),
+            eseqlisp::widget_render::WidgetCursor::EwResize,
+            "end-edge hover on a scrolled clip must show the resize cursor"
+        );
+
+        // Horizontal touchpad panning over a scrolled lane must still pan
+        // the shared time axis. Zoom in first: a 64-beat view of a 16-beat
+        // song clamps max-view-start to 0 and no pan could be observed.
+        editor
+            .runtime_mut()
+            .eval_str("(set! arrangement-view-duration 8)")
+            .expect("zoom in for the pan check");
+        editor.refresh_runtime_side_effects();
+        let _ = editor.widget_layout();
+        assert!(editor.handle_touchpad_scroll(0, 0, click_col, click_row, -40.0, 0.5));
+        editor.refresh_runtime_side_effects();
+        let panned_neg = editor
+            .runtime_mut()
+            .eval_str("arrangement-view-start")
+            .unwrap();
+        assert!(editor.handle_touchpad_scroll(0, 0, click_col, click_row, 40.0, 0.5));
+        editor.refresh_runtime_side_effects();
+        let panned_pos = editor
+            .runtime_mut()
+            .eval_str("arrangement-view-start")
+            .unwrap();
+        assert!(
+            panned_neg != Some(Value::Number(0.0)) || panned_pos != Some(Value::Number(0.0)),
+            "horizontal panning over a scrolled lane must move the time axis \
+             (after -40: {panned_neg:?}, after +40: {panned_pos:?})"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(do (set! arrangement-view-start 0) (set! arrangement-view-duration 64))")
+            .expect("restore the view for the resize check");
+        editor.refresh_runtime_side_effects();
+        let _ = editor.widget_layout();
+
         // End-edge resize on the scrolled clip: press on the clip's right
         // edge, drag left past the snap threshold, release.
         let edge_col = lane5.rect.col + lane5.rect.width * (16.0 / 64.0) - 0.2;
