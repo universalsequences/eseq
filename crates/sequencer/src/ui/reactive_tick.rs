@@ -335,6 +335,14 @@ pub(crate) fn reactive_tick_and_render(
         if !transport_visible && master_rec_on != ctx.frame.prev_master_recording {
             ctx.frame.prev_master_recording = master_rec_on;
         }
+        // Song-mode bindings (docs/song-mode-spec.md 12): diff-published each
+        // frame; `song-rows` rebuilds only on committed-song revision change.
+        needs_reactive_cycle |= sync_song_state(
+            editor.runtime_mut(),
+            &app,
+            &mut ctx.frame.song,
+            transport_visible,
+        );
         if master_meter_visible && ctx.meters.cached_peak_l_level != ctx.frame.prev_peak_l_level {
             needs_reactive_cycle |= editor
                 .runtime_mut()

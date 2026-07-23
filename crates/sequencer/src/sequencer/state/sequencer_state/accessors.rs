@@ -73,6 +73,7 @@ impl SequencerState {
                     0,
                 )),
                 song: Mutex::new(None),
+                song_revision: AtomicU64::new(0),
                 current_pattern: AtomicU32::new(0),
                 num_patterns: AtomicU32::new(1),
                 timebase_plocks: (0..MAX_TRACKS).map(|_| TimebasePLockData::new()).collect(),
@@ -433,6 +434,13 @@ impl SequencerState {
     /// Replace the committed song wholesale (project load / new project).
     pub fn set_committed_song(&self, song: Option<ProjectSong>) {
         *self.pattern.song.lock().unwrap() = song;
+        self.pattern.song_revision.fetch_add(1, Ordering::Release);
+    }
+
+    /// Monotonic counter bumped on every committed-song change; per-frame UI
+    /// code keys song-derived rebuild work off it (docs/song-mode-spec.md 12).
+    pub fn committed_song_revision(&self) -> u64 {
+        self.pattern.song_revision.load(Ordering::Acquire)
     }
 
     /// Edit the committed song in place (topology remaps, future editing
@@ -441,7 +449,9 @@ impl SequencerState {
         &self,
         f: impl FnOnce(&mut Option<ProjectSong>) -> R,
     ) -> R {
-        f(&mut self.pattern.song.lock().unwrap())
+        let result = f(&mut self.pattern.song.lock().unwrap());
+        self.pattern.song_revision.fetch_add(1, Ordering::Release);
+        result
     }
 
     #[cfg(test)]

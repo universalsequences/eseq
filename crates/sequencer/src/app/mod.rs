@@ -43,6 +43,7 @@ mod hooks;
 mod params;
 mod projects;
 pub mod song_edit;
+pub mod song_transport;
 mod synth;
 
 pub use browser::BrowserNode;
@@ -864,11 +865,26 @@ pub struct App {
     pub sample_analysis: AnalysisService,
     pub pending_recording_take: Option<RecordingTake>,
     recording_history: Option<RecordingHistoryTransaction>,
-    /// Seam for Slice B's transport authority: when true, the song editing
-    /// primitives (`song_edit.rs`) reject with an actionable error. Slice B's
-    /// `SongPlayback`/`ArrangementCapture` transport modes must set/derive
-    /// this; until then it stays false (see `App::song_edits_locked`).
+    /// Derived from `song_transport_mode`: true while `SongPlayback` or
+    /// `ArrangementCapture` is active, making the song editing primitives
+    /// (`song_edit.rs`) reject with an actionable error (see
+    /// `App::song_edits_locked` and `song_transport.rs`).
     pub song_transport_locks_edits: bool,
+    /// The single active launch authority (docs/song-mode-spec.md 13); all
+    /// transitions go through the methods in `song_transport.rs`.
+    pub song_transport_mode: song_transport::SongTransportMode,
+    /// Persisted `Use Arrangement` project preference (spec 7.1): selects
+    /// what the next Play does; never alters audio by itself.
+    pub use_arrangement: bool,
+    /// Armed state for arrangement capture at the next Play (spec 7.4/7.5;
+    /// `seq-song-capture-arm`).
+    pub song_capture_armed: bool,
+    /// The preflighted song currently handed to the scheduler while
+    /// `SongPlayback` is active; used to mirror row transitions control-side.
+    pub active_runtime_song: Option<std::sync::Arc<crate::sequencer::RuntimeSong>>,
+    /// Last row ordinal mirrored control-side (skips the duplicate initial
+    /// `RowApplied` notice for row zero).
+    pub(crate) song_mirrored_row: Option<usize>,
 }
 
 struct RecordingHistoryTransaction {
@@ -1389,6 +1405,10 @@ pub enum PatternLaunchError {
     EmptyTrackMask,
     TrackOutOfRange { track: usize },
     MissingSceneCell { scene: usize, track: usize },
+    /// Manual launches are rejected while song playback is the launch
+    /// authority (docs/song-mode-spec.md 7.3); surface
+    /// `song_transport::MANUAL_LAUNCH_DURING_SONG_ERROR` to the user.
+    SongPlaybackActive,
 }
 
 impl App {
@@ -1479,6 +1499,11 @@ impl App {
         &mut self,
         target: &PatternLaunchTarget,
     ) -> Result<PatternLaunchOutcome, PatternLaunchError> {
+        // Spec 7.3: during song playback the song is the only launch
+        // authority — manual launches from every source hit this wall.
+        if self.manual_launch_rejection().is_some() {
+            return Err(PatternLaunchError::SongPlaybackActive);
+        }
         let _ = self.state.quantized_launches().cancel_all();
         self.scene_macro_runtime.clear();
         let mut touched = self.macro_engine.release_all_scene_macros();
@@ -1490,6 +1515,14 @@ impl App {
     pub fn drain_due_pattern_launches(
         &mut self,
     ) -> Vec<Result<PatternLaunchOutcome, PatternLaunchError>> {
+        // Belt-and-braces for spec 7.3: the song start flow cancels pending
+        // quantized launches and scheduling is gated, but any launch that
+        // still becomes due during song playback is dropped, not applied.
+        if self.manual_launch_rejection().is_some() {
+            let _ = self.state.quantized_launches().cancel_all();
+            let _ = self.state.quantized_launches().drain_valid_due();
+            return Vec::new();
+        }
         let due = self.state.quantized_launches().drain_valid_due();
         due.into_iter()
             .map(|DuePatternLaunch { token, target }| {
@@ -2102,6 +2135,11 @@ impl App {
             pending_recording_take: None,
             recording_history: None,
             song_transport_locks_edits: false,
+            song_transport_mode: song_transport::SongTransportMode::Stopped,
+            use_arrangement: false,
+            song_capture_armed: false,
+            active_runtime_song: None,
+            song_mirrored_row: None,
             graph: GraphState {
                 lg,
                 track_node_ids: Vec::new(),

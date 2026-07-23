@@ -22,6 +22,10 @@ pub struct PatternState {
     /// because several paths rebuild `ProjectScenes` wholesale from snapshots
     /// (`from_pattern_snapshots`) and would silently drop an embedded song.
     pub(super) song: Mutex<Option<ProjectSong>>,
+    /// Bumped on every committed-song replacement/edit so per-frame UI code
+    /// can rebuild song-derived reactive values (`song-rows`) only when the
+    /// song actually changed (docs/song-mode-spec.md 12).
+    pub(super) song_revision: AtomicU64,
     pub(super) current_pattern: AtomicU32,
     pub(super) num_patterns: AtomicU32,
     pub timebase_plocks: Vec<TimebasePLockData>,

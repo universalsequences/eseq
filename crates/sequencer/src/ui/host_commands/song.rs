@@ -18,6 +18,14 @@ pub(super) const COMMANDS: &[&str] = &[
     "song-set-loop",
     "song-replace",
     "song-clear",
+    // Transport authority (docs/song-mode-spec.md 12/13): routed through the
+    // state machine in app/song_transport.rs.
+    "song-transport-toggle-play",
+    "song-transport-play",
+    "song-use-arrangement",
+    "song-capture-arm",
+    "song-capture-cancel",
+    "song-status",
 ];
 
 fn payload_map(payload: &Value) -> Result<&HashMap<String, Rc<RefCell<Value>>>, String> {
@@ -206,13 +214,101 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
     }
 }
 
+/// Whether the record signal selects arrangement capture at Play time
+/// (docs/song-mode-spec.md section 1): the explicit capture arm or the
+/// existing pattern/note record toggle.
+fn transport_record_signal(app: &app::App, ctx: &LoopCtx<'_>) -> bool {
+    app.song_capture_armed || ctx.shared.recording.load(Ordering::Relaxed)
+}
+
+fn run_transport(
+    name: &str,
+    payload: &Value,
+    app: &mut app::App,
+    ctx: &mut LoopCtx<'_>,
+) -> Result<Option<String>, String> {
+    match name {
+        "song-transport-toggle-play" => {
+            let record = transport_record_signal(app, ctx);
+            app.song_transport_toggle_play(record)
+        }
+        "song-transport-play" => {
+            let record = transport_record_signal(app, ctx);
+            app.song_transport_play(record).map(|mode| match mode {
+                sequencer::app::song_transport::SongTransportMode::SongPlayback => {
+                    Some("Song playback started".to_string())
+                }
+                sequencer::app::song_transport::SongTransportMode::ArrangementCapture => {
+                    Some("Arrangement capture started".to_string())
+                }
+                _ => None,
+            })
+        }
+        "song-use-arrangement" => {
+            let map = payload_map(payload)?;
+            let enabled = map_bool(map, "enabled");
+            app.set_use_arrangement(enabled)?;
+            Ok(Some(format!(
+                "Use Arrangement {}",
+                if enabled { "on" } else { "off" }
+            )))
+        }
+        "song-capture-arm" => {
+            let map = payload_map(payload)?;
+            let armed = map_bool(map, "armed");
+            app.set_song_capture_armed(armed)?;
+            Ok(Some(format!(
+                "Arrangement capture {}",
+                if armed { "armed" } else { "disarmed" }
+            )))
+        }
+        "song-capture-cancel" => app.song_capture_cancel().map(Some),
+        "song-status" => Ok(Some(song_status_summary(app))),
+        _ => Err(format!("unknown song transport command: {name}")),
+    }
+}
+
+/// Status-line summary for `seq-song-status` (docs/song-mode-spec.md 12).
+fn song_status_summary(app: &app::App) -> String {
+    let mode = app.song_transport_mode.binding_str();
+    let arrangement = if app.use_arrangement { "on" } else { "off" };
+    match app.state.committed_song() {
+        Some(song) => format!(
+            "Song: {} row(s), end beat {}, loop {} — mode {mode}, Use Arrangement {arrangement}",
+            song.rows.len(),
+            song.end_beat,
+            if song.loop_enabled { "on" } else { "off" },
+        ),
+        None => format!("No committed song — mode {mode}, Use Arrangement {arrangement}"),
+    }
+}
+
+const TRANSPORT_COMMANDS: &[&str] = &[
+    "song-transport-toggle-play",
+    "song-transport-play",
+    "song-use-arrangement",
+    "song-capture-arm",
+    "song-capture-cancel",
+    "song-status",
+];
+
 pub(super) fn handle(
     name: &str,
     payload: Value,
     app: &mut app::App,
     editor: &mut Editor,
-    _ctx: &mut LoopCtx<'_>,
+    ctx: &mut LoopCtx<'_>,
 ) {
+    if TRANSPORT_COMMANDS.contains(&name) {
+        match run_transport(name, &payload, app, ctx) {
+            Ok(Some(status)) => editor.handle_host_event(HostEvent::Status(status)),
+            Ok(None) => {}
+            Err(error) => {
+                editor.handle_host_event(HostEvent::Error(format!("{name} failed: {error}")))
+            }
+        }
+        return;
+    }
     match run(name, &payload, app) {
         Ok(status) => editor.handle_host_event(HostEvent::Status(status)),
         Err(error) => editor.handle_host_event(HostEvent::Error(format!("{name} failed: {error}"))),

@@ -3826,7 +3826,12 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
 
         // ── Transport ─────────────────────────────────────────────────────
         AppCommand::TogglePlay => {
-            app.state.toggle_play_no_publish();
+            // Route through the song transport state machine
+            // (docs/song-mode-spec.md 13) so Use Arrangement selects session
+            // vs song playback for this path too.
+            if let Err(error) = app.song_transport_toggle_play(app.song_capture_armed) {
+                eprintln!("toggle-play failed: {error}");
+            }
         }
 
         AppCommand::SetBpm { bpm } => {

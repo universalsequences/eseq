@@ -84,6 +84,10 @@ pub struct ProjectFile {
     /// saved before song mode existed.
     #[serde(default)]
     pub song: Option<ProjectSong>,
+    /// Persisted `Use Arrangement` transport preference (docs/song-mode-spec.md
+    /// 7.1): selects session vs song behavior for the next Play.
+    #[serde(default)]
+    pub use_arrangement: bool,
 }
 
 #[derive(Deserialize)]
@@ -115,6 +119,8 @@ struct ProjectFileWire {
     next_macro_id: u32,
     #[serde(default)]
     song: Option<ProjectSong>,
+    #[serde(default)]
+    use_arrangement: bool,
 }
 
 impl<'de> Deserialize<'de> for ProjectFile {
@@ -142,6 +148,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
             macros: wire.macros,
             next_macro_id: wire.next_macro_id,
             song: wire.song,
+            use_arrangement: wire.use_arrangement,
         };
         project.normalize_device_instances().map_err(D::Error::custom)?;
         // Reject malformed song data with an actionable error rather than
@@ -2944,6 +2951,7 @@ mod tests {
             macros: Vec::new(),
             next_macro_id: 1,
             song: None,
+            use_arrangement: false,
         }
     }
 
@@ -2994,6 +3002,27 @@ mod tests {
         let restored: ProjectFile =
             serde_json::from_value(value).expect("deserialize pre-song project");
         assert!(restored.song.is_none());
+    }
+
+    /// `use_arrangement` is a persisted project preference
+    /// (docs/song-mode-spec.md 7.1): it round-trips, and projects saved
+    /// before song mode load with it off.
+    #[test]
+    fn use_arrangement_preference_round_trips_and_defaults_off() {
+        let mut project = sample_project();
+        project.use_arrangement = true;
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+        assert!(restored.use_arrangement);
+
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        value
+            .as_object_mut()
+            .expect("project is a json object")
+            .remove("use_arrangement");
+        let restored: ProjectFile =
+            serde_json::from_value(value).expect("deserialize pre-song-mode project");
+        assert!(!restored.use_arrangement);
     }
 
     #[test]

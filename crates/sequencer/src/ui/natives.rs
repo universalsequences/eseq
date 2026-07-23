@@ -811,7 +811,24 @@ pub(crate) fn def_song_replace_payload(spec: &DefSongSpec) -> Value {
 /// every editing primitive plus declarative `def-song`. Each enqueues one
 /// custom host command handled by `ui/host_commands/song.rs`; success and
 /// failure surface on the status line there.
-fn register_song_natives(runtime: &mut Runtime) {
+/// `seq-toggle-play` — Play/Stop route through the song transport state
+/// machine (docs/song-mode-spec.md 12/13): the host command handler in
+/// host_commands/song.rs applies the transition on App so Use Arrangement
+/// and record select session playback, song playback, or capture.
+pub(crate) fn register_transport_toggle_play_native(
+    runtime: &mut Runtime,
+    state: Arc<SequencerState>,
+) {
+    runtime.register_native("seq-toggle-play", move |_args, ctx| {
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "song-transport-toggle-play".to_string(),
+            payload: Value::Nil,
+        });
+        Ok(Value::Bool(!state.is_playing()))
+    });
+}
+
+pub(crate) fn register_song_natives(runtime: &mut Runtime) {
     runtime.register_native_with_docs(
         "seq-song-row-insert",
         "(seq-song-row-insert start-beat scene [overrides])",
@@ -980,6 +997,90 @@ fn register_song_natives(runtime: &mut Runtime) {
         move |_args, ctx| {
             ctx.enqueue_command(HostCommand::Custom {
                 name: "song-clear".to_string(),
+                payload: Value::Nil,
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    // Transport-facing song commands (spec 12/13): each routes through the
+    // song transport state machine in app/song_transport.rs via the host
+    // command handler; rejections surface on the status line there.
+    runtime.register_native_with_docs(
+        "seq-use-arrangement",
+        "(seq-use-arrangement enabled)",
+        "Set the persisted Use Arrangement transport preference (session vs \
+         song behavior for the next Play). Rejected while playing.",
+        move |args, ctx| {
+            let enabled = match args.first() {
+                Some(value) => def_song_bool(value)
+                    .map_err(|_| "seq-use-arrangement: expected true/false".to_string())?,
+                None => return Err("seq-use-arrangement: expected true/false".into()),
+            };
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-use-arrangement".to_string(),
+                payload: song_payload(vec![("enabled", Value::Bool(enabled))]),
+            });
+            Ok(Value::Bool(enabled))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-play",
+        "(seq-song-play)",
+        "Play through the song transport state machine: session playback, \
+         song playback, or arrangement capture per Use Arrangement + record \
+         (docs/song-mode-spec.md section 1). Errors if already playing.",
+        move |_args, ctx| {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-transport-play".to_string(),
+                payload: Value::Nil,
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-capture-arm",
+        "(seq-song-capture-arm armed)",
+        "Arm or disarm arrangement capture for the next Play (Use \
+         Arrangement + record selects capture). Only changes while stopped.",
+        move |args, ctx| {
+            let armed = match args.first() {
+                Some(value) => def_song_bool(value)
+                    .map_err(|_| "seq-song-capture-arm: expected true/false".to_string())?,
+                None => return Err("seq-song-capture-arm: expected true/false".into()),
+            };
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-capture-arm".to_string(),
+                payload: song_payload(vec![("armed", Value::Bool(armed))]),
+            });
+            Ok(Value::Bool(armed))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-capture-cancel",
+        "(seq-song-capture-cancel)",
+        "Cancel arrangement capture: discard the take, preserve the committed \
+         song, stop the transport. Only valid during arrangement capture.",
+        move |_args, ctx| {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-capture-cancel".to_string(),
+                payload: Value::Nil,
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-status",
+        "(seq-song-status)",
+        "Report the song transport status on the status line: mode, row \
+         count, end beat, and loop state.",
+        move |_args, ctx| {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-status".to_string(),
                 payload: Value::Nil,
             });
             Ok(Value::Bool(true))
@@ -1418,6 +1519,19 @@ pub(crate) fn init_runtime(
                 ("record-quantize", Value::String("1/16".to_string())),
                 ("metronome", Value::Bool(false)),
                 ("queued-scene", Value::Number(-1.0)),
+                // Song mode observability (docs/song-mode-spec.md 12).
+                ("song-exists", Value::Bool(false)),
+                ("use-arrangement", Value::Bool(false)),
+                ("song-mode", Value::String("session".to_string())),
+                ("song-current-row", Value::Number(-1.0)),
+                ("song-current-row-id", Value::Number(-1.0)),
+                ("song-row-count", Value::Number(0.0)),
+                ("song-position-beats", Value::Number(0.0)),
+                ("song-end-beat", Value::Number(0.0)),
+                ("song-loop-enabled", Value::Bool(false)),
+                ("song-capture-failed", Value::Bool(false)),
+                ("song-capture-error", Value::Nil),
+                ("song-rows", Value::List(vec![])),
                 ("num-steps", Value::Number(PAGE_SIZE as f64)),
                 ("num-tracks", Value::Number(track_count as f64)),
                 ("current-track", Value::Number(0.0)),
@@ -4502,11 +4616,7 @@ pub(crate) fn init_runtime(
         Ok(Value::Number(val as f64))
     });
 
-    // seq-toggle-play
-    let st = state.clone();
-    runtime.register_native("seq-toggle-play", move |_args, _ctx| {
-        Ok(Value::Bool(st.toggle_play()))
-    });
+    register_transport_toggle_play_native(&mut runtime, state.clone());
 
     runtime.register_native("seq-set-bpm", move |args, ctx| {
         let Some(Value::Number(bpm)) = args.first() else {

@@ -78,6 +78,8 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_sampler_analysis_key: Option<(usize, i32, u32, u32, usize)>,
     pub(crate) prev_auto_follow: bool,
     pub(crate) prev_queued_transport_scene: Option<usize>,
+    /// Song-mode reactive diff state (docs/song-mode-spec.md 12).
+    pub(crate) song: SongFrameState,
     pub(crate) watched_sampler_voice_track: Option<usize>,
     pub(crate) watched_sampler_voice_ids: Vec<i32>,
 }

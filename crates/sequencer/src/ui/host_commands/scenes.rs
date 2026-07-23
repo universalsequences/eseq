@@ -435,6 +435,12 @@ pub(super) fn handle(
             )));
         }
         "launch-track-pattern" => {
+            // Spec 7.3: manual track-pattern launches are rejected while song
+            // playback is the launch authority.
+            if let Some(message) = app.manual_launch_rejection() {
+                editor.handle_host_event(HostEvent::Error(message.to_string()));
+                return;
+            }
             let Value::Map(ref map) = payload else {
                 editor.handle_host_event(HostEvent::Status(
                     "Track pattern launch failed: invalid payload".to_string(),
@@ -594,6 +600,12 @@ pub(super) fn handle(
                     _ => None,
                 });
                 if let Some(idx) = idx {
+                    // Spec 7.3: the song is the only launch authority during
+                    // song playback.
+                    if let Some(message) = app.manual_launch_rejection() {
+                        editor.handle_host_event(HostEvent::Error(message.to_string()));
+                        return;
+                    }
                     let quantize_label =
                         extract_string_from_payload(&payload, "quantize")
                             .unwrap_or_else(|| "off".to_string());

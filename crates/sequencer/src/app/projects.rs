@@ -943,6 +943,8 @@ impl App {
         self.editor.pending_project_load = None;
         self.groups.clear();
         self.state.set_committed_song(None);
+        self.use_arrangement = false;
+        self.song_capture_armed = false;
 
         {
             let mut graph = self.graph_controller();
@@ -1831,6 +1833,7 @@ impl App {
                 .map(ProjectMacro::from)
                 .collect(),
             next_macro_id: self.macro_engine.next_id(),
+            use_arrangement: self.use_arrangement,
         })
     }
 
@@ -2796,6 +2799,7 @@ impl App {
             song,
             macros,
             next_macro_id,
+            use_arrangement,
         } = pending.project;
         let bank = pending.built_patterns;
         let bus_pattern_bank = pending.built_bus_patterns;
@@ -2829,6 +2833,9 @@ impl App {
                 .map_err(|error| format!("Project song failed to load: {error}"))?;
         }
         self.state.set_committed_song(song);
+        // Persisted transport preference (docs/song-mode-spec.md 7.1); loads
+        // happen with the transport stopped, so setting it directly is safe.
+        self.use_arrangement = use_arrangement;
         self.state
             .transport
             .pattern_epoch
@@ -4170,6 +4177,7 @@ mod tests {
             }],
             macros: Vec::new(),
             next_macro_id: 1,
+            use_arrangement: false,
         }
     }
 
