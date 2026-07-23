@@ -1,6 +1,6 @@
-use super::*;
+use super::super::*;
 
-pub(super) fn publish_process_authoring(
+pub(in crate::lisp_host) fn publish_process_authoring(
     process_authoring: &SharedProcessAuthoring,
     publish: &Option<ProcessPublishHook>,
 ) {
@@ -14,7 +14,7 @@ pub(super) fn publish_process_authoring(
         }
     }
 }
-pub(super) fn register_process_target_hint_constructors(runtime: &mut Runtime) {
+pub(in crate::lisp_host) fn register_process_target_hint_constructors(runtime: &mut Runtime) {
     for (name, arity) in [
         ("step-param", 1usize),
         ("param-tag", 1),
@@ -52,7 +52,7 @@ pub(super) fn register_process_target_hint_constructors(runtime: &mut Runtime) {
     );
 }
 
-pub(super) fn register_process_natives(
+pub(in crate::lisp_host) fn register_process_natives(
     runtime: &mut Runtime,
     process_authoring: SharedProcessAuthoring,
     process_eval: SharedProcessEvalContext,
@@ -1204,7 +1204,7 @@ pub(super) fn register_process_natives(
     );
 }
 
-pub(super) fn register_def_accumulator_dispatch_native(
+pub(in crate::lisp_host) fn register_def_accumulator_dispatch_native(
     runtime: &mut Runtime,
     accumulators: SharedRegisteredAccumulators,
     process_authoring: SharedProcessAuthoring,
@@ -1237,7 +1237,7 @@ pub(super) fn register_def_accumulator_dispatch_native(
     );
 }
 
-pub(super) fn def_accumulator_dispatch(
+pub(in crate::lisp_host) fn def_accumulator_dispatch(
     args: Vec<EValue>,
     vm: &mut eseqlisp::vm::VM,
     accumulators: &SharedRegisteredAccumulators,
@@ -1282,7 +1282,7 @@ pub(super) fn def_accumulator_dispatch(
     Ok(EValue::Bool(true))
 }
 
-pub(super) fn register_process_graph_emit_native(
+pub(in crate::lisp_host) fn register_process_graph_emit_native(
     runtime: &mut Runtime,
     process_eval: SharedProcessEvalContext,
 ) {
@@ -1353,11 +1353,11 @@ pub fn register_published_process_authoring_natives(
     }
 }
 
-pub(super) const PROCESS_LANE_TAG: &str = "__process-lane";
-pub(super) const PROCESS_INLET_INSTANCE_TARGET_TAG: &str = "__process-inlet-instance";
+pub(in crate::lisp_host) const PROCESS_LANE_TAG: &str = "__process-lane";
+pub(in crate::lisp_host) const PROCESS_INLET_INSTANCE_TARGET_TAG: &str = "__process-inlet-instance";
 
 /// `(lane 0 1 0 ...)` evaluates to a tagged list; `processes`/`lane!` unpack it.
-pub(super) fn process_lane_values(value: &EValue) -> Option<Result<Vec<f32>, String>> {
+pub(in crate::lisp_host) fn process_lane_values(value: &EValue) -> Option<Result<Vec<f32>, String>> {
     let EValue::List(items) = value else {
         return None;
     };
@@ -1381,13 +1381,13 @@ pub(super) fn process_lane_values(value: &EValue) -> Option<Result<Vec<f32>, Str
     Some(Ok(values))
 }
 
-pub(super) fn process_lane_literal(values: &[f32]) -> EValue {
+pub(in crate::lisp_host) fn process_lane_literal(values: &[f32]) -> EValue {
     let mut items = vec![EValue::Keyword(PROCESS_LANE_TAG.to_string())];
     items.extend(values.iter().map(|value| EValue::Number(*value as f64)));
     process_list(items)
 }
 
-pub(super) fn parse_process_track_spec(value: &EValue, active_tracks: usize) -> Result<Vec<usize>, String> {
+pub(in crate::lisp_host) fn parse_process_track_spec(value: &EValue, active_tracks: usize) -> Result<Vec<usize>, String> {
     let parse_index = |number: f64| -> Result<usize, String> {
         if number < 0.0 || number.fract() != 0.0 {
             return Err("processes expects non-negative integer track indices".to_string());
@@ -1425,7 +1425,7 @@ pub(super) fn parse_process_track_spec(value: &EValue, active_tracks: usize) -> 
 /// Convert an attached instance handle into a pattern-scoped chain slot:
 /// scalar inlet literals into `slot.inlets`, `(lane ...)` literals into
 /// `slot.lanes` (legal only on `:lane true` inlets).
-pub(super) fn process_chain_slot_from_handle(
+pub(in crate::lisp_host) fn process_chain_slot_from_handle(
     registry: &ProcessAuthoringRegistry,
     handle_id: u64,
 ) -> Result<crate::process::TrackProcessSlot, String> {
@@ -1492,7 +1492,7 @@ pub(super) fn process_chain_slot_from_handle(
     })
 }
 
-pub(super) fn validate_process_port_bindings(
+pub(in crate::lisp_host) fn validate_process_port_bindings(
     def: &crate::process::ProcessDef,
     bindings: &BTreeMap<String, Option<crate::process::ParamTarget>>,
 ) -> Result<(), String> {
@@ -1517,7 +1517,7 @@ pub(super) fn validate_process_port_bindings(
     Ok(())
 }
 
-pub(super) fn process_param_target_label_for_error(target: &crate::process::ParamTarget) -> String {
+pub(in crate::lisp_host) fn process_param_target_label_for_error(target: &crate::process::ParamTarget) -> String {
     match target {
         crate::process::ParamTarget::StepParam { param } => format!("step-param:{param}"),
         crate::process::ParamTarget::InstrumentParam { param, .. } => {
@@ -1551,7 +1551,7 @@ pub(super) fn process_param_target_label_for_error(target: &crate::process::Para
     }
 }
 
-pub(super) fn matching_existing_process_slot<'a>(
+pub(in crate::lisp_host) fn matching_existing_process_slot<'a>(
     slot: &crate::process::TrackProcessSlot,
     existing: &'a crate::process::TrackProcessChain,
 ) -> Option<&'a crate::process::TrackProcessSlot> {
@@ -1561,7 +1561,7 @@ pub(super) fn matching_existing_process_slot<'a>(
         .find(|existing_slot| process_slots_have_same_identity(slot, existing_slot))
 }
 
-pub(super) fn process_slots_have_same_identity(
+pub(in crate::lisp_host) fn process_slots_have_same_identity(
     left: &crate::process::TrackProcessSlot,
     right: &crate::process::TrackProcessSlot,
 ) -> bool {
@@ -1571,7 +1571,7 @@ pub(super) fn process_slots_have_same_identity(
     right.instance_id == left.instance_id && right.class_name == left.class_name
 }
 
-pub(super) fn preserve_process_slot_state(
+pub(in crate::lisp_host) fn preserve_process_slot_state(
     defs: &[crate::process::ProcessDef],
     existing: &crate::process::TrackProcessChain,
     replacement: &mut crate::process::TrackProcessChain,
@@ -1630,7 +1630,7 @@ pub(super) fn preserve_process_slot_state(
     }
 }
 
-pub(super) fn register_process_chain_natives(
+pub(in crate::lisp_host) fn register_process_chain_natives(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
     process_authoring: SharedProcessAuthoring,
@@ -1975,7 +1975,7 @@ pub(super) fn register_process_chain_natives(
     );
 }
 
-pub(super) fn register_process_def(
+pub(in crate::lisp_host) fn register_process_def(
     args: Vec<EValue>,
     vm: &mut eseqlisp::vm::VM,
     process_authoring: &SharedProcessAuthoring,
@@ -1999,7 +1999,7 @@ pub(super) fn register_process_def(
     Ok(EValue::String(name))
 }
 
-pub(super) fn register_process_constructor_native(
+pub(in crate::lisp_host) fn register_process_constructor_native(
     vm: &mut eseqlisp::vm::VM,
     name: &str,
     process_authoring: &SharedProcessAuthoring,
@@ -2048,7 +2048,7 @@ pub(super) fn register_process_constructor_native(
     });
 }
 
-pub(super) fn register_process_accumulator_def(
+pub(in crate::lisp_host) fn register_process_accumulator_def(
     args: Vec<EValue>,
     vm: &mut eseqlisp::vm::VM,
     process_authoring: &SharedProcessAuthoring,
@@ -2072,7 +2072,7 @@ pub(super) fn register_process_accumulator_def(
     Ok(EValue::String(name))
 }
 
-pub(super) fn parse_process_accumulator_def(
+pub(in crate::lisp_host) fn parse_process_accumulator_def(
     name: &str,
     args: &[EValue],
 ) -> Result<crate::process::ProcessDef, String> {

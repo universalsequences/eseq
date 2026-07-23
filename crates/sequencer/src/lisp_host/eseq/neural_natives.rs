@@ -1,55 +1,55 @@
-use super::*;
+use super::super::*;
 
 #[derive(Clone, Debug)]
-pub(super) enum NeuralNetworkRef {
+pub(in crate::lisp_host) enum NeuralNetworkRef {
     Id(u64),
     Name(String),
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct NeuralCreateOptions {
-    pub(super) name: String,
-    pub(super) num_neurons: usize,
-    pub(super) enabled: bool,
-    pub(super) weights: Option<Vec<Vec<f32>>>,
+pub(in crate::lisp_host) struct NeuralCreateOptions {
+    pub(in crate::lisp_host) name: String,
+    pub(in crate::lisp_host) num_neurons: usize,
+    pub(in crate::lisp_host) enabled: bool,
+    pub(in crate::lisp_host) weights: Option<Vec<Vec<f32>>>,
 }
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct NeuralSetEdits {
-    pub(super) name: Option<String>,
-    pub(super) reset_interval_bars: Option<f32>,
-    pub(super) energy_decay: Option<f32>,
-    pub(super) max_poly: Option<u32>,
-    pub(super) max_poly_selection: Option<NeuralMaxPolySelection>,
+pub(in crate::lisp_host) struct NeuralSetEdits {
+    pub(in crate::lisp_host) name: Option<String>,
+    pub(in crate::lisp_host) reset_interval_bars: Option<f32>,
+    pub(in crate::lisp_host) energy_decay: Option<f32>,
+    pub(in crate::lisp_host) max_poly: Option<u32>,
+    pub(in crate::lisp_host) max_poly_selection: Option<NeuralMaxPolySelection>,
 }
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct NeuralNeuronEdits {
-    pub(super) route: Option<Option<usize>>,
-    pub(super) resolution: Option<Timebase>,
-    pub(super) threshold: Option<f32>,
-    pub(super) delay_steps: Option<u32>,
-    pub(super) quantize: Option<Option<Timebase>>,
-    pub(super) transpose: Option<f32>,
-    pub(super) dampening_amount: Option<f32>,
-    pub(super) dampening_recovery: Option<f32>,
+pub(in crate::lisp_host) struct NeuralNeuronEdits {
+    pub(in crate::lisp_host) route: Option<Option<usize>>,
+    pub(in crate::lisp_host) resolution: Option<Timebase>,
+    pub(in crate::lisp_host) threshold: Option<f32>,
+    pub(in crate::lisp_host) delay_steps: Option<u32>,
+    pub(in crate::lisp_host) quantize: Option<Option<Timebase>>,
+    pub(in crate::lisp_host) transpose: Option<f32>,
+    pub(in crate::lisp_host) dampening_amount: Option<f32>,
+    pub(in crate::lisp_host) dampening_recovery: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct NeuralWeightEdit {
-    pub(super) from: usize,
-    pub(super) to: usize,
-    pub(super) value: f32,
+pub(in crate::lisp_host) struct NeuralWeightEdit {
+    pub(in crate::lisp_host) from: usize,
+    pub(in crate::lisp_host) to: usize,
+    pub(in crate::lisp_host) value: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct NeuralResetStepEdit {
-    pub(super) track: usize,
-    pub(super) step: usize,
-    pub(super) enabled: bool,
+pub(in crate::lisp_host) struct NeuralResetStepEdit {
+    pub(in crate::lisp_host) track: usize,
+    pub(in crate::lisp_host) step: usize,
+    pub(in crate::lisp_host) enabled: bool,
 }
 
-pub(super) fn parse_neural_network_ref(value: &EValue) -> Result<NeuralNetworkRef, String> {
+pub(in crate::lisp_host) fn parse_neural_network_ref(value: &EValue) -> Result<NeuralNetworkRef, String> {
     match value {
         EValue::Number(id) if id.is_finite() && *id >= 0.0 && id.fract() == 0.0 => {
             Ok(NeuralNetworkRef::Id(*id as u64))
@@ -66,7 +66,7 @@ pub(super) fn parse_neural_network_ref(value: &EValue) -> Result<NeuralNetworkRe
     }
 }
 
-pub(super) fn neural_network_index(
+pub(in crate::lisp_host) fn neural_network_index(
     networks: &[ProjectNeuralNetwork],
     reference: &NeuralNetworkRef,
 ) -> Result<usize, String> {
@@ -91,7 +91,7 @@ pub(super) fn neural_network_index(
     }
 }
 
-pub(super) fn next_neural_network_id(networks: &[ProjectNeuralNetwork]) -> u64 {
+pub(in crate::lisp_host) fn next_neural_network_id(networks: &[ProjectNeuralNetwork]) -> u64 {
     networks
         .iter()
         .map(|network| network.id)
@@ -101,7 +101,7 @@ pub(super) fn next_neural_network_id(networks: &[ProjectNeuralNetwork]) -> u64 {
         .max(1)
 }
 
-pub(super) fn parse_nonnegative_usize(value: &EValue, label: &str) -> Result<usize, String> {
+pub(in crate::lisp_host) fn parse_nonnegative_usize(value: &EValue, label: &str) -> Result<usize, String> {
     match value {
         EValue::Number(value)
             if value.is_finite()
@@ -115,7 +115,7 @@ pub(super) fn parse_nonnegative_usize(value: &EValue, label: &str) -> Result<usi
     }
 }
 
-pub(super) fn parse_positive_neuron_count(value: &EValue) -> Result<usize, String> {
+pub(in crate::lisp_host) fn parse_positive_neuron_count(value: &EValue) -> Result<usize, String> {
     let count = parse_nonnegative_usize(value, "neuron count")?;
     if count == 0 || count > NUM_NEURONS {
         return Err(format!("neuron count must be 1..={NUM_NEURONS}"));
@@ -123,7 +123,7 @@ pub(super) fn parse_positive_neuron_count(value: &EValue) -> Result<usize, Strin
     Ok(count)
 }
 
-pub(super) fn parse_u32_value(value: &EValue, label: &str) -> Result<u32, String> {
+pub(in crate::lisp_host) fn parse_u32_value(value: &EValue, label: &str) -> Result<u32, String> {
     match value {
         EValue::Number(value)
             if value.is_finite()
@@ -137,7 +137,7 @@ pub(super) fn parse_u32_value(value: &EValue, label: &str) -> Result<u32, String
     }
 }
 
-pub(super) fn parse_f32_value(value: &EValue, label: &str) -> Result<f32, String> {
+pub(in crate::lisp_host) fn parse_f32_value(value: &EValue, label: &str) -> Result<f32, String> {
     match value {
         EValue::Number(value)
             if value.is_finite() && *value >= f32::MIN as f64 && *value <= f32::MAX as f64 =>
@@ -148,7 +148,7 @@ pub(super) fn parse_f32_value(value: &EValue, label: &str) -> Result<f32, String
     }
 }
 
-pub(super) fn parse_bool_value(value: &EValue, label: &str) -> Result<bool, String> {
+pub(in crate::lisp_host) fn parse_bool_value(value: &EValue, label: &str) -> Result<bool, String> {
     match value {
         EValue::Bool(value) => Ok(*value),
         EValue::Nil => Ok(false),
@@ -157,11 +157,11 @@ pub(super) fn parse_bool_value(value: &EValue, label: &str) -> Result<bool, Stri
     }
 }
 
-pub(super) fn parse_timebase_value(value: &EValue) -> Result<Timebase, String> {
+pub(in crate::lisp_host) fn parse_timebase_value(value: &EValue) -> Result<Timebase, String> {
     parse_timebase_arg(std::slice::from_ref(value), 0)
 }
 
-pub(super) fn parse_neural_max_poly_selection(value: &EValue) -> Result<NeuralMaxPolySelection, String> {
+pub(in crate::lisp_host) fn parse_neural_max_poly_selection(value: &EValue) -> Result<NeuralMaxPolySelection, String> {
     let name = match value {
         EValue::String(value) | EValue::Keyword(value) | EValue::Symbol(value) => {
             value.trim().trim_start_matches(':').to_ascii_lowercase()
@@ -194,7 +194,7 @@ pub(super) fn parse_neural_max_poly_selection(value: &EValue) -> Result<NeuralMa
     }
 }
 
-pub(super) fn neural_attr_name(value: &EValue) -> Option<String> {
+pub(in crate::lisp_host) fn neural_attr_name(value: &EValue) -> Option<String> {
     match value {
         EValue::Keyword(name) => Some(name.to_ascii_lowercase()),
         EValue::Symbol(name) | EValue::String(name)
@@ -210,7 +210,7 @@ pub(super) fn neural_attr_name(value: &EValue) -> Option<String> {
     }
 }
 
-pub(super) fn parse_neural_create_args(args: &[EValue]) -> Result<NeuralCreateOptions, String> {
+pub(in crate::lisp_host) fn parse_neural_create_args(args: &[EValue]) -> Result<NeuralCreateOptions, String> {
     let mut name: Option<String> = None;
     let mut num_neurons: Option<usize> = None;
     let mut enabled = true;
@@ -256,7 +256,7 @@ pub(super) fn parse_neural_create_args(args: &[EValue]) -> Result<NeuralCreateOp
     })
 }
 
-pub(super) fn parse_neural_set_args(args: &[EValue]) -> Result<NeuralSetEdits, String> {
+pub(in crate::lisp_host) fn parse_neural_set_args(args: &[EValue]) -> Result<NeuralSetEdits, String> {
     let mut edits = NeuralSetEdits::default();
     let mut idx = 0;
     while idx < args.len() {
@@ -290,7 +290,7 @@ pub(super) fn parse_neural_set_args(args: &[EValue]) -> Result<NeuralSetEdits, S
     Ok(edits)
 }
 
-pub(super) fn parse_neural_neuron_args(args: &[EValue]) -> Result<NeuralNeuronEdits, String> {
+pub(in crate::lisp_host) fn parse_neural_neuron_args(args: &[EValue]) -> Result<NeuralNeuronEdits, String> {
     let mut edits = NeuralNeuronEdits::default();
     let mut idx = 0;
     while idx < args.len() {
@@ -330,7 +330,7 @@ pub(super) fn parse_neural_neuron_args(args: &[EValue]) -> Result<NeuralNeuronEd
     Ok(edits)
 }
 
-pub(super) fn parse_neural_weight_args(args: &[EValue]) -> Result<NeuralWeightEdit, String> {
+pub(in crate::lisp_host) fn parse_neural_weight_args(args: &[EValue]) -> Result<NeuralWeightEdit, String> {
     let mut from = None;
     let mut to = None;
     let mut value = None;
@@ -357,7 +357,7 @@ pub(super) fn parse_neural_weight_args(args: &[EValue]) -> Result<NeuralWeightEd
     })
 }
 
-pub(super) fn parse_neural_reset_step_args(args: &[EValue]) -> Result<NeuralResetStepEdit, String> {
+pub(in crate::lisp_host) fn parse_neural_reset_step_args(args: &[EValue]) -> Result<NeuralResetStepEdit, String> {
     if args.len() == 3 && matches!(args[0], EValue::Number(_)) {
         return Ok(NeuralResetStepEdit {
             track: parse_nonnegative_usize(&args[0], "track")?,
@@ -397,7 +397,7 @@ pub(super) fn parse_neural_reset_step_args(args: &[EValue]) -> Result<NeuralRese
     })
 }
 
-pub(super) fn parse_neural_weight_matrix(
+pub(in crate::lisp_host) fn parse_neural_weight_matrix(
     value: &EValue,
     expected_size: usize,
 ) -> Result<Vec<Vec<f32>>, String> {
@@ -430,7 +430,7 @@ pub(super) fn parse_neural_weight_matrix(
     Ok(matrix)
 }
 
-pub(super) fn validate_neural_matrix_shape(matrix: &[Vec<f32>], expected_size: usize) -> Result<(), String> {
+pub(in crate::lisp_host) fn validate_neural_matrix_shape(matrix: &[Vec<f32>], expected_size: usize) -> Result<(), String> {
     if matrix.len() != expected_size {
         return Err(format!(
             "neural weight matrix must have {expected_size} rows"
@@ -444,7 +444,7 @@ pub(super) fn validate_neural_matrix_shape(matrix: &[Vec<f32>], expected_size: u
     Ok(())
 }
 
-pub(super) fn normalize_project_neural_network_shape(
+pub(in crate::lisp_host) fn normalize_project_neural_network_shape(
     network: &mut ProjectNeuralNetwork,
 ) -> Result<(), String> {
     if network.num_neurons == 0 || network.num_neurons > NUM_NEURONS {
@@ -471,7 +471,7 @@ pub(super) fn normalize_project_neural_network_shape(
     Ok(())
 }
 
-pub(super) fn apply_neural_set_edits(
+pub(in crate::lisp_host) fn apply_neural_set_edits(
     network: &mut ProjectNeuralNetwork,
     edits: &NeuralSetEdits,
 ) -> Result<(), String> {
@@ -496,7 +496,7 @@ pub(super) fn apply_neural_set_edits(
     Ok(())
 }
 
-pub(super) fn apply_neural_neuron_edits(
+pub(in crate::lisp_host) fn apply_neural_neuron_edits(
     neuron: &mut ProjectNeuron,
     edits: &NeuralNeuronEdits,
     track_count: usize,
@@ -533,7 +533,7 @@ pub(super) fn apply_neural_neuron_edits(
     Ok(())
 }
 
-pub(super) fn neural_instrument_param_id(
+pub(in crate::lisp_host) fn neural_instrument_param_id(
     state: &crate::sequencer::SequencerState,
     track: usize,
     param_idx: usize,
@@ -554,7 +554,7 @@ pub(super) fn neural_instrument_param_id(
         .ok_or_else(|| "instrument param has no live node identity".to_string())
 }
 
-pub(super) fn neural_effect_param_id(
+pub(in crate::lisp_host) fn neural_effect_param_id(
     state: &crate::sequencer::SequencerState,
     track: usize,
     slot_idx: usize,
@@ -577,7 +577,7 @@ pub(super) fn neural_effect_param_id(
         .ok_or_else(|| "effect param has no live node identity".to_string())
 }
 
-pub(super) fn neural_neuron_mut(
+pub(in crate::lisp_host) fn neural_neuron_mut(
     network: &mut ProjectNeuralNetwork,
     neuron_idx: usize,
 ) -> Result<&mut ProjectNeuron, String> {
@@ -591,7 +591,7 @@ pub(super) fn neural_neuron_mut(
         .ok_or_else(|| "neuron index out of range".to_string())
 }
 
-pub(super) fn upsert_neural_instrument_plock(
+pub(in crate::lisp_host) fn upsert_neural_instrument_plock(
     network: &mut ProjectNeuralNetwork,
     neuron_idx: usize,
     target_track: usize,
@@ -628,7 +628,7 @@ pub(super) fn upsert_neural_instrument_plock(
     Ok(())
 }
 
-pub(super) fn upsert_neural_effect_plock(
+pub(in crate::lisp_host) fn upsert_neural_effect_plock(
     network: &mut ProjectNeuralNetwork,
     neuron_idx: usize,
     target_track: usize,
@@ -666,7 +666,7 @@ pub(super) fn upsert_neural_effect_plock(
     Ok(())
 }
 
-pub(super) fn clear_neural_instrument_plock(
+pub(in crate::lisp_host) fn clear_neural_instrument_plock(
     network: &mut ProjectNeuralNetwork,
     neuron_idx: usize,
     target_track: usize,
@@ -681,7 +681,7 @@ pub(super) fn clear_neural_instrument_plock(
     Ok(neuron.output_overrides.instrument.len() != before)
 }
 
-pub(super) fn clear_neural_effect_plock(
+pub(in crate::lisp_host) fn clear_neural_effect_plock(
     network: &mut ProjectNeuralNetwork,
     neuron_idx: usize,
     target_track: usize,
@@ -877,7 +877,7 @@ pub fn selected_neural_effect_plock_value(
         })
 }
 
-pub(super) fn neural_network_to_value(network: &ProjectNeuralNetwork) -> EValue {
+pub(in crate::lisp_host) fn neural_network_to_value(network: &ProjectNeuralNetwork) -> EValue {
     let mut map: HashMap<String, Rc<RefCell<EValue>>> = HashMap::new();
     map.insert("id".to_string(), lisp_number(network.id as f64));
     map.insert("name".to_string(), lisp_string(network.name.clone()));
@@ -953,7 +953,7 @@ pub fn selected_neural_neurons_to_value(selection: &BTreeSet<SelectedNeuralNeuro
     )
 }
 
-pub(super) fn neural_instrument_overrides_to_value(overrides: &[ProjectParamOverride]) -> EValue {
+pub(in crate::lisp_host) fn neural_instrument_overrides_to_value(overrides: &[ProjectParamOverride]) -> EValue {
     lisp_list(
         overrides
             .iter()
@@ -985,7 +985,7 @@ pub(super) fn neural_instrument_overrides_to_value(overrides: &[ProjectParamOver
     )
 }
 
-pub(super) fn neural_effect_overrides_to_value(overrides: &[ProjectEffectParamOverride]) -> EValue {
+pub(in crate::lisp_host) fn neural_effect_overrides_to_value(overrides: &[ProjectEffectParamOverride]) -> EValue {
     lisp_list(
         overrides
             .iter()
@@ -1021,7 +1021,7 @@ pub(super) fn neural_effect_overrides_to_value(overrides: &[ProjectEffectParamOv
     )
 }
 
-pub(super) fn neural_neuron_to_value(idx: usize, neuron: &ProjectNeuron) -> EValue {
+pub(in crate::lisp_host) fn neural_neuron_to_value(idx: usize, neuron: &ProjectNeuron) -> EValue {
     let mut map: HashMap<String, Rc<RefCell<EValue>>> = HashMap::new();
     map.insert("index".to_string(), lisp_number(idx as f64));
     map.insert(

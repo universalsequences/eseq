@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{
+use super::super::{
     compile_effective_dgen_source_to_dir, dgenlisp_tool_path, effective_dgen_source, load_dylib,
     parse_manifest_with_base, CompileResult,
 };

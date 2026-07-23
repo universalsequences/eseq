@@ -1,10 +1,10 @@
-use super::*;
+use super::super::*;
 use crate::graph::{
     GraphDurationSpec, GraphSwingSpec, LeakSpec, ParamSpec, ShapeSpec, StateSpec, Topology,
 };
 
 /// Clone a list value's items out of their cells, or `None` if not a list.
-pub(super) fn graph_list_items(value: &EValue) -> Option<Vec<EValue>> {
+pub(in crate::lisp_host) fn graph_list_items(value: &EValue) -> Option<Vec<EValue>> {
     match value {
         EValue::List(items) => Some(items.iter().map(|i| i.borrow().clone()).collect()),
         _ => None,
@@ -12,7 +12,7 @@ pub(super) fn graph_list_items(value: &EValue) -> Option<Vec<EValue>> {
 }
 
 /// The lowercased head symbol of a sub-form (`def-node`, `edges`, `grid`, …).
-pub(super) fn graph_head_symbol(items: &[EValue]) -> Option<String> {
+pub(in crate::lisp_host) fn graph_head_symbol(items: &[EValue]) -> Option<String> {
     match items.first() {
         Some(EValue::Symbol(s)) => Some(s.trim_start_matches('@').to_ascii_lowercase()),
         _ => None,
@@ -20,7 +20,7 @@ pub(super) fn graph_head_symbol(items: &[EValue]) -> Option<String> {
 }
 
 /// Normalize a keyword/symbol/string to a bare lowercase key (no leading `:`/`@`).
-pub(super) fn graph_keyword(value: &EValue) -> Option<String> {
+pub(in crate::lisp_host) fn graph_keyword(value: &EValue) -> Option<String> {
     match value {
         EValue::Keyword(k) | EValue::Symbol(k) | EValue::String(k) => Some(
             k.trim_start_matches('@')
@@ -31,26 +31,26 @@ pub(super) fn graph_keyword(value: &EValue) -> Option<String> {
     }
 }
 
-pub(super) fn graph_number(value: &EValue) -> Option<f64> {
+pub(in crate::lisp_host) fn graph_number(value: &EValue) -> Option<f64> {
     match value {
         EValue::Number(n) => Some(*n),
         _ => None,
     }
 }
 
-pub(super) fn graph_symbol_string(value: &EValue) -> String {
+pub(in crate::lisp_host) fn graph_symbol_string(value: &EValue) -> String {
     match value {
         EValue::Symbol(s) | EValue::String(s) | EValue::Keyword(s) => s.clone(),
         _ => String::new(),
     }
 }
 
-pub(super) fn graph_timebase(value: &EValue) -> Result<Timebase, String> {
+pub(in crate::lisp_host) fn graph_timebase(value: &EValue) -> Result<Timebase, String> {
     parse_timebase_arg(std::slice::from_ref(value), 0)
 }
 
 /// `(bars 4)` → beats (assumes 4/4), `(beats 2)` → beats, bare number → beats.
-pub(super) fn graph_bars_or_beats(value: &EValue) -> f64 {
+pub(in crate::lisp_host) fn graph_bars_or_beats(value: &EValue) -> f64 {
     if let Some(items) = graph_list_items(value) {
         let n = items.get(1).and_then(graph_number).unwrap_or(0.0);
         match graph_head_symbol(&items).as_deref() {
@@ -62,7 +62,7 @@ pub(super) fn graph_bars_or_beats(value: &EValue) -> f64 {
     graph_number(value).unwrap_or(0.0)
 }
 
-pub(super) fn graph_parse_duration_spec(value: &EValue) -> Result<GraphDurationSpec, String> {
+pub(in crate::lisp_host) fn graph_parse_duration_spec(value: &EValue) -> Result<GraphDurationSpec, String> {
     if let Some(n) = graph_number(value) {
         return Ok(GraphDurationSpec::Beats { value: n.max(0.0) });
     }
@@ -172,7 +172,7 @@ pub(super) fn graph_parse_duration_spec(value: &EValue) -> Result<GraphDurationS
     }
 }
 
-pub(super) fn graph_swing_resolution(value: &EValue) -> Result<u8, String> {
+pub(in crate::lisp_host) fn graph_swing_resolution(value: &EValue) -> Result<u8, String> {
     let label = match value {
         EValue::Keyword(s) | EValue::Symbol(s) | EValue::String(s) => {
             s.trim_start_matches(':').to_ascii_lowercase()
@@ -192,7 +192,7 @@ pub(super) fn graph_swing_resolution(value: &EValue) -> Result<u8, String> {
     }
 }
 
-pub(super) fn graph_swing_value(amount: f64, resolution: u8) -> EValue {
+pub(in crate::lisp_host) fn graph_swing_value(amount: f64, resolution: u8) -> EValue {
     lisp_list(vec![
         EValue::Symbol("swing".to_string()),
         EValue::Number(amount.clamp(50.0, 75.0)),
@@ -200,7 +200,7 @@ pub(super) fn graph_swing_value(amount: f64, resolution: u8) -> EValue {
     ])
 }
 
-pub(super) fn graph_swing_value_from_args(args: &[EValue]) -> Result<EValue, String> {
+pub(in crate::lisp_host) fn graph_swing_value_from_args(args: &[EValue]) -> Result<EValue, String> {
     if !(1..=2).contains(&args.len()) {
         return Err("swing expects (swing pct [:16|:8|:4|:2])".to_string());
     }
@@ -212,7 +212,7 @@ pub(super) fn graph_swing_value_from_args(args: &[EValue]) -> Result<EValue, Str
     Ok(graph_swing_value(amount, resolution))
 }
 
-pub(super) fn graph_parse_swing_spec(value: &EValue) -> Result<GraphSwingSpec, String> {
+pub(in crate::lisp_host) fn graph_parse_swing_spec(value: &EValue) -> Result<GraphSwingSpec, String> {
     if let Some(n) = graph_number(value) {
         return Ok(GraphSwingSpec::new(n as f32, 0));
     }
@@ -238,7 +238,7 @@ pub(super) fn graph_parse_swing_spec(value: &EValue) -> Result<GraphSwingSpec, S
 }
 
 /// `(name :float min max :default d)` / `(name :int min max :default d)`.
-pub(super) fn graph_parse_param(items: &[EValue]) -> Option<ParamSpec> {
+pub(in crate::lisp_host) fn graph_parse_param(items: &[EValue]) -> Option<ParamSpec> {
     let name = match items.first()? {
         EValue::Symbol(s) | EValue::String(s) => s.clone(),
         _ => return None,
@@ -274,7 +274,7 @@ pub(super) fn graph_parse_param(items: &[EValue]) -> Option<ParamSpec> {
     })
 }
 
-pub(super) fn graph_parse_param_list(value: &EValue) -> Vec<ParamSpec> {
+pub(in crate::lisp_host) fn graph_parse_param_list(value: &EValue) -> Vec<ParamSpec> {
     graph_list_items(value)
         .unwrap_or_default()
         .iter()
@@ -284,7 +284,7 @@ pub(super) fn graph_parse_param_list(value: &EValue) -> Vec<ParamSpec> {
 }
 
 /// `(per-step :energy-decay)` or `(per-step 0.9)`.
-pub(super) fn graph_parse_leak(value: &EValue) -> Option<LeakSpec> {
+pub(in crate::lisp_host) fn graph_parse_leak(value: &EValue) -> Option<LeakSpec> {
     let items = graph_list_items(value)?;
     if graph_head_symbol(&items).as_deref() != Some("per-step") {
         return None;
@@ -299,7 +299,7 @@ pub(super) fn graph_parse_leak(value: &EValue) -> Option<LeakSpec> {
 }
 
 /// `(energy :leak (per-step :energy-decay))`.
-pub(super) fn graph_parse_state(items: &[EValue]) -> Option<StateSpec> {
+pub(in crate::lisp_host) fn graph_parse_state(items: &[EValue]) -> Option<StateSpec> {
     let name = match items.first()? {
         EValue::Symbol(s) | EValue::String(s) => s.clone(),
         _ => return None,
@@ -318,7 +318,7 @@ pub(super) fn graph_parse_state(items: &[EValue]) -> Option<StateSpec> {
     Some(StateSpec { name, leak })
 }
 
-pub(super) fn graph_parse_state_list(value: &EValue) -> Vec<StateSpec> {
+pub(in crate::lisp_host) fn graph_parse_state_list(value: &EValue) -> Vec<StateSpec> {
     graph_list_items(value)
         .unwrap_or_default()
         .iter()
@@ -393,7 +393,7 @@ fn graph_parse_line_shape(items: &[EValue]) -> Result<ShapeSpec, String> {
     Ok(ShapeSpec::VariableLine { default, min, max })
 }
 
-pub(super) fn graph_parse_shape(value: &EValue) -> Result<ShapeSpec, String> {
+pub(in crate::lisp_host) fn graph_parse_shape(value: &EValue) -> Result<ShapeSpec, String> {
     let items =
         graph_list_items(value).ok_or_else(|| ":shape expects a generator form".to_string())?;
     let n = |idx: usize| {
@@ -413,7 +413,7 @@ pub(super) fn graph_parse_shape(value: &EValue) -> Result<ShapeSpec, String> {
     }
 }
 
-pub(super) fn graph_parse_topology(value: &EValue) -> Result<Topology, String> {
+pub(in crate::lisp_host) fn graph_parse_topology(value: &EValue) -> Result<Topology, String> {
     let items =
         graph_list_items(value).ok_or_else(|| ":topology expects a generator form".to_string())?;
     match graph_head_symbol(&items).as_deref() {
@@ -425,7 +425,7 @@ pub(super) fn graph_parse_topology(value: &EValue) -> Result<Topology, String> {
     }
 }
 
-pub(super) fn graph_edge_distribution(
+pub(in crate::lisp_host) fn graph_edge_distribution(
     value: &EValue,
 ) -> Result<crate::graph::EdgeDistribution, String> {
     match graph_keyword(value).as_deref() {

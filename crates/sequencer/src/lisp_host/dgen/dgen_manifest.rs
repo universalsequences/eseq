@@ -1,4 +1,4 @@
-use super::*;
+use super::super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EffectGraphNodeIds {
@@ -400,18 +400,18 @@ pub fn effect_has_host_modulation(manifest: &DGenManifest) -> bool {
     !manifest.mod_destinations.is_empty()
 }
 
-pub(super) fn normalized_dgen_name(name: &str) -> String {
+pub(in crate::lisp_host) fn normalized_dgen_name(name: &str) -> String {
     name.chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
         .flat_map(|ch| ch.to_lowercase())
         .collect()
 }
 
-pub(super) fn is_named_sidechain_input(name: &str) -> bool {
+pub(in crate::lisp_host) fn is_named_sidechain_input(name: &str) -> bool {
     normalized_dgen_name(name).starts_with("sidechain")
 }
 
-pub(super) fn sidechain_control_name(name: &str) -> String {
+pub(in crate::lisp_host) fn sidechain_control_name(name: &str) -> String {
     if is_named_sidechain_input(name) || name.trim().is_empty() {
         "sidechain".to_string()
     } else {
@@ -472,7 +472,7 @@ pub fn append_effect_host_modulation_controls(
     append_dgen_modulation_target_params(desc, manifest);
 }
 
-pub(super) fn append_dgen_modulator_descriptors(
+pub(in crate::lisp_host) fn append_dgen_modulator_descriptors(
     desc: &mut crate::effects::EffectDescriptor,
     manifest: &DGenManifest,
 ) {
@@ -487,7 +487,7 @@ pub(super) fn append_dgen_modulator_descriptors(
         .collect();
 }
 
-pub(super) fn append_dgen_modulation_target_params(
+pub(in crate::lisp_host) fn append_dgen_modulation_target_params(
     desc: &mut crate::effects::EffectDescriptor,
     manifest: &DGenManifest,
 ) {
@@ -626,7 +626,7 @@ pub fn load_dylib(path: &Path) -> Result<LoadedDGenLib, String> {
 /// [slot_id, total_memory_slots, canary, declared_input_count, enabled,
 ///  process_fn_chunk0..3, num_entries, idx0, val0, ...]
 /// The engine zeroes state; init only needs to set non-zero values.
-pub(super) fn build_init_message(
+pub(in crate::lisp_host) fn build_init_message(
     slot_id: usize,
     manifest: &DGenManifest,
     process_fn: Option<DGenProcessFn>,

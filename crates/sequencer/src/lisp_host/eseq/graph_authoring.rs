@@ -1,5 +1,5 @@
 use super::graph_dsl::*;
-use super::*;
+use super::super::*;
 
 pub fn register_graph_authoring_natives(
     runtime: &mut Runtime,

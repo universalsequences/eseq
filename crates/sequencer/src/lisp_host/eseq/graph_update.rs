@@ -1,5 +1,5 @@
 use super::graph_dsl::{graph_keyword, graph_parse_swing_spec, graph_swing_value_from_args};
-use super::*;
+use super::super::*;
 
 pub(crate) type SharedGraphNodeContext = Arc<Mutex<Option<GraphNodeContext>>>;
 
@@ -25,9 +25,9 @@ pub(crate) struct GraphNodeContext {
     reset_graph_state: bool,
 }
 
-pub(super) struct CompiledGraphUpdate {
-    pub(super) source: String,
-    pub(super) callback: EValue,
+pub(in crate::lisp_host) struct CompiledGraphUpdate {
+    pub(in crate::lisp_host) source: String,
+    pub(in crate::lisp_host) callback: EValue,
 }
 
 impl ScratchControlRuntime {
@@ -181,7 +181,7 @@ fn parse_emit_spec(value: &EValue) -> Option<crate::graph::EmitSpec> {
     })
 }
 
-pub(super) fn build_graph_emit_value(args: &[EValue]) -> Result<EValue, String> {
+pub(in crate::lisp_host) fn build_graph_emit_value(args: &[EValue]) -> Result<EValue, String> {
     let mut map: HashMap<String, std::rc::Rc<std::cell::RefCell<EValue>>> = HashMap::new();
     map.insert(
         EMIT_MARKER.to_string(),
@@ -249,7 +249,7 @@ fn graph_emit_key(value: Option<&EValue>) -> Option<String> {
 /// Register the `node-*` accessors a graph-mode `:update` reads. They read the
 /// currently-bound [`GraphNodeContext`] (set by `invoke_graph_update`) and ignore
 /// their `self` argument (the context is ambient, like the `gen-*` builtins).
-pub(super) fn register_graph_node_natives(
+pub(in crate::lisp_host) fn register_graph_node_natives(
     runtime: &mut Runtime,
     graph_node: SharedGraphNodeContext,
 ) {

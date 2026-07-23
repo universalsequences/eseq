@@ -1,4 +1,4 @@
-use super::*;
+use super::super::*;
 
 pub struct CompileResult {
     pub manifest: DGenManifest,
@@ -109,8 +109,8 @@ pub fn compile_and_load_uncached_with_asset_base(
 
 // ── Effect library storage ──
 
-pub(super) const EFFECTS_DIR: &str = "effects";
-pub(super) const INSTRUMENTS_DIR: &str = "instruments";
+pub(in crate::lisp_host) const EFFECTS_DIR: &str = "effects";
+pub(in crate::lisp_host) const INSTRUMENTS_DIR: &str = "instruments";
 
 pub fn save_effect(name: &str, source: &str) -> io::Result<()> {
     let path = effect_source_path(name);
@@ -328,7 +328,7 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
 
 // ── Parse manifest ──
 
-pub(super) fn parse_dgen_param_span(param: &serde_json::Value) -> usize {
+pub(in crate::lisp_host) fn parse_dgen_param_span(param: &serde_json::Value) -> usize {
     const DEFAULT_DGEN_PARAM_SPAN: usize = 1;
     const MAX_DGEN_PARAM_SPAN: usize = 64;
 

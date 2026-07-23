@@ -26,50 +26,41 @@ use crate::sequencer::{
     CustomInstrumentRunMode, PublishedSequencer, StepParam, StepSnapshot, Timebase,
 };
 
-pub mod dylib_cache;
-mod graph_authoring;
-mod graph_dsl;
-mod graph_manifest;
-mod graph_update;
+mod dgen;
+mod eseq;
 
-pub use dylib_cache::{DGenCompileKind, DGenSourceOrigin, DylibLease};
-pub use graph_authoring::register_graph_authoring_natives;
-pub use graph_manifest::{graph_mode_present, parse_graph_manifest};
-use graph_update::{CompiledGraphUpdate, SharedGraphNodeContext};
-
-mod dgen_ffi;
-mod dgen_manifest;
+// Shared plumbing used by both language sides stays at the lisp_host root.
 mod editor_flow;
-mod effect_compile;
-mod effect_chain_graph;
-mod instrument_compile;
-mod instrument_storage;
-mod midi_fx;
 mod native_arg_parsing;
-mod neural_natives;
-mod process_dsl_parse;
-mod process_natives;
-mod scratch_runtime;
-mod sequencer_natives;
 mod shared_state;
 mod value_helpers;
 
-pub use dgen_ffi::*;
+// -- dgenlisp: DSP-compile pipeline (source -> dgen -> dylib -> engine node) --
+pub use dgen::dylib_cache; // module path compat: `lisp_host::dylib_cache::`
+pub use dgen::dylib_cache::{DGenCompileKind, DGenSourceOrigin, DylibLease};
+pub use dgen::dgen_ffi::*;
 #[cfg(test)]
-use dgen_ffi::dgenlisp_wrapper_process;
-pub use dgen_manifest::*;
+use dgen::dgen_ffi::dgenlisp_wrapper_process;
+pub use dgen::dgen_manifest::*;
+pub use dgen::effect_compile::*;
+pub use dgen::effect_chain_graph::*;
+pub use dgen::instrument_compile::*;
+pub use dgen::instrument_storage::*;
+
+// -- eseqlisp: live-coding / sequencing natives --
+pub use eseq::graph_authoring::register_graph_authoring_natives;
+pub use eseq::graph_manifest::{graph_mode_present, parse_graph_manifest};
+use eseq::graph_update; // qualified `graph_update::` calls in shared_state/process_natives
+use eseq::graph_update::{CompiledGraphUpdate, SharedGraphNodeContext};
+use eseq::midi_fx::*;
+pub use eseq::neural_natives::*;
+use eseq::process_dsl_parse::*;
+pub use eseq::process_natives::*;
+pub use eseq::scratch_runtime::*;
+pub use eseq::sequencer_natives::*;
+
 pub use editor_flow::*;
-pub use effect_compile::*;
-pub use effect_chain_graph::*;
-pub use instrument_compile::*;
-pub use instrument_storage::*;
-use midi_fx::*;
 use native_arg_parsing::*;
-pub use neural_natives::*;
-use process_dsl_parse::*;
-pub use process_natives::*;
-pub use scratch_runtime::*;
-pub use sequencer_natives::*;
 pub use shared_state::*;
 use value_helpers::*;
 

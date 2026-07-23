@@ -1,4 +1,4 @@
-use super::*;
+use super::super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectChainSuccessor {
@@ -56,7 +56,7 @@ pub unsafe fn remove_effect_modulator(lg: *mut LiveGraph, modulator_node_id: i32
     }
 }
 
-pub(super) unsafe fn disconnect_direct_chain(
+pub(in crate::lisp_host) unsafe fn disconnect_direct_chain(
     lg: *mut LiveGraph,
     predecessor_id: i32,
     successor: EffectChainSuccessor,
@@ -76,7 +76,7 @@ pub(super) unsafe fn disconnect_direct_chain(
     }
 }
 
-pub(super) unsafe fn connect_effect_port(
+pub(in crate::lisp_host) unsafe fn connect_effect_port(
     lg: *mut LiveGraph,
     src_node: i32,
     src_port: i32,
@@ -93,7 +93,7 @@ pub(super) unsafe fn connect_effect_port(
     }
 }
 
-pub(super) unsafe fn connect_effect_chain(
+pub(in crate::lisp_host) unsafe fn connect_effect_chain(
     lg: *mut LiveGraph,
     predecessor_id: i32,
     predecessor_outputs: usize,

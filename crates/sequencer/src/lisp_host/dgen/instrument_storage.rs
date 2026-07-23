@@ -1,4 +1,4 @@
-use super::*;
+use super::super::*;
 use crate::sequencer::MAX_INSTRUMENT_ENGINES;
 use crate::voice::MAX_VOICES;
 
@@ -13,20 +13,20 @@ pub struct InstrumentPreset {
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct InstrumentMetadataFile {
+pub(in crate::lisp_host) struct InstrumentMetadataFile {
     version: u32,
     run_mode: String,
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct InstrumentPresetBank {
+pub(in crate::lisp_host) struct InstrumentPresetBank {
     version: u32,
     engine_name: String,
     source_file: String,
     presets: Vec<InstrumentPreset>,
 }
 
-pub(super) fn resolve_instrument_storage_path(name: &str, extension: &str) -> io::Result<PathBuf> {
+pub(in crate::lisp_host) fn resolve_instrument_storage_path(name: &str, extension: &str) -> io::Result<PathBuf> {
     fn is_hidden(path: &Path) -> bool {
         path.file_name()
             .and_then(|name| name.to_str())
@@ -95,7 +95,7 @@ pub(super) fn resolve_instrument_storage_path(name: &str, extension: &str) -> io
     }
 }
 
-pub(super) fn collect_folder_source_matches(dir: &Path, folder_name: &str, out: &mut Vec<PathBuf>) {
+pub(in crate::lisp_host) fn collect_folder_source_matches(dir: &Path, folder_name: &str, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -118,7 +118,7 @@ pub(super) fn collect_folder_source_matches(dir: &Path, folder_name: &str, out: 
     }
 }
 
-pub(super) fn resolve_instrument_folder_path(name: &str) -> io::Result<PathBuf> {
+pub(in crate::lisp_host) fn resolve_instrument_folder_path(name: &str) -> io::Result<PathBuf> {
     let source = resolve_instrument_storage_path(name, "lisp")?;
     if source.file_name().and_then(|file| file.to_str()) == Some("dsp.lisp") {
         source.parent().map(Path::to_path_buf).ok_or_else(|| {
@@ -136,7 +136,7 @@ pub fn instrument_source_path(name: &str) -> io::Result<PathBuf> {
     resolve_instrument_storage_path(name, "lisp")
 }
 
-pub(super) fn instrument_metadata_path_for_source_path(source: &Path) -> io::Result<PathBuf> {
+pub(in crate::lisp_host) fn instrument_metadata_path_for_source_path(source: &Path) -> io::Result<PathBuf> {
     if source.file_name().and_then(|file| file.to_str()) == Some("dsp.lisp") {
         source
             .parent()
@@ -204,7 +204,7 @@ pub fn save_instrument_run_mode(name: &str, run_mode: CustomInstrumentRunMode) -
     std::fs::write(path, format!("{json}\n"))
 }
 
-pub(super) fn instrument_name_from_source_path(path: &Path) -> Option<String> {
+pub(in crate::lisp_host) fn instrument_name_from_source_path(path: &Path) -> Option<String> {
     if path.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
         if let Some(parent) = path.parent() {
             if let Ok(rel) = parent.strip_prefix(INSTRUMENTS_DIR) {
@@ -220,7 +220,7 @@ pub(super) fn instrument_name_from_source_path(path: &Path) -> Option<String> {
         .map(|stem| stem.to_string_lossy().to_string())
 }
 
-pub(super) fn source_name_from_path(kind: &CompileKind, path: &Path) -> Option<String> {
+pub(in crate::lisp_host) fn source_name_from_path(kind: &CompileKind, path: &Path) -> Option<String> {
     match kind {
         CompileKind::Instrument => instrument_name_from_source_path(path),
         CompileKind::Effect => {
@@ -236,7 +236,7 @@ pub(super) fn source_name_from_path(kind: &CompileKind, path: &Path) -> Option<S
     }
 }
 
-pub(super) fn instrument_preset_path(name: &str) -> io::Result<PathBuf> {
+pub(in crate::lisp_host) fn instrument_preset_path(name: &str) -> io::Result<PathBuf> {
     resolve_instrument_storage_path(name, "presets")
 }
 
@@ -277,24 +277,24 @@ pub fn save_instrument_presets(name: &str, presets: &[InstrumentPreset]) -> io::
     std::fs::write(path, json)
 }
 
-pub(super) const INSTRUMENT_REGISTRY_SIZE: usize = MAX_INSTRUMENT_ENGINES * MAX_VOICES;
-pub(super) static DGEN_INSTRUMENT_FNS: [AtomicUsize; INSTRUMENT_REGISTRY_SIZE] = {
+pub(in crate::lisp_host) const INSTRUMENT_REGISTRY_SIZE: usize = MAX_INSTRUMENT_ENGINES * MAX_VOICES;
+pub(in crate::lisp_host) static DGEN_INSTRUMENT_FNS: [AtomicUsize; INSTRUMENT_REGISTRY_SIZE] = {
     const INIT: AtomicUsize = AtomicUsize::new(0);
     [INIT; INSTRUMENT_REGISTRY_SIZE]
 };
-pub(super) static DGEN_INSTRUMENT_OUTPUT_COUNTS: [AtomicUsize; INSTRUMENT_REGISTRY_SIZE] = {
+pub(in crate::lisp_host) static DGEN_INSTRUMENT_OUTPUT_COUNTS: [AtomicUsize; INSTRUMENT_REGISTRY_SIZE] = {
     const INIT: AtomicUsize = AtomicUsize::new(1);
     [INIT; INSTRUMENT_REGISTRY_SIZE]
 };
-pub(super) static DGEN_ENGINE_ENABLED_VOICES: [AtomicUsize; MAX_INSTRUMENT_ENGINES] = {
+pub(in crate::lisp_host) static DGEN_ENGINE_ENABLED_VOICES: [AtomicUsize; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicUsize = AtomicUsize::new(1);
     [INIT; MAX_INSTRUMENT_ENGINES]
 };
-pub(super) static DGEN_ENGINE_PROCESS_CALLS: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
+pub(in crate::lisp_host) static DGEN_ENGINE_PROCESS_CALLS: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
     [INIT; MAX_INSTRUMENT_ENGINES]
 };
-pub(super) static DGEN_ENGINE_PROCESS_BLOCKS: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
+pub(in crate::lisp_host) static DGEN_ENGINE_PROCESS_BLOCKS: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
     [INIT; MAX_INSTRUMENT_ENGINES]
 };
@@ -607,7 +607,7 @@ pub fn list_saved_instruments() -> Vec<String> {
     names
 }
 
-pub(super) fn validate_instrument_relative_dir(path: &str) -> io::Result<PathBuf> {
+pub(in crate::lisp_host) fn validate_instrument_relative_dir(path: &str) -> io::Result<PathBuf> {
     let trimmed = path.trim().trim_matches('/');
     let mut relative = PathBuf::new();
     if trimmed.is_empty() {

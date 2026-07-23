@@ -1,34 +1,34 @@
-use super::*;
+use super::super::*;
 
 /// Monotonic counter so each compile produces a unique dylib filename,
 /// preventing dlopen from returning a stale cached handle.
-pub(super) static COMPILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+pub(in crate::lisp_host) static COMPILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-pub(super) static MIDI_FX_DESCRIPTOR_CACHE: OnceLock<Mutex<HashMap<String, Vec<EffectDescriptor>>>> =
+pub(in crate::lisp_host) static MIDI_FX_DESCRIPTOR_CACHE: OnceLock<Mutex<HashMap<String, Vec<EffectDescriptor>>>> =
     OnceLock::new();
 
-pub(super) fn read_eseqlisp_init_source() -> String {
+pub(in crate::lisp_host) fn read_eseqlisp_init_source() -> String {
     eseqlisp_init_candidates()
         .into_iter()
         .find_map(|path| std::fs::read_to_string(path).ok())
         .unwrap_or_default()
 }
 
-pub(super) fn eseqlisp_init_candidates() -> Vec<PathBuf> {
+pub(in crate::lisp_host) fn eseqlisp_init_candidates() -> Vec<PathBuf> {
     crate::paths::eseqlisp_init_candidates()
 }
 
 // ── dlopen FFI (macOS) ──
 
 extern "C" {
-    pub(super) fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
-    pub(super) fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    pub(super) fn dlerror() -> *const c_char;
+    pub(in crate::lisp_host) fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
+    pub(in crate::lisp_host) fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    pub(in crate::lisp_host) fn dlerror() -> *const c_char;
 }
 
-pub(super) const RTLD_NOW: c_int = 2;
+pub(in crate::lisp_host) const RTLD_NOW: c_int = 2;
 
-pub(super) type DGenProcessFn = unsafe extern "C" fn(
+pub(in crate::lisp_host) type DGenProcessFn = unsafe extern "C" fn(
     inputs: *const *mut f32,
     outputs: *const *mut f32,
     frame_count: c_int,
@@ -54,13 +54,13 @@ pub const MAX_BUS_FX_CHAINS: usize = 64;
 
 pub const DGEN_ENABLED_PARAM_IDX: usize = 4;
 pub const DGEN_HOST_SAMPLE_RATE_IDX: usize = 5;
-pub(super) const DGEN_PROCESS_FN_START_IDX: usize = 6;
-pub(super) const DGEN_PROCESS_FN_CHUNKS: usize = 4;
+pub(in crate::lisp_host) const DGEN_PROCESS_FN_START_IDX: usize = 6;
+pub(in crate::lisp_host) const DGEN_PROCESS_FN_CHUNKS: usize = 4;
 pub const HEADER_SLOTS: usize = 10;
 pub const DGEN_STATE_REDZONE_SLOTS: usize = 256;
-pub(super) const HEADER_CANARY: f32 = f32::from_bits(0x4cd35a1d);
+pub(in crate::lisp_host) const HEADER_CANARY: f32 = f32::from_bits(0x4cd35a1d);
 
-pub(super) fn ensure_enabled_param(params: &mut Vec<crate::effects::ParamDescriptor>) {
+pub(in crate::lisp_host) fn ensure_enabled_param(params: &mut Vec<crate::effects::ParamDescriptor>) {
     if params
         .iter()
         .any(|param| param.name.eq_ignore_ascii_case("enabled"))
@@ -78,15 +78,15 @@ pub fn dgen_total_state_slots(total_memory_slots: usize) -> usize {
     HEADER_SLOTS + dgen_buffer_span_slots(total_memory_slots) * 2
 }
 
-pub(super) unsafe fn dgen_read_buffer_ptr(state: *mut f32) -> *mut f32 {
+pub(in crate::lisp_host) unsafe fn dgen_read_buffer_ptr(state: *mut f32) -> *mut f32 {
     state.add(HEADER_SLOTS)
 }
 
-pub(super) unsafe fn dgen_write_buffer_ptr(state: *mut f32, total_memory_slots: usize) -> *mut f32 {
+pub(in crate::lisp_host) unsafe fn dgen_write_buffer_ptr(state: *mut f32, total_memory_slots: usize) -> *mut f32 {
     state.add(HEADER_SLOTS + dgen_buffer_span_slots(total_memory_slots))
 }
 
-pub(super) unsafe fn dgen_host_sample_rate(state: *mut f32) -> f32 {
+pub(in crate::lisp_host) unsafe fn dgen_host_sample_rate(state: *mut f32) -> f32 {
     let sample_rate = *state.add(DGEN_HOST_SAMPLE_RATE_IDX);
     if sample_rate.is_finite() && sample_rate > 0.0 {
         sample_rate
@@ -95,12 +95,12 @@ pub(super) unsafe fn dgen_host_sample_rate(state: *mut f32) -> f32 {
     }
 }
 
-pub(super) fn process_fn_pointer_chunks(process_fn: DGenProcessFn) -> [f32; DGEN_PROCESS_FN_CHUNKS] {
+pub(in crate::lisp_host) fn process_fn_pointer_chunks(process_fn: DGenProcessFn) -> [f32; DGEN_PROCESS_FN_CHUNKS] {
     let pointer = process_fn as usize as u64;
     std::array::from_fn(|chunk| ((pointer >> (chunk * 16)) & 0xffff) as f32)
 }
 
-pub(super) unsafe fn dgen_process_fn_from_state(state: *mut f32) -> Option<DGenProcessFn> {
+pub(in crate::lisp_host) unsafe fn dgen_process_fn_from_state(state: *mut f32) -> Option<DGenProcessFn> {
     let mut pointer = 0u64;
     for chunk in 0..DGEN_PROCESS_FN_CHUNKS {
         let value = *state.add(DGEN_PROCESS_FN_START_IDX + chunk);
@@ -112,7 +112,7 @@ pub(super) unsafe fn dgen_process_fn_from_state(state: *mut f32) -> Option<DGenP
     (pointer != 0).then(|| std::mem::transmute::<usize, DGenProcessFn>(pointer as usize))
 }
 
-pub(super) unsafe extern "C" fn dgenlisp_wrapper_process(
+pub(in crate::lisp_host) unsafe extern "C" fn dgenlisp_wrapper_process(
     inp: *const *mut f32,
     out: *const *mut f32,
     nframes: c_int,
@@ -174,7 +174,7 @@ pub(super) unsafe extern "C" fn dgenlisp_wrapper_process(
 ///   [5..9] = process function pointer (four numeric u16 chunks)
 ///   [9] = num_entries (N)
 ///   [10..10+2N] = pairs of (index, value)
-pub(super) unsafe extern "C" fn dgenlisp_init(
+pub(in crate::lisp_host) unsafe extern "C" fn dgenlisp_init(
     state: *mut c_void,
     sample_rate: c_int,
     _max_block: c_int,
@@ -240,7 +240,7 @@ pub unsafe fn queue_dgen_host_sample_rate_update(
     audiograph::write_node_state(lg, node_id, DGEN_HOST_SAMPLE_RATE_IDX, &value, 1)
 }
 
-pub(super) fn dgenlisp_vtable() -> NodeVTable {
+pub(in crate::lisp_host) fn dgenlisp_vtable() -> NodeVTable {
     NodeVTable {
         process: Some(dgenlisp_wrapper_process),
         init: Some(dgenlisp_init),

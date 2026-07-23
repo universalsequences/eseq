@@ -1,6 +1,6 @@
-use super::*;
+use super::super::*;
 
-pub(super) fn process_symbol_name(value: &EValue) -> Result<String, String> {
+pub(in crate::lisp_host) fn process_symbol_name(value: &EValue) -> Result<String, String> {
     match value {
         EValue::String(name) | EValue::Symbol(name) | EValue::Keyword(name) => Ok(name
             .trim_start_matches(':')
@@ -9,18 +9,18 @@ pub(super) fn process_symbol_name(value: &EValue) -> Result<String, String> {
         _ => Err("expected symbol/string name".to_string()),
     }
 }
-pub(super) fn process_key_arg(value: Option<&EValue>, native: &str) -> Result<String, String> {
+pub(in crate::lisp_host) fn process_key_arg(value: Option<&EValue>, native: &str) -> Result<String, String> {
     process_symbol_name(value.ok_or_else(|| format!("{native} expects a key"))?)
 }
 
-pub(super) fn process_number_arg(value: Option<&EValue>, native: &str) -> Result<f64, String> {
+pub(in crate::lisp_host) fn process_number_arg(value: Option<&EValue>, native: &str) -> Result<f64, String> {
     match value {
         Some(EValue::Number(value)) => Ok(*value),
         _ => Err(format!("{native} expects a number")),
     }
 }
 
-pub(super) fn process_field_domain(value: &EValue) -> Result<String, String> {
+pub(in crate::lisp_host) fn process_field_domain(value: &EValue) -> Result<String, String> {
     let EValue::Map(map) = value else {
         return Err("expected a typed field value".to_string());
     };
@@ -31,7 +31,7 @@ pub(super) fn process_field_domain(value: &EValue) -> Result<String, String> {
     process_symbol_name(&domain)
 }
 
-pub(super) fn process_field_cell(value: &EValue, key: &str) -> Result<EValue, String> {
+pub(in crate::lisp_host) fn process_field_cell(value: &EValue, key: &str) -> Result<EValue, String> {
     let EValue::Map(map) = value else {
         return Err("expected a typed field value".to_string());
     };
@@ -40,7 +40,7 @@ pub(super) fn process_field_cell(value: &EValue, key: &str) -> Result<EValue, St
         .ok_or_else(|| format!("field value is missing {key}"))
 }
 
-pub(super) fn process_scalar_field(value: f64) -> Result<EValue, String> {
+pub(in crate::lisp_host) fn process_scalar_field(value: f64) -> Result<EValue, String> {
     if !value.is_finite() {
         return Err("scalar field value must be finite".to_string());
     }
@@ -50,14 +50,14 @@ pub(super) fn process_scalar_field(value: f64) -> Result<EValue, String> {
     ]))
 }
 
-pub(super) fn process_gate_field(value: bool) -> EValue {
+pub(in crate::lisp_host) fn process_gate_field(value: bool) -> EValue {
     process_map([
         ("field-domain", EValue::Keyword("gate".to_string())),
         ("value", EValue::Bool(value)),
     ])
 }
 
-pub(super) fn normalize_process_field(value: &EValue) -> Result<EValue, String> {
+pub(in crate::lisp_host) fn normalize_process_field(value: &EValue) -> Result<EValue, String> {
     match value {
         EValue::Number(value) => process_scalar_field(*value),
         EValue::Bool(value) => Ok(process_gate_field(*value)),
@@ -101,7 +101,7 @@ pub(super) fn normalize_process_field(value: &EValue) -> Result<EValue, String> 
     }
 }
 
-pub(super) fn process_target_write_args(
+pub(in crate::lisp_host) fn process_target_write_args(
     args: &[EValue],
     native: &str,
 ) -> Result<(Option<String>, f32), String> {
@@ -112,7 +112,7 @@ pub(super) fn process_target_write_args(
     }
 }
 
-pub(super) fn ensure_process_run_scope(ctx: &ProcessEvalContext, native: &str) -> Result<(), String> {
+pub(in crate::lisp_host) fn ensure_process_run_scope(ctx: &ProcessEvalContext, native: &str) -> Result<(), String> {
     if ctx.scope == ProcessEvalScope::Run {
         Ok(())
     } else {
@@ -122,7 +122,7 @@ pub(super) fn ensure_process_run_scope(ctx: &ProcessEvalContext, native: &str) -
     }
 }
 
-pub(super) fn process_value_is_callable(value: &EValue) -> bool {
+pub(in crate::lisp_host) fn process_value_is_callable(value: &EValue) -> bool {
     matches!(
         value,
         EValue::Closure(_, _)
@@ -132,7 +132,7 @@ pub(super) fn process_value_is_callable(value: &EValue) -> bool {
     )
 }
 
-pub(super) fn parse_process_ratchet_args(
+pub(in crate::lisp_host) fn parse_process_ratchet_args(
     args: &[EValue],
 ) -> Result<
     (
@@ -199,7 +199,7 @@ pub(super) fn parse_process_ratchet_args(
     Ok((times, mode, span_beats, shape))
 }
 
-pub(super) fn process_ratchet_event_value(event: crate::process::ProcessRatchetEvent) -> EValue {
+pub(in crate::lisp_host) fn process_ratchet_event_value(event: crate::process::ProcessRatchetEvent) -> EValue {
     fn number(value: impl Into<f64>) -> Rc<RefCell<EValue>> {
         Rc::new(RefCell::new(EValue::Number(value.into())))
     }
@@ -229,7 +229,7 @@ pub(super) fn process_ratchet_event_value(event: crate::process::ProcessRatchetE
     EValue::Map(map)
 }
 
-pub(super) fn process_ratchet_event_number(
+pub(in crate::lisp_host) fn process_ratchet_event_number(
     map: &HashMap<String, Rc<RefCell<EValue>>>,
     key: &str,
 ) -> Result<f32, String> {
@@ -243,7 +243,7 @@ pub(super) fn process_ratchet_event_number(
     }
 }
 
-pub(super) fn process_ratchet_event_from_value(
+pub(in crate::lisp_host) fn process_ratchet_event_from_value(
     value: &EValue,
 ) -> Result<crate::process::ProcessRatchetEvent, String> {
     let EValue::Map(map) = value else {
@@ -264,7 +264,7 @@ pub(super) fn process_ratchet_event_from_value(
     })
 }
 
-pub(super) fn process_ratchet_event_param_key(native: &str) -> Option<&'static str> {
+pub(in crate::lisp_host) fn process_ratchet_event_param_key(native: &str) -> Option<&'static str> {
     match native.trim_end_matches('!') {
         "vel" => Some("velocity"),
         "note" => Some("transpose"),
@@ -276,7 +276,7 @@ pub(super) fn process_ratchet_event_param_key(native: &str) -> Option<&'static s
     }
 }
 
-pub(super) fn process_ratchet_event_read(value: Option<&EValue>, native: &str) -> Result<EValue, String> {
+pub(in crate::lisp_host) fn process_ratchet_event_read(value: Option<&EValue>, native: &str) -> Result<EValue, String> {
     let key = process_ratchet_event_param_key(native)
         .ok_or_else(|| format!("unknown ratchet event reader '{native}'"))?;
     let Some(EValue::Map(map)) = value else {
@@ -287,7 +287,7 @@ pub(super) fn process_ratchet_event_read(value: Option<&EValue>, native: &str) -
     ))
 }
 
-pub(super) fn process_ratchet_event_write(args: &[EValue], native: &str) -> Result<EValue, String> {
+pub(in crate::lisp_host) fn process_ratchet_event_write(args: &[EValue], native: &str) -> Result<EValue, String> {
     let key = process_ratchet_event_param_key(native)
         .ok_or_else(|| format!("unknown ratchet event writer '{native}'"))?;
     let Some(EValue::Map(map)) = args.first() else {
@@ -304,7 +304,7 @@ pub(super) fn process_ratchet_event_write(args: &[EValue], native: &str) -> Resu
     Ok(EValue::Number(value))
 }
 
-pub(super) fn register_process_ratchet_event_natives(runtime: &mut Runtime) {
+pub(in crate::lisp_host) fn register_process_ratchet_event_natives(runtime: &mut Runtime) {
     for native in ["vel", "note", "dur", "speed", "pan", "chop"] {
         runtime.register_native_with_docs(
             native,
@@ -357,7 +357,7 @@ pub(super) fn register_process_ratchet_event_natives(runtime: &mut Runtime) {
     );
 }
 
-pub(super) fn push_process_target_write(
+pub(in crate::lisp_host) fn push_process_target_write(
     process_eval: &SharedProcessEvalContext,
     op: crate::process::ProcessTargetOp,
     port: Option<String>,
@@ -403,7 +403,7 @@ pub(super) fn push_process_target_write(
     Ok(())
 }
 
-pub(super) fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::process::ProcessDef, String> {
+pub(in crate::lisp_host) fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::process::ProcessDef, String> {
     let mut inlets = Vec::new();
     let mut outlets = Vec::new();
     let mut state = Vec::new();
@@ -488,14 +488,14 @@ pub(super) fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::pr
     })
 }
 
-pub(super) fn value_list(value: &EValue) -> Option<Vec<EValue>> {
+pub(in crate::lisp_host) fn value_list(value: &EValue) -> Option<Vec<EValue>> {
     match value {
         EValue::List(items) => Some(items.iter().map(|item| item.borrow().clone()).collect()),
         _ => None,
     }
 }
 
-pub(super) fn parse_process_inlets(value: &EValue) -> Result<Vec<crate::process::ProcessInletDef>, String> {
+pub(in crate::lisp_host) fn parse_process_inlets(value: &EValue) -> Result<Vec<crate::process::ProcessInletDef>, String> {
     let entries = value_list(value).ok_or_else(|| ":in expects a list".to_string())?;
     entries
         .iter()
@@ -529,11 +529,11 @@ pub(super) fn parse_process_inlets(value: &EValue) -> Result<Vec<crate::process:
         .collect()
 }
 
-pub(super) fn process_truthy(value: &EValue) -> bool {
+pub(in crate::lisp_host) fn process_truthy(value: &EValue) -> bool {
     !matches!(value, EValue::Nil | EValue::Bool(false))
 }
 
-pub(super) fn parse_process_inlet_kind_and_range(
+pub(in crate::lisp_host) fn parse_process_inlet_kind_and_range(
     items: &[EValue],
 ) -> Result<(crate::process::ProcessInletKind, Option<f32>, Option<f32>), String> {
     let Some(kind_value) = items.get(1) else {
@@ -580,7 +580,7 @@ pub(super) fn parse_process_inlet_kind_and_range(
     Ok((kind, min, max))
 }
 
-pub(super) fn parse_process_seed_policy(value: &EValue) -> Result<crate::process::ProcessSeedPolicy, String> {
+pub(in crate::lisp_host) fn parse_process_seed_policy(value: &EValue) -> Result<crate::process::ProcessSeedPolicy, String> {
     let name = process_symbol_name(value)?.to_ascii_lowercase();
     match name.as_str() {
         "locked" => Ok(crate::process::ProcessSeedPolicy::Locked),
@@ -589,7 +589,7 @@ pub(super) fn parse_process_seed_policy(value: &EValue) -> Result<crate::process
     }
 }
 
-pub(super) fn parse_process_default_target(value: &EValue) -> Result<crate::process::ProcessPortDef, String> {
+pub(in crate::lisp_host) fn parse_process_default_target(value: &EValue) -> Result<crate::process::ProcessPortDef, String> {
     if value_list(value).is_some() {
         return Ok(crate::process::ProcessPortDef::default_with_target(
             parse_process_target_hint(value)?,
@@ -602,13 +602,13 @@ pub(super) fn parse_process_default_target(value: &EValue) -> Result<crate::proc
     Err(":target expects a target hint list or :mappable".to_string())
 }
 
-pub(super) fn parse_process_accumulator_target(
+pub(in crate::lisp_host) fn parse_process_accumulator_target(
     value: &EValue,
 ) -> Result<crate::process::ProcessPortDef, String> {
     parse_process_default_target(value)
 }
 
-pub(super) fn parse_process_target_kind(value: &EValue) -> Result<crate::process::ProcessTargetKind, String> {
+pub(in crate::lisp_host) fn parse_process_target_kind(value: &EValue) -> Result<crate::process::ProcessTargetKind, String> {
     let name = process_symbol_name(value)?.to_ascii_lowercase();
     match name.as_str() {
         "step-param" | "step_param" | "step" => Ok(crate::process::ProcessTargetKind::StepParam),
@@ -641,7 +641,7 @@ pub(super) fn parse_process_target_kind(value: &EValue) -> Result<crate::process
     }
 }
 
-pub(super) fn parse_process_port_def(items: &[EValue]) -> Result<crate::process::ProcessPortDef, String> {
+pub(in crate::lisp_host) fn parse_process_port_def(items: &[EValue]) -> Result<crate::process::ProcessPortDef, String> {
     let name = process_symbol_name(
         items
             .first()
@@ -703,7 +703,7 @@ pub(super) fn parse_process_port_def(items: &[EValue]) -> Result<crate::process:
     }
 }
 
-pub(super) fn parse_process_ports(value: &EValue) -> Result<Vec<crate::process::ProcessPortDef>, String> {
+pub(in crate::lisp_host) fn parse_process_ports(value: &EValue) -> Result<Vec<crate::process::ProcessPortDef>, String> {
     let entries = value_list(value).ok_or_else(|| ":targets expects a list".to_string())?;
     let mut ports = Vec::new();
     for entry in entries {
@@ -721,7 +721,7 @@ pub(super) fn parse_process_ports(value: &EValue) -> Result<Vec<crate::process::
     Ok(ports)
 }
 
-pub(super) fn parse_process_target_hint(value: &EValue) -> Result<crate::process::ProcessTargetHint, String> {
+pub(in crate::lisp_host) fn parse_process_target_hint(value: &EValue) -> Result<crate::process::ProcessTargetHint, String> {
     let items = value_list(value).ok_or_else(|| "process target must be a list".to_string())?;
     let head = process_symbol_name(
         items
@@ -800,7 +800,7 @@ pub(super) fn parse_process_target_hint(value: &EValue) -> Result<crate::process
     }
 }
 
-pub(super) fn parse_process_connection_target(value: &EValue) -> Result<crate::process::ParamTarget, String> {
+pub(in crate::lisp_host) fn parse_process_connection_target(value: &EValue) -> Result<crate::process::ParamTarget, String> {
     let items =
         value_list(value).ok_or_else(|| "process port target must be a list".to_string())?;
     let head = process_symbol_name(
@@ -844,7 +844,7 @@ pub(super) fn parse_process_connection_target(value: &EValue) -> Result<crate::p
     }
 }
 
-pub(super) fn parse_process_accumulator_amount_inlet(
+pub(in crate::lisp_host) fn parse_process_accumulator_amount_inlet(
     value: &EValue,
 ) -> Result<crate::process::ProcessInletDef, String> {
     let items =
@@ -871,7 +871,7 @@ pub(super) fn parse_process_accumulator_amount_inlet(
     })
 }
 
-pub(super) fn parse_process_accumulator_range(value: &EValue) -> Result<(f32, f32), String> {
+pub(in crate::lisp_host) fn parse_process_accumulator_range(value: &EValue) -> Result<(f32, f32), String> {
     let items = value_list(value).ok_or_else(|| ":range expects (lo hi)".to_string())?;
     let Some(EValue::Number(lo)) = items.first() else {
         return Err(":range expects numeric lo".to_string());
@@ -885,7 +885,7 @@ pub(super) fn parse_process_accumulator_range(value: &EValue) -> Result<(f32, f3
     Ok((*lo as f32, *hi as f32))
 }
 
-pub(super) fn parse_process_accumulator_mode(
+pub(in crate::lisp_host) fn parse_process_accumulator_mode(
     value: &EValue,
 ) -> Result<crate::process::ProcessAccumulatorMode, String> {
     let name = process_symbol_name(value)?.to_ascii_lowercase();
@@ -897,7 +897,7 @@ pub(super) fn parse_process_accumulator_mode(
     }
 }
 
-pub(super) fn parse_process_outlets(value: &EValue) -> Result<Vec<crate::process::ProcessOutletDef>, String> {
+pub(in crate::lisp_host) fn parse_process_outlets(value: &EValue) -> Result<Vec<crate::process::ProcessOutletDef>, String> {
     let entries = value_list(value).ok_or_else(|| ":out expects a list".to_string())?;
     entries
         .iter()
@@ -914,7 +914,7 @@ pub(super) fn parse_process_outlets(value: &EValue) -> Result<Vec<crate::process
         .collect()
 }
 
-pub(super) fn parse_process_state(value: &EValue) -> Result<Vec<crate::process::ProcessStateDef>, String> {
+pub(in crate::lisp_host) fn parse_process_state(value: &EValue) -> Result<Vec<crate::process::ProcessStateDef>, String> {
     let entries = value_list(value).ok_or_else(|| ":state expects a list".to_string())?;
     entries
         .iter()
@@ -932,7 +932,7 @@ pub(super) fn parse_process_state(value: &EValue) -> Result<Vec<crate::process::
         .collect()
 }
 
-pub(super) fn parse_process_listens(
+pub(in crate::lisp_host) fn parse_process_listens(
     value: &EValue,
     handlers: &HashMap<String, EValue>,
     state_names: &[String],
@@ -965,7 +965,7 @@ pub(super) fn parse_process_listens(
         .collect()
 }
 
-pub(super) fn parse_process_event_source(
+pub(in crate::lisp_host) fn parse_process_event_source(
     value: &EValue,
 ) -> Result<crate::process::ProcessEventSource, String> {
     if matches!(
@@ -1011,7 +1011,7 @@ pub(super) fn parse_process_event_source(
     }
 }
 
-pub(super) fn keyword_value(items: &[EValue], key: &str) -> Option<EValue> {
+pub(in crate::lisp_host) fn keyword_value(items: &[EValue], key: &str) -> Option<EValue> {
     let mut idx = 0;
     while idx + 1 < items.len() {
         if process_symbol_name(&items[idx])
@@ -1025,7 +1025,7 @@ pub(super) fn keyword_value(items: &[EValue], key: &str) -> Option<EValue> {
     None
 }
 
-pub(super) fn parse_process_time_expr(value: &EValue) -> Result<crate::process::ProcessTimeExpr, String> {
+pub(in crate::lisp_host) fn parse_process_time_expr(value: &EValue) -> Result<crate::process::ProcessTimeExpr, String> {
     match value {
         EValue::Number(beats) => Ok(crate::process::ProcessTimeExpr::Beats(*beats)),
         EValue::Keyword(_) | EValue::Symbol(_) | EValue::String(_) => {
@@ -1070,7 +1070,7 @@ pub(super) fn parse_process_time_expr(value: &EValue) -> Result<crate::process::
     }
 }
 
-pub(super) fn wrap_process_source_with_bindings(
+pub(in crate::lisp_host) fn wrap_process_source_with_bindings(
     state_names: &[String],
     inlet_names: &[String],
     extra_bindings: Vec<(String, String)>,
@@ -1120,7 +1120,7 @@ pub(super) fn wrap_process_source_with_bindings(
     ))
 }
 
-pub(super) fn wrap_process_body_source(
+pub(in crate::lisp_host) fn wrap_process_body_source(
     state_names: &[String],
     inlet_names: &[String],
     body: &EValue,
@@ -1133,7 +1133,7 @@ pub(super) fn wrap_process_body_source(
     )
 }
 
-pub(super) fn wrap_process_handler_source(
+pub(in crate::lisp_host) fn wrap_process_handler_source(
     state_names: &[String],
     inlet_names: &[String],
     handler: &EValue,
@@ -1170,7 +1170,7 @@ pub(super) fn wrap_process_handler_source(
     )
 }
 
-pub(super) fn process_body_source(body: &[EValue]) -> Result<String, String> {
+pub(in crate::lisp_host) fn process_body_source(body: &[EValue]) -> Result<String, String> {
     match body {
         [] => Err("process body cannot be empty".to_string()),
         [single] => Ok(eseqlisp::vm::format_lisp_source(single)),
@@ -1185,7 +1185,7 @@ pub(super) fn process_body_source(body: &[EValue]) -> Result<String, String> {
     }
 }
 
-pub(super) fn construct_process_instance(
+pub(in crate::lisp_host) fn construct_process_instance(
     process_authoring: &SharedProcessAuthoring,
     class_name: &str,
     args: Vec<EValue>,
@@ -1228,7 +1228,7 @@ pub(super) fn construct_process_instance(
     ))
 }
 
-pub(super) fn construct_anonymous_listener_process(
+pub(in crate::lisp_host) fn construct_anonymous_listener_process(
     process_authoring: &SharedProcessAuthoring,
     kind: &str,
     source: crate::process::ProcessEventSource,
@@ -1281,12 +1281,12 @@ pub(super) fn construct_anonymous_listener_process(
     ))
 }
 
-pub(super) struct ProcessConstructorArgs {
+pub(in crate::lisp_host) struct ProcessConstructorArgs {
     inlets: HashMap<String, crate::process::ProcessInletValue>,
     bindings: BTreeMap<String, Option<crate::process::ParamTarget>>,
 }
 
-pub(super) fn parse_process_constructor_args(
+pub(in crate::lisp_host) fn parse_process_constructor_args(
     process_authoring: &SharedProcessAuthoring,
     args: &[EValue],
 ) -> Result<ProcessConstructorArgs, String> {
@@ -1314,7 +1314,7 @@ pub(super) fn parse_process_constructor_args(
     Ok(ProcessConstructorArgs { inlets, bindings })
 }
 
-pub(super) fn parse_process_constructor_connections(
+pub(in crate::lisp_host) fn parse_process_constructor_connections(
     value: &EValue,
 ) -> Result<BTreeMap<String, Option<crate::process::ParamTarget>>, String> {
     let entries = value_list(value)
@@ -1333,7 +1333,7 @@ pub(super) fn parse_process_constructor_connections(
     Ok(bindings)
 }
 
-pub(super) fn parse_inlet_value(
+pub(in crate::lisp_host) fn parse_inlet_value(
     process_authoring: &SharedProcessAuthoring,
     value: &EValue,
 ) -> Result<crate::process::ProcessInletValue, String> {
@@ -1364,7 +1364,7 @@ pub(super) fn parse_inlet_value(
     }
 }
 
-pub(super) fn process_instance_handle(
+pub(in crate::lisp_host) fn process_instance_handle(
     process_authoring: SharedProcessAuthoring,
     handle_id: crate::process::AuthoredHandleId,
     process_chain_state: Option<Arc<crate::sequencer::SequencerState>>,
@@ -1401,7 +1401,7 @@ pub(super) fn process_instance_handle(
     }
 }
 
-pub(super) fn process_channel_handle(
+pub(in crate::lisp_host) fn process_channel_handle(
     process_authoring: SharedProcessAuthoring,
     handle_id: crate::process::AuthoredHandleId,
 ) -> EValue {
@@ -1412,7 +1412,7 @@ pub(super) fn process_channel_handle(
     }
 }
 
-pub(super) fn process_outlet_handle(
+pub(in crate::lisp_host) fn process_outlet_handle(
     process_authoring: SharedProcessAuthoring,
     outlet: crate::process::ProcessOutletRef,
 ) -> Result<EValue, String> {
@@ -1428,13 +1428,13 @@ pub(super) fn process_outlet_handle(
     })
 }
 
-pub(super) enum DurableProcessHandleUpdate {
+pub(in crate::lisp_host) enum DurableProcessHandleUpdate {
     Scalar(crate::process::ProcessLiteral),
     Lane(Vec<f32>),
     None,
 }
 
-pub(super) fn process_instance_lane_backed_inlet(
+pub(in crate::lisp_host) fn process_instance_lane_backed_inlet(
     registry: &ProcessAuthoringRegistry,
     handle_id: crate::process::AuthoredHandleId,
     inlet: &str,
@@ -1455,7 +1455,7 @@ pub(super) fn process_instance_lane_backed_inlet(
         .any(|entry| entry.name == inlet && entry.lane))
 }
 
-pub(super) fn process_handle_call(
+pub(in crate::lisp_host) fn process_handle_call(
     process_authoring: &SharedProcessAuthoring,
     process_chain_state: Option<&Arc<crate::sequencer::SequencerState>>,
     handle_id: crate::process::AuthoredHandleId,
@@ -1565,7 +1565,7 @@ pub(super) fn process_handle_call(
     }
 }
 
-pub(super) fn set_process_running(
+pub(in crate::lisp_host) fn set_process_running(
     process_authoring: &SharedProcessAuthoring,
     value: Option<&EValue>,
     running: bool,
@@ -1588,7 +1588,7 @@ pub(super) fn set_process_running(
     Ok(())
 }
 
-pub(super) fn parse_channel_name(
+pub(in crate::lisp_host) fn parse_channel_name(
     process_authoring: &SharedProcessAuthoring,
     value: &EValue,
 ) -> Result<String, String> {
@@ -1608,7 +1608,7 @@ pub(super) fn parse_channel_name(
     }
 }
 
-pub(super) fn parse_process_source_ref(
+pub(in crate::lisp_host) fn parse_process_source_ref(
     process_authoring: &SharedProcessAuthoring,
     value: &EValue,
 ) -> Result<crate::process::ProcessSourceRef, String> {
@@ -1686,7 +1686,7 @@ pub(super) fn parse_process_source_ref(
     }
 }
 
-pub(super) fn parse_process_event_source_ref(
+pub(in crate::lisp_host) fn parse_process_event_source_ref(
     process_authoring: &SharedProcessAuthoring,
     value: &EValue,
 ) -> Result<crate::process::ProcessEventSource, String> {
@@ -1709,7 +1709,7 @@ pub(super) fn parse_process_event_source_ref(
     parse_process_event_source(value)
 }
 
-pub(super) fn parse_process_target_ref(
+pub(in crate::lisp_host) fn parse_process_target_ref(
     process_authoring: &SharedProcessAuthoring,
     value: &EValue,
 ) -> Result<crate::process::ProcessTargetRef, String> {
@@ -1735,7 +1735,7 @@ pub(super) fn parse_process_target_ref(
     }
 }
 
-pub(super) fn build_process_emit_event(args: &[EValue]) -> Result<EmittedAccumulatorEvent, String> {
+pub(in crate::lisp_host) fn build_process_emit_event(args: &[EValue]) -> Result<EmittedAccumulatorEvent, String> {
     let mut idx = 0;
     if args
         .first()
@@ -1779,7 +1779,7 @@ pub(super) fn build_process_emit_event(args: &[EValue]) -> Result<EmittedAccumul
     })
 }
 
-pub(super) fn process_status_value(registry: &ProcessAuthoringRegistry) -> EValue {
+pub(in crate::lisp_host) fn process_status_value(registry: &ProcessAuthoringRegistry) -> EValue {
     process_map([
         (
             "defs",
@@ -1864,7 +1864,7 @@ pub(super) fn process_status_value(registry: &ProcessAuthoringRegistry) -> EValu
     ])
 }
 
-pub(super) fn process_inlet_status_value(value: &crate::process::ProcessInletValue) -> EValue {
+pub(in crate::lisp_host) fn process_inlet_status_value(value: &crate::process::ProcessInletValue) -> EValue {
     match value {
         crate::process::ProcessInletValue::Literal(value) => process_map([
             ("kind", EValue::Keyword("literal".to_string())),
@@ -1885,11 +1885,11 @@ pub(super) fn process_inlet_status_value(value: &crate::process::ProcessInletVal
     }
 }
 
-pub(super) fn process_string_list<'a>(items: impl IntoIterator<Item = &'a String>) -> EValue {
+pub(in crate::lisp_host) fn process_string_list<'a>(items: impl IntoIterator<Item = &'a String>) -> EValue {
     process_list(items.into_iter().map(|item| EValue::String(item.clone())))
 }
 
-pub(super) fn process_list(items: impl IntoIterator<Item = EValue>) -> EValue {
+pub(in crate::lisp_host) fn process_list(items: impl IntoIterator<Item = EValue>) -> EValue {
     EValue::List(
         items
             .into_iter()
@@ -1898,7 +1898,7 @@ pub(super) fn process_list(items: impl IntoIterator<Item = EValue>) -> EValue {
     )
 }
 
-pub(super) fn process_map(items: impl IntoIterator<Item = (&'static str, EValue)>) -> EValue {
+pub(in crate::lisp_host) fn process_map(items: impl IntoIterator<Item = (&'static str, EValue)>) -> EValue {
     EValue::Map(
         items
             .into_iter()

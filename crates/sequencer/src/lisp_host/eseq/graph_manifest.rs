@@ -1,5 +1,5 @@
 use super::graph_dsl::*;
-use super::*;
+use super::super::*;
 use crate::graph::{
     EdgeSetSpec, EventSelect, GraphDurationSpec, GraphManifest, GraphSwingSpec, NodeProto,
     Reduce as GraphReduce, SeedFrom, ShapeSpec, Topology,

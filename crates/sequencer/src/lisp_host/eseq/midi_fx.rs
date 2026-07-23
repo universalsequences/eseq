@@ -1,6 +1,6 @@
-use super::*;
+use super::super::*;
 
-pub(super) fn eval_suppress_current_event(
+pub(in crate::lisp_host) fn eval_suppress_current_event(
     accumulator_eval: &SharedAccumulatorEvalContext,
     label: &str,
 ) -> Result<EValue, String> {
@@ -14,7 +14,7 @@ pub(super) fn eval_suppress_current_event(
     Ok(EValue::Bool(true))
 }
 
-pub(super) fn eval_emit_current_event(
+pub(in crate::lisp_host) fn eval_emit_current_event(
     accumulator_eval: &SharedAccumulatorEvalContext,
     args: &[EValue],
     label: &str,
@@ -45,7 +45,7 @@ pub(super) fn eval_emit_current_event(
     Ok(EValue::Bool(true))
 }
 
-pub(super) fn eval_arp_count_current_event(
+pub(in crate::lisp_host) fn eval_arp_count_current_event(
     accumulator_eval: &SharedAccumulatorEvalContext,
     args: &[EValue],
     label: &str,
@@ -63,7 +63,7 @@ pub(super) fn eval_arp_count_current_event(
     ))
 }
 
-pub(super) fn eval_arp_note_current_event(
+pub(in crate::lisp_host) fn eval_arp_note_current_event(
     accumulator_eval: &SharedAccumulatorEvalContext,
     args: &[EValue],
     label: &str,
@@ -87,7 +87,7 @@ pub(super) fn eval_arp_note_current_event(
         .unwrap_or(EValue::Nil))
 }
 
-pub(super) fn eval_arp_emit_current_event(
+pub(in crate::lisp_host) fn eval_arp_emit_current_event(
     accumulator_eval: &SharedAccumulatorEvalContext,
     args: &[EValue],
     label: &str,
@@ -132,7 +132,7 @@ pub(super) fn eval_arp_emit_current_event(
     Ok(EValue::Bool(true))
 }
 
-pub(super) fn eval_arp_emit_directed_current_event(
+pub(in crate::lisp_host) fn eval_arp_emit_directed_current_event(
     accumulator_eval: &SharedAccumulatorEvalContext,
     args: &[EValue],
     label: &str,
@@ -182,7 +182,7 @@ pub(super) fn eval_arp_emit_directed_current_event(
     Ok(EValue::Bool(true))
 }
 
-pub(super) fn eval_fx_time(
+pub(in crate::lisp_host) fn eval_fx_time(
     accumulator_eval: &SharedAccumulatorEvalContext,
     args: &[EValue],
 ) -> Result<EValue, String> {
@@ -203,7 +203,7 @@ pub(super) fn eval_fx_time(
     ))
 }
 
-pub(super) fn eval_fx_source_time(
+pub(in crate::lisp_host) fn eval_fx_source_time(
     accumulator_eval: &SharedAccumulatorEvalContext,
     args: &[EValue],
 ) -> Result<EValue, String> {
@@ -221,7 +221,7 @@ pub(super) fn eval_fx_source_time(
     Ok(EValue::Number((eval.step_beats * units) as f64))
 }
 
-pub(super) fn eval_fx_phase_time(accumulator_eval: &SharedAccumulatorEvalContext) -> Result<EValue, String> {
+pub(in crate::lisp_host) fn eval_fx_phase_time(accumulator_eval: &SharedAccumulatorEvalContext) -> Result<EValue, String> {
     let guard = accumulator_eval
         .lock()
         .map_err(|_| "failed to lock MIDI FX eval context".to_string())?;
@@ -231,7 +231,7 @@ pub(super) fn eval_fx_phase_time(accumulator_eval: &SharedAccumulatorEvalContext
     Ok(EValue::Number(eval.arp_phase_beats.max(0.0) as f64))
 }
 
-pub(super) fn eval_fx_phase_tick(
+pub(in crate::lisp_host) fn eval_fx_phase_tick(
     accumulator_eval: &SharedAccumulatorEvalContext,
     args: &[EValue],
 ) -> Result<EValue, String> {
@@ -251,7 +251,7 @@ pub(super) fn eval_fx_phase_tick(
     ))
 }
 
-pub(super) fn parse_midi_fx_param_ref(eval: &AccumulatorEvalContext, value: &EValue) -> Result<usize, String> {
+pub(in crate::lisp_host) fn parse_midi_fx_param_ref(eval: &AccumulatorEvalContext, value: &EValue) -> Result<usize, String> {
     match value {
         EValue::Number(index) if *index >= 0.0 => Ok(*index as usize),
         EValue::String(name) | EValue::Keyword(name) | EValue::Symbol(name) => eval
@@ -263,7 +263,7 @@ pub(super) fn parse_midi_fx_param_ref(eval: &AccumulatorEvalContext, value: &EVa
     }
 }
 
-pub(super) fn eval_midi_fx_param(
+pub(in crate::lisp_host) fn eval_midi_fx_param(
     accumulator_eval: &SharedAccumulatorEvalContext,
     args: &[EValue],
 ) -> Result<EValue, String> {
@@ -297,7 +297,7 @@ pub(super) fn eval_midi_fx_param(
     Ok(EValue::Number(value as f64))
 }
 
-pub(super) fn eval_midi_fx_track(accumulator_eval: &SharedAccumulatorEvalContext) -> Result<EValue, String> {
+pub(in crate::lisp_host) fn eval_midi_fx_track(accumulator_eval: &SharedAccumulatorEvalContext) -> Result<EValue, String> {
     let guard = accumulator_eval
         .lock()
         .map_err(|_| "failed to lock MIDI FX eval context".to_string())?;
@@ -310,7 +310,7 @@ pub(super) fn eval_midi_fx_track(accumulator_eval: &SharedAccumulatorEvalContext
     Ok(EValue::Number(*track as f64))
 }
 
-pub(super) fn eval_midi_fx_velocity(
+pub(in crate::lisp_host) fn eval_midi_fx_velocity(
     accumulator_eval: &SharedAccumulatorEvalContext,
 ) -> Result<EValue, String> {
     let guard = accumulator_eval
@@ -322,13 +322,13 @@ pub(super) fn eval_midi_fx_velocity(
     Ok(EValue::Number(eval.resolved.velocity as f64))
 }
 
-pub(super) enum FxNoteField {
+pub(in crate::lisp_host) enum FxNoteField {
     Transpose,
     Start,
     End,
 }
 
-pub(super) fn eval_note_span_field(
+pub(in crate::lisp_host) fn eval_note_span_field(
     accumulator_eval: &SharedAccumulatorEvalContext,
     args: &[EValue],
     field: FxNoteField,
@@ -367,7 +367,7 @@ pub(super) fn eval_note_span_field(
     }))
 }
 
-pub(super) fn eval_note_spans_as_list(
+pub(in crate::lisp_host) fn eval_note_spans_as_list(
     accumulator_eval: &SharedAccumulatorEvalContext,
 ) -> Result<EValue, String> {
     let guard = accumulator_eval
@@ -401,14 +401,14 @@ pub(super) fn eval_note_spans_as_list(
     ))
 }
 
-pub(super) fn midi_fx_state_user_key(value: &EValue) -> Result<String, String> {
+pub(in crate::lisp_host) fn midi_fx_state_user_key(value: &EValue) -> Result<String, String> {
     match value {
         EValue::String(key) | EValue::Keyword(key) => Ok(key.clone()),
         _ => Err("MIDI FX state key must be a string or keyword".to_string()),
     }
 }
 
-pub(super) fn current_midi_fx_state_key(
+pub(in crate::lisp_host) fn current_midi_fx_state_key(
     accumulator_eval: &SharedAccumulatorEvalContext,
     user_key: &str,
 ) -> Result<String, String> {
@@ -424,7 +424,7 @@ pub(super) fn current_midi_fx_state_key(
     Ok(format!("{track}\u{0}{fx_name}\u{0}{user_key}"))
 }
 
-pub(super) fn eval_midi_fx_state_get(
+pub(in crate::lisp_host) fn eval_midi_fx_state_get(
     accumulator_eval: &SharedAccumulatorEvalContext,
     midi_fx_state: &SharedMidiFxState,
     args: &[EValue],
@@ -442,7 +442,7 @@ pub(super) fn eval_midi_fx_state_get(
         .unwrap_or_else(|| args.get(1).cloned().unwrap_or(EValue::Nil)))
 }
 
-pub(super) fn eval_midi_fx_state_set(
+pub(in crate::lisp_host) fn eval_midi_fx_state_set(
     accumulator_eval: &SharedAccumulatorEvalContext,
     midi_fx_state: &SharedMidiFxState,
     args: &[EValue],
@@ -463,12 +463,12 @@ pub(super) fn eval_midi_fx_state_set(
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct AccumulatorChordNote {
-    pub(super) transpose: f32,
-    pub(super) duration_steps: f32,
+pub(in crate::lisp_host) struct AccumulatorChordNote {
+    pub(in crate::lisp_host) transpose: f32,
+    pub(in crate::lisp_host) duration_steps: f32,
 }
 
-pub(super) fn accumulator_chord_notes(eval: &AccumulatorEvalContext) -> Vec<AccumulatorChordNote> {
+pub(in crate::lisp_host) fn accumulator_chord_notes(eval: &AccumulatorEvalContext) -> Vec<AccumulatorChordNote> {
     if eval.chord.is_empty() {
         return vec![AccumulatorChordNote {
             transpose: eval.resolved.transpose,
@@ -491,7 +491,7 @@ pub(super) fn accumulator_chord_notes(eval: &AccumulatorEvalContext) -> Vec<Accu
         .collect()
 }
 
-pub(super) fn accumulator_arp_count(eval: &AccumulatorEvalContext, rate_beats: f32) -> usize {
+pub(in crate::lisp_host) fn accumulator_arp_count(eval: &AccumulatorEvalContext, rate_beats: f32) -> usize {
     if rate_beats <= 0.0 {
         return 0;
     }
@@ -513,7 +513,7 @@ pub(super) fn accumulator_arp_count(eval: &AccumulatorEvalContext, rate_beats: f
     (max_duration_beats / rate_beats).ceil().max(0.0) as usize
 }
 
-pub(super) fn accumulator_arp_note(
+pub(in crate::lisp_host) fn accumulator_arp_note(
     eval: &AccumulatorEvalContext,
     rate_beats: f32,
     tick: usize,
@@ -521,7 +521,7 @@ pub(super) fn accumulator_arp_note(
     accumulator_arp_note_directed(eval, rate_beats, tick, 0)
 }
 
-pub(super) fn directed_note_index(tick: usize, len: usize, direction: i32) -> usize {
+pub(in crate::lisp_host) fn directed_note_index(tick: usize, len: usize, direction: i32) -> usize {
     if len <= 1 {
         return 0;
     }
@@ -547,7 +547,7 @@ pub(super) fn directed_note_index(tick: usize, len: usize, direction: i32) -> us
     }
 }
 
-pub(super) fn accumulator_arp_note_directed(
+pub(in crate::lisp_host) fn accumulator_arp_note_directed(
     eval: &AccumulatorEvalContext,
     rate_beats: f32,
     tick: usize,
@@ -585,7 +585,7 @@ pub(super) fn accumulator_arp_note_directed(
     }
 }
 
-pub(super) fn parse_acc_emit_offset(
+pub(in crate::lisp_host) fn parse_acc_emit_offset(
     args: &[EValue],
     default_step_beats: f32,
     num_steps: usize,
@@ -615,7 +615,7 @@ pub(super) fn parse_acc_emit_offset(
     }
 }
 
-pub(super) fn apply_step_param_set(resolved: &mut ResolvedStep, param: StepParam, value: f32) {
+pub(in crate::lisp_host) fn apply_step_param_set(resolved: &mut ResolvedStep, param: StepParam, value: f32) {
     match param {
         StepParam::Duration => resolved.duration = value.max(0.0),
         StepParam::Velocity => resolved.velocity = value.clamp(0.0, 1.0),
@@ -627,7 +627,7 @@ pub(super) fn apply_step_param_set(resolved: &mut ResolvedStep, param: StepParam
     }
 }
 
-pub(super) fn apply_step_param_add(resolved: &mut ResolvedStep, param: StepParam, delta: f32) {
+pub(in crate::lisp_host) fn apply_step_param_add(resolved: &mut ResolvedStep, param: StepParam, delta: f32) {
     match param {
         StepParam::Duration => resolved.duration = (resolved.duration + delta).max(0.0),
         StepParam::Velocity => resolved.velocity = (resolved.velocity + delta).clamp(0.0, 1.0),
@@ -639,7 +639,7 @@ pub(super) fn apply_step_param_add(resolved: &mut ResolvedStep, param: StepParam
     }
 }
 
-pub(super) fn apply_step_param_scale(resolved: &mut ResolvedStep, param: StepParam, factor: f32) {
+pub(in crate::lisp_host) fn apply_step_param_scale(resolved: &mut ResolvedStep, param: StepParam, factor: f32) {
     match param {
         StepParam::Duration => resolved.duration = (resolved.duration * factor).max(0.0),
         StepParam::Velocity => resolved.velocity = (resolved.velocity * factor).clamp(0.0, 1.0),
@@ -651,7 +651,7 @@ pub(super) fn apply_step_param_scale(resolved: &mut ResolvedStep, param: StepPar
     }
 }
 
-pub(super) fn accumulator_effect_param_desc(
+pub(in crate::lisp_host) fn accumulator_effect_param_desc(
     metadata: &SharedSequencerNativeMetadata,
     track_idx: usize,
     slot_idx: usize,
@@ -669,7 +669,7 @@ pub(super) fn accumulator_effect_param_desc(
         .ok_or_else(|| "effect descriptor missing for parameter".to_string())
 }
 
-pub(super) fn accumulator_instrument_param_desc(
+pub(in crate::lisp_host) fn accumulator_instrument_param_desc(
     metadata: &SharedSequencerNativeMetadata,
     track_idx: usize,
     param_idx: usize,
@@ -686,7 +686,7 @@ pub(super) fn accumulator_instrument_param_desc(
 }
 
 #[derive(Clone)]
-pub(super) struct EffectDescriptorParamSnapshot {
+pub(in crate::lisp_host) struct EffectDescriptorParamSnapshot {
     min: f32,
     max: f32,
     default: f32,
@@ -774,7 +774,7 @@ impl EffectDescriptorParamSnapshot {
     }
 }
 
-pub(super) fn effect_param_ids(
+pub(in crate::lisp_host) fn effect_param_ids(
     eval: &mut AccumulatorEvalContext,
     slot_idx: usize,
     param_idx: usize,
@@ -801,7 +801,7 @@ pub(super) fn effect_param_ids(
     Ok((slot.node_id as u64, idx))
 }
 
-pub(super) fn current_effect_param_raw(
+pub(in crate::lisp_host) fn current_effect_param_raw(
     eval: &AccumulatorEvalContext,
     slot_idx: usize,
     param_idx: usize,
@@ -834,7 +834,7 @@ pub(super) fn current_effect_param_raw(
         .unwrap_or(desc.default))
 }
 
-pub(super) fn set_effect_param_raw(
+pub(in crate::lisp_host) fn set_effect_param_raw(
     eval: &mut AccumulatorEvalContext,
     slot_idx: usize,
     param_idx: usize,
@@ -859,7 +859,7 @@ pub(super) fn set_effect_param_raw(
     Ok(())
 }
 
-pub(super) fn set_effect_param_normalized(
+pub(in crate::lisp_host) fn set_effect_param_normalized(
     eval: &mut AccumulatorEvalContext,
     slot_idx: usize,
     param_idx: usize,
@@ -875,7 +875,7 @@ pub(super) fn set_effect_param_normalized(
     )
 }
 
-pub(super) fn add_effect_param_raw(
+pub(in crate::lisp_host) fn add_effect_param_raw(
     eval: &mut AccumulatorEvalContext,
     slot_idx: usize,
     param_idx: usize,
@@ -886,7 +886,7 @@ pub(super) fn add_effect_param_raw(
     set_effect_param_raw(eval, slot_idx, param_idx, current + delta, desc)
 }
 
-pub(super) fn add_effect_param_normalized(
+pub(in crate::lisp_host) fn add_effect_param_normalized(
     eval: &mut AccumulatorEvalContext,
     slot_idx: usize,
     param_idx: usize,
@@ -898,7 +898,7 @@ pub(super) fn add_effect_param_normalized(
     set_effect_param_normalized(eval, slot_idx, param_idx, next, desc)
 }
 
-pub(super) fn instrument_param_target_and_idx(
+pub(in crate::lisp_host) fn instrument_param_target_and_idx(
     slot: &EffectSlotSnapshot,
     param_idx: usize,
 ) -> Result<(ScheduledInstrumentParamTarget, u64, u32), String> {
@@ -928,7 +928,7 @@ pub(super) fn instrument_param_target_and_idx(
     Ok((target, idx, span))
 }
 
-pub(super) fn current_instrument_param_raw(
+pub(in crate::lisp_host) fn current_instrument_param_raw(
     eval: &AccumulatorEvalContext,
     param_idx: usize,
     desc: &EffectDescriptorParamSnapshot,
@@ -942,7 +942,7 @@ pub(super) fn current_instrument_param_raw(
         .unwrap_or(desc.default))
 }
 
-pub(super) fn set_instrument_param_raw(
+pub(in crate::lisp_host) fn set_instrument_param_raw(
     eval: &mut AccumulatorEvalContext,
     param_idx: usize,
     value: f32,
@@ -968,7 +968,7 @@ pub(super) fn set_instrument_param_raw(
     Ok(())
 }
 
-pub(super) fn set_instrument_param_normalized(
+pub(in crate::lisp_host) fn set_instrument_param_normalized(
     eval: &mut AccumulatorEvalContext,
     param_idx: usize,
     normalized: f32,
@@ -977,7 +977,7 @@ pub(super) fn set_instrument_param_normalized(
     set_instrument_param_raw(eval, param_idx, desc.denormalize(normalized), desc)
 }
 
-pub(super) fn add_instrument_param_raw(
+pub(in crate::lisp_host) fn add_instrument_param_raw(
     eval: &mut AccumulatorEvalContext,
     param_idx: usize,
     delta: f32,
@@ -987,7 +987,7 @@ pub(super) fn add_instrument_param_raw(
     set_instrument_param_raw(eval, param_idx, current + delta, desc)
 }
 
-pub(super) fn add_instrument_param_normalized(
+pub(in crate::lisp_host) fn add_instrument_param_normalized(
     eval: &mut AccumulatorEvalContext,
     param_idx: usize,
     normalized_delta: f32,
@@ -998,7 +998,7 @@ pub(super) fn add_instrument_param_normalized(
     set_instrument_param_normalized(eval, param_idx, next, desc)
 }
 
-pub(super) fn parse_step_param_arg(args: &[EValue], idx: usize) -> Result<StepParam, String> {
+pub(in crate::lisp_host) fn parse_step_param_arg(args: &[EValue], idx: usize) -> Result<StepParam, String> {
     let Some(value) = args.get(idx) else {
         return Err("expected step param".to_string());
     };

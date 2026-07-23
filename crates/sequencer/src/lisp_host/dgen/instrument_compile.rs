@@ -1,6 +1,6 @@
-use super::*;
+use super::super::*;
 
-pub(super) const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers injected at compile time.
+pub(in crate::lisp_host) const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers injected at compile time.
 ; `samplerate` is provided by DGenLisp as runtime host sample-rate context.
 
 (defmacro mod_unipolar (m)
@@ -210,12 +210,12 @@ pub(super) const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers inje
   level)
 "#;
 
-pub(super) fn instrument_preamble(sample_rate: u32) -> String {
+pub(in crate::lisp_host) fn instrument_preamble(sample_rate: u32) -> String {
     let _ = sample_rate;
     INSTRUMENT_PREAMBLE.to_string()
 }
 
-pub(super) fn effect_preamble(sample_rate: u32) -> String {
+pub(in crate::lisp_host) fn effect_preamble(sample_rate: u32) -> String {
     instrument_preamble(sample_rate)
 }
 
@@ -242,14 +242,14 @@ pub fn compile_instrument_with_asset_base(
     )
 }
 
-pub(super) fn log_dgenlisp_compile_failure(kind: &str, src_path: &Path, error: &str, source: &str) {
+pub(in crate::lisp_host) fn log_dgenlisp_compile_failure(kind: &str, src_path: &Path, error: &str, source: &str) {
     eprintln!(
         "[dgenlisp compile failed] kind={kind} path={}\nerror:\n{error}\nsource:\n{source}\n[/dgenlisp compile failed]",
         src_path.display()
     );
 }
 
-pub(super) fn log_dgenlisp_compile_manifest(kind: &str, src_path: &Path, manifest: &str) {
+pub(in crate::lisp_host) fn log_dgenlisp_compile_manifest(kind: &str, src_path: &Path, manifest: &str) {
     /*
     eprintln!(
         "[dgenlisp compile manifest] kind={kind} path={}\nmanifest:\n{manifest}\n[/dgenlisp compile manifest]",
@@ -684,7 +684,7 @@ pub fn render_loaded_effect_for_test(
     })
 }
 
-pub(super) fn host_mod_descriptor_param_cell(manifest: &DGenManifest, name: &str) -> Option<usize> {
+pub(in crate::lisp_host) fn host_mod_descriptor_param_cell(manifest: &DGenManifest, name: &str) -> Option<usize> {
     for dest in &manifest.mod_destinations {
         if name == format!("__dgen_mod_active__{}", dest.name) {
             return Some(dest.active_cell_id);

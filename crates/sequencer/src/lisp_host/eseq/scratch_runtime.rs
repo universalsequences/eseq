@@ -1,6 +1,6 @@
-use super::*;
+use super::super::*;
 
-pub(super) fn scratch_buffer_template() -> String {
+pub(in crate::lisp_host) fn scratch_buffer_template() -> String {
     r#"; Scratch buffer for live sequencer scripting.
 ; C-x C-e eval s-expression at cursor
 ; C-x C-b eval whole buffer
@@ -16,7 +16,7 @@ pub(super) fn scratch_buffer_template() -> String {
     .to_string()
 }
 
-pub(super) fn control_prelude_source() -> &'static str {
+pub(in crate::lisp_host) fn control_prelude_source() -> &'static str {
     r#"
 (def empty? (xs) (= (len xs) 0))
 (def map (fn xs)
@@ -43,7 +43,7 @@ pub(super) fn control_prelude_source() -> &'static str {
 "#
 }
 
-pub(super) fn new_eval_context(track: usize, cursor_step: usize) -> SharedSequencerEvalContext {
+pub(in crate::lisp_host) fn new_eval_context(track: usize, cursor_step: usize) -> SharedSequencerEvalContext {
     Arc::new(Mutex::new(SequencerEvalContext { track, cursor_step }))
 }
 
@@ -65,7 +65,7 @@ pub fn scheduler_scratch_runtime_with_fallbacks(
     scratch_runtime_with_fallbacks_inner(state, track, cursor_step, false)
 }
 
-pub(super) fn scratch_runtime_with_fallbacks_inner(
+pub(in crate::lisp_host) fn scratch_runtime_with_fallbacks_inner(
     state: Arc<crate::sequencer::SequencerState>,
     track: usize,
     cursor_step: usize,
@@ -95,7 +95,7 @@ pub(super) fn scratch_runtime_with_fallbacks_inner(
     runtime
 }
 
-pub(super) fn midi_fx_library_root_candidates() -> Vec<PathBuf> {
+pub(in crate::lisp_host) fn midi_fx_library_root_candidates() -> Vec<PathBuf> {
     let manifest_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("midi-fx");
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let candidates = [
@@ -116,7 +116,7 @@ pub(super) fn midi_fx_library_root_candidates() -> Vec<PathBuf> {
     unique
 }
 
-pub(super) fn midi_fx_name_components(name: &str) -> Option<Vec<&str>> {
+pub(in crate::lisp_host) fn midi_fx_name_components(name: &str) -> Option<Vec<&str>> {
     let trimmed = name.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return None;
@@ -135,7 +135,7 @@ pub(super) fn midi_fx_name_components(name: &str) -> Option<Vec<&str>> {
     }
 }
 
-pub(super) fn midi_fx_source_path(name: &str) -> Option<PathBuf> {
+pub(in crate::lisp_host) fn midi_fx_source_path(name: &str) -> Option<PathBuf> {
     let components = midi_fx_name_components(name)?;
     for root in midi_fx_library_root_candidates() {
         let mut folder = root.clone();
@@ -159,7 +159,7 @@ pub(super) fn midi_fx_source_path(name: &str) -> Option<PathBuf> {
     None
 }
 
-pub(super) fn load_midi_fx_source(name: &str) -> io::Result<String> {
+pub(in crate::lisp_host) fn load_midi_fx_source(name: &str) -> io::Result<String> {
     let path = midi_fx_source_path(name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "MIDI FX source not found"))?;
     std::fs::read_to_string(path)
@@ -217,7 +217,7 @@ pub fn load_process_library_source() -> String {
             format!("(load {:?})", path.to_string_lossy())
         }
         Err(_) => {
-            let source = include_str!("../../processes/builtin.lisp");
+            let source = include_str!("../../../processes/builtin.lisp");
             if source.trim().is_empty() {
                 String::new()
             } else {
@@ -227,7 +227,7 @@ pub fn load_process_library_source() -> String {
     }
 }
 
-pub(super) fn load_midi_fx_descriptors_from_source(source: String) -> Vec<EffectDescriptor> {
+pub(in crate::lisp_host) fn load_midi_fx_descriptors_from_source(source: String) -> Vec<EffectDescriptor> {
     if source.trim().is_empty() {
         return Vec::new();
     }
@@ -273,7 +273,7 @@ pub(super) fn load_midi_fx_descriptors_from_source(source: String) -> Vec<Effect
     descriptors
 }
 
-pub(super) fn parse_midi_fx_descriptors_from_source(source: &str) -> Result<Vec<EffectDescriptor>, String> {
+pub(in crate::lisp_host) fn parse_midi_fx_descriptors_from_source(source: &str) -> Result<Vec<EffectDescriptor>, String> {
     let tokens = Parser::new(source.to_string())
         .parse()
         .map_err(|error| format!("failed to tokenize MIDI FX source: {error:?}"))?;
@@ -326,7 +326,7 @@ pub(super) fn parse_midi_fx_descriptors_from_source(source: &str) -> Result<Vec<
     Ok(descriptors)
 }
 
-pub(super) fn midi_fx_metadata_name(expression: &Expression) -> Option<String> {
+pub(in crate::lisp_host) fn midi_fx_metadata_name(expression: &Expression) -> Option<String> {
     match expression {
         Expression::String(name) | Expression::Symbol(name) | Expression::Keyword(name) => {
             Some(name.trim_start_matches('@').to_string())
@@ -335,7 +335,7 @@ pub(super) fn midi_fx_metadata_name(expression: &Expression) -> Option<String> {
     }
 }
 
-pub(super) fn midi_fx_metadata_value(expression: &Expression) -> Result<EValue, String> {
+pub(in crate::lisp_host) fn midi_fx_metadata_value(expression: &Expression) -> Result<EValue, String> {
     match expression {
         Expression::String(value) => Ok(EValue::String(value.clone())),
         Expression::Symbol(value) => Ok(EValue::Symbol(value.clone())),

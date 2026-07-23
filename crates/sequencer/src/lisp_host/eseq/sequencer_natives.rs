@@ -1,6 +1,6 @@
-use super::*;
+use super::super::*;
 
-pub(super) fn register_sequencer_natives(
+pub(in crate::lisp_host) fn register_sequencer_natives(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
     context: SharedSequencerEvalContext,
@@ -526,7 +526,7 @@ pub fn register_neural_authoring_natives_with_selection(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn register_sequencer_natives_with_accumulators(
+pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
     context: SharedSequencerEvalContext,
@@ -2531,7 +2531,7 @@ pub(super) fn register_sequencer_natives_with_accumulators(
 }
 
 
-pub(super) fn register_sequencer_impl(
+pub(in crate::lisp_host) fn register_sequencer_impl(
     args: &[EValue],
     sequencers: &SharedRegisteredSequencers,
 ) -> Result<EValue, String> {
@@ -2671,13 +2671,13 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
     })
 }
 
-pub(super) fn gen_splitmix64(mut value: u64) -> u64 {
+pub(in crate::lisp_host) fn gen_splitmix64(mut value: u64) -> u64 {
     value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     value ^ (value >> 31)
 }
 
-pub(super) fn build_seq_emit_event(
+pub(in crate::lisp_host) fn build_seq_emit_event(
     args: &[EValue],
     ctx: &GeneratorTickContext,
 ) -> Result<EmittedAccumulatorEvent, String> {
@@ -2774,7 +2774,7 @@ pub(super) fn build_seq_emit_event(
     })
 }
 
-pub(super) fn parse_timebase_arg(args: &[EValue], idx: usize) -> Result<Timebase, String> {
+pub(in crate::lisp_host) fn parse_timebase_arg(args: &[EValue], idx: usize) -> Result<Timebase, String> {
     let Some(value) = args.get(idx) else {
         return Err("expected timebase".to_string());
     };
@@ -2814,7 +2814,7 @@ pub(super) fn parse_timebase_arg(args: &[EValue], idx: usize) -> Result<Timebase
     }
 }
 
-pub(super) fn midi_fx_attr_name(value: &EValue) -> Option<String> {
+pub(in crate::lisp_host) fn midi_fx_attr_name(value: &EValue) -> Option<String> {
     match value {
         EValue::Keyword(name) => Some(
             name.trim_start_matches('@')
@@ -2834,7 +2834,7 @@ pub(super) fn midi_fx_attr_name(value: &EValue) -> Option<String> {
     }
 }
 
-pub(super) fn midi_fx_known_param_attr_name(value: &EValue) -> Option<String> {
+pub(in crate::lisp_host) fn midi_fx_known_param_attr_name(value: &EValue) -> Option<String> {
     let name = midi_fx_attr_name(value)?;
     matches!(
         name.as_str(),
@@ -2843,14 +2843,14 @@ pub(super) fn midi_fx_known_param_attr_name(value: &EValue) -> Option<String> {
     .then_some(name)
 }
 
-pub(super) fn midi_fx_attr_number(args: &[EValue], idx: usize, attr: &str) -> Result<f32, String> {
+pub(in crate::lisp_host) fn midi_fx_attr_number(args: &[EValue], idx: usize, attr: &str) -> Result<f32, String> {
     match args.get(idx) {
         Some(EValue::Number(value)) => Ok(*value as f32),
         _ => Err(format!("midi-fx-param :{attr} expects a number")),
     }
 }
 
-pub(super) fn parse_midi_fx_param_descriptor(
+pub(in crate::lisp_host) fn parse_midi_fx_param_descriptor(
     name: &str,
     args: &[EValue],
 ) -> Result<crate::effects::ParamDescriptor, String> {
@@ -2949,7 +2949,7 @@ pub(super) fn parse_midi_fx_param_descriptor(
     })
 }
 
-pub(super) fn midi_fx_param_descriptor_for_slot(
+pub(in crate::lisp_host) fn midi_fx_param_descriptor_for_slot(
     state: &crate::sequencer::SequencerState,
     registry: &[RegisteredAccumulator],
     track_idx: usize,
