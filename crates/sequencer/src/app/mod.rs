@@ -42,6 +42,7 @@ mod graph;
 mod hooks;
 mod params;
 mod projects;
+pub mod song_capture;
 pub mod song_edit;
 pub mod song_transport;
 mod synth;
@@ -885,6 +886,18 @@ pub struct App {
     /// Last row ordinal mirrored control-side (skips the duplicate initial
     /// `RowApplied` notice for row zero).
     pub(crate) song_mirrored_row: Option<usize>,
+    /// The non-destructive staging take while `ArrangementCapture` is active
+    /// (docs/song-mode-spec.md 7.4/10.3). Owned by the control thread;
+    /// `apply_pattern_launch` appends one lightweight event per audible
+    /// launch.
+    pub(crate) song_capture_take: Option<song_capture::SongCaptureTake>,
+    /// True when the most recent arrangement capture failed to commit
+    /// (overflow, normalization, validation). Cleared when the next capture
+    /// starts. Bound to `SEQ.song-capture-failed`.
+    pub song_capture_failed: bool,
+    /// The actionable error for the most recent failed capture, bound to
+    /// `SEQ.song-capture-error`.
+    pub song_capture_error: Option<String>,
 }
 
 struct RecordingHistoryTransaction {
@@ -1412,9 +1425,24 @@ pub enum PatternLaunchError {
 }
 
 impl App {
+    /// Central audible-launch seam (docs/song-mode-spec.md 8.1): every
+    /// audible launch — UI, Lisp, MIDI, keyboard; immediate or quantized —
+    /// flows through here. `audible_beats` is the scheduler-stamped deadline
+    /// for quantized launches; `None` means "audible now" and the beat is
+    /// read from the scheduler's rendered-beat clock at application time
+    /// (spec 8.2, never snapped). Song capture observes successful launches
+    /// here.
     pub fn apply_pattern_launch(
         &mut self,
         target: &PatternLaunchTarget,
+    ) -> Result<PatternLaunchOutcome, PatternLaunchError> {
+        self.apply_pattern_launch_at(target, None)
+    }
+
+    fn apply_pattern_launch_at(
+        &mut self,
+        target: &PatternLaunchTarget,
+        audible_beats: Option<f64>,
     ) -> Result<PatternLaunchOutcome, PatternLaunchError> {
         let num_tracks = self.tracks.len();
         let scene = match target {
@@ -1488,6 +1516,11 @@ impl App {
             self.graph_controller().sync_current_pattern_mod_routes();
         }
         self.push_all_restored_defaults();
+        // Slice C capture observation (spec 8.1/10.3): record the audible
+        // launch after it successfully applied. Cheap control-thread Vec
+        // push; no-op unless an arrangement-capture take is active.
+        let beat = audible_beats.unwrap_or_else(|| self.state.scheduler_rendered_beats());
+        self.record_song_capture_launch(target, beat);
         Ok(PatternLaunchOutcome {
             token: None,
             target: target.clone(),
@@ -1525,13 +1558,22 @@ impl App {
         }
         let due = self.state.quantized_launches().drain_valid_due();
         due.into_iter()
-            .map(|DuePatternLaunch { token, target }| {
-                self.apply_pattern_launch(&target).map(|mut outcome| {
-                    self.note_scene_macro_launch_applied(token);
-                    outcome.token = Some(token);
-                    outcome
-                })
-            })
+            .map(
+                |DuePatternLaunch {
+                     token,
+                     target,
+                     deadline_beats,
+                 }| {
+                    // Quantized launches capture the scheduler-stamped
+                    // audible boundary, not the drain time (spec 8.3).
+                    self.apply_pattern_launch_at(&target, Some(deadline_beats))
+                        .map(|mut outcome| {
+                            self.note_scene_macro_launch_applied(token);
+                            outcome.token = Some(token);
+                            outcome
+                        })
+                },
+            )
             .collect()
     }
 
@@ -2140,6 +2182,9 @@ impl App {
             song_capture_armed: false,
             active_runtime_song: None,
             song_mirrored_row: None,
+            song_capture_take: None,
+            song_capture_failed: false,
+            song_capture_error: None,
             graph: GraphState {
                 lg,
                 track_node_ids: Vec::new(),

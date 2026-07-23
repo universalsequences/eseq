@@ -19626,6 +19626,23 @@
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(read(&mut editor, "SEQ.song-mode"), Value::String("session".into()));
 
+        // A latched capture failure publishes both failure bindings.
+        test_app.song_capture_failed = true;
+        test_app.song_capture_error = Some("take could not be committed".to_string());
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(read(&mut editor, "SEQ.song-capture-failed"), Value::Bool(true));
+        assert_eq!(
+            read(&mut editor, "SEQ.song-capture-error"),
+            Value::String("take could not be committed".into())
+        );
+        test_app.song_capture_failed = false;
+        test_app.song_capture_error = None;
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(read(&mut editor, "SEQ.song-capture-failed"), Value::Bool(false));
+        assert_eq!(read(&mut editor, "SEQ.song-capture-error"), Value::Nil);
+
         // Clearing the song flips song-exists and empties song-rows.
         test_app.song_clear().expect("clear succeeds");
         assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));

@@ -8,13 +8,15 @@
 //! transport atomic directly. Invalid transitions return a clear error and
 //! leave the prior state unchanged (spec 13).
 //!
-//! Slice C (performance capture) hooks the marked `Slice C: capture staging
-//! hook` seams: mode entry (`song_transport_play` capture branch), the
-//! Stop-commit point (`song_transport_stop`), and Cancel
-//! (`song_capture_cancel`). Audible-launch observation for capture belongs in
-//! `App::apply_pattern_launch` (src/app/mod.rs), and capture must refuse to
-//! commit when `state.song_playback().take_notice_overflow()` reports lost
-//! notices (spec 10.3).
+//! Performance capture (Slice C, spec 7.4/8/10.3/10.4) plugs in at three
+//! seams here: mode entry opens the staging take (`song_transport_play`
+//! capture branch), Stop consolidates and commits it atomically through
+//! `song_replace` (`song_transport_stop`), and Cancel discards it
+//! (`song_capture_cancel`). Audible-launch observation lives in
+//! `App::apply_pattern_launch` (src/app/mod.rs); the take itself is in
+//! `song_capture.rs`. A notice overflow
+//! (`state.song_playback().take_notice_overflow()`) fails the capture and
+//! Stop refuses to commit (spec 10.3).
 
 use std::sync::Arc;
 
@@ -128,9 +130,11 @@ impl App {
         if record {
             // Arrangement capture (spec 7.4): transport starts at beat zero,
             // the committed song is NOT played, and the performer keeps the
-            // session launch controls.
-            // Slice C: capture staging hook — begin the staging take here by
-            // capturing the resolved session state as the beat-zero row.
+            // session launch controls. The staging take opens with the
+            // resolved session state as the beat-zero row and establishes
+            // its beat origin from the scheduler's rendered-beat clock
+            // (song_capture.rs).
+            self.begin_song_capture_take();
             self.state.start_playback();
             self.set_song_transport_mode(SongTransportMode::ArrangementCapture);
             return Ok(SongTransportMode::ArrangementCapture);
@@ -203,18 +207,17 @@ impl App {
                 Ok(Some("Song playback stopped".to_string()))
             }
             SongTransportMode::ArrangementCapture => {
-                // Slice C: capture staging hook — Stop-commit point: validate
-                // and normalize the staging take, then atomically replace the
-                // committed song (refusing on notice overflow via
-                // `state.song_playback().take_notice_overflow()`). Slice B
-                // has no take: stop and report that nothing was committed.
+                // Stop-commit (spec 7.4.7/10.4): the authoritative Stop
+                // boundary is the scheduler's rendered-beat clock — the same
+                // clock every capture event was recorded against — read
+                // BEFORE the transport stops (the scheduler rewinds its
+                // clock once it observes the stopped transport).
+                let end_raw_beats = self.state.scheduler_rendered_beats();
                 self.state.stop_playback();
+                // Unlock the song editing primitives before committing: the
+                // commit itself goes through `song_replace`.
                 self.set_song_transport_mode(SongTransportMode::Stopped);
-                Ok(Some(
-                    "Arrangement capture stopped; nothing was committed (capture lands in a \
-                     later slice)"
-                        .to_string(),
-                ))
+                self.finish_song_capture_take(end_raw_beats).map(Some)
             }
         }
     }
@@ -237,7 +240,7 @@ impl App {
                 "seq-song-capture-cancel is only valid during arrangement capture".to_string(),
             );
         }
-        // Slice C: capture staging hook — discard the staging take here.
+        self.discard_song_capture_take();
         self.state.stop_playback();
         self.set_song_transport_mode(SongTransportMode::Stopped);
         Ok("Arrangement capture cancelled; take discarded, committed song preserved".to_string())
@@ -475,19 +478,31 @@ mod tests {
             app.manual_launch_rejection().is_none(),
             "the performer stays launch authority during capture"
         );
-
-        let status = app.song_transport_stop().expect("stop succeeds");
         assert!(
-            status.unwrap().contains("nothing was committed"),
-            "Slice B stop must report that no take was committed"
+            app.song_capture_take.is_some(),
+            "capture opens the staging take"
         );
-        assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
-        assert!(!app.state.is_playing());
         assert_eq!(
             app.state.committed_song(),
             song_before,
-            "the committed song is untouched"
+            "the committed song is untouched while capture runs"
         );
+
+        // Stop at rendered beat 8 commits the take: with no launches it is
+        // the single beat-zero row holding the initial session state.
+        app.state.set_scheduler_rendered_beats(8.0);
+        let status = app.song_transport_stop().expect("stop commits the take");
+        assert!(status.unwrap().contains("committed"), "stop reports the commit");
+        assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
+        assert!(!app.state.is_playing());
+        assert!(app.song_capture_take.is_none());
+        let song = app.state.committed_song().expect("captured song committed");
+        assert_eq!(song.rows.len(), 1);
+        assert_eq!(song.rows[0].start_beat, 0.0);
+        assert_eq!(song.rows[0].scene, 0);
+        assert!(song.rows[0].overrides.is_empty());
+        assert_eq!(song.end_beat, 8.0);
+        app.state.set_scheduler_rendered_beats(0.0);
     }
 
     #[test]
@@ -501,7 +516,9 @@ mod tests {
                 .expect_err("second play must fail");
             assert!(error.contains("already playing"), "{error}");
             assert_eq!(app.song_transport_mode, mode, "mode unchanged");
-            app.song_transport_stop().expect("stop succeeds");
+            // A zero-length capture take fails commit validation on Stop;
+            // the transport still stops (spec 13).
+            let _ = app.song_transport_stop();
             assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
         }
     }
@@ -517,7 +534,9 @@ mod tests {
                 .expect_err("toggle while playing must fail");
             assert_eq!(error, USE_ARRANGEMENT_WHILE_PLAYING_ERROR);
             assert_eq!(app.use_arrangement, use_arrangement, "state unchanged");
-            app.song_transport_stop().expect("stop succeeds");
+            // Zero-length capture commits fail; the transport still stops.
+            let _ = app.song_transport_stop();
+            assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
         }
         // While stopped the toggle works and selects the next Play.
         app.set_use_arrangement(true).expect("toggle while stopped");
@@ -568,11 +587,22 @@ mod tests {
         app.set_use_arrangement(true).unwrap();
         let song_before = app.state.committed_song();
         app.song_transport_play(true).expect("capture starts");
+        // Record something into the take: cancel must still discard it all.
+        app.state.set_scheduler_rendered_beats(2.0);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("launch during capture succeeds");
+        assert_eq!(
+            app.song_capture_take.as_ref().map(|take| take.event_count()),
+            Some(1)
+        );
         let status = app.song_capture_cancel().expect("cancel succeeds");
         assert!(status.contains("take discarded"), "{status}");
         assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
         assert!(!app.state.is_playing());
+        assert!(app.song_capture_take.is_none(), "cancel discards the take");
+        assert!(!app.song_capture_failed, "cancel is not a capture failure");
         assert_eq!(app.state.committed_song(), song_before);
+        app.state.set_scheduler_rendered_beats(0.0);
     }
 
     #[test]
@@ -609,7 +639,9 @@ mod tests {
             app.song_transport_play(record).expect("play succeeds");
             let error = app.song_set_loop(true).expect_err("edits must be locked");
             assert_eq!(error, crate::app::song_edit::SONG_EDITS_LOCKED_ERROR);
-            app.song_transport_stop().expect("stop succeeds");
+            // Zero-length capture commits fail; the transport still stops
+            // and the primitives unlock.
+            let _ = app.song_transport_stop();
             app.song_set_loop(app.state.committed_song().unwrap().loop_enabled)
                 .expect("no-op edit succeeds when unlocked");
         }
@@ -719,6 +751,278 @@ mod tests {
                 end_sample: 0,
             });
         assert_eq!(app.state.drain_song_playback_notices().len(), 1);
+    }
+
+    /// Start arrangement capture on an app whose rendered-beat clock is 0.
+    fn start_capture(app: &mut App) {
+        app.set_use_arrangement(true).expect("toggle while stopped");
+        app.state.set_scheduler_rendered_beats(0.0);
+        let mode = app.song_transport_play(true).expect("capture starts");
+        assert_eq!(mode, SongTransportMode::ArrangementCapture);
+    }
+
+    fn committed(app: &App) -> crate::sequencer::ProjectSong {
+        app.state.committed_song().expect("song committed")
+    }
+
+    fn row_tuples(song: &crate::sequencer::ProjectSong) -> Vec<(f64, usize, Vec<(usize, u64)>)> {
+        song.rows
+            .iter()
+            .map(|row| {
+                (
+                    row.start_beat,
+                    row.scene,
+                    row.overrides
+                        .iter()
+                        .map(|over| (over.track, over.pattern_id))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn capture_creates_beat_zero_row_from_the_resolved_initial_state() {
+        let mut app = app_with_song();
+        // Resolved session state before capture: scene 2 with an override on
+        // track 0 pointing at scene 1's cell (pool id 2).
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 2 })
+            .expect("scene launch");
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::SceneTracks {
+            scene: 1,
+            tracks: vec![0],
+        })
+        .expect("track launch");
+
+        start_capture(&mut app);
+        app.state.set_scheduler_rendered_beats(8.0);
+        app.song_transport_stop().expect("stop commits");
+        let song = committed(&app);
+        assert_eq!(row_tuples(&song), vec![(0.0, 2, vec![(0, 2)])]);
+        assert_eq!(song.end_beat, 8.0);
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn capture_immediate_launch_retains_exact_fractional_scheduler_beat() {
+        let mut app = app_with_song();
+        start_capture(&mut app);
+        // An unquantized launch is audible at the scheduler-derived beat at
+        // application time; nothing may snap it to a grid (spec 8.2).
+        app.state.set_scheduler_rendered_beats(2.375);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("immediate launch");
+        app.state.set_scheduler_rendered_beats(8.0);
+        app.song_transport_stop().expect("stop commits");
+        let song = committed(&app);
+        assert_eq!(
+            row_tuples(&song),
+            vec![(0.0, 0, Vec::new()), (2.375, 1, Vec::new())],
+            "the fractional beat must survive to the committed row exactly"
+        );
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn capture_quantized_launch_stores_the_audible_boundary_not_request_time() {
+        let mut app = app_with_song();
+        start_capture(&mut app);
+
+        // Request a bar-quantized launch mid-grid-interval (rendered 2.6).
+        app.state
+            .quantized_launches()
+            .schedule(
+                PatternLaunchTarget::Scene { scene: 2 },
+                crate::quantized_launch::LaunchQuantize::Bar,
+                crate::quantized_launch::QuantizedLaunchOwner::Transport,
+                app.state.scene_count(),
+                app.tracks.len(),
+            )
+            .expect("schedule succeeds");
+        let mut pending = crate::quantized_launch::PendingQuantizedLaunches::default();
+        app.state
+            .quantized_launches()
+            .process_scheduler(&mut pending, 2.6, true);
+        // The launch becomes due after the boundary; the control thread
+        // drains it late (rendered 4.2) — the quantized path through
+        // `apply_pattern_launch` must still capture the stamped 4.0.
+        app.state
+            .quantized_launches()
+            .process_scheduler(&mut pending, 4.2, true);
+        app.state.set_scheduler_rendered_beats(4.2);
+        let results = app.drain_due_pattern_launches();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+
+        app.state.set_scheduler_rendered_beats(8.0);
+        app.song_transport_stop().expect("stop commits");
+        let song = committed(&app);
+        assert_eq!(
+            row_tuples(&song),
+            vec![(0.0, 0, Vec::new()), (4.0, 2, Vec::new())],
+            "the captured beat is the scheduled grid boundary"
+        );
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn capture_consolidates_same_boundary_scene_and_track_launches() {
+        // Track launch first, scene launch second at one audible boundary:
+        // the row must contain the new scene PLUS the track override even
+        // though the audible scene launch cleared it in session state
+        // (spec 10.4: scene clears overrides before same-boundary track
+        // launches consolidate, regardless of input order).
+        for scene_first in [false, true] {
+            let mut app = app_with_song();
+            start_capture(&mut app);
+            app.state.set_scheduler_rendered_beats(4.0);
+            let scene = PatternLaunchTarget::Scene { scene: 2 };
+            let tracks = PatternLaunchTarget::SceneTracks {
+                scene: 1,
+                tracks: vec![0],
+            };
+            let (first, second) = if scene_first {
+                (&scene, &tracks)
+            } else {
+                (&tracks, &scene)
+            };
+            app.apply_manual_pattern_launch(first).expect("first launch");
+            app.apply_manual_pattern_launch(second).expect("second launch");
+            app.state.set_scheduler_rendered_beats(8.0);
+            app.song_transport_stop().expect("stop commits");
+            let song = committed(&app);
+            assert_eq!(
+                row_tuples(&song),
+                vec![(0.0, 0, Vec::new()), (4.0, 2, vec![(0, 2)])],
+                "scene_first={scene_first}: one row, scene 2 plus the track override"
+            );
+            app.state.set_scheduler_rendered_beats(0.0);
+        }
+    }
+
+    #[test]
+    fn capture_repeated_identical_state_produces_no_row() {
+        let mut app = app_with_song();
+        start_capture(&mut app);
+        app.state.set_scheduler_rendered_beats(2.0);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("launch");
+        app.state.set_scheduler_rendered_beats(4.0);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("identical relaunch");
+        app.state.set_scheduler_rendered_beats(8.0);
+        app.song_transport_stop().expect("stop commits");
+        let song = committed(&app);
+        assert_eq!(
+            row_tuples(&song),
+            vec![(0.0, 0, Vec::new()), (2.0, 1, Vec::new())],
+            "the identical relaunch must not create a second row"
+        );
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn capture_stop_commits_atomically_with_one_undo_entry() {
+        let mut app = app_with_song();
+        let song_before = app.state.committed_song();
+        let depth = app.history.undo_len();
+        start_capture(&mut app);
+        app.state.set_scheduler_rendered_beats(2.5);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("launch");
+        app.state.set_scheduler_rendered_beats(8.0);
+        app.song_transport_stop().expect("stop commits");
+        assert_eq!(
+            app.history.undo_len(),
+            depth + 1,
+            "the whole capture commit is exactly one undo entry"
+        );
+        let captured = app.state.committed_song();
+        assert_ne!(captured, song_before);
+        // Fresh row ids continue the allocator (spec 10.4.8/5.2).
+        let song = committed(&app);
+        assert_eq!(song.next_row_id, 5, "ids continue after the previous song's 0..=2");
+
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.state.committed_song(),
+            song_before,
+            "undo restores the previous committed song"
+        );
+        assert!(matches!(
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.state.committed_song(), captured);
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn capture_overflow_prevents_commit_and_populates_error_bindings() {
+        let mut app = app_with_song();
+        let song_before = app.state.committed_song();
+        start_capture(&mut app);
+        app.state.set_scheduler_rendered_beats(2.0);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("launch");
+        // Trip the sticky notice-overflow flag (bounded channel capacity is
+        // 256; the extra pushes are dropped and latch the flag, spec 10.3).
+        for _ in 0..300 {
+            app.state
+                .song_playback()
+                .push_notice(SongPlaybackNotice::Ended {
+                    end_beat: 0.0,
+                    end_sample: 0,
+                });
+        }
+        app.state.set_scheduler_rendered_beats(8.0);
+        let error = app
+            .song_transport_stop()
+            .expect_err("overflow must prevent commit");
+        assert!(error.contains("overflow"), "{error}");
+        assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
+        assert_eq!(
+            app.state.committed_song(),
+            song_before,
+            "the previous song is preserved"
+        );
+        assert!(app.song_capture_failed);
+        assert!(
+            app.song_capture_error
+                .as_deref()
+                .is_some_and(|error| error.contains("overflow")),
+            "the error binding is populated"
+        );
+        assert!(app.song_capture_take.is_none());
+        // Drain the notices the test stuffed into the channel.
+        let _ = app.state.drain_song_playback_notices();
+
+        // The failure state clears when the next capture starts.
+        start_capture(&mut app);
+        assert!(!app.song_capture_failed);
+        assert!(app.song_capture_error.is_none());
+        app.song_capture_cancel().expect("cancel cleans up");
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn capture_commit_validation_failure_preserves_previous_song() {
+        let mut app = app_with_song();
+        let song_before = app.state.committed_song();
+        start_capture(&mut app);
+        // Stop with the rendered clock still at the capture origin: the
+        // zero-length take fails `end_beat > last start` validation.
+        let error = app
+            .song_transport_stop()
+            .expect_err("zero-length capture cannot commit");
+        assert!(error.contains("could not be committed"), "{error}");
+        assert_eq!(app.state.committed_song(), song_before);
+        assert!(app.song_capture_failed);
+        assert!(app.song_capture_error.is_some());
+        assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
     }
 
     #[test]

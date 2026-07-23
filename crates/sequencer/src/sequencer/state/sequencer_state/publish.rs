@@ -53,6 +53,21 @@ impl SequencerState {
         self.audio_rendered_sample.store(sample, Ordering::Release);
     }
 
+    /// Publish the scheduler's rendered-beat clock (the `rendered_beats`
+    /// domain quantized-launch deadlines live in). Called once per scheduler
+    /// loop from scheduler/worker.rs; song capture reads it back for
+    /// immediate launches (docs/song-mode-spec.md 8.2).
+    pub fn set_scheduler_rendered_beats(&self, beats: f64) {
+        self.scheduler_rendered_beats_bits
+            .store(beats.to_bits(), Ordering::Release);
+    }
+
+    /// The last published scheduler rendered-beat position (see
+    /// `set_scheduler_rendered_beats`).
+    pub fn scheduler_rendered_beats(&self) -> f64 {
+        f64::from_bits(self.scheduler_rendered_beats_bits.load(Ordering::Acquire))
+    }
+
     /// Keep a scheduled MIDI note active through its gate end. `fetch_max`
     /// preserves overlapping/retriggered instances of the same pitch.
     pub fn mark_scheduled_note_active_until(&self, track: usize, note: u8, sample: u64) {

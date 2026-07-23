@@ -76,10 +76,15 @@ pub struct QuantizedLaunchRequest {
     pub owner: QuantizedLaunchOwner,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DuePatternLaunch {
     pub token: QuantizedLaunchToken,
     pub target: PatternLaunchTarget,
+    /// The scheduler-stamped audible deadline in rendered beats: the exact
+    /// grid boundary for quantized launches, or the rendered-beat position at
+    /// scheduling time for unquantized ones. Song capture stores this beat
+    /// (docs/song-mode-spec.md 8.3), never the drain/request time.
+    pub deadline_beats: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,6 +158,7 @@ impl PendingQuantizedLaunches {
                     action: DuePatternLaunch {
                         token,
                         target: pending.request.target,
+                        deadline_beats: pending.deadline_beats,
                     },
                     owner: pending.request.owner,
                 });
@@ -497,6 +503,30 @@ mod tests {
     }
 
     #[test]
+    fn due_launches_carry_the_audible_deadline_not_the_request_or_drain_beat() {
+        let (tx, rx) = mpsc::sync_channel(2);
+        let (due_tx, due_rx) = mpsc::sync_channel(2);
+        let mut pending = PendingQuantizedLaunches::default();
+
+        // Requested mid-grid-interval: the stamped deadline is the exact next
+        // bar boundary (4.0), and it survives even when the launch is drained
+        // late (rendered 4.37).
+        tx.try_send(request(1, LaunchQuantize::Bar, 1)).unwrap();
+        pending.process(&rx, &due_tx, 2.6, true);
+        pending.process(&rx, &due_tx, 4.37, true);
+        let due = due_rx.try_recv().unwrap();
+        assert_eq!(due.token, 1);
+        assert_eq!(due.deadline_beats, 4.0);
+
+        // Unquantized: stamped with the rendered beat at scheduling time.
+        tx.try_send(request(2, LaunchQuantize::Off, 2)).unwrap();
+        pending.process(&rx, &due_tx, 5.125, true);
+        let due = due_rx.try_recv().unwrap();
+        assert_eq!(due.token, 2);
+        assert_eq!(due.deadline_beats, 5.125);
+    }
+
+    #[test]
     fn stopped_transport_emits_all_quantization_modes_immediately() {
         for (idx, quantize) in [
             LaunchQuantize::Off,
@@ -525,6 +555,7 @@ mod tests {
             .try_send(DuePatternLaunch {
                 token: 99,
                 target: PatternLaunchTarget::Scene { scene: 0 },
+                deadline_beats: 0.0,
             })
             .unwrap();
         tx.try_send(request(1, LaunchQuantize::Off, 1)).unwrap();

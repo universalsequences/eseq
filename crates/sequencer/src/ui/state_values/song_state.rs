@@ -23,6 +23,10 @@ pub(crate) struct SongBindingsSnapshot {
     pub(crate) position_beats: f64,
     pub(crate) end_beat: f64,
     pub(crate) loop_enabled: bool,
+    /// Latched failure state of the most recent arrangement capture
+    /// (docs/song-mode-spec.md 12); cleared when the next capture starts.
+    pub(crate) capture_failed: bool,
+    pub(crate) capture_error: Option<String>,
 }
 
 /// Per-frame diff state for the song bindings: the committed song is cached
@@ -81,6 +85,8 @@ pub(crate) fn build_song_bindings_snapshot(
         position_beats: (position.unwrap_or(0.0) * 1000.0).round() / 1000.0,
         end_beat: song.map(|song| song.end_beat).unwrap_or(0.0),
         loop_enabled: song.map(|song| song.loop_enabled).unwrap_or(false),
+        capture_failed: app.song_capture_failed,
+        capture_error: app.song_capture_error.clone(),
     }
 }
 
@@ -178,6 +184,19 @@ pub(crate) fn sync_song_state(
         "song-loop-enabled",
         loop_enabled,
         Value::Bool(next.loop_enabled)
+    );
+    publish_on_change!(
+        "song-capture-failed",
+        capture_failed,
+        Value::Bool(next.capture_failed)
+    );
+    publish_on_change!(
+        "song-capture-error",
+        capture_error,
+        match &next.capture_error {
+            Some(error) => Value::String(error.clone()),
+            None => Value::Nil,
+        }
     );
     let position_changed = prev
         .map(|prev| prev.position_beats != next.position_beats)

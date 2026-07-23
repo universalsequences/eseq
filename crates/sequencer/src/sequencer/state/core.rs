@@ -229,6 +229,13 @@ pub struct SequencerState {
     pub(super) active_note_until_samples: Vec<[AtomicU64; 128]>,
     pub(super) live_note_masks: Vec<[AtomicU64; 2]>,
     pub(super) audio_rendered_sample: AtomicU64,
+    /// The scheduler's rendered-beat clock (`rendered_total_beats` in
+    /// scheduler/worker.rs), published every scheduler loop. This is the same
+    /// clock quantized-launch deadlines are computed against
+    /// (`quantized_launch::launch_deadline`), so song capture reads it as the
+    /// audible beat for immediate/unquantized launches
+    /// (docs/song-mode-spec.md 8.2). Stored as `f64::to_bits`.
+    pub(super) scheduler_rendered_beats_bits: AtomicU64,
     pub(super) scratch_source: Mutex<String>,
     pub(super) scratch_source_version: AtomicU64,
     pub(super) published_sequencers: Mutex<Vec<PublishedSequencer>>,

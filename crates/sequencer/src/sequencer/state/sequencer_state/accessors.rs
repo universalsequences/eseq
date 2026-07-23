@@ -238,6 +238,7 @@ impl SequencerState {
                 .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
                 .collect(),
             audio_rendered_sample: AtomicU64::new(0),
+            scheduler_rendered_beats_bits: AtomicU64::new(0.0_f64.to_bits()),
             scratch_source: Mutex::new(String::new()),
             scratch_source_version: AtomicU64::new(0),
             published_sequencers: Mutex::new(Vec::new()),

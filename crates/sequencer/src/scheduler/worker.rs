@@ -291,6 +291,10 @@ pub fn spawn_scheduler_thread(
                 let scheduled_ahead_beats =
                     scheduled_until_sample.saturating_sub(rendered) as f64 / samples_per_quarter;
                 let rendered_total_beats = (lookahead_state.clock.total_beats - scheduled_ahead_beats).max(0.0);
+                // Publish the launch-deadline beat clock so the control
+                // thread can stamp immediate launches with a
+                // scheduler-derived audible beat (song capture, spec 8.2).
+                state.set_scheduler_rendered_beats(rendered_total_beats);
                 state.quantized_launches().process_scheduler(
                     &mut lookahead_state.quantized_launches,
                     rendered_total_beats,
