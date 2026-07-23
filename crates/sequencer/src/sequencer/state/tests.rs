@@ -5256,7 +5256,7 @@
             scene,
             overrides: overrides
                 .iter()
-                .map(|&(track, pattern_id)| ProjectSongTrackOverride { track, pattern_id })
+                .map(|&(track, pattern_id)| ProjectSongTrackOverride { track, pattern_id: Some(pattern_id) })
                 .collect(),
         }
     }
@@ -5276,13 +5276,13 @@
         assert_eq!(
             song.rows[0].overrides,
             vec![
-                ProjectSongTrackOverride { track: 0, pattern_id: 1 },
-                ProjectSongTrackOverride { track: 1, pattern_id: 3 },
+                ProjectSongTrackOverride { track: 0, pattern_id: Some(1) },
+                ProjectSongTrackOverride { track: 1, pattern_id: Some(3) },
             ]
         );
         assert_eq!(
             song.rows[1].overrides,
-            vec![ProjectSongTrackOverride { track: 1, pattern_id: 1 }]
+            vec![ProjectSongTrackOverride { track: 1, pattern_id: Some(1) }]
         );
     }
 
@@ -5319,9 +5319,9 @@
         assert_eq!(
             song.rows[0].overrides,
             vec![
-                ProjectSongTrackOverride { track: 0, pattern_id: 1 },
-                ProjectSongTrackOverride { track: 1, pattern_id: 4 },
-                ProjectSongTrackOverride { track: 3, pattern_id: 3 },
+                ProjectSongTrackOverride { track: 0, pattern_id: Some(1) },
+                ProjectSongTrackOverride { track: 1, pattern_id: Some(4) },
+                ProjectSongTrackOverride { track: 3, pattern_id: Some(3) },
             ]
         );
         // Moving it back restores the original assignment.
@@ -5329,9 +5329,9 @@
         assert_eq!(
             song.rows[0].overrides,
             vec![
-                ProjectSongTrackOverride { track: 0, pattern_id: 1 },
-                ProjectSongTrackOverride { track: 2, pattern_id: 3 },
-                ProjectSongTrackOverride { track: 3, pattern_id: 4 },
+                ProjectSongTrackOverride { track: 0, pattern_id: Some(1) },
+                ProjectSongTrackOverride { track: 2, pattern_id: Some(3) },
+                ProjectSongTrackOverride { track: 3, pattern_id: Some(4) },
             ]
         );
     }
@@ -5358,8 +5358,8 @@
         assert_eq!(
             song.rows[0].overrides,
             vec![
-                ProjectSongTrackOverride { track: 0, pattern_id: 1 },
-                ProjectSongTrackOverride { track: 1, pattern_id: 1 },
+                ProjectSongTrackOverride { track: 0, pattern_id: Some(1) },
+                ProjectSongTrackOverride { track: 1, pattern_id: Some(1) },
             ]
         );
     }

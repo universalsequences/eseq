@@ -2965,7 +2965,7 @@ mod tests {
                     scene: 0,
                     overrides: vec![ProjectSongTrackOverride {
                         track: 1,
-                        pattern_id: 1,
+                        pattern_id: Some(1),
                     }],
                 },
                 ProjectSongRow {
@@ -3034,7 +3034,7 @@ mod tests {
             ("scene", Box::new(|song| song.rows[1].scene = 7)),
             (
                 "pattern",
-                Box::new(|song| song.rows[0].overrides[0].pattern_id = 9),
+                Box::new(|song| song.rows[0].overrides[0].pattern_id = Some(9)),
             ),
             (
                 "track",

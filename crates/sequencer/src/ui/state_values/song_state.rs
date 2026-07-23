@@ -257,9 +257,14 @@ pub(crate) fn build_song_rows_value(song: Option<&ProjectSong>) -> Value {
                 .overrides
                 .iter()
                 .map(|over| {
+                    let pattern_value = match over.pattern_id {
+                        Some(id) => Value::Number(id as f64),
+                        // Explicit-empty override: the track plays nothing.
+                        None => Value::Nil,
+                    };
                     Rc::new(RefCell::new(Value::List(vec![
                         Rc::new(RefCell::new(Value::Number(over.track as f64))),
-                        Rc::new(RefCell::new(Value::Number(over.pattern_id as f64))),
+                        Rc::new(RefCell::new(pattern_value)),
                     ])))
                 })
                 .collect();

@@ -31,8 +31,9 @@ pub struct RuntimeSongRow {
     pub id: SongRowId,
     pub start_beat: f64,
     pub scene: usize,
-    /// The row's complete override set as live pool ids.
-    pub overrides: Vec<(usize, PatternId)>,
+    /// The row's complete override set as live pool ids (`None` =
+    /// explicit-empty: the track is silenced for the row).
+    pub overrides: Vec<(usize, Option<PatternId>)>,
     /// Effective pattern per track: override, else scene cell, else `None`
     /// (the track is scene-silenced for this row).
     pub resolved_pattern_ids: Vec<Option<PatternId>>,

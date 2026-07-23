@@ -55,46 +55,72 @@ fn require_scene(map: &HashMap<String, Rc<RefCell<Value>>>) -> Result<usize, Str
 }
 
 /// Parse one override from either a `(track pattern-id)` pair list or a
-/// `{track, pattern-id}` map.
+/// `{track, pattern-id}` map. A pattern-id of `nil` or `0` is an
+/// explicit-empty override (the track plays nothing for the row); positive
+/// integers are pool ids.
 fn parse_override(value: &Value) -> Result<ProjectSongTrackOverride, String> {
     match value {
         Value::List(items) => {
-            let numbers: Vec<f64> = items
-                .iter()
-                .filter_map(|item| match &*item.borrow() {
-                    Value::Number(n) => Some(*n),
-                    _ => None,
-                })
-                .collect();
-            if numbers.len() != 2 {
+            if items.len() != 2 {
                 return Err(
-                    "override entries must be (track pattern-id) number pairs".to_string()
+                    "override entries must be (track pattern-id) pairs".to_string()
                 );
             }
-            override_from_numbers(numbers[0], numbers[1])
+            let track = match &*items[0].borrow() {
+                Value::Number(n) => *n,
+                _ => return Err("override track must be a number".to_string()),
+            };
+            let pattern_id = match &*items[1].borrow() {
+                Value::Number(n) => Some(*n),
+                Value::Nil => None,
+                _ => {
+                    return Err(
+                        "override pattern-id must be a number or nil (explicit-empty)"
+                            .to_string(),
+                    )
+                }
+            };
+            override_from_numbers(track, pattern_id)
         }
         Value::Map(map) => {
             let track = map_number(map, "track")
                 .ok_or_else(|| "override entry is missing :track".to_string())?;
+            let has_key = map.contains_key("pattern-id") || map.contains_key("pattern_id");
             let pattern_id = map_number(map, "pattern-id")
-                .or_else(|| map_number(map, "pattern_id"))
-                .ok_or_else(|| "override entry is missing :pattern-id".to_string())?;
+                .or_else(|| map_number(map, "pattern_id"));
+            if pattern_id.is_none() && !has_key {
+                return Err("override entry is missing :pattern-id".to_string());
+            }
             override_from_numbers(track, pattern_id)
         }
         _ => Err("override entries must be (track pattern-id) pairs or maps".to_string()),
     }
 }
 
-fn override_from_numbers(track: f64, pattern_id: f64) -> Result<ProjectSongTrackOverride, String> {
+fn override_from_numbers(
+    track: f64,
+    pattern_id: Option<f64>,
+) -> Result<ProjectSongTrackOverride, String> {
     if !track.is_finite() || track < 0.0 || track.fract() != 0.0 {
         return Err("override track must be a non-negative integer".to_string());
     }
-    if !pattern_id.is_finite() || pattern_id < 1.0 || pattern_id.fract() != 0.0 {
-        return Err("override pattern-id must be a positive integer".to_string());
-    }
+    let pattern_id = match pattern_id {
+        None => None,
+        Some(id) if id == 0.0 => None,
+        Some(id) => {
+            if !id.is_finite() || id < 1.0 || id.fract() != 0.0 {
+                return Err(
+                    "override pattern-id must be a positive integer, or 0/nil for \
+                     explicit-empty"
+                        .to_string(),
+                );
+            }
+            Some(id as u64)
+        }
+    };
     Ok(ProjectSongTrackOverride {
         track: track as usize,
-        pattern_id: pattern_id as u64,
+        pattern_id,
     })
 }
 
@@ -352,7 +378,7 @@ mod tests {
     fn override_entries_parse_from_pairs_and_maps() {
         assert_eq!(
             parse_override(&pair(1.0, 3.0)).unwrap(),
-            ProjectSongTrackOverride { track: 1, pattern_id: 3 }
+            ProjectSongTrackOverride { track: 1, pattern_id: Some(3) }
         );
         assert_eq!(
             parse_override(&value_map(vec![
@@ -360,10 +386,25 @@ mod tests {
                 ("pattern-id", Value::Number(5.0)),
             ]))
             .unwrap(),
-            ProjectSongTrackOverride { track: 2, pattern_id: 5 }
+            ProjectSongTrackOverride { track: 2, pattern_id: Some(5) }
         );
         assert!(parse_override(&pair(-1.0, 3.0)).is_err());
-        assert!(parse_override(&pair(1.0, 0.0)).is_err(), "pattern id 0 is reserved");
+        // Pattern id 0 and nil both mean explicit-empty (the track plays
+        // nothing for the row).
+        assert_eq!(
+            parse_override(&pair(1.0, 0.0)).unwrap(),
+            ProjectSongTrackOverride { track: 1, pattern_id: None }
+        );
+        assert_eq!(
+            parse_override(&Value::List(vec![
+                Rc::new(RefCell::new(Value::Number(1.0))),
+                Rc::new(RefCell::new(Value::Nil)),
+            ]))
+            .unwrap(),
+            ProjectSongTrackOverride { track: 1, pattern_id: None }
+        );
+        assert!(parse_override(&pair(1.0, -2.0)).is_err());
+        assert!(parse_override(&pair(1.0, 1.5)).is_err());
         assert!(parse_override(&Value::Number(3.0)).is_err());
     }
 
@@ -380,7 +421,10 @@ mod tests {
         let spec = parse_row_spec(&row).unwrap();
         assert_eq!(spec.start_beat, 47.5);
         assert_eq!(spec.scene, 2);
-        assert_eq!(spec.overrides, vec![ProjectSongTrackOverride { track: 0, pattern_id: 3 }]);
+        assert_eq!(
+            spec.overrides,
+            vec![ProjectSongTrackOverride { track: 0, pattern_id: Some(3) }]
+        );
 
         let missing_scene = value_map(vec![("start-beat", Value::Number(0.0))]);
         assert!(parse_row_spec(&missing_scene).is_err());

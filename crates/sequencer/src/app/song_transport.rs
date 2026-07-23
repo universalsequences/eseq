@@ -299,7 +299,7 @@ impl App {
     fn apply_song_row_control(
         &mut self,
         scene: usize,
-        overrides: &[(usize, PatternId)],
+        overrides: &[(usize, Option<PatternId>)],
         bump_pattern_epoch: bool,
     ) -> Result<(), String> {
         if scene != self.state.current_scene_index() {
@@ -765,7 +765,9 @@ mod tests {
         app.state.committed_song().expect("song committed")
     }
 
-    fn row_tuples(song: &crate::sequencer::ProjectSong) -> Vec<(f64, usize, Vec<(usize, u64)>)> {
+    fn row_tuples(
+        song: &crate::sequencer::ProjectSong,
+    ) -> Vec<(f64, usize, Vec<(usize, Option<u64>)>)> {
         song.rows
             .iter()
             .map(|row| {
@@ -798,7 +800,7 @@ mod tests {
         app.state.set_scheduler_rendered_beats(8.0);
         app.song_transport_stop().expect("stop commits");
         let song = committed(&app);
-        assert_eq!(row_tuples(&song), vec![(0.0, 2, vec![(0, 2)])]);
+        assert_eq!(row_tuples(&song), vec![(0.0, 2, vec![(0, Some(2))])]);
         assert_eq!(song.end_beat, 8.0);
         app.state.set_scheduler_rendered_beats(0.0);
     }
@@ -893,7 +895,7 @@ mod tests {
             let song = committed(&app);
             assert_eq!(
                 row_tuples(&song),
-                vec![(0.0, 0, Vec::new()), (4.0, 2, vec![(0, 2)])],
+                vec![(0.0, 0, Vec::new()), (4.0, 2, vec![(0, Some(2))])],
                 "scene_first={scene_first}: one row, scene 2 plus the track override"
             );
             app.state.set_scheduler_rendered_beats(0.0);

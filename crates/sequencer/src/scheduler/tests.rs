@@ -5428,7 +5428,7 @@
                 .into_iter()
                 .map(|(track, pattern_id)| crate::sequencer::ProjectSongTrackOverride {
                     track,
-                    pattern_id,
+                    pattern_id: Some(pattern_id),
                 })
                 .collect(),
         }
@@ -5677,6 +5677,48 @@
     }
 
     #[test]
+    fn song_explicit_empty_override_silences_only_its_track() {
+        run_with_scheduler_stack(|| {
+            let (state, _override_id) = song_mode_fixture();
+            let mut silence_row = song_mode_row(1, 1.0, 0, Vec::new());
+            silence_row.overrides = vec![crate::sequencer::ProjectSongTrackOverride {
+                track: 0,
+                pattern_id: None,
+            }];
+            song_mode_commit(
+                &state,
+                vec![song_mode_row(0, 0.0, 0, Vec::new()), silence_row],
+                2.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            // Explicit-empty resolves to no pattern even though scene 0's
+            // cell for track 0 holds one.
+            assert_eq!(runtime.rows[1].resolved_pattern_ids[0], None);
+            assert!(runtime.rows[1].scheduler_snapshot.tracks[0].scene_silenced);
+            let (events, notices) = drive_song_lookahead(&state, runtime, 16_000, 48_000);
+            let applied = song_row_applied(&notices);
+            let boundary = applied
+                .iter()
+                .find(|record| record.row_ordinal == 1)
+                .expect("row 1 applied")
+                .effective_sample;
+            assert!(
+                events
+                    .iter()
+                    .all(|event| !(event.track == 0 && event.sample_time >= boundary)),
+                "track 0 must be silent from the boundary on: {events:#?}"
+            );
+            // Track 1 keeps playing scene 0's pattern through the boundary.
+            assert!(events
+                .iter()
+                .any(|event| event.track == 1
+                    && event.sample_time >= boundary
+                    && event.transpose == 1.0));
+        });
+    }
+
+    #[test]
     fn song_loop_reapplies_row_zero_without_stale_override_or_duplicate_trigger() {
         run_with_scheduler_stack(|| {
             let (state, override_id) = song_mode_fixture();
@@ -5825,7 +5867,7 @@
         let epoch_before = state.transport.pattern_epoch.load(Ordering::Relaxed);
         let version_before = state.scheduler_snapshot_version();
         let sample_ids = state
-            .apply_song_row(1, &[(0, override_id)], 2, &[], &[], &[], &[], true)
+            .apply_song_row(1, &[(0, Some(override_id))], 2, &[], &[], &[], &[], true)
             .expect("apply song row");
         assert_eq!(sample_ids.len(), 2);
         state.with_scenes_mut(|scenes| {
@@ -5853,4 +5895,12 @@
         assert!(err.contains("scene 8"), "{err}");
         assert_eq!(state.scheduler_snapshot_version(), version_before);
         assert_eq!(state.current_scene_index(), 1);
+
+        // Explicit-empty override: track 0 is scene-silenced without falling
+        // back to the scene cell; track 1 restores normally.
+        state
+            .apply_song_row(0, &[(0, None)], 2, &[], &[], &[], &[], true)
+            .expect("apply explicit-empty row");
+        assert!(state.is_scene_silenced(0));
+        assert!(!state.is_scene_silenced(1));
     }

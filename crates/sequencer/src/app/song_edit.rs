@@ -468,7 +468,10 @@ mod tests {
     }
 
     fn ov(track: usize, pattern_id: u64) -> ProjectSongTrackOverride {
-        ProjectSongTrackOverride { track, pattern_id }
+        ProjectSongTrackOverride {
+            track,
+            pattern_id: Some(pattern_id),
+        }
     }
 
     fn spec(start_beat: f64, scene: usize, overrides: Vec<ProjectSongTrackOverride>) -> SongRowSpec {

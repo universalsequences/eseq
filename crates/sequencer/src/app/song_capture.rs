@@ -265,7 +265,7 @@ impl App {
                     .into_iter()
                     .map(|(track, id)| crate::sequencer::ProjectSongTrackOverride {
                         track,
-                        pattern_id: id.0,
+                        pattern_id: Some(id.0),
                     })
                     .collect(),
             })

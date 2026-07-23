@@ -57,13 +57,17 @@ impl SequencerState {
                     let mut track_data = Vec::with_capacity(track_count);
                     let mut silenced = Vec::with_capacity(track_count);
                     for track in 0..track_count {
-                        let override_id = row
+                        // An explicit-empty override (`pattern_id: None`)
+                        // silences the track for the row; only an ABSENT
+                        // override falls back to the scene cell.
+                        let effective = match row
                             .overrides
                             .iter()
                             .find(|over| over.track == track)
-                            .map(|over| PatternId(over.pattern_id));
-                        let effective = override_id
-                            .or_else(|| scene.cells.get(track).copied().flatten());
+                        {
+                            Some(over) => over.pattern_id.map(PatternId),
+                            None => scene.cells.get(track).copied().flatten(),
+                        };
                         match effective {
                             Some(id) => {
                                 let data = scenes
@@ -134,7 +138,7 @@ impl SequencerState {
                 overrides: row
                     .overrides
                     .iter()
-                    .map(|over| (over.track, PatternId(over.pattern_id)))
+                    .map(|over| (over.track, over.pattern_id.map(PatternId)))
                     .collect(),
                 resolved_pattern_ids: staging.resolved_pattern_ids,
                 scheduler_snapshot: Arc::new(snapshot),

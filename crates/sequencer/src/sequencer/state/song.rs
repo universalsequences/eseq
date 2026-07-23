@@ -22,11 +22,14 @@ pub struct SongRowId(pub u64);
 
 /// One per-track pattern override inside a song row. `pattern_id` is a
 /// track-pattern-pool id (`PatternId`) stored as its raw `u64` because
-/// `PatternId` itself is not serialized.
+/// `PatternId` itself is not serialized. `None` is an explicit-empty
+/// override: the track plays nothing for the row even when the base scene's
+/// cell holds a pattern (the arrangement's sparsity primitive). Serde reads
+/// a legacy bare number as `Some`, so old project files load unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectSongTrackOverride {
     pub track: usize,
-    pub pattern_id: u64,
+    pub pattern_id: Option<u64>,
 }
 
 /// A complete session launch state beginning at `start_beat`: a base scene
@@ -189,13 +192,16 @@ impl ProjectSong {
                         ctx.song_track_count()
                     ));
                 }
-                if !ctx.song_track_pattern_exists(over.track, over.pattern_id) {
-                    return Err(format!(
-                        "Song row {} references pattern {} which is not in track {}'s pattern pool",
-                        idx + 1,
-                        over.pattern_id,
-                        over.track + 1
-                    ));
+                if let Some(pattern_id) = over.pattern_id {
+                    if !ctx.song_track_pattern_exists(over.track, pattern_id) {
+                        return Err(format!(
+                            "Song row {} references pattern {} which is not in track {}'s \
+                             pattern pool",
+                            idx + 1,
+                            pattern_id,
+                            over.track + 1
+                        ));
+                    }
                 }
             }
         }
@@ -290,13 +296,14 @@ pub fn project_lanes(song: &ProjectSong, scenes: &ProjectScenes) -> Vec<Vec<Lane
                         .get(idx + 1)
                         .map(|next| next.start_beat)
                         .unwrap_or(song.end_beat);
-                    let override_pattern = row
+                    let override_entry = row
                         .overrides
                         .iter()
-                        .find(|over| over.track == track)
-                        .map(|over| PatternId(over.pattern_id));
-                    let (pattern, from_override) = match override_pattern {
-                        Some(id) => (Some(id), true),
+                        .find(|over| over.track == track);
+                    let (pattern, from_override) = match override_entry {
+                        // Explicit-empty (`pattern_id: None`) resolves to no
+                        // pattern WITHOUT falling back to the scene cell.
+                        Some(over) => (over.pattern_id.map(PatternId), true),
                         None => (
                             scenes
                                 .scenes
@@ -343,7 +350,7 @@ pub fn song_rows_referencing_track_pattern(
         .filter(|(_, row)| {
             row.overrides
                 .iter()
-                .any(|over| over.track == track && over.pattern_id == pattern_id)
+                .any(|over| over.track == track && over.pattern_id == Some(pattern_id))
         })
         .map(|(idx, _)| idx)
         .collect()
@@ -384,7 +391,11 @@ pub fn song_for_serialization(
     let mut serialized = song.clone();
     for (idx, row) in serialized.rows.iter_mut().enumerate() {
         for over in &mut row.overrides {
-            let live_id = PatternId(over.pattern_id);
+            // Explicit-empty overrides carry no pool id; they serialize as-is.
+            let Some(live_raw) = over.pattern_id else {
+                continue;
+            };
+            let live_id = PatternId(live_raw);
             let scene_idx = scenes
                 .scenes
                 .iter()
@@ -396,10 +407,10 @@ pub fn song_for_serialization(
                          or update the song row",
                         idx + 1,
                         over.track + 1,
-                        over.pattern_id
+                        live_raw
                     )
                 })?;
-            over.pattern_id = scene_idx as u64 + 1;
+            over.pattern_id = Some(scene_idx as u64 + 1);
         }
     }
     Ok(serialized)
@@ -410,7 +421,17 @@ mod tests {
     use super::*;
 
     fn over(track: usize, pattern_id: u64) -> ProjectSongTrackOverride {
-        ProjectSongTrackOverride { track, pattern_id }
+        ProjectSongTrackOverride {
+            track,
+            pattern_id: Some(pattern_id),
+        }
+    }
+
+    fn empty_over(track: usize) -> ProjectSongTrackOverride {
+        ProjectSongTrackOverride {
+            track,
+            pattern_id: None,
+        }
     }
 
     fn row(id: u64, start_beat: f64, scene: usize, overrides: Vec<ProjectSongTrackOverride>) -> ProjectSongRow {
@@ -681,6 +702,45 @@ mod tests {
         let lanes = project_lanes(&song, &scenes);
         assert_eq!(lanes[0][1].pattern, None);
         assert!(!lanes[0][1].from_override);
+    }
+
+    #[test]
+    fn explicit_empty_override_validates_and_silences_the_lane() {
+        let scenes = test_scenes();
+        let mut song = valid_song();
+        // Row 1's scene cell for track 0 holds PatternId(2); an
+        // explicit-empty override must win over it.
+        song.rows[1].overrides = vec![empty_over(0)];
+        song.validate(&ctx()).expect("explicit-empty override validates");
+        let lanes = project_lanes(&song, &scenes);
+        assert_eq!(lanes[0][1].pattern, None, "no fallback to the scene cell");
+        assert!(lanes[0][1].from_override);
+        // The other track's lane is untouched.
+        assert_eq!(lanes[1][1].pattern, Some(PatternId(2)));
+    }
+
+    #[test]
+    fn explicit_empty_override_serde_round_trips_and_reads_legacy_numbers() {
+        let mut song = valid_song();
+        song.rows[1].overrides = vec![empty_over(0)];
+        let json = serde_json::to_string(&song).expect("serialize song");
+        let restored: ProjectSong = serde_json::from_str(&json).expect("deserialize song");
+        assert_eq!(restored, song);
+
+        // Legacy files store bare numbers; they must load as `Some`.
+        let json = r#"{"track":1,"pattern_id":3}"#;
+        let restored: ProjectSongTrackOverride =
+            serde_json::from_str(json).expect("deserialize legacy override");
+        assert_eq!(restored, over(1, 3));
+    }
+
+    #[test]
+    fn song_for_serialization_passes_explicit_empty_overrides_through() {
+        let scenes = test_scenes();
+        let mut song = valid_song();
+        song.rows[1].overrides = vec![empty_over(0)];
+        let serialized = song_for_serialization(&song, &scenes).expect("serializable");
+        assert_eq!(serialized.rows[1].overrides, vec![empty_over(0)]);
     }
 
     #[test]

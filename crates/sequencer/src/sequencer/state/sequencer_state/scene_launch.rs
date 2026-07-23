@@ -273,7 +273,7 @@ impl SequencerState {
     pub fn apply_song_row(
         &self,
         scene: usize,
-        overrides: &[(usize, PatternId)],
+        overrides: &[(usize, Option<PatternId>)],
         num_tracks: usize,
         buffer_ids: &[i32],
         sample_rates: &[u32],
@@ -301,18 +301,23 @@ impl SequencerState {
             let mut resolved: Vec<(usize, Option<PatternId>, Option<TrackPatternData>)> =
                 Vec::with_capacity(num_tracks);
             for track in 0..num_tracks {
-                let override_id = overrides
+                // `Some(None)` is an explicit-empty override: the track is
+                // silenced for the row and must NOT fall back to the scene
+                // cell. Only an absent override resolves through the scene.
+                let override_entry = overrides
                     .iter()
                     .find(|(over_track, _)| *over_track == track)
                     .map(|(_, id)| *id);
-                let effective = override_id.or_else(|| {
-                    scenes
+                let override_id = override_entry.flatten();
+                let effective = match override_entry {
+                    Some(explicit) => explicit,
+                    None => scenes
                         .scenes
                         .get(scene)
                         .and_then(|scene| scene.cells.get(track))
                         .copied()
-                        .flatten()
-                });
+                        .flatten(),
+                };
                 let data = match effective {
                     Some(id) => Some(
                         scenes
