@@ -140,7 +140,16 @@
 
 ;; Scene-lane items (spec 8): one span per song row covering
 ;; [start_beat, next start_beat) labeled with the row's scene name. Spans (not
-;; markers) so Slice C gets move/resize edges for free.
+;; markers) so Slice C gets move/resize edges for free. Rows created by
+;; track-clip surgery keep the same base scene as their predecessor; labeling
+;; only scene CHANGES keeps the lane readable ("Scene 4 | | |" reads as one
+;; region with row splits, not four different states).
+(def arrangement-scene-row-label (row index)
+  (if (and (> index 0)
+        (= (get row :scene) (get (nth SEQ.song-rows (- index 1)) :scene)))
+    nil
+    (arrangement-scene-name (get row :scene))))
+
 (def arrangement-scene-row-items ()
   (map
     (lambda (index)
@@ -152,7 +161,7 @@
             :lane 0
             :start (arrangement-scene-span-start row index start)
             :end (arrangement-scene-span-end row start end)
-            :label (arrangement-scene-name (get row :scene))
+            :label (arrangement-scene-row-label row index)
             :kind :scene
             :selected (arrangement-row-selected? (get row :id))
             :color (list 0.52 0.56 0.62)))))
@@ -636,11 +645,24 @@
 ;; and double-click cover editing; Backspace deletes the selection. The scene
 ;; lane (the arrangement's one ruler) sits OUTSIDE the track scroll container
 ;; so it stays pinned while track rows scroll vertically inside it.
+;; The step tile hides the global status line, so song-primitive rejections
+;; (including "song editing is unavailable during song playback/capture")
+;; surface here; the strip disappears on the next successful edit.
+(def arrangement-error-banner ()
+  (if (= SEQ.song-edit-error nil)
+    (box :width 0 :height 0 :bg :transparent)
+    (box :width :fill :height 1.5 :padding 0.3
+      :background-color (rgba 0.32 0.13 0.12 1.0)
+      (label (str "Edit rejected: " SEQ.song-edit-error)
+        :key "arrangement-edit-error-label"
+        :font-size 10.5 :color (rgba 1.0 0.78 0.72 1.0) :bg :transparent))))
+
 (effect-buffer "*arrangement*"
   (v-stack :padding 0.0 :gap 0.0
     (if SEQ.song-exists
       (box :width 0 :height 0 :bg :transparent)
       (arrangement-empty-banner))
+    (arrangement-error-banner)
     (box :width :fill
       (h-stack :width :fill :gap 0.6 :align :start
         (box :key "arrangement-scene-header-spacer"

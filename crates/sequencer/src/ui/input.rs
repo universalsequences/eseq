@@ -1053,6 +1053,10 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         && editor.prompt_text().is_none()
         && matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
         && key.modifiers == KeyModifiers::NONE
+        // Defer to a focused widget (e.g. an arrangement lane with a selected
+        // clip): the widget's own delete handling wins over the global
+        // selected-step shortcut, mirroring the navigation-key gate below.
+        && editor.focused_widget_id().is_none()
         && selected_steps_delete_shortcut_available(editor, selected_steps)
     {
         let _ = editor.runtime_mut().eval_str("(delete-selected-steps)");

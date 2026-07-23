@@ -30,6 +30,10 @@ pub(crate) struct SongBindingsSnapshot {
     /// (docs/song-mode-spec.md 12); cleared when the next capture starts.
     pub(crate) capture_failed: bool,
     pub(crate) capture_error: Option<String>,
+    /// Latched rejection of the most recent song editing primitive, cleared
+    /// by the next successful edit. Bound to `SEQ.song-edit-error` so the
+    /// arrangement view can surface it (the step tile hides the status line).
+    pub(crate) edit_error: Option<String>,
 }
 
 /// Per-frame diff state for the song bindings: the committed song is cached
@@ -240,6 +244,7 @@ pub(crate) fn build_song_bindings_snapshot(
         loop_enabled: song.map(|song| song.loop_enabled).unwrap_or(false),
         capture_failed: app.song_capture_failed,
         capture_error: app.song_capture_error.clone(),
+        edit_error: app.song_edit_error.clone(),
     }
 }
 
@@ -463,6 +468,14 @@ pub(crate) fn sync_song_state(
         "song-capture-error",
         capture_error,
         match &next.capture_error {
+            Some(error) => Value::String(error.clone()),
+            None => Value::Nil,
+        }
+    );
+    publish_on_change!(
+        "song-edit-error",
+        edit_error,
+        match &next.edit_error {
             Some(error) => Value::String(error.clone()),
             None => Value::Nil,
         }

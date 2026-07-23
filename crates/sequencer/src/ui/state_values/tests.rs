@@ -19792,6 +19792,20 @@
             read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 2) :end-beat)"),
             Value::Number(24.0)
         );
+
+        // The latched primitive-rejection error publishes (the arrangement
+        // banner reads it) and clears back to nil.
+        test_app.song_edit_error = Some("song editing is unavailable".to_string());
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "SEQ.song-edit-error"),
+            Value::String("song editing is unavailable".to_string())
+        );
+        test_app.song_edit_error = None;
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(read(&mut editor, "SEQ.song-edit-error"), Value::Nil);
     }
 
     /// Scene-lane gesture lifecycle (docs/arrangement-timeline-ui-spec.md
@@ -20299,6 +20313,146 @@
             .rows
             .iter()
             .any(|row| row.start_beat == 6.0 && row.overrides.is_empty()));
+    }
+
+    /// The full keyboard-delete path for a track clip: clicking the clip
+    /// focuses its lane and selects it; Backspace must reach the lane widget
+    /// (the global selected-step delete shortcut defers to a focused widget)
+    /// and lower to one :track-paint action.
+    #[test]
+    fn metal_seq_arrangement_click_then_backspace_deletes_track_clip() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let recorded: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = recorded.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-arrangement-action", move |args, _ctx| {
+                sink.lock().unwrap().push(args.first().cloned().unwrap_or(Value::Nil));
+                Ok(Value::String("recorded".to_string()))
+            });
+
+        let song_row = |id: f64, start: f64, scene: f64| {
+            map_value(vec![
+                ("id", Value::Number(id)),
+                ("start-beat", Value::Number(start)),
+                ("scene", Value::Number(scene)),
+                ("overrides", Value::List(vec![])),
+            ])
+        };
+        let lane_clip = |row_id: f64, start: f64, end: f64, pattern: Value| {
+            map_value(vec![
+                ("row-id", Value::Number(row_id)),
+                ("start-beat", Value::Number(start)),
+                ("end-beat", Value::Number(end)),
+                ("pattern-id", pattern),
+                ("from-override", Value::Bool(false)),
+            ])
+        };
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
+        rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
+        rt.set_reactive(
+            "SEQ",
+            "song-rows",
+            test_list(vec![song_row(0.0, 0.0, 0.0)]),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "song-lanes",
+            test_list(vec![test_list(vec![lane_clip(
+                0.0,
+                0.0,
+                16.0,
+                Value::Number(1.0),
+            )])]),
+        );
+        rt.run_reactive_cycle();
+        editor
+            .runtime_mut()
+            .eval_str("(do (seq-open-arrangement) (set! arrangement-view-start 0) \
+                       (set! arrangement-view-duration 64))")
+            .expect("open arrangement view");
+        editor.refresh_runtime_side_effects();
+
+        // Click the middle of the clip in track lane 0 (clip covers beats
+        // 0..16 of a 64-beat view: the left quarter of the lane).
+        let layout = editor.widget_layout().expect("arrangement layout");
+        let container = find_layout_node_by_stable_key(&layout, "arrangement-track-lane-0")
+            .expect("track lane container");
+        let lane = find_layout_node_by_widget_type(container, "timeline")
+            .expect("track timeline instance");
+        let click_col = lane.rect.col + lane.rect.width * (8.0 / 64.0);
+        let click_row = lane.rect.row + lane.rect.height * 0.5;
+        for kind in [
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            editor.handle_mouse_precise(
+                crossterm::event::MouseEvent {
+                    kind,
+                    column: click_col as u16,
+                    row: click_row as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                0,
+                0,
+                72,
+                60,
+                click_col,
+                click_row,
+            );
+        }
+        assert!(
+            editor.focused_widget_id().is_some(),
+            "clicking a track clip must focus its lane"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len (arrangement-lane-selection 0))")
+                .unwrap(),
+            Some(Value::Number(1.0)),
+            "clicking a track clip must select it"
+        );
+
+        // The global selected-step delete shortcut must defer to the focused
+        // lane even when grid steps are selected (the app-side key path).
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        selected_steps.lock().unwrap().insert(4);
+        let step_clipboard = Arc::new(Mutex::new(None));
+        let backspace = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Backspace,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        assert!(
+            !handle_metal_command_shortcut(
+                &mut editor,
+                &backspace,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "selected-step delete must defer to the focused arrangement lane"
+        );
+
+        // The editor key path delivers Backspace to the lane widget, which
+        // lowers the selected clip to one :track-paint silence.
+        editor.handle_key(backspace);
+        let recorded = recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "backspace deletes the selected clip");
+        let Value::Map(map) = &recorded[0] else {
+            panic!("recorded action must be a map");
+        };
+        assert_eq!(
+            map["type"].borrow().clone(),
+            Value::Keyword("track-paint".to_string())
+        );
+        assert_eq!(map["start"].borrow().clone(), Value::Number(0.0));
+        assert_eq!(map["end"].borrow().clone(), Value::Number(16.0));
+        assert!(matches!(&*map["pattern-id"].borrow(), Value::Nil));
     }
 
     /// MIDI dot flattening (docs/arrangement-timeline-ui-spec.md 7.1): the

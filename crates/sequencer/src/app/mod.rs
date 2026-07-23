@@ -898,6 +898,11 @@ pub struct App {
     /// The actionable error for the most recent failed capture, bound to
     /// `SEQ.song-capture-error`.
     pub song_capture_error: Option<String>,
+    /// The most recent song editing-primitive rejection, bound to
+    /// `SEQ.song-edit-error` so the arrangement view can surface it (the
+    /// step tile hides the global status line). Cleared by the next
+    /// successful song edit.
+    pub song_edit_error: Option<String>,
 }
 
 struct RecordingHistoryTransaction {
@@ -2185,6 +2190,7 @@ impl App {
             song_capture_take: None,
             song_capture_failed: false,
             song_capture_error: None,
+            song_edit_error: None,
             graph: GraphState {
                 lg,
                 track_node_ids: Vec::new(),

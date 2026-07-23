@@ -1544,6 +1544,7 @@ pub(crate) fn init_runtime(
                 ("song-loop-enabled", Value::Bool(false)),
                 ("song-capture-failed", Value::Bool(false)),
                 ("song-capture-error", Value::Nil),
+                ("song-edit-error", Value::Nil),
                 ("song-rows", Value::List(vec![])),
                 ("song-lanes", Value::List(vec![])),
                 ("song-lane-events", Value::List(vec![])),

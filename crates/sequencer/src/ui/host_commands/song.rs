@@ -387,8 +387,18 @@ pub(super) fn handle(
         return;
     }
     match run(name, &payload, app) {
-        Ok(status) => editor.handle_host_event(HostEvent::Status(status)),
-        Err(error) => editor.handle_host_event(HostEvent::Error(format!("{name} failed: {error}"))),
+        Ok(status) => {
+            // A successful edit clears the latched rejection so the
+            // arrangement banner disappears.
+            app.song_edit_error = None;
+            editor.handle_host_event(HostEvent::Status(status));
+        }
+        Err(error) => {
+            // Latch the rejection for SEQ.song-edit-error: the step tile
+            // hides the status line, so the arrangement view surfaces it.
+            app.song_edit_error = Some(error.clone());
+            editor.handle_host_event(HostEvent::Error(format!("{name} failed: {error}")));
+        }
     }
 }
 
