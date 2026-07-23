@@ -45,8 +45,8 @@
 pub mod agent;
 pub mod analysis;
 pub mod audio;
+pub use audio::{audiograph, engine};
 pub mod audio_tap;
-pub mod audiograph;
 pub mod crash;
 #[allow(dead_code)]
 pub mod effects;
@@ -83,4 +83,3 @@ mod voice;
 pub mod voice_modulator;
 pub mod warp_grid;
 
-pub mod engine;

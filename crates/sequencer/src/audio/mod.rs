@@ -1,3 +1,6 @@
+pub mod audiograph;
+pub mod engine;
+
 use arrayvec::ArrayVec;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
