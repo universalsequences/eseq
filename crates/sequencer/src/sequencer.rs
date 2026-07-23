@@ -32,6 +32,8 @@ pub use state::{
     song_rows_referencing_track_pattern, state_at_beat, BusGateSequence, BusPatternSnapshot,
     LaneClip, ProjectSong, ProjectSongRow, ProjectSongTrackOverride, SerializedSongContext,
     SongProjectContext, SongRowId,
+    AudibleSongRowApplied, RuntimeSong, RuntimeSongRow, SongChunkPlan, SongPlaybackCommand,
+    SongPlaybackMailbox, SongPlaybackNotice, SongPlaybackRuntime, SongPositionShared,
     EffectInstanceId, InstrumentDeviceValuesSnapshot, InstrumentSlotResetSummary,
     MidiFxInstanceId, PatternId, PatternSnapshot, ProjectScenes, PublishedSequencer, RackMacro, RackMacroCurve,
     RackMacroId, RackMacroMapping, RackMacroTarget, RackSlotId, RackSlotParam,

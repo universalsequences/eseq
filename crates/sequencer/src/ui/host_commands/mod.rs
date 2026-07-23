@@ -11,6 +11,7 @@ mod routing;
 mod samples;
 mod scenes;
 mod scripts;
+mod song;
 mod step_history;
 mod tracks;
 

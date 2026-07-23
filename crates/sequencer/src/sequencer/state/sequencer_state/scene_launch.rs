@@ -252,6 +252,135 @@ impl SequencerState {
         true
     }
 
+    /// Apply one song row as a single operation (docs/song-mode-spec.md 9):
+    /// resolve the scene plus the row's COMPLETE override set (an override
+    /// absent from the row is inactive even if one was live), mutate
+    /// `ProjectScenes` current scene and overrides atomically, restore every
+    /// track's live state, and publish exactly one scheduler snapshot. Never
+    /// a launch sequence — a rejected row is side-effect free.
+    ///
+    /// `bump_pattern_epoch` must be true when applying a row while the
+    /// transport is stopped (song start) and false for the control-side
+    /// mirror of a scheduler-driven row transition: the audio callback drops
+    /// in-flight scheduled events whose stamped epoch no longer matches, and
+    /// during song playback the scheduler has already made the row audible
+    /// sample-accurately from its prebuilt snapshot.
+    ///
+    /// Returns the per-track effective sample bindings (buffer id, name,
+    /// sample rate) so the caller can rebind sampler buffers, mirroring
+    /// `launch_scene`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_song_row(
+        &self,
+        scene: usize,
+        overrides: &[(usize, PatternId)],
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+        bump_pattern_epoch: bool,
+    ) -> Result<Vec<(i32, String, u32)>, String> {
+        if overrides.iter().any(|(track, _)| *track >= num_tracks) {
+            return Err("Song row override targets a track that does not exist".to_string());
+        }
+        let current_snapshot = self.capture_current_pattern_snapshot(
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+        );
+        let launched: Vec<(usize, Option<TrackPatternData>)> = {
+            let mut scenes = self.pattern.scenes.lock().unwrap();
+            if scene >= scenes.scene_count() {
+                return Err(format!("Song row references scene {} which does not exist", scene + 1));
+            }
+            // Resolve the complete row state before mutating anything so a
+            // rejected row leaves scenes, overrides, and live state intact.
+            let mut resolved: Vec<(usize, Option<PatternId>, Option<TrackPatternData>)> =
+                Vec::with_capacity(num_tracks);
+            for track in 0..num_tracks {
+                let override_id = overrides
+                    .iter()
+                    .find(|(over_track, _)| *over_track == track)
+                    .map(|(_, id)| *id);
+                let effective = override_id.or_else(|| {
+                    scenes
+                        .scenes
+                        .get(scene)
+                        .and_then(|scene| scene.cells.get(track))
+                        .copied()
+                        .flatten()
+                });
+                let data = match effective {
+                    Some(id) => Some(
+                        scenes
+                            .track_pools
+                            .get(track)
+                            .and_then(|pool| pool.get(id))
+                            .cloned()
+                            .ok_or_else(|| {
+                                format!(
+                                    "Song row resolves track {} to pattern {} which is not \
+                                     in the track's pattern pool",
+                                    track + 1,
+                                    id.0
+                                )
+                            })?,
+                    ),
+                    None => None,
+                };
+                resolved.push((track, override_id, data));
+            }
+            let current_scene = self.current_scene_index();
+            if !scenes.save_scene_snapshot(current_scene, current_snapshot) {
+                return Err("Could not save the outgoing session state".to_string());
+            }
+            scenes.current_scene = scene;
+            for slot in scenes.track_overrides.iter_mut() {
+                *slot = None;
+            }
+            for (track, override_id, _) in &resolved {
+                if override_id.is_some() {
+                    if let Some(slot) = scenes.track_overrides.get_mut(*track) {
+                        *slot = *override_id;
+                    }
+                }
+            }
+            resolved
+                .into_iter()
+                .map(|(track, _, data)| (track, data))
+                .collect()
+        };
+        let sample_ids = launched
+            .iter()
+            .map(|(_, data)| {
+                data.as_ref()
+                    .map(|data| data.sample_id.clone())
+                    .unwrap_or((-1, String::new(), 44_100))
+            })
+            .collect();
+        for (track, data) in launched {
+            match data {
+                Some(data) => {
+                    data.restore_to(self, track);
+                    self.set_scene_silenced(track, false);
+                }
+                None => self.set_scene_silenced(track, true),
+            }
+        }
+        self.pattern
+            .current_pattern
+            .store(scene as u32, Ordering::Relaxed);
+        if bump_pattern_epoch {
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        }
+        self.schedule_mod_resync();
+        self.publish_scheduler_snapshot();
+        Ok(sample_ids)
+    }
+
     pub fn fork_current_track_pattern(
         &self,
         track: usize,

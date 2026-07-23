@@ -253,6 +253,7 @@ impl SequencerState {
             pending_accumulator_reset_all: AtomicBool::new(false),
             pending_accumulator_reset_tracks: std::array::from_fn(|_| AtomicBool::new(false)),
             quantized_launches: crate::quantized_launch::QuantizedLaunchMailbox::default(),
+            song_playback: SongPlaybackMailbox::default(),
         };
         state.publish_scheduler_snapshot();
         state

@@ -63,6 +63,8 @@ mod scenes;
 pub use scenes::*;
 mod song;
 pub use song::*;
+mod song_runtime;
+pub use song_runtime::*;
 mod track_delete_remap;
 use track_delete_remap::*;
 mod core;

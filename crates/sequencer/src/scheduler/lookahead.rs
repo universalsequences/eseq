@@ -19,6 +19,10 @@ pub(super) struct SchedulerLookaheadState {
     pub(super) debug_graph_drive_chunks: u32,
     pub(super) debug_accum_invocations: u64,
     pub(super) quantized_launches: crate::quantized_launch::PendingQuantizedLaunches,
+    /// Scheduler-owned song playback cursor (docs/song-mode-spec.md 10.2).
+    /// While `Some`, the lookahead pass clamps every chunk to the next song
+    /// row boundary and schedules from the row's prebuilt snapshot.
+    pub(super) song: Option<crate::sequencer::SongPlaybackRuntime>,
 }
 
 impl SchedulerLookaheadState {
@@ -37,6 +41,7 @@ impl SchedulerLookaheadState {
             debug_graph_drive_chunks: 0,
             debug_accum_invocations: 0,
             quantized_launches: crate::quantized_launch::PendingQuantizedLaunches::default(),
+            song: None,
         }
     }
 }
@@ -146,7 +151,7 @@ pub(super) struct SchedulerLookaheadResult {
 pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     scheduler: &mut SchedulerLookaheadState,
     state: &Arc<SequencerState>,
-    snapshot: &SequencerSnapshot,
+    base_snapshot: &SequencerSnapshot,
     queue: &ScheduledEventQueue<QUEUE_CAP>,
     scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
     live_midi_fx_tracks: &[LiveMidiFxTrackState; MAX_TRACKS],
@@ -171,10 +176,11 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let graph_runtimes = &mut scheduler.graph_runtimes;
     let mut debug_graph_drive_chunks = scheduler.debug_graph_drive_chunks;
     let mut debug_accum_invocations = scheduler.debug_accum_invocations;
+    let song_playback = &mut scheduler.song;
     let mut track_output_events = Vec::new();
 
     process_runtime.sync_step_process_aliases(
-        snapshot
+        base_snapshot
             .tracks
             .iter()
             .enumerate()
@@ -183,7 +189,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
 
     let resolved_read_bases = vec![
         std::array::from_fn(|index| StepParam::ALL[index].default_value());
-        snapshot.tracks.len()
+        base_snapshot.tracks.len()
     ];
     if scheduler.resolved_read_pattern_epoch != Some(pattern_epoch) {
         process_runtime.reset_resolved_track_history(&resolved_read_bases);
@@ -198,8 +204,55 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         .unwrap_or_default();
 
     while scheduled_until_sample < rendered.saturating_add(lookahead_target_samples) {
+        // Song playback: clamp this chunk to the next row boundary and
+        // schedule it from the current row's prebuilt snapshot. A boundary
+        // inside a block therefore splits scheduling exactly at its sample:
+        // events strictly before it come from the old row, events at/after
+        // from the new row (docs/song-mode-spec.md 10.2). The snapshot switch
+        // is an `Arc` handoff prepared at preflight — no mutexes, no pattern
+        // cloning, no asset loading on this path (spec 9).
+        let mut chunk_frames = scheduler_block_size;
+        let mut song_row_snapshot: Option<Arc<SequencerSnapshot>> = None;
+        if let Some(song) = song_playback.as_mut() {
+            match song.next_chunk(
+                scheduled_until_sample,
+                clock.total_beats,
+                scheduler_block_size,
+                state.song_playback(),
+            ) {
+                crate::sequencer::SongChunkPlan::Ended => break,
+                crate::sequencer::SongChunkPlan::Schedule {
+                    frames,
+                    row,
+                    row_changed,
+                    wrapped,
+                } => {
+                    chunk_frames = frames;
+                    song_row_snapshot = Some(song.row_snapshot(row));
+                    if row_changed {
+                        *pending_accum_reset = [true; MAX_TRACKS];
+                    }
+                    if wrapped {
+                        // Loop wrap: song beat zero again. Rewind the clock
+                        // and every self-clocked runtime so row zero replays
+                        // from its start without stale state; the wrap chunk
+                        // begins exactly at the end-beat sample, so the edge
+                        // trigger fires exactly once.
+                        clock.reset();
+                        midi_fx_quantizer_state.reset();
+                        neural_runtime.reset_state(0.0);
+                        generator_runtime.reset(0.0);
+                        process_runtime.reset_transport(0.0);
+                        for graph in graph_runtimes.iter_mut() {
+                            graph.reset(0.0);
+                        }
+                    }
+                }
+            }
+        }
+        let snapshot: &SequencerSnapshot = song_row_snapshot.as_deref().unwrap_or(base_snapshot);
         let chunk_start_beats = clock.total_beats;
-        let triggers = clock.process_chunk(scheduler_block_size, snapshot, state);
+        let triggers = clock.process_chunk(chunk_frames, snapshot, state);
         let chunk_end_beats = clock.total_beats;
         let mut neural_events = Vec::new();
         let mut neural_cursor_beats = chunk_start_beats;
@@ -1469,7 +1522,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             break;
         }
 
-        scheduled_until_sample = scheduled_until_sample.saturating_add(scheduler_block_size as u64);
+        scheduled_until_sample = scheduled_until_sample.saturating_add(chunk_frames as u64);
     }
 
     scheduler.debug_graph_drive_chunks = debug_graph_drive_chunks;

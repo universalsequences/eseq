@@ -237,6 +237,9 @@ pub struct SequencerState {
     pub(super) pending_accumulator_reset_all: AtomicBool,
     pub(super) pending_accumulator_reset_tracks: [AtomicBool; MAX_TRACKS],
     pub(super) quantized_launches: crate::quantized_launch::QuantizedLaunchMailbox,
+    /// Song playback command/notice channels plus render-rate position
+    /// atomics (docs/song-mode-spec.md 10.2).
+    pub(super) song_playback: SongPlaybackMailbox,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

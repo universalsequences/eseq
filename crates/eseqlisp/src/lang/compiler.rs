@@ -1566,6 +1566,11 @@ impl Compiler {
             let is_defchan = matches!(op, Expression::Symbol(s) if s == "defchan");
             let is_process_sugar = matches!(op, Expression::Symbol(s)
                 if s == "every" || s == "after" || s == "on" || s == "tap");
+            // `def-song` (song-mode declarative authoring): the whole body —
+            // `(at <beat> :scene n :patterns ((track pat)...))` rows plus
+            // :end/:loop — is a declaration for the host, not code, so it is
+            // captured as data like def-sequencer's graph mode.
+            let is_def_song = matches!(op, Expression::Symbol(s) if s == "def-song");
             // Graph-mode `def-sequencer`: the *entire* body (`:shape`, sequencer-level
             // config, `def-node` and `edges` sub-forms) is a manifest for the sequencer
             // runtime and must be captured as data, not evaluated here. Detected by the
@@ -1596,7 +1601,7 @@ impl Compiler {
                     self.compile_quoted_expression(elem)?;
                     continue;
                 }
-                if is_process_sugar {
+                if is_process_sugar || is_def_song {
                     self.compile_quoted_expression(elem)?;
                     continue;
                 }

@@ -42,6 +42,7 @@ mod graph;
 mod hooks;
 mod params;
 mod projects;
+pub mod song_edit;
 mod synth;
 
 pub use browser::BrowserNode;
@@ -863,6 +864,11 @@ pub struct App {
     pub sample_analysis: AnalysisService,
     pub pending_recording_take: Option<RecordingTake>,
     recording_history: Option<RecordingHistoryTransaction>,
+    /// Seam for Slice B's transport authority: when true, the song editing
+    /// primitives (`song_edit.rs`) reject with an actionable error. Slice B's
+    /// `SongPlayback`/`ArrangementCapture` transport modes must set/derive
+    /// this; until then it stays false (see `App::song_edits_locked`).
+    pub song_transport_locks_edits: bool,
 }
 
 struct RecordingHistoryTransaction {
@@ -2095,6 +2101,7 @@ impl App {
             sample_analysis: AnalysisService::new(),
             pending_recording_take: None,
             recording_history: None,
+            song_transport_locks_edits: false,
             graph: GraphState {
                 lg,
                 track_node_ids: Vec::new(),
