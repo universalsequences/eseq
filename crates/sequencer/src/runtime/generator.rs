@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use crate::accumulator::ResolvedStep;
 use crate::lisp_host::EmittedAccumulatorEvent;
-use crate::neural::{process_grid_boundaries, GridBoundaryClock};
+use super::grid_clock::{process_grid_boundaries, GridBoundaryClock};
 
 /// Reference subdivision count used when converting a `Timebase` to beats. Only
 /// affects `Timebase::Polyrhythm`; matches the neural runtime's convention so the

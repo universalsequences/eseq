@@ -14,7 +14,7 @@ use crate::accumulator::ResolvedStep;
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
 use crate::lisp_host::EmittedAccumulatorEvent;
 use crate::neural::ParamNodeId;
-use crate::neural::{process_grid_boundaries, GridBoundaryClock};
+use super::grid_clock::{process_grid_boundaries, GridBoundaryClock};
 use crate::scheduled_event::StepEvent;
 use crate::sequencer::{StepParam, NUM_PARAMS};
 

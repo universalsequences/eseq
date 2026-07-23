@@ -31,7 +31,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::neural::{next_grid_boundary, NeuralMaxPolySelection};
+use super::grid_clock::next_grid_boundary;
+use crate::neural::NeuralMaxPolySelection;
 use crate::sequencer::Timebase;
 
 /// Reference subdivision used to convert a `Timebase` to beats — only affects
