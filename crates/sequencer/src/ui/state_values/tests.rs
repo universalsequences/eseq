@@ -20108,6 +20108,33 @@
         assert!(result.is_err(), "moving row zero must be rejected");
         assert_eq!(app.history.undo_len(), depth, "rejection adds no history");
         assert_eq!(app.state.committed_song().unwrap().rows[0].start_beat, 0.0);
+
+        // A scene drop beyond the song end lowers to extend-then-insert and
+        // both primitives apply (the silent-rejection bug: inserting past
+        // the end is invalid without the extension).
+        let song = app.state.committed_song().unwrap();
+        let action = map_value(vec![
+            ("type", Value::Keyword("finish-create-item".to_string())),
+            ("start", Value::Number(24.0)),
+            ("end", Value::Number(40.0)),
+            // Scene 0: a state distinct from the governing row (scene 1) —
+            // inserting the governing row's own state is normalized away and
+            // therefore rejected.
+            ("scene", Value::Number(0.0)),
+        ]);
+        let commands =
+            crate::arrangement_actions::arrangement_action_song_commands(&action, Some(&song))
+                .expect("drop translates");
+        assert_eq!(commands.len(), 2, "extend + insert");
+        for (name, payload) in &commands {
+            crate::host_commands::apply_song_edit_command(name, payload, &mut app)
+                .expect("song edit command")
+                .expect("primitive applies");
+        }
+        let song = app.state.committed_song().unwrap();
+        assert_eq!(song.end_beat, 40.0);
+        assert_eq!(song.rows.len(), 3);
+        assert_eq!(song.rows[2].start_beat, 24.0);
     }
 
     /// MIDI dot flattening (docs/arrangement-timeline-ui-spec.md 7.1): the

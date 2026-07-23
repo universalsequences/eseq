@@ -362,6 +362,7 @@
       (arrangement-edit-finish
         (dict :type :finish-create-item
           :start (get event :start)
+          :end (get event :end)
           :scene (or SEQ.current-pattern 0)))
       :finish-resize-content-length
       (arrangement-edit-finish
@@ -399,10 +400,14 @@
   (let ((scene (get (get event :payload) :scene)))
     (if (= scene nil)
       nil
-      (arrangement-edit-finish
-        (dict :type :finish-create-item
-          :start (arrangement-drop-time event)
-          :scene scene)))))
+      (let ((start (arrangement-drop-time event)))
+        (arrangement-edit-finish
+          (dict :type :finish-create-item
+            :start start
+            ;; Dropping at/past the song end extends it by four bars from
+            ;; the drop point (the translator only uses :end in that case).
+            :end (+ start (* arrangement-beats-per-bar 4))
+            :scene scene))))))
 
 ;; ── Lane instances (spec 4.1/4.2) ──────────────────────────────────────────
 

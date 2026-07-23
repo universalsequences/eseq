@@ -139,19 +139,42 @@ pub(crate) fn arrangement_action_song_commands(
                 )]),
             }
         }
-        // Draw on empty scene lane: insert a row launching the scene the
-        // view chose (the currently selected scene).
+        // Create (double-click draw or scene drop): insert a row launching
+        // the chosen scene. A create beyond the committed song end first
+        // extends the end to the gesture's :end (DAW convention: dropping
+        // past the end grows the arrangement) — that gesture is two
+        // primitives and therefore two undo entries.
         "finish-create-item" => {
             let start_beat = require_beat(map, "start")?;
             let scene = require_scene(map)?;
-            Ok(vec![(
+            let mut commands = Vec::new();
+            if let Some(song) = song {
+                if start_beat >= song.end_beat {
+                    let end_beat = match map_field(map, "end") {
+                        Some(Value::Number(end)) if end.is_finite() && end > start_beat => end,
+                        _ => {
+                            return Err(format!(
+                                "create at beat {start_beat} is beyond the song end \
+                                 {} and carries no :end to extend to",
+                                song.end_beat
+                            ));
+                        }
+                    };
+                    commands.push((
+                        "song-set-end",
+                        payload(vec![("end-beat", Value::Number(end_beat))]),
+                    ));
+                }
+            }
+            commands.push((
                 "song-row-insert",
                 payload(vec![
                     ("start-beat", Value::Number(start_beat)),
                     ("scene", Value::Number(scene)),
                     ("overrides", Value::List(vec![])),
                 ]),
-            )])
+            ));
+            Ok(commands)
         }
         // Erase / delete: one removal primitive (and one undo entry) per id.
         "delete-items" => {
@@ -284,6 +307,44 @@ mod tests {
         assert_eq!(commands[0].0, "song-row-insert");
         assert_eq!(payload_number(&commands[0], "start-beat"), 24.0);
         assert_eq!(payload_number(&commands[0], "scene"), 2.0);
+    }
+
+    #[test]
+    fn create_beyond_the_song_end_extends_the_end_first() {
+        // Song ends at 48; a drop at beat 64 must extend before inserting.
+        let action = value_map(vec![
+            ("type", Value::Keyword("finish-create-item".to_string())),
+            ("start", Value::Number(64.0)),
+            ("end", Value::Number(80.0)),
+            ("scene", Value::Number(1.0)),
+        ]);
+        let commands = arrangement_action_song_commands(&action, Some(&song())).unwrap();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].0, "song-set-end");
+        assert_eq!(payload_number(&commands[0], "end-beat"), 80.0);
+        assert_eq!(commands[1].0, "song-row-insert");
+        assert_eq!(payload_number(&commands[1], "start-beat"), 64.0);
+
+        // Beyond the end without an :end to extend to is an error, never a
+        // silently-rejected insert.
+        let action = value_map(vec![
+            ("type", Value::Keyword("finish-create-item".to_string())),
+            ("start", Value::Number(64.0)),
+            ("scene", Value::Number(1.0)),
+        ]);
+        assert!(arrangement_action_song_commands(&action, Some(&song())).is_err());
+
+        // With no committed song the insert itself creates one (default
+        // end); no extension command is prepended.
+        let action = value_map(vec![
+            ("type", Value::Keyword("finish-create-item".to_string())),
+            ("start", Value::Number(0.0)),
+            ("end", Value::Number(16.0)),
+            ("scene", Value::Number(0.0)),
+        ]);
+        let commands = arrangement_action_song_commands(&action, None).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].0, "song-row-insert");
     }
 
     #[test]
