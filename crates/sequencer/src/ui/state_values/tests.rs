@@ -20455,6 +20455,227 @@
         assert!(matches!(&*map["pattern-id"].borrow(), Value::Nil));
     }
 
+    /// Clip editing must keep working after the track scroll container is
+    /// scrolled: clicking a below-the-fold clip must focus ITS lane (the
+    /// focus hit-test has to account for the widget scroll offset like the
+    /// mouse hit-test does), Backspace must delete it, and an end-edge drag
+    /// must resize it.
+    #[test]
+    fn metal_seq_arrangement_scrolled_lane_clip_delete_and_resize() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let recorded: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = recorded.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-arrangement-action", move |args, _ctx| {
+                sink.lock().unwrap().push(args.first().cloned().unwrap_or(Value::Nil));
+                Ok(Value::String("recorded".to_string()))
+            });
+
+        let song_row = |id: f64, start: f64, scene: f64| {
+            map_value(vec![
+                ("id", Value::Number(id)),
+                ("start-beat", Value::Number(start)),
+                ("scene", Value::Number(scene)),
+                ("overrides", Value::List(vec![])),
+            ])
+        };
+        let lane_clip = |row_id: f64, start: f64, end: f64, pattern: Value| {
+            map_value(vec![
+                ("row-id", Value::Number(row_id)),
+                ("start-beat", Value::Number(start)),
+                ("end-beat", Value::Number(end)),
+                ("pattern-id", pattern),
+                ("from-override", Value::Bool(false)),
+            ])
+        };
+        // Eight tracks so the lane rows overflow the scroll container; only
+        // track 5 has a clip.
+        let track_count = 8usize;
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "num-tracks", Value::Number(track_count as f64));
+        rt.set_reactive(
+            "SEQ",
+            "track-ids",
+            test_number_list(&(0..track_count).map(|i| i as f64).collect::<Vec<_>>()),
+        );
+        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
+        rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
+        rt.set_reactive(
+            "SEQ",
+            "song-rows",
+            test_list(vec![song_row(0.0, 0.0, 0.0)]),
+        );
+        let lanes: Vec<Value> = (0..track_count)
+            .map(|track| {
+                if track == 5 {
+                    test_list(vec![lane_clip(0.0, 0.0, 16.0, Value::Number(1.0))])
+                } else {
+                    test_list(vec![lane_clip(0.0, 0.0, 16.0, Value::Nil)])
+                }
+            })
+            .collect();
+        rt.set_reactive("SEQ", "song-lanes", Value::List(
+            lanes.into_iter().map(|lane| Rc::new(RefCell::new(lane))).collect(),
+        ));
+        rt.run_reactive_cycle();
+        editor
+            .runtime_mut()
+            .eval_str("(do (seq-open-arrangement) (set! arrangement-view-start 0) \
+                       (set! arrangement-view-duration 64))")
+            .expect("open arrangement view");
+        editor.refresh_runtime_side_effects();
+        // A short viewport so the eight lanes overflow the scroll container.
+        editor.set_layout_viewport(72, 20);
+
+        let layout = editor.widget_layout().expect("arrangement layout");
+        let scroll_node = find_layout_node_by_stable_key(&layout, "arrangement-track-scroll")
+            .expect("track scroll container");
+        assert_eq!(scroll_node.widget_type, "scroll");
+        let lane5_container = find_layout_node_by_stable_key(&layout, "arrangement-track-lane-5")
+            .expect("track lane 5 container");
+        let lane5 = find_layout_node_by_widget_type(lane5_container, "timeline")
+            .expect("lane 5 timeline instance");
+        assert!(
+            lane5.rect.row + lane5.rect.height
+                > scroll_node.rect.row + scroll_node.rect.height,
+            "fixture must place lane 5 below the fold (lane bottom {}, viewport bottom {})",
+            lane5.rect.row + lane5.rect.height,
+            scroll_node.rect.row + scroll_node.rect.height
+        );
+
+        // Scroll the container far enough that lane 5 is on screen.
+        let scroll_key = eseqlisp::widget_render::scroll::scroll_state_key(scroll_node);
+        let mut scroll_state = eseqlisp::widget_render::scroll::get_scroll_state(scroll_key);
+        let offset = (lane5.rect.row + lane5.rect.height)
+            - (scroll_node.rect.row + scroll_node.rect.height)
+            + 1.0;
+        scroll_state.offset_y = offset;
+        eseqlisp::widget_render::scroll::set_scroll_state(scroll_key, scroll_state);
+        let offset = eseqlisp::widget_render::scroll::get_scroll_state(scroll_key).offset_y;
+        assert!(offset > 0.0, "scroll offset must clamp to a positive value");
+
+        // Click the middle of lane 5's clip AT ITS RENDERED (scrolled)
+        // position: layout row minus the container's scroll offset.
+        let click_col = lane5.rect.col + lane5.rect.width * (8.0 / 64.0);
+        let click_row = lane5.rect.row - offset + lane5.rect.height * 0.5;
+        let mouse = |kind, col: f32, row: f32| crossterm::event::MouseEvent {
+            kind,
+            column: col as u16,
+            row: row as u16,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        for kind in [
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            editor.handle_mouse_precise(
+                mouse(kind, click_col, click_row),
+                0,
+                0,
+                72,
+                20,
+                click_col,
+                click_row,
+            );
+        }
+        assert_eq!(
+            editor.focused_widget_id(),
+            Some(lane5.widget_id),
+            "clicking a scrolled-down clip must focus ITS lane, not the lane \
+             occupying that screen position in unscrolled layout coordinates"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len (arrangement-lane-selection 5))")
+                .unwrap(),
+            Some(Value::Number(1.0)),
+            "clicking a scrolled-down clip must select it"
+        );
+
+        // Backspace deletes the selected clip through the focused lane.
+        editor.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Backspace,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 1, "backspace deletes the scrolled clip");
+            let Value::Map(map) = &recorded[0] else {
+                panic!("recorded action must be a map");
+            };
+            assert_eq!(
+                map["type"].borrow().clone(),
+                Value::Keyword("track-paint".to_string())
+            );
+            assert_eq!(map["track"].borrow().clone(), Value::Number(5.0));
+        }
+        recorded.lock().unwrap().clear();
+
+        // End-edge resize on the scrolled clip: press on the clip's right
+        // edge, drag left past the snap threshold, release.
+        let edge_col = lane5.rect.col + lane5.rect.width * (16.0 / 64.0) - 0.2;
+        let target_col = lane5.rect.col + lane5.rect.width * (8.0 / 64.0);
+        let row = lane5.rect.row - offset + lane5.rect.height * 0.5;
+        editor.handle_mouse_precise(
+            mouse(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                edge_col,
+                row,
+            ),
+            0,
+            0,
+            72,
+            20,
+            edge_col,
+            row,
+        );
+        editor.handle_mouse_precise(
+            mouse(
+                crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+                target_col,
+                row,
+            ),
+            0,
+            0,
+            72,
+            20,
+            target_col,
+            row,
+        );
+        editor.handle_mouse_precise(
+            mouse(
+                crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                target_col,
+                row,
+            ),
+            0,
+            0,
+            72,
+            20,
+            target_col,
+            row,
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(
+                recorded.len(),
+                1,
+                "an end-edge drag on a scrolled clip must commit one gesture"
+            );
+            let Value::Map(map) = &recorded[0] else {
+                panic!("recorded action must be a map");
+            };
+            assert_eq!(
+                map["type"].borrow().clone(),
+                Value::Keyword("track-paint".to_string()),
+                "resize lowers to a track paint"
+            );
+            assert_eq!(map["track"].borrow().clone(), Value::Number(5.0));
+        }
+    }
+
     /// MIDI dot flattening (docs/arrangement-timeline-ui-spec.md 7.1): the
     /// view flattens raw (time transpose velocity) pattern events into
     /// normalized (offset, value) dots — offsets over the pattern length,

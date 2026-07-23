@@ -151,25 +151,17 @@ impl Editor {
         let local_row = precise_row - content_row as f32 + scroll_top;
         let local_col = precise_col - content_col as f32 + scroll_left;
 
-        // Find the focusable widget at this position
-        let mut focusable_nodes: Vec<(u64, f32, f32, f32, f32)> = Vec::new();
-        collect_focusable_nodes(&layout, &mut focusable_nodes);
-
-        for (id, row, col, width, height) in &focusable_nodes {
-            if local_row >= *row
-                && local_row < row + height
-                && local_col >= *col
-                && local_col < col + width
-            {
-                if let Some(node) = find_node_by_id(&layout, *id) {
-                    self.set_focused_widget(node);
-                } else {
-                    self.active_leaf_mut().focused_widget_id = Some(*id);
-                }
-                self.clear_focus_on_other_tiles();
-                self.mark_needs_redraw();
-                return self.activate_focused();
-            }
+        // Find the focusable widget at this position. The hit test is
+        // scroll-aware (crate::ui::layout::hit_test_focusable): a widget
+        // inside a scrolled container is matched at its RENDERED position,
+        // not its unscrolled layout rect.
+        if let Some(node) =
+            crate::ui::layout::hit_test_focusable(&layout, local_row, local_col).cloned()
+        {
+            self.set_focused_widget(node);
+            self.clear_focus_on_other_tiles();
+            self.mark_needs_redraw();
+            return self.activate_focused();
         }
         // Click landed outside any focusable widget → blur
         if self.active_leaf().focused_widget_id.is_some() {
