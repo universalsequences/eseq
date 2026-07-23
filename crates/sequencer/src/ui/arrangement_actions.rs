@@ -202,6 +202,36 @@ pub(crate) fn arrangement_action_song_commands(
                 })
                 .collect()
         }
+        // Track-clip surgery (delete / edge-resize on a track lane): one
+        // atomic song-track-paint primitive per gesture. :pattern-id nil (or
+        // absent) silences the region; a pool id paints it.
+        "track-paint" => {
+            let track = require_row_id(map, "track")?;
+            let start_beat = require_beat(map, "start")?;
+            let end_beat = require_beat(map, "end")?;
+            let pattern_id = match map_field(map, "pattern-id") {
+                None | Some(Value::Nil) => Value::Nil,
+                Some(Value::Number(id))
+                    if id.is_finite() && id >= 1.0 && id.fract() == 0.0 =>
+                {
+                    Value::Number(id)
+                }
+                other => {
+                    return Err(format!(
+                        "track-paint :pattern-id must be a pool id or nil, got {other:?}"
+                    ));
+                }
+            };
+            Ok(vec![(
+                "song-track-paint",
+                payload(vec![
+                    ("track", Value::Number(track as f64)),
+                    ("start-beat", Value::Number(start_beat)),
+                    ("end-beat", Value::Number(end_beat)),
+                    ("pattern-id", pattern_id),
+                ]),
+            )])
+        }
         // Content-length handle release: one song-set-end (spec 9.3).
         "finish-resize-content-length" => {
             let end_beat = require_beat(map, "length")?;
@@ -361,6 +391,48 @@ mod tests {
         assert!(commands.iter().all(|command| command.0 == "song-row-remove"));
         assert_eq!(payload_number(&commands[0], "row-id"), 3.0);
         assert_eq!(payload_number(&commands[1], "row-id"), 9.0);
+    }
+
+    #[test]
+    fn track_paint_lowers_to_one_song_track_paint() {
+        // Silence (delete / shrink): nil pattern-id.
+        let action = value_map(vec![
+            ("type", Value::Keyword("track-paint".to_string())),
+            ("track", Value::Number(2.0)),
+            ("start", Value::Number(8.0)),
+            ("end", Value::Number(16.0)),
+            ("pattern-id", Value::Nil),
+        ]);
+        let commands = arrangement_action_song_commands(&action, Some(&song())).unwrap();
+        assert_eq!(commands.len(), 1, "one gesture -> one primitive");
+        assert_eq!(commands[0].0, "song-track-paint");
+        assert_eq!(payload_number(&commands[0], "track"), 2.0);
+        assert_eq!(payload_number(&commands[0], "start-beat"), 8.0);
+        assert_eq!(payload_number(&commands[0], "end-beat"), 16.0);
+        let Value::Map(map) = &commands[0].1 else { panic!() };
+        assert!(matches!(&*map["pattern-id"].borrow(), Value::Nil));
+
+        // Extend: the clip's pattern id rides through.
+        let action = value_map(vec![
+            ("type", Value::Keyword("track-paint".to_string())),
+            ("track", Value::Number(0.0)),
+            ("start", Value::Number(16.0)),
+            ("end", Value::Number(24.0)),
+            ("pattern-id", Value::Number(3.0)),
+        ]);
+        let commands = arrangement_action_song_commands(&action, Some(&song())).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(payload_number(&commands[0], "pattern-id"), 3.0);
+
+        // Malformed pattern id is an error, not a silent silence.
+        let action = value_map(vec![
+            ("type", Value::Keyword("track-paint".to_string())),
+            ("track", Value::Number(0.0)),
+            ("start", Value::Number(0.0)),
+            ("end", Value::Number(4.0)),
+            ("pattern-id", Value::Number(1.5)),
+        ]);
+        assert!(arrangement_action_song_commands(&action, Some(&song())).is_err());
     }
 
     #[test]

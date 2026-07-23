@@ -19963,12 +19963,139 @@
             "no ghost -> nothing to commit"
         );
 
-        // Track lanes are read-only: edit actions never commit.
+        // ── Track-clip editing over the merged lane projection ────────────
+        // Lane 0: rows 0+1 play the same pattern (they merge into one clip
+        // spanning [0,8), id = first row-id), row 2 plays pattern 2, row 3
+        // is empty (the gap).
+        let lane_clip = |row_id: f64, start: f64, end: f64, pattern: Value| {
+            map_value(vec![
+                ("row-id", Value::Number(row_id)),
+                ("start-beat", Value::Number(start)),
+                ("end-beat", Value::Number(end)),
+                ("pattern-id", pattern),
+                ("from-override", Value::Bool(false)),
+            ])
+        };
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "song-lanes",
+            test_list(vec![test_list(vec![
+                lane_clip(0.0, 0.0, 4.0, Value::Number(1.0)),
+                lane_clip(1.0, 4.0, 8.0, Value::Number(1.0)),
+                lane_clip(2.0, 8.0, 12.0, Value::Number(2.0)),
+                lane_clip(3.0, 12.0, 16.0, Value::Nil),
+            ])]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-merged-track-clips 0))"),
+            Value::Number(2.0),
+            "adjacent same-pattern spans merge; the empty span is the gap"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :end)"),
+            Value::Number(8.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :id)"),
+            Value::Number(0.0),
+            "the merged clip keeps the first row's id"
+        );
+
+        // Shrink: live drag ghosts the clip end, finish lowers to ONE
+        // :track-paint silencing the released tail.
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :resize-item-absolute :id 0 :ids (list 0) :edge :end :time 6))",
+        );
+        assert_eq!(recorded.lock().unwrap().len(), 5, "live drags never commit");
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :end)"),
+            Value::Number(6.0),
+            "resize ghost previews the clip's new end"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :finish-resize-items :id 0 :ids (list 0)))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 6);
+            assert_eq!(
+                action_field(&recorded[5], "type"),
+                Value::Keyword("track-paint".to_string())
+            );
+            assert_eq!(action_field(&recorded[5], "track"), Value::Number(0.0));
+            assert_eq!(action_field(&recorded[5], "start"), Value::Number(6.0));
+            assert_eq!(action_field(&recorded[5], "end"), Value::Number(8.0));
+            assert_eq!(action_field(&recorded[5], "pattern-id"), Value::Nil);
+        }
+
+        // Grow: the clip's own pattern eats into what follows.
+        eval(
+            &mut editor,
+            "(do (arrangement-track-action 0 (dict :type :resize-item-absolute :id 2 :ids (list 2) :edge :end :time 15)) \
+             (arrangement-track-action 0 (dict :type :finish-resize-items :id 2 :ids (list 2))))",
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 7);
+            assert_eq!(action_field(&recorded[6], "start"), Value::Number(12.0));
+            assert_eq!(action_field(&recorded[6], "end"), Value::Number(15.0));
+            assert_eq!(action_field(&recorded[6], "pattern-id"), Value::Number(2.0));
+        }
+
+        // Select + delete: selection is exclusive per lane kind; Backspace
+        // silences the merged clip's whole span.
+        eval(
+            &mut editor,
+            "(do (arrangement-scene-action (dict :type :select :ids (list 1) :time 4)) \
+             (arrangement-track-action 0 (dict :type :select :ids (list 0) :time 1)))",
+        );
+        assert_eq!(
+            read(&mut editor, "arrangement-selection"),
+            Value::List(vec![]),
+            "selecting a track clip clears the scene selection"
+        );
+        assert_eq!(read(&mut editor, "arrangement-selected-track"), Value::Number(0.0));
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-lane-selection 0))"),
+            Value::Number(1.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-lane-selection 1))"),
+            Value::Number(0.0),
+            "only the owning lane shows the selection"
+        );
         eval(
             &mut editor,
             "(arrangement-track-action 0 (dict :type :delete-items :ids (list 0)))",
         );
-        assert_eq!(recorded.lock().unwrap().len(), 5);
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 8);
+            assert_eq!(
+                action_field(&recorded[7], "type"),
+                Value::Keyword("track-paint".to_string())
+            );
+            assert_eq!(action_field(&recorded[7], "start"), Value::Number(0.0));
+            assert_eq!(action_field(&recorded[7], "end"), Value::Number(8.0));
+            assert_eq!(action_field(&recorded[7], "pattern-id"), Value::Nil);
+        }
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-lane-selection 0))"),
+            Value::Number(0.0),
+            "delete clears the track selection"
+        );
+
+        // A delete for an id with no merged clip (stale gesture) commits
+        // nothing.
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :delete-items :ids (list 42)))",
+        );
+        assert_eq!(recorded.lock().unwrap().len(), 8);
 
         // Clicking a time in a track lane parks the track-specific cursor
         // there (Ableton-style); the scene lane parks it on -1. Only the
@@ -20004,17 +20131,17 @@
         );
         {
             let recorded = recorded.lock().unwrap();
-            assert_eq!(recorded.len(), 6);
+            assert_eq!(recorded.len(), 9);
             assert_eq!(
-                action_field(&recorded[5], "type"),
+                action_field(&recorded[8], "type"),
                 Value::Keyword("finish-create-item".to_string())
             );
             assert_eq!(
-                action_field(&recorded[5], "start"),
+                action_field(&recorded[8], "start"),
                 Value::Number(32.0),
                 "drop position snaps down to the bar grid"
             );
-            assert_eq!(action_field(&recorded[5], "scene"), Value::Number(1.0));
+            assert_eq!(action_field(&recorded[8], "scene"), Value::Number(1.0));
         }
     }
 
@@ -20135,6 +20262,43 @@
         assert_eq!(song.end_beat, 40.0);
         assert_eq!(song.rows.len(), 3);
         assert_eq!(song.rows[2].start_beat, 24.0);
+
+        // Track-clip surgery: a delete/resize gesture lowers to exactly one
+        // song-track-paint, which applies as ONE undo entry no matter how
+        // many rows it splits or rewrites.
+        let action = map_value(vec![
+            ("type", Value::Keyword("track-paint".to_string())),
+            ("track", Value::Number(0.0)),
+            ("start", Value::Number(2.0)),
+            ("end", Value::Number(6.0)),
+            ("pattern-id", Value::Nil),
+        ]);
+        let commands =
+            crate::arrangement_actions::arrangement_action_song_commands(&action, Some(&song))
+                .expect("track paint translates");
+        assert_eq!(commands.len(), 1);
+        let depth = app.history.undo_len();
+        crate::host_commands::apply_song_edit_command(
+            &commands[0].0,
+            &commands[0].1,
+            &mut app,
+        )
+        .expect("song edit command")
+        .expect("paint applies");
+        assert_eq!(app.history.undo_len(), depth + 1, "row surgery is one undo entry");
+        let song = app.state.committed_song().unwrap();
+        // [2,6) split out of row zero's span with an explicit-empty override
+        // on track 0, and row zero's state restored at 6.
+        assert!(song.rows.iter().any(|row| row.start_beat == 2.0
+            && row.overrides
+                == vec![sequencer::sequencer::ProjectSongTrackOverride {
+                    track: 0,
+                    pattern_id: None,
+                }]));
+        assert!(song
+            .rows
+            .iter()
+            .any(|row| row.start_beat == 6.0 && row.overrides.is_empty()));
     }
 
     /// MIDI dot flattening (docs/arrangement-timeline-ui-spec.md 7.1): the
@@ -20385,9 +20549,13 @@
             layout.rect.width
         );
         let scene_bottom = scene_lane.rect.row + scene_lane.rect.height;
+        // A thin deliberate separator strip (and row border chrome) may sit
+        // between the scene lane and the track rows; anything larger is a
+        // layout regression that would let the pointer fall between lanes.
+        let track_gap = track_lane.rect.row - scene_bottom;
         assert!(
-            (track_lane.rect.row - scene_bottom).abs() < 0.01,
-            "track lane must sit flush under the scene lane (scene bottom {scene_bottom}, track top {})",
+            (-0.01..0.5).contains(&track_gap),
+            "track lane must sit just under the scene lane (scene bottom {scene_bottom}, track top {})",
             track_lane.rect.row
         );
 
@@ -20398,9 +20566,10 @@
             .expect("track scroll container");
         assert_eq!(track_scroll.widget_type, "scroll");
         assert_finite_nonzero_rect(track_scroll, "arrangement-track-scroll");
+        let scroll_gap = track_scroll.rect.row - scene_bottom;
         assert!(
-            (track_scroll.rect.row - scene_bottom).abs() < 0.01,
-            "scroll container starts at the scene lane's bottom edge"
+            (-0.01..0.5).contains(&scroll_gap),
+            "scroll container starts just under the scene lane (gap {scroll_gap})"
         );
         assert!(
             find_layout_node_by_stable_key(track_scroll, "arr-track-0").is_some(),

@@ -14,6 +14,11 @@
 (defstate arrangement-cursor-track -1)
 (defstate arrangement-selection '())
 (defstate arrangement-selection-rect nil)
+;; Track-clip selection (spec 9.2 extension): ids are the first row-id of a
+;; merged clip, valid only within the owning track's lane. Selecting in any
+;; lane clears the other kind so Backspace is never ambiguous.
+(defstate arrangement-track-selection '())
+(defstate arrangement-selected-track -1)
 ;; Live-drag preview state (spec 9.1): live gesture actions update this ghost
 ;; only; the terminal :finish-* action lowers to exactly one song primitive
 ;; via seq-arrangement-action and clears it. A primitive rejection reports on
@@ -205,6 +210,40 @@
     (nth SEQ.song-lanes i)
     '()))
 
+;; Merge adjacent same-pattern spans into one clip (the spec's "merging is a
+;; view concern"): a row split made to edit ANOTHER track must not visually
+;; fragment this track's clip. Empty spans never merge — they are the gaps.
+;; The merged clip keeps the FIRST row's id as its stable gesture identity.
+(def arrangement-merge-clip-fold (acc clip)
+  (let ((cur (get acc :cur)))
+    (if (= cur nil)
+      (dict :done (get acc :done) :cur clip)
+      (if (and (= (get cur :pattern-id) (get clip :pattern-id))
+            (= (get cur :end-beat) (get clip :start-beat)))
+        (dict :done (get acc :done)
+          :cur (dict
+                 :row-id (get cur :row-id)
+                 :start-beat (get cur :start-beat)
+                 :end-beat (get clip :end-beat)
+                 :pattern-id (get cur :pattern-id)
+                 :from-override (or (get cur :from-override)
+                                  (get clip :from-override))))
+        (dict :done (append (get acc :done) (list cur)) :cur clip)))))
+
+(def arrangement-merged-track-clips (i)
+  (let ((folded (reduce |acc clip| (arrangement-merge-clip-fold acc clip)
+                  (dict :done '() :cur nil)
+                  (filter (lambda (clip) (not (= (get clip :pattern-id) nil)))
+                    (arrangement-track-clips i)))))
+    (if (= (get folded :cur) nil)
+      (get folded :done)
+      (append (get folded :done) (list (get folded :cur))))))
+
+(def arrangement-find-track-clip (i row-id)
+  (let ((matches (filter (lambda (clip) (= (get clip :row-id) row-id))
+                   (arrangement-merged-track-clips i))))
+    (if (> (len matches) 0) (nth matches 0) nil)))
+
 ;; ── MIDI content flattening (spec 7.1) ─────────────────────────────────────
 ;; SEQ.song-lane-events carries, per track, raw (time transpose velocity)
 ;; events for every pool pattern the lane projection references. The view
@@ -274,21 +313,41 @@
           nil
           (dict :dots dots :cycle (arrangement-clip-cycle entry clip)))))))
 
-;; Track-lane items (spec 6): spans whose resolved pattern is nil produce NO
-;; item — a track with nothing playing renders as an empty lane.
+;; Live resize ghost for a track clip: while the edge drag is in flight the
+;; clip previews its new end; the finish action lowers to one song-track-paint.
+(def arrangement-track-ghost-clip (i clip)
+  (if (and (= (arrangement-ghost-kind) :track-resize)
+        (= (get arrangement-ghost :track) i)
+        (= (get arrangement-ghost :row-id) (get clip :row-id)))
+    (dict
+      :row-id (get clip :row-id)
+      :start-beat (get clip :start-beat)
+      :end-beat (max (+ (get clip :start-beat) 1)
+                  (min SEQ.song-end-beat (get arrangement-ghost :end)))
+      :pattern-id (get clip :pattern-id)
+      :from-override (get clip :from-override))
+    clip))
+
+;; Track-lane items (spec 6): merged clips; spans whose resolved pattern is
+;; nil produce NO item — a track with nothing playing renders as an empty
+;; lane, and empty gaps are exactly where merged clips end.
 (def arrangement-track-items (i)
   (map
-    (lambda (clip)
-      (dict
-        :id (get clip :row-id)
-        :lane 0
-        :start (get clip :start-beat)
-        :end (get clip :end-beat)
-        :kind :midi
-        :content (arrangement-clip-content i clip)
-        :color (arrangement-clip-color i (get clip :from-override))))
-    (filter (lambda (clip) (not (= (get clip :pattern-id) nil)))
-      (arrangement-track-clips i))))
+    (lambda (raw)
+      (let ((clip (arrangement-track-ghost-clip i raw)))
+        (dict
+          :id (get clip :row-id)
+          :lane 0
+          :start (get clip :start-beat)
+          :end (get clip :end-beat)
+          :kind :midi
+          :content (arrangement-clip-content i clip)
+          :color (arrangement-clip-color i (get clip :from-override)))))
+    (arrangement-merged-track-clips i)))
+
+;; Selection prop for one track lane: only the owning track shows its ids.
+(def arrangement-lane-selection (i)
+  (if (= arrangement-selected-track i) arrangement-track-selection '()))
 
 ;; ── Action handlers ────────────────────────────────────────────────────────
 
@@ -310,6 +369,8 @@
       :select
       (do
         (set! arrangement-selection-rect nil)
+        (set! arrangement-track-selection '())
+        (set! arrangement-selected-track -1)
         (set! arrangement-selection (get event :ids))
         (set-arrangement-cursor (get event :time) -1))
       :clear-selection
@@ -372,18 +433,80 @@
       (arrangement-edit-finish
         (dict :type :delete-items :ids (get event :ids))))))
 
-;; Track lanes are read-only previews of the lane projection (spec 9.2), but
-;; clicking a time parks the track-specific edit cursor there.
+;; Track-lane clip editing (Ableton-style): select a clip, Backspace deletes
+;; it, dragging its end edge resizes it — fewer loops leaves silence, more
+;; eats into whatever follows. Every gesture lowers to ONE song-track-paint
+;; primitive; the paint's row surgery (split + per-row override set) is owned
+;; by the primitive, never composed here.
+(def arrangement-paint-track (i start end pattern-id)
+  (arrangement-edit-finish
+    (dict :type :track-paint
+      :track i :start start :end end :pattern-id pattern-id)))
+
+(def arrangement-track-resize-finish (i)
+  (let ((row-id (get arrangement-ghost :row-id))
+        (new-end (max 0 (min SEQ.song-end-beat (get arrangement-ghost :end)))))
+    (let ((clip (arrangement-find-track-clip i row-id)))
+      (do
+        (set! arrangement-ghost nil)
+        (if (= clip nil)
+          nil
+          (let ((old-end (get clip :end-beat)))
+            (if (< new-end old-end)
+              ;; Shrink: silence the released tail (shrinking to the clip
+              ;; start deletes it outright).
+              (arrangement-paint-track i
+                (max (get clip :start-beat) new-end) old-end nil)
+              (if (> new-end old-end)
+                ;; Grow: the clip's pattern eats into whatever follows.
+                (arrangement-paint-track i old-end new-end
+                  (get clip :pattern-id))
+                nil))))))))
+
+(def arrangement-track-delete (i ids)
+  (do
+    (set! arrangement-track-selection '())
+    (map
+      (lambda (row-id)
+        (let ((clip (arrangement-find-track-clip i row-id)))
+          (if (= clip nil)
+            nil
+            (arrangement-paint-track i
+              (get clip :start-beat) (get clip :end-beat) nil))))
+      ids)))
+
 (def arrangement-track-action (i event)
   (if (arrangement-view-action? event)
     (arrangement-view-action event)
     (match event.type
       :select
-      (set-arrangement-cursor (get event :time) i)
+      (do
+        (set! arrangement-selection '())
+        (set! arrangement-selection-rect nil)
+        (set! arrangement-selected-track i)
+        (set! arrangement-track-selection (get event :ids))
+        (set-arrangement-cursor (get event :time) i))
       :clear-selection
-      (set-arrangement-cursor (get event :time) i)
+      (do
+        (set! arrangement-track-selection '())
+        (set-arrangement-cursor (get event :time) i))
       :set-cursor
-      (set-arrangement-cursor (get event :time) i))))
+      (set-arrangement-cursor (get event :time) i)
+      ;; Live edge drag: ghost preview only (spec 9.1).
+      :resize-item-absolute
+      (set! arrangement-ghost
+        (dict :kind :track-resize :track i
+          :row-id (get event :id) :end (get event :time)))
+      :finish-resize-items
+      (if (and (= (arrangement-ghost-kind) :track-resize)
+            (= (get arrangement-ghost :track) i))
+        (arrangement-track-resize-finish i)
+        (set! arrangement-ghost nil))
+      :delete-items
+      (arrangement-track-delete i (get event :ids))
+      ;; Whole-clip moves are not lowered yet: never leave a stale ghost.
+      :finish-move-items
+      (set! arrangement-ghost nil))))
 
 ;; ── Scene drag-and-drop (Ableton-style, replaces the draw tool) ────────────
 ;; The transport scene pills are drag sources (:drag-type "transport-scene");
@@ -464,11 +587,13 @@
     :scroll-passthrough :vertical
     :sidebar-width 0
     :header-height 0
+    :focusable true
     :playhead-time (bind-seq "song-position-beats")
     :cursor-time (arrangement-lane-cursor-time i)
     :drop-types (list "transport-scene")
     :on-drop (lambda (event) (arrangement-drop-scene event))
     :items (arrangement-track-items i)
+    :selection (arrangement-lane-selection i)
     :view-start arrangement-view-start
     :view-duration arrangement-view-duration
     :zoom-min-duration arrangement-min-view-duration
@@ -476,6 +601,10 @@
     :content-length (arrangement-content-length)
     :lane-scroll 0
     :snap arrangement-snap
+    :min-duration 1
+    :resize-snap :grid
+    :snap-mode :floor
+    :resize-snap-mode :alignment-helper
     :scroll-mode :smooth
     :on-action |event| (arrangement-track-action i event)))
 
@@ -493,9 +622,9 @@
 ;; bounded width for flex distribution — without it the row collapses to its
 ;; fixed content and the flexed lane measures ~zero wide.
 (def arrangement-track-row (i)
-  (box :width :fill
+  (box :width :fill :border-color :bg :border-width 2
     (h-stack :width :fill :gap 0.6 :align :start
-      (box :width arrangement-header-width
+      (box :height :fill :width arrangement-header-width
         (seqv-track-header i))
       (arrangement-track-lane i))))
 
@@ -518,6 +647,7 @@
           :width arrangement-header-width :height arrangement-scene-lane-height
           :bg :transparent)
         (arrangement-scene-lane)))
+    (box :width :fill :height 0.1 :background-color :bg)
     (scroll :key "arrangement-track-scroll" :width :fill :flex 1
       (v-stack :width :fill :gap 0.0
         (each (seq-visible-track-indices) |i|

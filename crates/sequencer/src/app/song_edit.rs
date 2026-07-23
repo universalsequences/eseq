@@ -327,6 +327,116 @@ impl App {
         self.commit_song_edit("Set song row state", before, Some(song))
     }
 
+    /// Paint one track's resolved pattern over `[start_beat, end_beat)`
+    /// (the arrangement's track-clip surgery, one atomic primitive):
+    /// `pattern_id` is a pool id, or `None` for explicit-empty (silence).
+    ///
+    /// Row mechanics: the affected region is split out of the surrounding
+    /// rows — a restore row at `end_beat` preserving the state that was in
+    /// effect there, a row at `start_beat` when none exists, then every row
+    /// starting inside `[start_beat, end_beat)` gets its override for
+    /// `track` set to the painted value. The result is normalized (adjacent
+    /// identical rows collapse), validated, and committed as ONE undo
+    /// entry. A paint that changes nothing is a no-op with no history entry.
+    pub fn song_track_paint(
+        &mut self,
+        track: usize,
+        start_beat: f64,
+        end_beat: f64,
+        pattern_id: Option<u64>,
+    ) -> Result<(), String> {
+        self.require_song_edit_unlocked()?;
+        let start_beat = finite_beat("Paint start beat", start_beat)?;
+        let end_beat = finite_beat("Paint end beat", end_beat)?;
+        if end_beat <= start_beat {
+            return Err(format!(
+                "Paint region must have a positive span (got [{start_beat}, {end_beat}))"
+            ));
+        }
+        let before = self.state.committed_song();
+        let Some(existing) = &before else {
+            return Err("The project has no song".to_string());
+        };
+        if start_beat >= existing.end_beat {
+            return Err(format!(
+                "Cannot paint at beat {start_beat}: the song ends at beat {}; \
+                 extend it with song-set-end first",
+                existing.end_beat
+            ));
+        }
+        let end_beat = end_beat.min(existing.end_beat);
+        let mut song = existing.clone();
+
+        // Restore row: the state in effect at `end_beat` must resume there.
+        if end_beat < song.end_beat
+            && !song.rows.iter().any(|row| row.start_beat == end_beat)
+        {
+            let governing = state_at_beat(&song, end_beat)
+                .ok_or_else(|| format!("no song row governs beat {end_beat}"))?;
+            let (scene, overrides) = (governing.scene, governing.overrides.clone());
+            let row_id = song.allocate_row_id()?;
+            let position = song
+                .rows
+                .iter()
+                .position(|row| row.start_beat > end_beat)
+                .unwrap_or(song.rows.len());
+            song.rows.insert(
+                position,
+                ProjectSongRow {
+                    id: row_id,
+                    start_beat: end_beat,
+                    scene,
+                    overrides,
+                },
+            );
+        }
+
+        // Split row at the paint start when none exists (row zero always
+        // exists at 0.0, so a governing row is guaranteed).
+        if !song.rows.iter().any(|row| row.start_beat == start_beat) {
+            let governing = state_at_beat(&song, start_beat)
+                .ok_or_else(|| format!("no song row governs beat {start_beat}"))?;
+            let (scene, overrides) = (governing.scene, governing.overrides.clone());
+            let row_id = song.allocate_row_id()?;
+            let position = song
+                .rows
+                .iter()
+                .position(|row| row.start_beat > start_beat)
+                .unwrap_or(song.rows.len());
+            song.rows.insert(
+                position,
+                ProjectSongRow {
+                    id: row_id,
+                    start_beat,
+                    scene,
+                    overrides,
+                },
+            );
+        }
+
+        // Set the painted override on every row inside the region.
+        for row in song
+            .rows
+            .iter_mut()
+            .filter(|row| row.start_beat >= start_beat && row.start_beat < end_beat)
+        {
+            row.overrides.retain(|over| over.track != track);
+            row.overrides.push(ProjectSongTrackOverride { track, pattern_id });
+            row.overrides.sort_by_key(|over| over.track);
+        }
+
+        // Painting a value a row already had can leave adjacent identical
+        // rows; canonical form removes them (spec 5.3).
+        song.normalize();
+        // Complete no-op: compare rows only — split rows inserted then
+        // normalized away may have bumped the allocator, and committing an
+        // allocator-only diff would be an empty undo entry.
+        if song.rows == existing.rows && song.end_beat == existing.end_beat {
+            return Ok(());
+        }
+        self.commit_song_edit("Paint track clip", before, Some(song))
+    }
+
     /// Set the song's explicit end beat.
     pub fn song_set_end(&mut self, end_beat: f64) -> Result<(), String> {
         self.require_song_edit_unlocked()?;
@@ -718,6 +828,125 @@ mod tests {
             &mut app,
             |app| app.song_row_set_state(middle, 7, Vec::new()),
             "scene 8",
+        );
+    }
+
+    fn empty_ov(track: usize) -> ProjectSongTrackOverride {
+        ProjectSongTrackOverride {
+            track,
+            pattern_id: None,
+        }
+    }
+
+    fn row_shapes(app: &App) -> Vec<(f64, usize, Vec<ProjectSongTrackOverride>)> {
+        committed(app)
+            .rows
+            .iter()
+            .map(|row| (row.start_beat, row.scene, row.overrides.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn track_paint_splits_and_restores_around_the_region() {
+        let mut app = app_with_song();
+        let depth = app.history.undo_len();
+        // Silence track 0 over [6, 10): splits row 1's span at 6 and row 2's
+        // at 10, restoring scene 2's original state from beat 10 on.
+        app.song_track_paint(0, 6.0, 10.0, None)
+            .expect("paint succeeds");
+        assert_eq!(
+            row_shapes(&app),
+            vec![
+                (0.0, 0, Vec::new()),
+                (4.0, 1, Vec::new()),
+                (6.0, 1, vec![empty_ov(0)]),
+                (8.0, 2, vec![empty_ov(0)]),
+                (10.0, 2, Vec::new()),
+            ]
+        );
+        assert_eq!(app.history.undo_len(), depth + 1, "one paint = one undo entry");
+
+        // Undo restores the original three rows exactly.
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(
+            row_shapes(&app),
+            vec![(0.0, 0, Vec::new()), (4.0, 1, Vec::new()), (8.0, 2, Vec::new())]
+        );
+    }
+
+    #[test]
+    fn track_paint_with_pattern_and_existing_boundaries() {
+        let mut app = app_with_song();
+        // Paint pool pattern 3 over exactly row 1's span: no splits needed.
+        app.song_track_paint(0, 4.0, 8.0, Some(3))
+            .expect("paint succeeds");
+        assert_eq!(
+            row_shapes(&app),
+            vec![
+                (0.0, 0, Vec::new()),
+                (4.0, 1, vec![ov(0, 3)]),
+                (8.0, 2, Vec::new()),
+            ]
+        );
+
+        // Painting through the song end needs no restore row.
+        app.song_track_paint(0, 8.0, 16.0, None).expect("paint tail");
+        assert_eq!(committed(&app).rows.len(), 3);
+        assert_eq!(committed(&app).rows[2].overrides, vec![empty_ov(0)]);
+    }
+
+    #[test]
+    fn track_paint_noop_and_rejections() {
+        let mut app = app_with_song();
+        // Painting the value already in effect is a no-op with no entry.
+        app.song_track_paint(0, 4.0, 8.0, Some(2)).expect("first paint");
+        let depth = app.history.undo_len();
+        let song_before = app.state.committed_song();
+        app.song_track_paint(0, 5.0, 7.0, Some(2)).expect("no-op paint");
+        assert_eq!(app.history.undo_len(), depth);
+        assert_eq!(app.state.committed_song(), song_before);
+
+        assert_rejected_unchanged(
+            &mut app,
+            |app| app.song_track_paint(0, 8.0, 8.0, None),
+            "positive span",
+        );
+        assert_rejected_unchanged(
+            &mut app,
+            |app| app.song_track_paint(0, 16.0, 20.0, None),
+            "song-set-end",
+        );
+        // Unknown pool pattern fails validation atomically.
+        assert_rejected_unchanged(
+            &mut app,
+            |app| app.song_track_paint(0, 0.0, 4.0, Some(99)),
+            "pattern pool",
+        );
+        // Unknown track fails validation.
+        assert_rejected_unchanged(
+            &mut app,
+            |app| app.song_track_paint(5, 0.0, 4.0, None),
+            "track",
+        );
+        // No song at all.
+        let mut app = test_app();
+        assert_rejected_unchanged(
+            &mut app,
+            |app| app.song_track_paint(0, 0.0, 4.0, None),
+            "no song",
+        );
+    }
+
+    #[test]
+    fn track_paint_region_end_clamps_to_the_song_end() {
+        let mut app = app_with_song();
+        app.song_track_paint(0, 12.0, 999.0, None).expect("clamped paint");
+        let song = committed(&app);
+        assert_eq!(song.end_beat, 16.0, "paint never extends the song");
+        assert_eq!(
+            song.rows.last().unwrap().start_beat,
+            12.0,
+            "split at the paint start, no restore row past the end"
         );
     }
 

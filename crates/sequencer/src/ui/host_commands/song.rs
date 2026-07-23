@@ -14,6 +14,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "song-row-remove",
     "song-row-move",
     "song-row-set-state",
+    "song-track-paint",
     "song-set-end",
     "song-set-loop",
     "song-replace",
@@ -201,6 +202,42 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             let overrides = parse_overrides(map)?;
             app.song_row_set_state(row_id, scene, overrides)?;
             Ok(format!("Set song row {} state", row_id.0))
+        }
+        "song-track-paint" => {
+            let map = payload_map(payload)?;
+            let track = require_number(map, "track")?;
+            if !track.is_finite() || track < 0.0 || track.fract() != 0.0 {
+                return Err("track must be a non-negative integer".to_string());
+            }
+            let start_beat = require_number(map, "start-beat")?;
+            let end_beat = require_number(map, "end-beat")?;
+            // pattern-id nil/absent/0 = explicit-empty (silence the track).
+            let pattern_id = match map.get("pattern-id").map(|cell| cell.borrow().clone()) {
+                None | Some(Value::Nil) => None,
+                Some(Value::Number(id)) if id == 0.0 => None,
+                Some(Value::Number(id))
+                    if id.is_finite() && id >= 1.0 && id.fract() == 0.0 =>
+                {
+                    Some(id as u64)
+                }
+                _ => {
+                    return Err(
+                        "pattern-id must be a positive integer, or 0/nil for silence"
+                            .to_string(),
+                    )
+                }
+            };
+            app.song_track_paint(track as usize, start_beat, end_beat, pattern_id)?;
+            Ok(match pattern_id {
+                Some(id) => format!(
+                    "Painted pattern {id} on track {} over beats {start_beat}-{end_beat}",
+                    track as usize + 1
+                ),
+                None => format!(
+                    "Silenced track {} over beats {start_beat}-{end_beat}",
+                    track as usize + 1
+                ),
+            })
         }
         "song-set-end" => {
             let map = payload_map(payload)?;

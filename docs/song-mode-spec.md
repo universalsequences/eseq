@@ -278,11 +278,28 @@ song-row-insert(start_beat, scene, overrides) -> SongRowId
 song-row-remove(row_id)
 song-row-move(row_id, new_start_beat)
 song-row-set-state(row_id, scene, overrides)
+song-track-paint(track, start_beat, end_beat, pattern_id?)
 song-set-end(end_beat)
 song-set-loop(bool)
 song-replace(rows, end_beat)          ; wholesale: def-song, capture commit
 song-clear
 ```
+
+An override's `pattern_id` may be explicit-empty (`nil`/`0` on the wire,
+`None` in the model): the track plays nothing for the row even when the base
+scene's cell holds a pattern. Only an *absent* override falls back to the
+scene cell. This is the arrangement's sparsity primitive — resolved-empty
+tracks ride the same `scene_silenced` path as empty scene cells, with track
+phase still advancing so a later resume stays timeline-aligned.
+
+`song-track-paint` is the track-clip surgery primitive (arrangement delete /
+edge-resize): it sets `track`'s override to `pattern_id` (or explicit-empty)
+across `[start_beat, end_beat)` as ONE atomic, one-undo-entry mutation —
+inserting a restore row at `end_beat` preserving the state in effect there,
+splitting at `start_beat` when no row starts there, rewriting the override on
+every row inside the region, then normalizing. A paint that changes nothing
+is a no-op with no history entry. The paint never extends the song
+(`end_beat` clamps to the song end; painting at/after the end is rejected).
 
 Semantics chosen for timeline friendliness:
 

@@ -559,33 +559,42 @@ fn song_beat_arg(name: &str, value: Option<&Value>) -> Result<f64, String> {
 }
 
 /// A parsed `(track pattern-id)` pair from a song overrides/patterns list.
-fn song_override_pair(value: &Value) -> Result<(usize, u64), String> {
+/// A pattern-id of `nil` or `0` is an explicit-empty override (the track
+/// plays nothing for the row).
+fn song_override_pair(value: &Value) -> Result<(usize, Option<u64>), String> {
     let Value::List(items) = value else {
         return Err("expected a (track pattern-id) pair".to_string());
     };
-    let numbers: Vec<f64> = items
-        .iter()
-        .filter_map(|item| match &*item.borrow() {
-            Value::Number(n) => Some(*n),
-            _ => None,
-        })
-        .collect();
-    if numbers.len() != 2 || items.len() != 2 {
-        return Err("expected a (track pattern-id) pair of numbers".to_string());
+    if items.len() != 2 {
+        return Err("expected a (track pattern-id) pair".to_string());
     }
-    let (track, pattern) = (numbers[0], numbers[1]);
+    let track = match &*items[0].borrow() {
+        Value::Number(n) => *n,
+        _ => return Err("override track must be a number".to_string()),
+    };
     if !track.is_finite() || track < 0.0 || track.fract() != 0.0 {
         return Err("override track must be a non-negative integer".to_string());
     }
-    if !pattern.is_finite() || pattern < 1.0 || pattern.fract() != 0.0 {
-        return Err("override pattern-id must be a positive integer".to_string());
-    }
-    Ok((track as usize, pattern as u64))
+    let pattern = match &*items[1].borrow() {
+        Value::Nil => None,
+        Value::Number(n) if *n == 0.0 => None,
+        Value::Number(n) if n.is_finite() && *n >= 1.0 && n.fract() == 0.0 => {
+            Some(*n as u64)
+        }
+        _ => {
+            return Err(
+                "override pattern-id must be a positive integer, or 0/nil for \
+                 explicit-empty"
+                    .to_string(),
+            )
+        }
+    };
+    Ok((track as usize, pattern))
 }
 
 /// Parse an optional overrides argument: nil/absent, or a list of
 /// `(track pattern-id)` pairs.
-fn song_overrides_arg(value: Option<&Value>) -> Result<Vec<(usize, u64)>, String> {
+fn song_overrides_arg(value: Option<&Value>) -> Result<Vec<(usize, Option<u64>)>, String> {
     match value {
         None | Some(Value::Nil) => Ok(Vec::new()),
         Some(Value::List(items)) => items
@@ -596,14 +605,18 @@ fn song_overrides_arg(value: Option<&Value>) -> Result<Vec<(usize, u64)>, String
     }
 }
 
-fn song_overrides_value(overrides: &[(usize, u64)]) -> Value {
+fn song_overrides_value(overrides: &[(usize, Option<u64>)]) -> Value {
     Value::List(
         overrides
             .iter()
             .map(|(track, pattern)| {
+                let pattern_value = match pattern {
+                    Some(id) => Value::Number(*id as f64),
+                    None => Value::Nil,
+                };
                 Rc::new(RefCell::new(Value::List(vec![
                     Rc::new(RefCell::new(Value::Number(*track as f64))),
-                    Rc::new(RefCell::new(Value::Number(*pattern as f64))),
+                    Rc::new(RefCell::new(pattern_value)),
                 ])))
             })
             .collect(),
@@ -636,7 +649,7 @@ fn song_scene_arg(name: &str, value: Option<&Value>) -> Result<usize, String> {
 pub(crate) struct DefSongRow {
     pub(crate) start_beat: f64,
     pub(crate) scene: usize,
-    pub(crate) patterns: Vec<(usize, u64)>,
+    pub(crate) patterns: Vec<(usize, Option<u64>)>,
 }
 
 /// A fully parsed `def-song` definition, validated for shape before any host
@@ -670,7 +683,7 @@ fn parse_def_song_row(items: &[Rc<RefCell<Value>>]) -> Result<DefSongRow, String
         song_beat_arg("(at <beat> ...)", beat.as_ref())?
     };
     let mut scene: Option<usize> = None;
-    let mut patterns: Vec<(usize, u64)> = Vec::new();
+    let mut patterns: Vec<(usize, Option<u64>)> = Vec::new();
     let mut idx = 2;
     while idx < items.len() {
         let key = match &*items[idx].borrow() {
@@ -6607,14 +6620,14 @@ mod tests {
         assert_eq!(spec.rows[0], DefSongRow { start_beat: 0.0, scene: 0, patterns: vec![] });
         assert_eq!(
             spec.rows[1],
-            DefSongRow { start_beat: 32.0, scene: 1, patterns: vec![(1, 3)] }
+            DefSongRow { start_beat: 32.0, scene: 1, patterns: vec![(1, Some(3))] }
         );
         assert_eq!(
             spec.rows[2],
             DefSongRow {
                 start_beat: 47.5,
                 scene: 2,
-                patterns: vec![(1, 5), (3, 2)],
+                patterns: vec![(1, Some(5)), (3, Some(2))],
             }
         );
     }
@@ -6663,7 +6676,7 @@ mod tests {
             name: "bossa-1".to_string(),
             rows: vec![
                 DefSongRow { start_beat: 0.0, scene: 0, patterns: vec![] },
-                DefSongRow { start_beat: 47.5, scene: 2, patterns: vec![(1, 5)] },
+                DefSongRow { start_beat: 47.5, scene: 2, patterns: vec![(1, Some(5))] },
             ],
             end_beat: 64.0,
             loop_enabled: true,

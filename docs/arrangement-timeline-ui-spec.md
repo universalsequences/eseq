@@ -346,16 +346,28 @@ The song primitives are atomic, validated, one-undo-entry operations
 
 ### 9.2 Row granularity: where each gesture lives
 
-A song row is a complete state, so V1 editing is row-granular and lives on
-the **scene lane**. A drag there moves a boundary for every track at once,
-which is exactly what the model expresses. Track lanes in V1 are read-only
-previews of the lane projection; a gesture started on a track-lane clip
-either does nothing (V1 default) or is forwarded to the governing row's
-scene-lane equivalent with the full column highlighted during the drag so
-the cross-track effect is visible. Per-track clip editing (changing one
-lane's pattern without touching others) is expressible later via
-`song-row-set-state` with per-track overrides — `LaneClip.from_override`
-already carries the render hint — but it is out of V1 scope (§3).
+A song row is a complete state, so row-granular editing lives on the
+**scene lane**: a drag there moves a boundary for every track at once,
+which is exactly what the model expresses.
+
+Track lanes additionally support **per-track clip editing** over the merged
+lane projection (adjacent same-pattern spans render as one clip — the
+merge is a view concern; the clip's stable gesture identity is its first
+row's id):
+
+- **Select** a clip; selection is exclusive between the scene lane and
+  track lanes so Backspace is never ambiguous.
+- **Backspace** silences the clip's whole span.
+- **End-edge drag** resizes it: shrinking silences the released tail
+  (shrinking to the clip start deletes it), growing paints the clip's own
+  pattern over what follows.
+
+Every track-clip gesture lowers to exactly ONE `song-track-paint`
+(song-mode-spec 5.6): the primitive owns the row surgery (split + restore
+row + per-row override rewrite + normalize) as one atomic, one-undo-entry
+mutation. Live drags remain ghost-only per §9.1. Silenced regions come
+from explicit-empty overrides (`pattern_id: nil`), which never fall back
+to the scene cell. Whole-clip *moves* on track lanes are not lowered yet.
 
 ### 9.3 Song end is a free gesture
 
