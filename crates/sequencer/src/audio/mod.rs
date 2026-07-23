@@ -1,5 +1,8 @@
 pub mod audiograph;
 pub mod engine;
+mod device;
+#[allow(unused_imports)]
+use device::*;
 
 use arrayvec::ArrayVec;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -157,86 +160,6 @@ unsafe fn dispatch_transport_phase(
             fvalue: beat_phase,
         },
     );
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct OutputDeviceConfig {
-    sample_rate: u32,
-    channels: u16,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct OutputFormatRange {
-    channels: u16,
-    min_sample_rate: u32,
-    max_sample_rate: u32,
-    supports_f32: bool,
-}
-
-impl OutputFormatRange {
-    fn supports_sample_rate(self, sample_rate: u32) -> bool {
-        self.min_sample_rate <= sample_rate && sample_rate <= self.max_sample_rate
-    }
-}
-
-fn select_output_channels(
-    sample_rate: u32,
-    default_channels: u16,
-    ranges: impl IntoIterator<Item = OutputFormatRange>,
-) -> Option<u16> {
-    ranges
-        .into_iter()
-        .filter(|range| range.supports_sample_rate(sample_rate))
-        .filter(|range| range.supports_f32)
-        .map(|range| range.channels)
-        .min_by_key(|&channels| {
-            let preference = if channels == default_channels {
-                0
-            } else if channels == 2 {
-                1
-            } else {
-                2
-            };
-            (preference, channels)
-        })
-}
-
-fn select_output_config(
-    default_sample_rate: u32,
-    default_channels: u16,
-    ranges: impl IntoIterator<Item = OutputFormatRange>,
-) -> Option<OutputDeviceConfig> {
-    let ranges: Vec<OutputFormatRange> = ranges.into_iter().collect();
-    if let Some(channels) =
-        select_output_channels(default_sample_rate, default_channels, ranges.clone())
-    {
-        return Some(OutputDeviceConfig {
-            sample_rate: default_sample_rate,
-            channels,
-        });
-    }
-
-    if default_sample_rate == FALLBACK_SAMPLE_RATE {
-        return None;
-    }
-
-    select_output_channels(FALLBACK_SAMPLE_RATE, default_channels, ranges).map(|channels| {
-        OutputDeviceConfig {
-            sample_rate: FALLBACK_SAMPLE_RATE,
-            channels,
-        }
-    })
-}
-
-fn env_flag(name: &str, default: bool) -> bool {
-    match std::env::var(name) {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" => false,
-            _ => default,
-        },
-        Err(_) => default,
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
