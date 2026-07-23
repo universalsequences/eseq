@@ -130,7 +130,7 @@
               (effect-lfo-source-editor fx section)
               (if (or (= source-type "rand") (= source-type "drift"))
                 (fx-param-grid (get section :params) fx)
-                (box :width :fill :height :fill :h-align :center :v-align :center
+                (box :width :fill :height 6 :h-align :center :v-align :center
                   (label "no source controls" :font-size 12 :color :dim :bg :transparent))))))
         (box :width :fill :height :fill :h-align :center :v-align :center
           (label "no source controls" :font-size 12 :color :dim :bg :transparent))))))

@@ -628,30 +628,30 @@
     ;; SESSION / SONG / ARR REC readout — ARR REC is its own clearly visible
     ;; state, never just the generic record icon — plus current row / total
     ;; rows while song playback is active.
-    (subtree :key "transport-song-status"
-      (box :background "transport-led-bg" :height 1.4
-        :debug-name "transport-song-status"
-        (h-stack :gap 0.3 :align :center :padding 0.45
-          (if (= SEQ.song-mode "arrangement-capture")
-            (label "ARR REC"
-              :debug-name "transport-arr-rec-indicator"
-              :font-size 11 :width 4.6
-              :color '(rgba 0.95 0.25 0.22 1)
-              :bg :transparent)
-            (label (if (= SEQ.song-mode "song-playback") "SONG" "SESSION")
-              :debug-name "transport-song-mode-label"
-              :font-size 11 :width 4.6
-              :color (if (= SEQ.song-mode "song-playback")
-                '(rgba 0.63 0.88 0.41 1)
-                '(rgba 0.55 0.55 0.58 1))
-              :bg :transparent))
-          (if (= SEQ.song-mode "song-playback")
-            (label (fmt "{}/{}" (+ SEQ.song-current-row 1) SEQ.song-row-count)
-              :debug-name "transport-song-row-indicator"
-              :font-size 11 :width 3.2
-              :color '(rgba 0.85 0.85 0.85 1)
-              :bg :transparent)
-            nil))))
+    ;(subtree :key "transport-song-status"
+    ;  (box :background "transport-led-bg" :height 1.4
+    ;    :debug-name "transport-song-status"
+    ;    (h-stack :gap 0.3 :align :center :padding 0.45
+    ;      (if (= SEQ.song-mode "arrangement-capture")
+    ;        (label "ARR REC"
+    ;          :debug-name "transport-arr-rec-indicator"
+    ;          :font-size 11 :width 4.6
+    ;          :color '(rgba 0.95 0.25 0.22 1)
+    ;          :bg :transparent)
+    ;        (label (if (= SEQ.song-mode "song-playback") "SONG" "SESSION")
+    ;          :debug-name "transport-song-mode-label"
+    ;          :font-size 11 :width 4.6
+    ;          :color (if (= SEQ.song-mode "song-playback")
+    ;            '(rgba 0.63 0.88 0.41 1)
+    ;            '(rgba 0.55 0.55 0.58 1))
+    ;          :bg :transparent))
+    ;      (if (= SEQ.song-mode "song-playback")
+    ;        (label (fmt "{}/{}" (+ SEQ.song-current-row 1) SEQ.song-row-count)
+    ;          :debug-name "transport-song-row-indicator"
+    ;          :font-size 11 :width 3.2
+    ;          :color '(rgba 0.85 0.85 0.85 1)
+    ;          :bg :transparent)
+    ;        nil))))
     
     ;; Single continuous LED panel
     (box :background "transport-led-bg" :height 1.4 :width 56
