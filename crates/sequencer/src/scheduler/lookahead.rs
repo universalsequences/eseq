@@ -46,6 +46,23 @@ impl SchedulerLookaheadState {
     }
 }
 
+/// Flag accumulator resets for exactly the tracks whose resolved pattern
+/// changed across a song row boundary. Tracks playing the same pattern
+/// through the boundary keep their accumulator state, so a row split made to
+/// edit one track's clip is audibly transparent to every other track.
+/// Existing pending flags are preserved (marking is additive).
+pub(super) fn mark_song_row_accum_resets(
+    prev: &crate::sequencer::RuntimeSongRow,
+    next: &crate::sequencer::RuntimeSongRow,
+    resets: &mut [bool; MAX_TRACKS],
+) {
+    for (track, reset) in resets.iter_mut().enumerate() {
+        if prev.resolved_pattern_ids.get(track) != next.resolved_pattern_ids.get(track) {
+            *reset = true;
+        }
+    }
+}
+
 pub(super) fn build_scheduler_scratch_runtime(
     state: Arc<SequencerState>,
     user_source: &str,
@@ -214,6 +231,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         let mut chunk_frames = scheduler_block_size;
         let mut song_row_snapshot: Option<Arc<SequencerSnapshot>> = None;
         if let Some(song) = song_playback.as_mut() {
+            let prev_row = song.current_row();
             match song.next_chunk(
                 scheduled_until_sample,
                 clock.total_beats,
@@ -230,7 +248,22 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     chunk_frames = frames;
                     song_row_snapshot = Some(song.row_snapshot(row));
                     if row_changed {
-                        *pending_accum_reset = [true; MAX_TRACKS];
+                        if wrapped {
+                            // A loop wrap rewinds the clock and every
+                            // self-clocked runtime below; accumulators restart
+                            // with them on every track.
+                            *pending_accum_reset = [true; MAX_TRACKS];
+                        } else {
+                            // Diff-aware row transition: a row split made to
+                            // edit one track's clip must not restart the
+                            // accumulator evolution of tracks whose resolved
+                            // pattern is unchanged across the boundary.
+                            mark_song_row_accum_resets(
+                                &song.song().rows[prev_row],
+                                &song.song().rows[row],
+                                pending_accum_reset,
+                            );
+                        }
                     }
                     if wrapped {
                         // Loop wrap: song beat zero again. Rewind the clock

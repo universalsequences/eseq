@@ -5677,6 +5677,66 @@
     }
 
     #[test]
+    fn song_row_transition_accum_reset_is_diff_aware() {
+        run_with_scheduler_stack(|| {
+            let (state, override_id) = song_mode_fixture();
+            let mut silence_row = song_mode_row(2, 2.0, 0, Vec::new());
+            silence_row.overrides = vec![crate::sequencer::ProjectSongTrackOverride {
+                track: 1,
+                pattern_id: None,
+            }];
+            song_mode_commit(
+                &state,
+                vec![
+                    song_mode_row(0, 0.0, 0, Vec::new()),
+                    // Row 1 changes ONLY track 0 (override); track 1 keeps
+                    // scene 0's pattern through the boundary.
+                    song_mode_row(1, 1.0, 0, vec![(0, override_id.0)]),
+                    // Row 2 drops the override (track 0 changes back) and
+                    // explicitly empties track 1.
+                    silence_row,
+                ],
+                3.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+
+            let mut resets = [false; MAX_TRACKS];
+            crate::scheduler::lookahead::mark_song_row_accum_resets(
+                &runtime.rows[0],
+                &runtime.rows[1],
+                &mut resets,
+            );
+            assert!(resets[0], "track 0's resolved pattern changed");
+            assert!(
+                !resets[1],
+                "track 1 plays the same pattern through the boundary and must keep \
+                 its accumulator state"
+            );
+
+            let mut resets = [false; MAX_TRACKS];
+            crate::scheduler::lookahead::mark_song_row_accum_resets(
+                &runtime.rows[1],
+                &runtime.rows[2],
+                &mut resets,
+            );
+            assert!(resets[0], "override removed: track 0 changes back");
+            assert!(resets[1], "explicit-empty is a pattern change for track 1");
+
+            // Marking is additive: an already-pending reset survives an
+            // unchanged-track boundary.
+            let mut resets = [false; MAX_TRACKS];
+            resets[1] = true;
+            crate::scheduler::lookahead::mark_song_row_accum_resets(
+                &runtime.rows[0],
+                &runtime.rows[1],
+                &mut resets,
+            );
+            assert!(resets[1], "pending flags are preserved");
+        });
+    }
+
+    #[test]
     fn song_explicit_empty_override_silences_only_its_track() {
         run_with_scheduler_stack(|| {
             let (state, _override_id) = song_mode_fixture();
