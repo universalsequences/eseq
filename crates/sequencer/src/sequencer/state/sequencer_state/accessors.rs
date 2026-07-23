@@ -72,6 +72,7 @@ impl SequencerState {
                     &[PatternSnapshot::new_default(num_tracks, &slot_descriptors)],
                     0,
                 )),
+                song: Mutex::new(None),
                 current_pattern: AtomicU32::new(0),
                 num_patterns: AtomicU32::new(1),
                 timebase_plocks: (0..MAX_TRACKS).map(|_| TimebasePLockData::new()).collect(),
@@ -421,6 +422,25 @@ impl SequencerState {
     #[doc(hidden)]
     pub fn capture_project_scenes(&self) -> ProjectScenes {
         self.pattern.scenes.lock().unwrap().clone()
+    }
+
+    /// Clone of the committed song, or `None` when the project has no song.
+    pub fn committed_song(&self) -> Option<ProjectSong> {
+        self.pattern.song.lock().unwrap().clone()
+    }
+
+    /// Replace the committed song wholesale (project load / new project).
+    pub fn set_committed_song(&self, song: Option<ProjectSong>) {
+        *self.pattern.song.lock().unwrap() = song;
+    }
+
+    /// Edit the committed song in place (topology remaps, future editing
+    /// primitives). Callers are responsible for keeping the song valid.
+    pub(crate) fn with_committed_song_mut<R>(
+        &self,
+        f: impl FnOnce(&mut Option<ProjectSong>) -> R,
+    ) -> R {
+        f(&mut self.pattern.song.lock().unwrap())
     }
 
     #[cfg(test)]

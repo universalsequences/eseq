@@ -61,6 +61,8 @@ mod track_pattern_data;
 pub use track_pattern_data::*;
 mod scenes;
 pub use scenes::*;
+mod song;
+pub use song::*;
 mod track_delete_remap;
 use track_delete_remap::*;
 mod core;

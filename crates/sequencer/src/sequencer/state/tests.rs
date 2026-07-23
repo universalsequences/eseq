@@ -3347,7 +3347,7 @@
             &[InstrumentType::Modulator, InstrumentType::Custom],
         );
 
-        assert!(sample_ids.is_some());
+        assert!(sample_ids.is_ok());
         let bank = state.export_pattern_repository();
         assert_eq!(bank.len(), 1);
         assert_eq!(bank[0].mod_connections, vec![route]);
@@ -3729,15 +3729,17 @@
         let second_id = state.scene_track_pattern_id(1, 0).unwrap();
         let (buffer_ids, sample_rates, names, instrument_types) = launch_test_args();
 
-        assert!(state.delete_track_pattern(
-            0,
-            second_id,
-            1,
-            &buffer_ids,
-            &sample_rates,
-            &names,
-            &instrument_types,
-        ));
+        state
+            .delete_track_pattern(
+                0,
+                second_id,
+                1,
+                &buffer_ids,
+                &sample_rates,
+                &names,
+                &instrument_types,
+            )
+            .unwrap();
         assert_eq!(state.scene_track_pattern_id(1, 0), None);
         assert!(!state.is_scene_silenced(0));
         assert!(state
@@ -3745,15 +3747,17 @@
             .iter()
             .all(|cell| cell.pattern_id != second_id));
 
-        assert!(state.delete_track_pattern(
-            0,
-            first_id,
-            1,
-            &buffer_ids,
-            &sample_rates,
-            &names,
-            &instrument_types,
-        ));
+        state
+            .delete_track_pattern(
+                0,
+                first_id,
+                1,
+                &buffer_ids,
+                &sample_rates,
+                &names,
+                &instrument_types,
+            )
+            .unwrap();
         assert_eq!(state.scene_track_pattern_id(0, 0), None);
         assert!(state.is_scene_silenced(0));
         assert!(state.track_pattern_cells(0).is_empty());
@@ -5238,4 +5242,194 @@
             .instrument[0];
         assert_eq!(restored.value, 0.625);
         assert_eq!(restored.param_id.logical_id, 42);
+    }
+
+    fn song_row(
+        id: u64,
+        start_beat: f64,
+        scene: usize,
+        overrides: &[(usize, u64)],
+    ) -> ProjectSongRow {
+        ProjectSongRow {
+            id: SongRowId(id),
+            start_beat,
+            scene,
+            overrides: overrides
+                .iter()
+                .map(|&(track, pattern_id)| ProjectSongTrackOverride { track, pattern_id })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn remap_song_overrides_after_track_delete_drops_and_shifts() {
+        let mut song = ProjectSong {
+            rows: vec![
+                song_row(0, 0.0, 0, &[(0, 1), (1, 2), (2, 3)]),
+                song_row(1, 8.0, 1, &[(2, 1)]),
+            ],
+            end_beat: 16.0,
+            loop_enabled: false,
+            next_row_id: 2,
+        };
+        remap_song_overrides_after_track_delete(&mut song, 1);
+        assert_eq!(
+            song.rows[0].overrides,
+            vec![
+                ProjectSongTrackOverride { track: 0, pattern_id: 1 },
+                ProjectSongTrackOverride { track: 1, pattern_id: 3 },
+            ]
+        );
+        assert_eq!(
+            song.rows[1].overrides,
+            vec![ProjectSongTrackOverride { track: 1, pattern_id: 1 }]
+        );
+    }
+
+    #[test]
+    fn remap_song_overrides_after_track_delete_normalizes_identical_rows() {
+        // Rows differ only by the deleted track's override, so removing it
+        // must fold the later row into the earlier one (earlier id wins).
+        let mut song = ProjectSong {
+            rows: vec![
+                song_row(0, 0.0, 0, &[(0, 1)]),
+                song_row(1, 8.0, 0, &[(0, 1), (1, 2)]),
+                song_row(2, 16.0, 1, &[]),
+            ],
+            end_beat: 32.0,
+            loop_enabled: false,
+            next_row_id: 3,
+        };
+        remap_song_overrides_after_track_delete(&mut song, 1);
+        let ids: Vec<u64> = song.rows.iter().map(|row| row.id.0).collect();
+        assert_eq!(ids, vec![0, 2]);
+        assert_eq!(song.next_row_id, 3);
+    }
+
+    #[test]
+    fn remap_song_overrides_after_track_move_permutes_and_resorts() {
+        let mut song = ProjectSong {
+            rows: vec![song_row(0, 0.0, 0, &[(0, 1), (2, 3), (3, 4)])],
+            end_beat: 8.0,
+            loop_enabled: false,
+            next_row_id: 1,
+        };
+        // Move track 3 to index 1 (the undo-restore append-then-move path).
+        remap_song_overrides_after_track_move(&mut song, 3, 1);
+        assert_eq!(
+            song.rows[0].overrides,
+            vec![
+                ProjectSongTrackOverride { track: 0, pattern_id: 1 },
+                ProjectSongTrackOverride { track: 1, pattern_id: 4 },
+                ProjectSongTrackOverride { track: 3, pattern_id: 3 },
+            ]
+        );
+        // Moving it back restores the original assignment.
+        remap_song_overrides_after_track_move(&mut song, 1, 3);
+        assert_eq!(
+            song.rows[0].overrides,
+            vec![
+                ProjectSongTrackOverride { track: 0, pattern_id: 1 },
+                ProjectSongTrackOverride { track: 2, pattern_id: 3 },
+                ProjectSongTrackOverride { track: 3, pattern_id: 4 },
+            ]
+        );
+    }
+
+    #[test]
+    fn remove_track_remaps_committed_song_overrides() {
+        let state = SequencerState::new(3, vec![vec![], vec![], vec![]]);
+        state.set_committed_song(Some(ProjectSong {
+            rows: vec![song_row(0, 0.0, 0, &[(0, 1), (1, 1), (2, 1)])],
+            end_beat: 8.0,
+            loop_enabled: false,
+            next_row_id: 1,
+        }));
+        let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert!(state.remove_track(
+            1,
+            &[-1, -1, -1],
+            &[44_100, 44_100, 44_100],
+            &names,
+            &[InstrumentType::Sampler; 3],
+            &[Vec::new(), Vec::new(), Vec::new()],
+        ));
+        let song = state.committed_song().expect("song survives track delete");
+        assert_eq!(
+            song.rows[0].overrides,
+            vec![
+                ProjectSongTrackOverride { track: 0, pattern_id: 1 },
+                ProjectSongTrackOverride { track: 1, pattern_id: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn delete_track_pattern_referenced_by_song_is_rejected_with_row_positions() {
+        let state = SequencerState::new(1, vec![vec![]]);
+        state.set_committed_song(Some(ProjectSong {
+            rows: vec![
+                song_row(0, 0.0, 0, &[(0, 1)]),
+                song_row(1, 8.0, 0, &[]),
+                song_row(2, 16.0, 0, &[(0, 1)]),
+            ],
+            end_beat: 24.0,
+            loop_enabled: false,
+            next_row_id: 3,
+        }));
+        let names = vec!["a".to_string()];
+        let err = state
+            .delete_track_pattern(
+                0,
+                PatternId(1),
+                1,
+                &[-1],
+                &[44_100],
+                &names,
+                &[InstrumentType::Sampler],
+            )
+            .unwrap_err();
+        assert!(err.contains("song row(s) 1, 3"), "{err}");
+        // The pattern is still in the pool.
+        assert!(state.pattern.scenes.lock().unwrap().track_pools[0].contains(PatternId(1)));
+    }
+
+    #[test]
+    fn delete_scene_referenced_by_song_is_rejected_and_unreferenced_delete_remaps() {
+        let state = SequencerState::new(1, vec![vec![]]);
+        let names = vec!["a".to_string()];
+        state.with_scenes_mut(|scenes| {
+            scenes.new_scene();
+            scenes.new_scene();
+        });
+        state.pattern.current_pattern.store(2, Ordering::Relaxed);
+        state.pattern.num_patterns.store(3, Ordering::Relaxed);
+        // Current scene is now index 2; a song row references it.
+        state.set_committed_song(Some(ProjectSong {
+            rows: vec![song_row(0, 0.0, 2, &[])],
+            end_beat: 8.0,
+            loop_enabled: false,
+            next_row_id: 1,
+        }));
+        let err = state
+            .delete_pattern(1, &[-1], &[44_100], &names, &[InstrumentType::Sampler])
+            .unwrap_err();
+        assert!(err.contains("Scene 3"), "{err}");
+        assert!(err.contains("song row(s) 1"), "{err}");
+        assert_eq!(state.pattern.scenes.lock().unwrap().scenes.len(), 3);
+
+        // Point the song at scene 0 instead; deleting current scene 2 is now
+        // allowed and does not disturb lower scene references.
+        state.set_committed_song(Some(ProjectSong {
+            rows: vec![song_row(0, 0.0, 0, &[]), song_row(1, 8.0, 1, &[])],
+            end_beat: 16.0,
+            loop_enabled: false,
+            next_row_id: 2,
+        }));
+        state
+            .delete_pattern(1, &[-1], &[44_100], &names, &[InstrumentType::Sampler])
+            .expect("unreferenced scene delete succeeds");
+        let song = state.committed_song().unwrap();
+        assert_eq!(song.rows[0].scene, 0);
+        assert_eq!(song.rows[1].scene, 1);
     }

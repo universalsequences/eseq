@@ -17,6 +17,11 @@ pub struct PatternState {
     pub effect_chains: Vec<Vec<EffectSlotState>>,
     pub midi_fx_slots: Vec<Vec<EffectSlotState>>,
     pub(super) scenes: Mutex<ProjectScenes>,
+    /// The committed song (docs/song-mode-spec.md section 5), or `None` when
+    /// the project has no song. Stored beside — not inside — `ProjectScenes`
+    /// because several paths rebuild `ProjectScenes` wholesale from snapshots
+    /// (`from_pattern_snapshots`) and would silently drop an embedded song.
+    pub(super) song: Mutex<Option<ProjectSong>>,
     pub(super) current_pattern: AtomicU32,
     pub(super) num_patterns: AtomicU32,
     pub timebase_plocks: Vec<TimebasePLockData>,

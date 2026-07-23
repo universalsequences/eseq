@@ -361,9 +361,23 @@ impl SequencerState {
         sample_rates: &[u32],
         names: &[String],
         instrument_types: &[InstrumentType],
-    ) -> bool {
+    ) -> Result<(), String> {
         if track >= num_tracks {
-            return false;
+            return Err(format!("Track {} is out of range", track + 1));
+        }
+        // Deleting a pattern referenced by the committed song is rejected
+        // with the referencing row positions (docs/song-mode-spec.md 5.4).
+        if let Some(song) = self.committed_song() {
+            let rows = song_rows_referencing_track_pattern(&song, track, pattern_id.0);
+            if !rows.is_empty() {
+                return Err(format!(
+                    "Track {} pattern {} is used by song row(s) {}; \
+                     update or clear those rows first",
+                    track + 1,
+                    pattern_id.0,
+                    format_song_row_positions(&rows)
+                ));
+            }
         }
         let current_snapshot = self.capture_current_pattern_snapshot(
             num_tracks,
@@ -378,7 +392,11 @@ impl SequencerState {
             scenes.save_scene_snapshot(current_scene, current_snapshot);
             let was_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
             if !scenes.delete_track_pattern(track, pattern_id) {
-                return false;
+                return Err(format!(
+                    "Track {} has no pattern {}",
+                    track + 1,
+                    pattern_id.0
+                ));
             }
             let replacement = if was_effective {
                 scenes.effective_track_pattern(track).cloned()
@@ -398,7 +416,7 @@ impl SequencerState {
         }
         self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.publish_scheduler_snapshot();
-        true
+        Ok(())
     }
 
     pub fn set_scene_cell(
@@ -612,12 +630,28 @@ impl SequencerState {
         sample_rates: &[u32],
         names: &[String],
         instrument_types: &[InstrumentType],
-    ) -> Option<Vec<(i32, String, u32)>> {
+    ) -> Result<Vec<(i32, String, u32)>, String> {
         let _ = self.quantized_launches.cancel_all();
+        // Deleting a scene referenced by the committed song is rejected with
+        // the referencing row positions (docs/song-mode-spec.md 5.4).
+        {
+            let cur = self.current_scene_index();
+            if let Some(song) = self.committed_song() {
+                let rows = song_rows_referencing_scene(&song, cur);
+                if !rows.is_empty() {
+                    return Err(format!(
+                        "Scene {} is used by song row(s) {}; \
+                         reassign or clear those rows first",
+                        cur + 1,
+                        format_song_row_positions(&rows)
+                    ));
+                }
+            }
+        }
         let sample_ids = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             if scenes.scene_count() <= 1 {
-                return None;
+                return Err("The last scene cannot be deleted".to_string());
             }
             let cur = self.current_scene_index();
             let current_metadata = scenes.current_scene_metadata();
@@ -633,8 +667,19 @@ impl SequencerState {
                 current_metadata.2,
             );
             scenes.save_scene_snapshot(cur, current_snapshot);
-            let new_idx = scenes.delete_scene(cur)?;
-            let launched = scenes.launch_scene(new_idx)?;
+            let new_idx = scenes
+                .delete_scene(cur)
+                .ok_or_else(|| "The last scene cannot be deleted".to_string())?;
+            // Higher scene indices shift down; keep song references pointed
+            // at the same scenes in the same transaction.
+            self.with_committed_song_mut(|song| {
+                if let Some(song) = song {
+                    remap_song_after_scene_delete(song, cur);
+                }
+            });
+            let launched = scenes
+                .launch_scene(new_idx)
+                .ok_or_else(|| "Could not launch the replacement scene".to_string())?;
             for (track, data) in launched.into_iter().enumerate() {
                 if let Some(data) = data {
                     data.restore_to(self, track);
@@ -658,7 +703,7 @@ impl SequencerState {
         };
         self.schedule_mod_resync();
         self.publish_scheduler_snapshot();
-        Some(sample_ids)
+        Ok(sample_ids)
     }
 
     pub fn propagate_track_to_all_patterns(

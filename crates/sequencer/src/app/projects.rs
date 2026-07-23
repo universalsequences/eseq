@@ -942,6 +942,7 @@ impl App {
     pub fn start_new_project(&mut self) {
         self.editor.pending_project_load = None;
         self.groups.clear();
+        self.state.set_committed_song(None);
 
         {
             let mut graph = self.graph_controller();
@@ -1811,6 +1812,18 @@ impl App {
             },
             patterns,
             groups: self.groups.clone(),
+            song: match self.state.committed_song() {
+                // Serialization maps live pattern-pool ids into the
+                // deterministic ids the loader rebuilds from scene cells;
+                // a song referencing an unpersistable pattern fails the save
+                // with the referencing row positions instead of silently
+                // dropping the reference.
+                Some(song) => Some(crate::sequencer::song_for_serialization(
+                    &song,
+                    &self.state.capture_project_scenes(),
+                )?),
+                None => None,
+            },
             macros: self
                 .macro_engine
                 .macros()
@@ -2780,6 +2793,7 @@ impl App {
             device_instances,
             patterns: _,
             groups,
+            song,
             macros,
             next_macro_id,
         } = pending.project;
@@ -2805,6 +2819,16 @@ impl App {
         };
         self.state
             .replace_pattern_repository(pattern_repository, current_pattern);
+        // The serialized song was validated at deserialize time against the
+        // deterministic rebuilt-pool id domain, which is exactly what
+        // `replace_pattern_repository` just installed; re-check against the
+        // live scenes and reject the load rather than installing a song that
+        // dangles.
+        if let Some(song) = &song {
+            song.validate(&self.state.capture_project_scenes())
+                .map_err(|error| format!("Project song failed to load: {error}"))?;
+        }
+        self.state.set_committed_song(song);
         self.state
             .transport
             .pattern_epoch
@@ -4094,6 +4118,7 @@ mod tests {
             master_volume: 1.0,
             current_pattern: 0,
             current_track: Some(0),
+            song: None,
             reverb: ProjectReverbState {
                 size: 0.2,
                 brightness: 0.8,
