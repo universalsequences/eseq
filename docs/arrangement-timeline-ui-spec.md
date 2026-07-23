@@ -456,7 +456,18 @@ priority order. None require stored-model changes; each is its own slice.
 4. **Clip copy/paste at the per-track cursor** — the cursor already
    carries (time, track) for this; paste = `song-track-paint` of the
    copied clip's pattern over [cursor, cursor + span).
-5. **Polish backlog** — scene-label width clipping/eliding on narrow
+5. **The rest of the UI follows the arrangement during playback** —
+   synth/device panels, the scene launch buttons, mixer faders, and the
+   mixer clip-grid selection currently do not update at all as song
+   playback moves through rows; they keep showing whatever was live at
+   transport start. The control-side mirror already applies each audible
+   row (`apply_song_row_control` on `RowApplied` notices: track state
+   restore, sampler rebinds, current-scene store), so the gap is the UI
+   layer re-reading that state: reactive republish/invalidation on row
+   transitions WITHOUT a pattern-epoch bump (the epoch stays untouched
+   during playback so in-flight scheduled events are not dropped —
+   spec 9's `bump_pattern_epoch: false` mirror contract).
+6. **Polish backlog** — scene-label width clipping/eliding on narrow
    spans; an Ableton-style drop-hover insertion preview line while
    dragging a scene pill; scene-lane vertical scroll pass-through to
    the sibling track scroll container.
