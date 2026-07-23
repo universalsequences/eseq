@@ -2688,7 +2688,11 @@ mod tests {
 pub(crate) fn command_mutates_sequencer_state(cmd: &AppCommand) -> bool {
     !matches!(
         cmd,
-        AppCommand::SetTrackVolume { .. }
+        // TogglePlay routes through the song transport state machine, which
+        // publishes its own scheduler snapshot (start_playback/stop_playback);
+        // a second generic publish here would double-publish per toggle.
+        AppCommand::TogglePlay
+            | AppCommand::SetTrackVolume { .. }
             | AppCommand::AdjustTrackVolume { .. }
             | AppCommand::SetTrackPan { .. }
             | AppCommand::AdjustTrackPan { .. }
