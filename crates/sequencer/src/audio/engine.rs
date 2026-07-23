@@ -1,3 +1,13 @@
+/*!
+Engine construction and lifecycle.
+
+Builds the live graph (mix/default buses with merge/gate/volume chains, the
+global reverb send), starts the audiograph worker threads, and wraps it all
+in an `Engine` (with a CPAL stream, via `audio::build_output_stream`) or a
+`HeadlessEngine` (no stream; for capture, tests, and probes). `destroy` tears
+down workers and the graph after the stream is dropped.
+*/
+
 use std::ffi::CString;
 use std::sync::{Arc, Mutex};
 

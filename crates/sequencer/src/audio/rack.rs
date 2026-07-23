@@ -1,3 +1,13 @@
+/*!
+Rack-slot processing: routing, macros, choke groups, and rack note firing.
+
+Decides which slots of a rack track accept a trigger (routing, key ranges,
+mute/solo), applies rack macro curves at a step, collects and dispatches
+slot note-offs and choke-group releases, and fires notes into rack slots —
+`fire_rack_slot_note`/`fire_rack_resolved` for sequenced triggers and
+`fire_live_keyboard_rack_note` for live keyboard input.
+*/
+
 #[allow(unused_imports)]
 use super::*;
 

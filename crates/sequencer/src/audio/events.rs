@@ -1,3 +1,14 @@
+/*!
+Callback-side event machinery: the consumer end of the scheduler queue.
+
+Owns the deferred-event types (gate-off, chop, countdown, block) and their
+queues. Scheduled events from the scheduler thread are enqueued per block,
+counted down sample-accurately, promoted to block events, prioritized (with
+mute-group arbitration), and dispatched — ultimately into `fire_resolved` /
+`dispatch_chop_event` / gate-off handling. Also computes swing delays and
+cancels pending events when tracks or voices are retired.
+*/
+
 #[allow(unused_imports)]
 use super::*;
 

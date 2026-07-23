@@ -1,3 +1,13 @@
+/*!
+Note firing: turning a resolved trigger into sound.
+
+`fire_resolved` is the heart of the module (~700 lines): given a resolved
+step/keyboard/network trigger it allocates or steals voices, resolves and
+pushes parameter bundles, emits note-on graph events for sampler and custom
+engines, and registers gate-offs and chops. `dispatch_chop_event` retriggers
+voices for chop/roll playback. Rack-specific variants live in `rack`.
+*/
+
 #[allow(unused_imports)]
 use super::*;
 

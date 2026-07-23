@@ -1,3 +1,14 @@
+/*!
+Raw FFI bindings to the C `audiograph` library.
+
+Mirrors the C ABI (`NodeVTable`, `ParamMsg`, `GraphBlockEvent`, `BufferDesc`)
+and declares the `extern "C"` surface for engine lifecycle, live-graph edits
+(add/delete/connect, edit batches), node-state access, and block processing.
+The few safe-ish wrappers here (`params_push_wrapper`, logging toggles) add
+tracing and bool-to-int shims; everything else is used directly, and
+unsafely, by the rest of the crate.
+*/
+
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicU64, Ordering};
 

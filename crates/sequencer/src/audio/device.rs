@@ -1,3 +1,12 @@
+/*!
+CPAL output-device configuration selection.
+
+Picks a sample rate and channel count from the device's supported format
+ranges, preferring the device default and falling back to
+`FALLBACK_SAMPLE_RATE`/stereo. Pure logic over `OutputFormatRange`s so it is
+unit-testable without real audio hardware.
+*/
+
 #[allow(unused_imports)]
 use super::*;
 

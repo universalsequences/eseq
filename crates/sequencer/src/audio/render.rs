@@ -1,3 +1,13 @@
+/*!
+Block rendering and per-block housekeeping around it.
+
+`render_chunk` asks the graph for the next block; around it live the
+metronome mix-in, interleaved peak metering, bus-gate parameter sync (gate
+sequences evaluated against the transport), snapshot effect-param dispatch
+at step boundaries, and the host transport-clock broadcasts to instruments,
+effect modulators, and the DJ mixer.
+*/
+
 #[allow(unused_imports)]
 use super::*;
 

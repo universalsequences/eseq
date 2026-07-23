@@ -1,3 +1,14 @@
+/*!
+Output-stream construction: the bridge from engine setup to the running
+callback.
+
+`build_output_stream` allocates the sampler/custom-engine voice pools,
+assembles `AudioCallbackData`, spawns the keyboard MIDI-FX router thread and
+the scheduler thread, and builds and plays the CPAL stream whose data
+callback is `audio_callback`. `query_device_config` probes the default output
+device for (sample rate, channels).
+*/
+
 #[allow(unused_imports)]
 use super::*;
 

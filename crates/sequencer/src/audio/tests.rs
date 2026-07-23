@@ -1,3 +1,10 @@
+/*!
+Tests for the `audio` module, moved verbatim from the original single-file
+`audio.rs`. Flat namespace via `use super::*`; fixtures build sequencer
+state/snapshots directly and call the module's internals (no audio device
+required).
+*/
+
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 

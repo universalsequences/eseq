@@ -1,3 +1,15 @@
+/*!
+Unsafe wrappers that push data into the live audiograph.
+
+The leaf layer everything above sits on: param spans (`push_param_span`),
+sequenced block events (`push_graph_block_event`), note-on/off triggers for
+sampler/custom/keyboard voices (`send_*`), modulator gates and pulses, and
+the bulk `dispatch_*_to_voice` helpers that write resolved instrument and
+sampler parameter bundles to a voice's nodes. Also routes custom-voice
+outputs to their consumer nodes and broadcasts transport/BPM to voice
+modulators.
+*/
+
 #[allow(unused_imports)]
 use super::*;
 

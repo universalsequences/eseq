@@ -1,3 +1,14 @@
+/*!
+The audio callback's state: `AudioCallbackData` and friends.
+
+`AudioCallbackData` is the hub struct threaded (by `&mut`) through nearly
+every function in this module: graph pointer, sequencer state and snapshot,
+voice pools, event queues, recorder, metronome, and assorted caches. Also
+home to live keyboard-note bookkeeping (`ActiveKeyboardNote` storage and
+release helpers), metronome synthesis state, and small per-bus/transport
+cache structs.
+*/
+
 #[allow(unused_imports)]
 use super::*;
 

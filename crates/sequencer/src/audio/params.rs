@@ -1,3 +1,15 @@
+/*!
+Parameter resolution: from sequencer state to concrete per-voice values.
+
+Answers "what value does this parameter have for this trigger?" across every
+source: p-locks (per-step), key locks (per-note), slot defaults, and live
+overrides — in paired `live_*` (current `SequencerState`) and `snapshot_*`
+(scheduler snapshot) variants that must stay in sync. Builds the
+`ScheduledInstrumentParams`/`ScheduledSamplerParams` bundles consumed by the
+fire path, computes sound fingerprints used for voice-reuse decisions, and
+resolves rack-slot param sets.
+*/
+
 #[allow(unused_imports)]
 use super::*;
 

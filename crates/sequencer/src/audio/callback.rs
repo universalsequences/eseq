@@ -1,3 +1,13 @@
+/*!
+The CPAL audio callback.
+
+`audio_callback` runs once per output buffer and orchestrates the whole
+module: topology resets, snapshot refresh, transport advance, pool and
+route sync, live keyboard trigger handling, scheduled/countdown/block event
+draining, rendering via `render_chunk`, master-recorder capture, metronome
+mix, metering, and CPU-load accounting.
+*/
+
 #[allow(unused_imports)]
 use super::*;
 

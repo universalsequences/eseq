@@ -1,3 +1,38 @@
+/*!
+The real-time audio engine: everything between the sequencer's shared state
+and the samples that leave the speakers.
+
+The module is organized around one producer/consumer seam. A scheduler thread
+(see `crate::scheduler`) resolves the timeline into `ScheduledEvent`s; the
+CPAL callback in this module drains them, fires voices into the C audiograph,
+and renders blocks. `engine` builds the graph and owns the stream;
+`audiograph` is the raw FFI layer everything sits on.
+
+Submodule map (each file's header has details):
+
+- `engine` / `stream` / `device` — construction: graph + bus setup, CPAL
+  device selection, output-stream build, helper-thread spawning.
+- `state` — `AudioCallbackData`, the hub struct threaded through the whole
+  callback, plus live keyboard-note bookkeeping.
+- `callback` — the per-block CPAL callback orchestrating everything below.
+- `events` — callback-side scheduled-event queues (countdown/block/gate-off/
+  chop) and their dispatch.
+- `fire` / `rack` — note firing: resolving a trigger into voice allocations,
+  param pushes, and graph events (rack variants handle slot routing, macros,
+  and choke groups).
+- `params` — plock/key-lock/default parameter resolution for instruments,
+  samplers, and rack slots.
+- `voice_pool` — custom-engine voice pools: allocation, stealing, release,
+  and topology sync when tracks change.
+- `graph_dispatch` — unsafe wrappers that push params, block events, and
+  triggers into the live graph.
+- `render` — block rendering, metronome mix, peak metering, and bus-gate/
+  transport-clock sync.
+
+Every submodule starts with `use super::*;` and shares this module's flat
+namespace, mirroring the single-file `audio.rs` this was split from.
+*/
+
 pub mod audiograph;
 pub mod engine;
 

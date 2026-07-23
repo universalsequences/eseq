@@ -1,3 +1,14 @@
+/*!
+Voice pools for custom instrument engines, and runtime/topology sync.
+
+`CustomEnginePool` tracks per-engine voice slots with allocation, LRU-ish
+stealing, release tails, and free-patch (always-running) voices. The sync
+half reconciles pools against the current track topology each block: sampler
+pool sizing, rack pool wiring, free-patch transport routing, and the
+full `reset_audio_runtime_for_track_topology` reset, plus voice-release and
+mute-group enforcement across tracks and racks.
+*/
+
 #[allow(unused_imports)]
 use super::*;
 
