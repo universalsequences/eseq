@@ -3136,6 +3136,39 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(enabled))
     });
 
+    // Arrangement-timeline edit translator
+    // (docs/arrangement-timeline-ui-spec.md 9): lowers one finished
+    // scene-lane gesture into song editing-primitive host commands. View
+    // actions are handled in Lisp; primitive validation/undo and rejection
+    // reporting live in ui/host_commands/song.rs.
+    let st = state.clone();
+    runtime.register_native("seq-arrangement-action", move |args, ctx| {
+        let Some(action) = args.first() else {
+            return Err("seq-arrangement-action: expected action map".into());
+        };
+        let song = st.committed_song();
+        let commands =
+            crate::arrangement_actions::arrangement_action_song_commands(action, song.as_ref())
+                .map_err(|error| format!("seq-arrangement-action: {error}"))?;
+        if commands.is_empty() {
+            return Ok(Value::String("arrangement".to_string()));
+        }
+        let count = commands.len();
+        for (name, payload) in commands {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: name.to_string(),
+                payload,
+            });
+        }
+        let status = if count == 1 {
+            "arrangement edit queued".to_string()
+        } else {
+            format!("arrangement: {count} edits queued")
+        };
+        ctx.set_status(status.clone());
+        Ok(Value::String(status))
+    });
+
     let st = state.clone();
     let ct = current_track.clone();
     let piano_sel = piano_roll_selection.clone();

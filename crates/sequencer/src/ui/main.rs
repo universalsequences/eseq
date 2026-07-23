@@ -9,6 +9,7 @@
     clippy::useless_format
 )]
 
+mod arrangement_actions;
 mod browser;
 mod capture;
 mod constants;

@@ -19786,6 +19786,275 @@
         );
     }
 
+    /// Scene-lane gesture lifecycle (docs/arrangement-timeline-ui-spec.md
+    /// 9.1): live actions update ghost preview state only (visible in the
+    /// item overlay and content-length), the terminal action forwards the
+    /// ghost's final values to the seq-arrangement-action translator exactly
+    /// once, and the ghost is cleared afterwards so a rejected primitive
+    /// snaps the view back to the committed song.
+    #[test]
+    fn metal_seq_arrangement_gestures_ghost_then_commit_through_translator() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let recorded: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = recorded.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-arrangement-action", move |args, _ctx| {
+                sink.lock().unwrap().push(args.first().cloned().unwrap_or(Value::Nil));
+                Ok(Value::String("recorded".to_string()))
+            });
+
+        let song_row = |id: f64, start: f64, scene: f64| {
+            map_value(vec![
+                ("id", Value::Number(id)),
+                ("start-beat", Value::Number(start)),
+                ("scene", Value::Number(scene)),
+                ("overrides", Value::List(vec![])),
+            ])
+        };
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
+        rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
+        rt.set_reactive(
+            "SEQ",
+            "song-rows",
+            test_list(vec![song_row(0.0, 0.0, 0.0), song_row(1.0, 8.0, 1.0)]),
+        );
+        rt.run_reactive_cycle();
+
+        let eval = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .unwrap_or_else(|error| panic!("{expr}: {error:?}"))
+        };
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            eval(editor, expr).expect("expr returns a value")
+        };
+        let action_field = |action: &Value, key: &str| -> Value {
+            let Value::Map(map) = action else {
+                panic!("recorded action must be a map");
+            };
+            map[key].borrow().clone()
+        };
+
+        // Move drag: live action ghosts (item overlay shifts), commit
+        // forwards the ghost's final start, ghost clears.
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :move-items-absolute :anchor-id 1 :ids (list 1) :start 12))",
+        );
+        assert!(recorded.lock().unwrap().is_empty(), "live drags never commit");
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :start)"),
+            Value::Number(12.0),
+            "move ghost previews the dragged span"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :finish-move-items :anchor-id 1 :ids (list 1)))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 1, "one commit per completed gesture");
+            assert_eq!(
+                action_field(&recorded[0], "type"),
+                Value::Keyword("finish-move-items".to_string())
+            );
+            assert_eq!(action_field(&recorded[0], "row-id"), Value::Number(1.0));
+            assert_eq!(action_field(&recorded[0], "start"), Value::Number(12.0));
+        }
+
+        // Resize drag: the ghost moves the shared boundary (row 0's end and
+        // row 1's start), the commit carries the resized row's id + end.
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :resize-item-absolute :id 0 :ids (list 0) :edge :end :time 10))",
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 0) :end)"),
+            Value::Number(10.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :start)"),
+            Value::Number(10.0),
+            "the next row's start previews the boundary move"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :finish-resize-items :id 0 :ids (list 0)))",
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 2);
+            assert_eq!(
+                action_field(&recorded[1], "type"),
+                Value::Keyword("finish-resize-items".to_string())
+            );
+            assert_eq!(action_field(&recorded[1], "row-id"), Value::Number(0.0));
+            assert_eq!(action_field(&recorded[1], "end"), Value::Number(10.0));
+        }
+
+        // Draw commit carries the start beat plus the selected scene.
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :finish-create-item :lane 0 :start 24 :end 28))",
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 3);
+            assert_eq!(
+                action_field(&recorded[2], "type"),
+                Value::Keyword("finish-create-item".to_string())
+            );
+            assert_eq!(action_field(&recorded[2], "start"), Value::Number(24.0));
+            assert!(matches!(action_field(&recorded[2], "scene"), Value::Number(_)));
+        }
+
+        // Content-length drag ghosts the end marker; release commits once.
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :resize-content-length :length 20))",
+        );
+        assert_eq!(
+            read(&mut editor, "(arrangement-content-length)"),
+            Value::Number(20.0)
+        );
+        assert!(recorded.lock().unwrap().len() == 3);
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :finish-resize-content-length :length 20))",
+        );
+        assert_eq!(
+            read(&mut editor, "(arrangement-content-length)"),
+            Value::Number(16.0),
+            "ghost cleared: content length reads the committed song again"
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 4);
+            assert_eq!(action_field(&recorded[3], "length"), Value::Number(20.0));
+        }
+
+        // Erase forwards the ids untouched.
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :delete-items :ids (list 1)))",
+        );
+        assert_eq!(recorded.lock().unwrap().len(), 5);
+
+        // A finish with no preceding live drag is a no-op commit-wise.
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :finish-move-items :anchor-id 1 :ids (list 1)))",
+        );
+        assert_eq!(
+            recorded.lock().unwrap().len(),
+            5,
+            "no ghost -> nothing to commit"
+        );
+
+        // Track lanes are read-only: edit actions are ignored entirely.
+        eval(
+            &mut editor,
+            "(arrangement-track-action (dict :type :delete-items :ids (list 0)))",
+        );
+        assert_eq!(recorded.lock().unwrap().len(), 5);
+    }
+
+    /// One completed gesture is one undo entry: the translator's commands
+    /// run through the song host-command path against a real App, and each
+    /// application adds exactly one history entry (song-mode-spec 5.6 H10).
+    #[test]
+    fn metal_seq_arrangement_gesture_commands_are_one_undo_entry_each() {
+        let state = sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = sequencer::app::App::new(
+            std::sync::Arc::new(state),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        let row = |start_beat: f64, scene: usize| sequencer::app::song_edit::SongRowSpec {
+            start_beat,
+            scene,
+            overrides: Vec::new(),
+        };
+        app.song_replace(vec![row(0.0, 0), row(8.0, 1)], 16.0, false)
+            .expect("song committed");
+        let song = app.state.committed_song().expect("committed song");
+        let move_row = song.rows[1].id.0;
+
+        // Move gesture -> one song-row-move -> one undo entry.
+        let action = map_value(vec![
+            ("type", Value::Keyword("finish-move-items".to_string())),
+            ("row-id", Value::Number(move_row as f64)),
+            ("start", Value::Number(12.0)),
+        ]);
+        let commands =
+            crate::arrangement_actions::arrangement_action_song_commands(&action, Some(&song))
+                .expect("gesture translates");
+        assert_eq!(commands.len(), 1);
+        let depth = app.history.undo_len();
+        for (name, payload) in &commands {
+            crate::host_commands::apply_song_edit_command(name, payload, &mut app)
+                .expect("song edit command")
+                .expect("primitive applies");
+        }
+        assert_eq!(app.history.undo_len(), depth + 1, "one gesture, one undo entry");
+        assert_eq!(
+            app.state.committed_song().unwrap().rows[1].start_beat,
+            12.0
+        );
+
+        // A rejected primitive (moving row zero off 0.0) changes nothing and
+        // adds no history entry — the view's ghost was already discarded, so
+        // the committed song snaps the display back.
+        let row_zero = song.rows[0].id.0;
+        let action = map_value(vec![
+            ("type", Value::Keyword("finish-move-items".to_string())),
+            ("row-id", Value::Number(row_zero as f64)),
+            ("start", Value::Number(4.0)),
+        ]);
+        let commands =
+            crate::arrangement_actions::arrangement_action_song_commands(&action, Some(&song))
+                .expect("gesture translates");
+        let depth = app.history.undo_len();
+        let result = crate::host_commands::apply_song_edit_command(
+            &commands[0].0,
+            &commands[0].1,
+            &mut app,
+        )
+        .expect("song edit command");
+        assert!(result.is_err(), "moving row zero must be rejected");
+        assert_eq!(app.history.undo_len(), depth, "rejection adds no history");
+        assert_eq!(app.state.committed_song().unwrap().rows[0].start_beat, 0.0);
+    }
+
     /// MIDI dot flattening (docs/arrangement-timeline-ui-spec.md 7.1): the
     /// view flattens raw (time transpose velocity) pattern events into
     /// normalized (offset, value) dots — offsets over the pattern length,

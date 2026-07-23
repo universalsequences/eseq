@@ -12,6 +12,12 @@
 (defstate arrangement-selection '())
 (defstate arrangement-selection-rect nil)
 (defstate arrangement-status "arrangement")
+;; Live-drag preview state (spec 9.1): live gesture actions update this ghost
+;; only; the terminal :finish-* action lowers to exactly one song primitive
+;; via seq-arrangement-action and clears it. A primitive rejection reports on
+;; the status line and, because items derive from the committed song, the
+;; view snaps back on its own.
+(defstate arrangement-ghost nil)
 
 (def arrangement-min-view-duration 4)
 (def arrangement-max-view-duration 1024)
@@ -97,23 +103,79 @@
     (get (nth SEQ.song-rows (+ index 1)) :start-beat)
     SEQ.song-end-beat))
 
+(def arrangement-ghost-kind ()
+  (if (= arrangement-ghost nil) nil (get arrangement-ghost :kind)))
+
+(def arrangement-ghost-row? (kind row-id)
+  (and (= (arrangement-ghost-kind) kind)
+    (= (get arrangement-ghost :row-id) row-id)))
+
+;; Ghost overlay for one scene span (spec 9.1 live preview): a move ghost
+;; shifts its row's span; a resize ghost moves the boundary shared by the
+;; resized row's end and the next row's start.
+(def arrangement-scene-span-start (row index start)
+  (if (arrangement-ghost-row? :move (get row :id))
+    (get arrangement-ghost :start)
+    (if (and (> index 0)
+          (arrangement-ghost-row? :resize
+            (get (nth SEQ.song-rows (- index 1)) :id)))
+      (get arrangement-ghost :end)
+      start)))
+
+(def arrangement-scene-span-end (row start end)
+  (if (arrangement-ghost-row? :move (get row :id))
+    (+ (get arrangement-ghost :start) (- end start))
+    (if (arrangement-ghost-row? :resize (get row :id))
+      (get arrangement-ghost :end)
+      end)))
+
 ;; Scene-lane items (spec 8): one span per song row covering
 ;; [start_beat, next start_beat) labeled with the row's scene name. Spans (not
 ;; markers) so Slice C gets move/resize edges for free.
-(def arrangement-scene-items ()
+(def arrangement-scene-row-items ()
   (map
     (lambda (index)
       (let ((row (nth SEQ.song-rows index)))
-        (dict
-          :id (get row :id)
-          :lane 0
-          :start (get row :start-beat)
-          :end (arrangement-row-end-beat index)
-          :label (arrangement-scene-name (get row :scene))
-          :kind :scene
-          :selected (arrangement-row-selected? (get row :id))
-          :color (list 0.52 0.56 0.62))))
+        (let ((start (get row :start-beat))
+              (end (arrangement-row-end-beat index)))
+          (dict
+            :id (get row :id)
+            :lane 0
+            :start (arrangement-scene-span-start row index start)
+            :end (arrangement-scene-span-end row start end)
+            :label (arrangement-scene-name (get row :scene))
+            :kind :scene
+            :selected (arrangement-row-selected? (get row :id))
+            :color (list 0.52 0.56 0.62)))))
     (range 0 (len SEQ.song-rows))))
+
+(def arrangement-scene-items ()
+  (if (= (arrangement-ghost-kind) :create)
+    (append (arrangement-scene-row-items)
+      (list (dict
+              :id :ghost-create
+              :lane 0
+              :start (get arrangement-ghost :start)
+              :end (get arrangement-ghost :end)
+              :kind :scene
+              :label (arrangement-scene-name (or SEQ.current-pattern 0))
+              :color (list 0.72 0.76 0.82))))
+    (arrangement-scene-row-items)))
+
+;; Song end, with the content-length drag ghost applied so the end marker
+;; previews in every lane while dragging (spec 9.3).
+(def arrangement-content-length ()
+  (if (= (arrangement-ghost-kind) :end)
+    (get arrangement-ghost :length)
+    SEQ.song-end-beat))
+
+;; The model rejects an end at/before the last row's start (spec 9.3); the
+;; widget clamp mirrors that boundary.
+(def arrangement-content-length-min ()
+  (let ((count (len SEQ.song-rows)))
+    (if (= count 0)
+      1
+      (max 1 (get (nth SEQ.song-rows (- count 1)) :start-beat)))))
 
 (def arrangement-row-selected? (row-id)
   (> (len (filter (lambda (id) (= id row-id)) arrangement-selection)) 0))
@@ -214,8 +276,17 @@
 
 ;; ── Action handlers ────────────────────────────────────────────────────────
 
-;; Scene lane: view actions route to the shared axis; editing gestures land
-;; in Slice C (spec 9). Until then edit actions are inert.
+;; Lower one finished gesture to song primitives through the Rust translator
+;; (spec 9.1): exactly one primitive per gesture, validation/undo/rejection
+;; reporting owned by the song host commands.
+(def arrangement-edit-finish (payload)
+  (do
+    (set! arrangement-ghost nil)
+    (set! arrangement-status (seq-arrangement-action payload))))
+
+;; Scene lane (spec 9.2: the only editable lane). View actions route to the
+;; shared axis; live edit actions update the ghost preview only; terminal
+;; actions commit through arrangement-edit-finish.
 (def arrangement-scene-action (event)
   (if (arrangement-view-action? event)
     (arrangement-view-action event)
@@ -233,7 +304,54 @@
       :marquee-select
       (set! arrangement-selection-rect event)
       :finish-marquee-select
-      (set! arrangement-selection-rect nil))))
+      (set! arrangement-selection-rect nil)
+      ;; Live drags: ghost only, never a primitive (spec 9.1).
+      :move-items-absolute
+      (set! arrangement-ghost
+        (dict :kind :move
+          :row-id (get event :anchor-id)
+          :start (get event :start)))
+      :resize-item-absolute
+      (set! arrangement-ghost
+        (dict :kind :resize
+          :row-id (get event :id)
+          :end (get event :time)))
+      :create-item
+      (set! arrangement-ghost
+        (dict :kind :create
+          :start (get event :start)
+          :end (get event :end)))
+      :resize-content-length
+      (set! arrangement-ghost
+        (dict :kind :end :length (get event :length)))
+      ;; Terminal actions: one primitive each, from the ghost's final values
+      ;; (the widget's finish actions carry ids, not times).
+      :finish-move-items
+      (if (= (arrangement-ghost-kind) :move)
+        (arrangement-edit-finish
+          (dict :type :finish-move-items
+            :row-id (get arrangement-ghost :row-id)
+            :start (get arrangement-ghost :start)))
+        (set! arrangement-ghost nil))
+      :finish-resize-items
+      (if (= (arrangement-ghost-kind) :resize)
+        (arrangement-edit-finish
+          (dict :type :finish-resize-items
+            :row-id (get arrangement-ghost :row-id)
+            :end (get arrangement-ghost :end)))
+        (set! arrangement-ghost nil))
+      :finish-create-item
+      (arrangement-edit-finish
+        (dict :type :finish-create-item
+          :start (get event :start)
+          :scene (or SEQ.current-pattern 0)))
+      :finish-resize-content-length
+      (arrangement-edit-finish
+        (dict :type :finish-resize-content-length
+          :length (get event :length)))
+      :delete-items
+      (arrangement-edit-finish
+        (dict :type :delete-items :ids (get event :ids))))))
 
 ;; Track lanes are read-only previews of the lane projection (spec 9.2):
 ;; only shared view actions are honored.
@@ -265,8 +383,8 @@
     :view-duration arrangement-view-duration
     :zoom-min-duration arrangement-min-view-duration
     :zoom-max-duration arrangement-max-view-duration
-    :content-length SEQ.song-end-beat
-    :content-length-min 1
+    :content-length (arrangement-content-length)
+    :content-length-min (arrangement-content-length-min)
     :content-length-max 8192
     :lane-scroll 0
     :snap arrangement-snap
@@ -294,7 +412,7 @@
     :view-duration arrangement-view-duration
     :zoom-min-duration arrangement-min-view-duration
     :zoom-max-duration arrangement-max-view-duration
-    :content-length SEQ.song-end-beat
+    :content-length (arrangement-content-length)
     :lane-scroll 0
     :snap arrangement-snap
     :scroll-mode :smooth

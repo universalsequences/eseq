@@ -2217,6 +2217,20 @@ impl TimelineView {
                 ("ids", gesture.get("ids")?.clone()),
                 ("id", gesture.get("id")?.clone()),
             ])),
+            // Terminal pair for the content-length drag, mirroring the other
+            // paired gestures: hosts that must not commit per drag-frame
+            // (arrangement song-end -> one undoable primitive) listen for
+            // this; hosts that apply :resize-content-length live are
+            // unaffected by the extra release action.
+            Some(Value::Keyword(kind)) if kind == "resize-content-length" => {
+                let length = current_resize_time
+                    .round()
+                    .clamp(self.content_length_min, self.content_length_max);
+                Some(action_map(vec![
+                    ("type", keyword(":finish-resize-content-length")),
+                    ("length", Value::Number(length)),
+                ]))
+            }
             _ => None,
         }
     }
@@ -2783,6 +2797,47 @@ mod tests {
 
         assert!(items[3].kind.is_none(), "unknown kind parses to None");
         assert!(items[3].content.is_none(), "malformed content parses to None");
+    }
+
+    /// The content-length drag gets a terminal action on release (mirroring
+    /// the other paired gestures) so hosts can commit one undoable edit
+    /// instead of applying per drag-frame.
+    #[test]
+    fn content_length_drag_release_emits_finish_action_with_final_length() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            ("lanes".to_string(), lanes_value(1)),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("content-length".to_string(), number_value(8.0)),
+            ("content-length-min".to_string(), number_value(1.0)),
+            ("content-length-max".to_string(), number_value(64.0)),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        let gesture = map_value_raw(vec![("kind", keyword_value("resize-content-length"))]);
+        let action = view
+            .handle_pointer_up(24.0, 2.0, Some(&gesture))
+            .expect("release action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("finish-resize-content-length".to_string()))
+        );
+        assert_eq!(
+            map.get("length").map(|value| value.borrow().clone()),
+            Some(Value::Number(12.0)),
+            "24 of 32 cols over a 16-duration view is time 12"
+        );
     }
 
     #[test]
