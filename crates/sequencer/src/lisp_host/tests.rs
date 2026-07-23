@@ -7804,7 +7804,7 @@
             Arc::clone(&state),
             Arc::clone(&ui_epoch),
         );
-        let source = include_str!("../scripts/ui/inline-code-widgets-demo.lisp");
+        let source = include_str!("../../scripts/ui/inline-code-widgets-demo.lisp");
 
         runtime
             .eval_str(source)

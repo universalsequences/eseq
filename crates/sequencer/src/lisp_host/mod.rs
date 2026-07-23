@@ -65,5 +65,4 @@ pub use shared_state::*;
 use value_helpers::*;
 
 #[cfg(test)]
-#[path = "lisp_host_tests.rs"]
 mod tests;
