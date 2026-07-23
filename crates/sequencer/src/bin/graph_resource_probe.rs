@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use sequencer::{audiograph, engine, tui};
+use sequencer::{app, audiograph, engine};
 
 const BLOCK_SIZE: usize = 512;
 
@@ -19,7 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let eng = engine::init_headless_engine(44_100, 2)?;
     let lg_ptr = eng.lg_ptr;
     let _guard = GraphGuard { lg: lg_ptr.0 };
-    let mut app = tui::App::new(
+    let mut app = app::App::new(
         eng.state.clone(),
         lg_ptr,
         eng.sample_rate,

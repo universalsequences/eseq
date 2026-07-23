@@ -1162,7 +1162,7 @@ mod tests {
         }
         // 21 globals + 24 stage params + the shared modulator block + 4
         // targets × 4 mod-depth slots.
-        let modulator_params = crate::voice_modulator::effect_param_descriptors().len();
+        let modulator_params = crate::instruments::voice_modulator::effect_param_descriptors().len();
         assert_eq!(descriptor.params.len(), 21 + 24 + modulator_params + 16);
         assert_eq!(descriptor.instrument_modulation_targets.len(), 16);
         for (idx, param) in descriptor.params.iter().enumerate() {
@@ -1265,7 +1265,7 @@ mod tests {
         let descriptor = EffectDescriptor::builtin_insert("Multiverb").unwrap();
         assert_eq!(
             descriptor.input_channels,
-            2 + crate::voice_modulator::NUM_OUTPUTS
+            2 + crate::instruments::voice_modulator::NUM_OUTPUTS
         );
         assert_eq!(descriptor.output_channels, 2);
         // Param order is append-only (plocks persist by descriptor index) —
@@ -1295,7 +1295,7 @@ mod tests {
                 "enabled",
             ]
         );
-        let source_descriptors = crate::voice_modulator::effect_param_descriptors();
+        let source_descriptors = crate::instruments::voice_modulator::effect_param_descriptors();
         let source_names = source_descriptors
             .iter()
             .map(|param| param.name.as_str())
@@ -1328,14 +1328,14 @@ mod tests {
         );
         assert_eq!(
             descriptor.instrument_modulators.len(),
-            crate::voice_modulator::SLOT_COUNT
+            crate::instruments::voice_modulator::SLOT_COUNT
         );
         assert_eq!(
             descriptor.instrument_modulation_targets.len(),
-            crate::voice_modulator::SLOT_COUNT * 4
+            crate::instruments::voice_modulator::SLOT_COUNT * 4
         );
         for param in &descriptor.params {
-            if !crate::voice_modulator::is_source_param(param.node_param_idx) {
+            if !crate::instruments::voice_modulator::is_source_param(param.node_param_idx) {
                 assert!(
                     (param.node_param_idx as usize)
                         < crate::effects::multiverb::MULTIVERB_STATE_SIZE,
@@ -1510,7 +1510,7 @@ mod tests {
     fn builtin_filter_exposes_effect_local_cutoff_modulation() {
         let desc = EffectDescriptor::builtin_filter();
 
-        assert_eq!(desc.input_channels, 2 + crate::voice_modulator::NUM_OUTPUTS);
+        assert_eq!(desc.input_channels, 2 + crate::instruments::voice_modulator::NUM_OUTPUTS);
         assert_eq!(
             desc.instrument_modulators
                 .iter()
@@ -1585,7 +1585,7 @@ mod tests {
                 "mod1_source",
             ]
         );
-        assert_eq!(desc.input_channels, 2 + crate::voice_modulator::NUM_OUTPUTS);
+        assert_eq!(desc.input_channels, 2 + crate::instruments::voice_modulator::NUM_OUTPUTS);
         assert_eq!(desc.instrument_modulators.len(), 4);
         // Spring tension, spring type, and stereo width ride at the end (after
         // the modulator params) so stored plock param indices stay stable.
@@ -1656,7 +1656,7 @@ mod tests {
                 "mod phase",
             ]
         );
-        assert_eq!(desc.input_channels, 2 + crate::voice_modulator::NUM_OUTPUTS);
+        assert_eq!(desc.input_channels, 2 + crate::instruments::voice_modulator::NUM_OUTPUTS);
         assert_eq!(
             desc.instrument_modulators
                 .iter()
@@ -1781,7 +1781,7 @@ mod tests {
             &names[..7],
             &["enabled", "speed", "length", "loop", "sync", "div", "warp"]
         );
-        assert_eq!(desc.input_channels, 2 + crate::voice_modulator::NUM_OUTPUTS);
+        assert_eq!(desc.input_channels, 2 + crate::instruments::voice_modulator::NUM_OUTPUTS);
         assert_eq!(desc.instrument_modulators.len(), 4);
         // 5 modulatable targets × 4 slots
         assert_eq!(desc.instrument_modulation_targets.len(), 20);
@@ -1833,7 +1833,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             target_names.len(),
-            crate::sampler::SAMPLER_MOD_LANES_PER_PARAM * 6
+            crate::instruments::sampler::SAMPLER_MOD_LANES_PER_PARAM * 6
         );
         assert_eq!(
             &target_names[..4],
@@ -1919,7 +1919,7 @@ mod tests {
             .expect("sampler should expose scrub smooth time");
         assert_eq!(
             smooth.node_param_idx,
-            crate::sampler::PARAM_SCRUB_SMOOTH_TIME_MS as u32
+            crate::instruments::sampler::PARAM_SCRUB_SMOOTH_TIME_MS as u32
         );
         assert_eq!((smooth.min, smooth.max, smooth.default), (0.0, 250.0, 6.0));
     }
@@ -2269,12 +2269,12 @@ impl EffectDescriptor {
     pub fn builtin_filter() -> Self {
         let mut desc = Self {
             name: "Filter".to_string(),
-            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
+            input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
-            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+            instrument_modulators: (1..=crate::instruments::voice_modulator::SLOT_COUNT)
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
-                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                    label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
             instrument_modulation_targets: Vec::new(),
@@ -2514,7 +2514,7 @@ impl EffectDescriptor {
             ],
         };
         desc.params
-            .extend(crate::voice_modulator::effect_param_descriptors());
+            .extend(crate::instruments::voice_modulator::effect_param_descriptors());
         let cutoff_idx = desc
             .params
             .iter()
@@ -2576,7 +2576,7 @@ impl EffectDescriptor {
                         unit: Some("%".to_string()),
                     },
                     scaling: ParamScaling::Linear,
-                    node_param_idx: crate::sampler::PARAM_ATTACK_SAMPLES as u32,
+                    node_param_idx: crate::instruments::sampler::PARAM_ATTACK_SAMPLES as u32,
                     node_param_span: 1,
                     host_control: None,
                     ui_metadata: None,
@@ -2588,7 +2588,7 @@ impl EffectDescriptor {
                     default: 0.0,
                     kind: ParamKind::Boolean,
                     scaling: ParamScaling::Linear,
-                    node_param_idx: crate::sampler::PARAM_RELEASE_SAMPLES as u32,
+                    node_param_idx: crate::instruments::sampler::PARAM_RELEASE_SAMPLES as u32,
                     node_param_span: 1,
                     host_control: None,
                     ui_metadata: None,
@@ -2602,7 +2602,7 @@ impl EffectDescriptor {
                         unit: Some("ms".to_string()),
                     },
                     scaling: ParamScaling::Linear,
-                    node_param_idx: crate::sampler::PARAM_START_POINT as u32,
+                    node_param_idx: crate::instruments::sampler::PARAM_START_POINT as u32,
                     node_param_span: 1,
                     host_control: None,
                     ui_metadata: None,
@@ -2614,7 +2614,7 @@ impl EffectDescriptor {
                     default: 0.3,
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
-                    node_param_idx: crate::sampler::PARAM_END_POINT as u32,
+                    node_param_idx: crate::instruments::sampler::PARAM_END_POINT as u32,
                     node_param_span: 1,
                     host_control: None,
                     ui_metadata: None,
@@ -2666,12 +2666,12 @@ impl EffectDescriptor {
         };
         let mut desc = Self {
             name: "Str8 Delay".to_string(),
-            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
+            input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
-            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+            instrument_modulators: (1..=crate::instruments::voice_modulator::SLOT_COUNT)
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
-                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                    label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
             instrument_modulation_targets: Vec::new(),
@@ -2889,7 +2889,7 @@ impl EffectDescriptor {
             ],
         };
         desc.params
-            .extend(crate::voice_modulator::effect_param_descriptors());
+            .extend(crate::instruments::voice_modulator::effect_param_descriptors());
 
         let time_idx = desc
             .params
@@ -2915,7 +2915,7 @@ impl EffectDescriptor {
         let mut append_depth_targets =
             |base_param_idx: usize,
              destination_name: &str,
-             depth_params: [u64; crate::voice_modulator::SLOT_COUNT],
+             depth_params: [u64; crate::instruments::voice_modulator::SLOT_COUNT],
              depth_min: f32,
              depth_max: f32,
              depth_unit: Option<&str>| {
@@ -3038,12 +3038,12 @@ impl EffectDescriptor {
         ];
         let mut desc = Self {
             name: "Space Echo".to_string(),
-            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
+            input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
-            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+            instrument_modulators: (1..=crate::instruments::voice_modulator::SLOT_COUNT)
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
-                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                    label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
             instrument_modulation_targets: Vec::new(),
@@ -3242,7 +3242,7 @@ impl EffectDescriptor {
             ],
         };
         desc.params
-            .extend(crate::voice_modulator::effect_param_descriptors());
+            .extend(crate::instruments::voice_modulator::effect_param_descriptors());
 
         let rate_idx = desc
             .params
@@ -3268,7 +3268,7 @@ impl EffectDescriptor {
         let mut append_depth_targets =
             |base_param_idx: usize,
              destination_name: &str,
-             depth_params: [u64; crate::voice_modulator::SLOT_COUNT],
+             depth_params: [u64; crate::instruments::voice_modulator::SLOT_COUNT],
              depth_min: f32,
              depth_max: f32,
              depth_unit: Option<&str>| {
@@ -3412,12 +3412,12 @@ impl EffectDescriptor {
     pub fn builtin_dimension() -> Self {
         let mut desc = Self {
             name: "Dimension".to_string(),
-            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
+            input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
-            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+            instrument_modulators: (1..=crate::instruments::voice_modulator::SLOT_COUNT)
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
-                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                    label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
             instrument_modulation_targets: Vec::new(),
@@ -3585,7 +3585,7 @@ impl EffectDescriptor {
             ],
         };
         desc.params
-            .extend(crate::voice_modulator::effect_param_descriptors());
+            .extend(crate::instruments::voice_modulator::effect_param_descriptors());
 
         let depth_idx = desc
             .params
@@ -3600,7 +3600,7 @@ impl EffectDescriptor {
 
         let mut append_depth_targets = |base_param_idx: usize,
                                         destination_name: &str,
-                                        depth_params: [u64; crate::voice_modulator::SLOT_COUNT],
+                                        depth_params: [u64; crate::instruments::voice_modulator::SLOT_COUNT],
                                         depth_min: f32,
                                         depth_max: f32| {
             for (slot, node_param_idx) in depth_params.into_iter().enumerate() {
@@ -3662,12 +3662,12 @@ impl EffectDescriptor {
     pub fn builtin_phaser_flanger() -> Self {
         let mut desc = Self {
             name: "Phaser-Flanger".to_string(),
-            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
+            input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
-            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+            instrument_modulators: (1..=crate::instruments::voice_modulator::SLOT_COUNT)
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
-                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                    label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
             instrument_modulation_targets: Vec::new(),
@@ -3977,7 +3977,7 @@ impl EffectDescriptor {
             ],
         };
         desc.params
-            .extend(crate::voice_modulator::effect_param_descriptors());
+            .extend(crate::instruments::voice_modulator::effect_param_descriptors());
 
         let amount_idx = desc
             .params
@@ -4007,7 +4007,7 @@ impl EffectDescriptor {
              depth_min: f32,
              depth_max: f32,
              depth_unit: Option<&str>| {
-                for slot in 0..crate::voice_modulator::SLOT_COUNT {
+                for slot in 0..crate::instruments::voice_modulator::SLOT_COUNT {
                     let depth_param_idx = desc.params.len();
                     desc.params.push(ParamDescriptor {
                         name: format!("mod {destination_name} slot {} amt", slot + 1),
@@ -4412,12 +4412,12 @@ impl EffectDescriptor {
 
         let mut desc = Self {
             name: "Roar".to_string(),
-            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
+            input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
-            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+            instrument_modulators: (1..=crate::instruments::voice_modulator::SLOT_COUNT)
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
-                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                    label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
             instrument_modulation_targets: Vec::new(),
@@ -4425,7 +4425,7 @@ impl EffectDescriptor {
             params,
         };
         desc.params
-            .extend(crate::voice_modulator::effect_param_descriptors());
+            .extend(crate::instruments::voice_modulator::effect_param_descriptors());
 
         let param_position = |desc: &Self, name: &str| {
             desc.params
@@ -4445,7 +4445,7 @@ impl EffectDescriptor {
              depth_min: f32,
              depth_max: f32,
              depth_unit: Option<&str>| {
-                for slot in 0..crate::voice_modulator::SLOT_COUNT {
+                for slot in 0..crate::instruments::voice_modulator::SLOT_COUNT {
                     let depth_param_idx = desc.params.len();
                     desc.params.push(ParamDescriptor {
                         name: format!("mod {destination_name} slot {} amt", slot + 1),
@@ -4515,12 +4515,12 @@ impl EffectDescriptor {
     pub fn builtin_dj_mixer() -> Self {
         let mut desc = Self {
             name: "DJ Mixer".to_string(),
-            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
+            input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
-            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+            instrument_modulators: (1..=crate::instruments::voice_modulator::SLOT_COUNT)
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
-                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                    label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
             instrument_modulation_targets: Vec::new(),
@@ -4613,7 +4613,7 @@ impl EffectDescriptor {
             ],
         };
         desc.params
-            .extend(crate::voice_modulator::effect_param_descriptors());
+            .extend(crate::instruments::voice_modulator::effect_param_descriptors());
 
         let mut append_depth_targets =
             |target_name: &str,
@@ -4813,12 +4813,12 @@ impl EffectDescriptor {
 
         let mut desc = Self {
             name: "Multiverb".to_string(),
-            input_channels: 2 + crate::voice_modulator::NUM_OUTPUTS,
+            input_channels: 2 + crate::instruments::voice_modulator::NUM_OUTPUTS,
             output_channels: 2,
-            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+            instrument_modulators: (1..=crate::instruments::voice_modulator::SLOT_COUNT)
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
-                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                    label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
             instrument_modulation_targets: Vec::new(),
@@ -4946,7 +4946,7 @@ impl EffectDescriptor {
             ],
         };
         desc.params
-            .extend(crate::voice_modulator::effect_param_descriptors());
+            .extend(crate::instruments::voice_modulator::effect_param_descriptors());
 
         let decay_idx = desc
             .params
@@ -4972,7 +4972,7 @@ impl EffectDescriptor {
         let mut append_depth_targets =
             |base_param_idx: usize,
              destination_name: &str,
-             depth_params: [u64; crate::voice_modulator::SLOT_COUNT]| {
+             depth_params: [u64; crate::instruments::voice_modulator::SLOT_COUNT]| {
                 for (slot, node_param_idx) in depth_params.into_iter().enumerate() {
                     let depth_param_idx = desc.params.len();
                     desc.params.push(ParamDescriptor {
@@ -5918,7 +5918,7 @@ impl EffectDescriptor {
                 host_control: None,
                 ui_metadata: None,
             },
-            Self::enabled_param(crate::sampler::SAMPLER_PARAM_ENABLED as u32, 1.0),
+            Self::enabled_param(crate::instruments::sampler::SAMPLER_PARAM_ENABLED as u32, 1.0),
             ParamDescriptor {
                 name: "reverse".to_string(),
                 min: 0.0,
@@ -5926,7 +5926,7 @@ impl EffectDescriptor {
                 default: 0.0,
                 kind: ParamKind::Boolean,
                 scaling: ParamScaling::Linear,
-                node_param_idx: crate::sampler::PARAM_REVERSE as u32,
+                node_param_idx: crate::instruments::sampler::PARAM_REVERSE as u32,
                 node_param_span: 1,
                 host_control: None,
                 ui_metadata: None,
@@ -5945,7 +5945,7 @@ impl EffectDescriptor {
                     ],
                 },
                 scaling: ParamScaling::Linear,
-                node_param_idx: crate::sampler::PARAM_LOOP_MODE as u32,
+                node_param_idx: crate::instruments::sampler::PARAM_LOOP_MODE as u32,
                 node_param_span: 1,
                 host_control: None,
                 ui_metadata: None,
@@ -5959,7 +5959,7 @@ impl EffectDescriptor {
                     unit: Some("ms".to_string()),
                 },
                 scaling: ParamScaling::Linear,
-                node_param_idx: crate::sampler::PARAM_LOOP_XFADE_SAMPLES as u32,
+                node_param_idx: crate::instruments::sampler::PARAM_LOOP_XFADE_SAMPLES as u32,
                 node_param_span: 1,
                 host_control: None,
                 ui_metadata: None,
@@ -5973,7 +5973,7 @@ impl EffectDescriptor {
                     unit: Some("Hz".to_string()),
                 },
                 scaling: ParamScaling::Exponential,
-                node_param_idx: crate::sampler::PARAM_SR_HZ as u32,
+                node_param_idx: crate::instruments::sampler::PARAM_SR_HZ as u32,
                 node_param_span: 1,
                 host_control: None,
                 ui_metadata: None,
@@ -5985,7 +5985,7 @@ impl EffectDescriptor {
                 default: 0.0,
                 kind: ParamKind::Boolean,
                 scaling: ParamScaling::Linear,
-                node_param_idx: crate::sampler::PARAM_WARP_ENABLED as u32,
+                node_param_idx: crate::instruments::sampler::PARAM_WARP_ENABLED as u32,
                 node_param_span: 1,
                 host_control: None,
                 ui_metadata: None,
@@ -6004,7 +6004,7 @@ impl EffectDescriptor {
                     ],
                 },
                 scaling: ParamScaling::Linear,
-                node_param_idx: crate::sampler::PARAM_WARP_MODE as u32,
+                node_param_idx: crate::instruments::sampler::PARAM_WARP_MODE as u32,
                 node_param_span: 1,
                 host_control: None,
                 ui_metadata: None,
@@ -6016,7 +6016,7 @@ impl EffectDescriptor {
                 default: 120.0,
                 kind: ParamKind::Continuous { unit: None },
                 scaling: ParamScaling::Linear,
-                node_param_idx: crate::sampler::PARAM_WARP_SAMPLE_BPM as u32,
+                node_param_idx: crate::instruments::sampler::PARAM_WARP_SAMPLE_BPM as u32,
                 node_param_span: 1,
                 host_control: None,
                 ui_metadata: None,
@@ -6028,7 +6028,7 @@ impl EffectDescriptor {
                 default: 1.0,
                 kind: ParamKind::Continuous { unit: None },
                 scaling: ParamScaling::Linear,
-                node_param_idx: crate::sampler::PARAM_SPEED as u32,
+                node_param_idx: crate::instruments::sampler::PARAM_SPEED as u32,
                 node_param_span: 1,
                 host_control: None,
                 ui_metadata: None,
@@ -6042,21 +6042,21 @@ impl EffectDescriptor {
                     unit: Some("%".to_string()),
                 },
                 scaling: ParamScaling::Linear,
-                node_param_idx: crate::sampler::PARAM_SCRUB_OFFSET as u32,
+                node_param_idx: crate::instruments::sampler::PARAM_SCRUB_OFFSET as u32,
                 node_param_span: 1,
                 host_control: None,
                 ui_metadata: None,
             },
         ];
-        params.extend(crate::voice_modulator::ui_param_descriptors());
+        params.extend(crate::instruments::voice_modulator::ui_param_descriptors());
         let mod_source_labels: Vec<String> = std::iter::once("off".to_string())
             .chain(
-                (1..=crate::voice_modulator::SLOT_COUNT)
-                    .map(|slot| crate::voice_modulator::modulator_slot_label(slot, "")),
+                (1..=crate::instruments::voice_modulator::SLOT_COUNT)
+                    .map(|slot| crate::instruments::voice_modulator::modulator_slot_label(slot, "")),
             )
             .collect();
         let mut instrument_modulation_targets = Vec::new();
-        for lane in crate::sampler::SAMPLER_MOD_TARGET_PARAMS {
+        for lane in crate::instruments::sampler::SAMPLER_MOD_TARGET_PARAMS {
             let name = lane.destination;
             let base_param_idx = params
                 .iter()
@@ -6070,7 +6070,7 @@ impl EffectDescriptor {
                     format!("mod {name} lane {} src", lane.lane)
                 },
                 min: 0.0,
-                max: crate::voice_modulator::SLOT_COUNT as f32,
+                max: crate::instruments::voice_modulator::SLOT_COUNT as f32,
                 default: 0.0,
                 kind: ParamKind::Enum {
                     labels: mod_source_labels.clone(),
@@ -6121,7 +6121,7 @@ impl EffectDescriptor {
                 unit: Some("ms".to_string()),
             },
             scaling: ParamScaling::Linear,
-            node_param_idx: crate::sampler::PARAM_SCRUB_SMOOTH_TIME_MS as u32,
+            node_param_idx: crate::instruments::sampler::PARAM_SCRUB_SMOOTH_TIME_MS as u32,
             node_param_span: 1,
             host_control: None,
             ui_metadata: None,
@@ -6132,7 +6132,7 @@ impl EffectDescriptor {
             name: "preserve".to_string(),
             min: 0.0,
             max: 6.0,
-            default: crate::warp_grid::PRESERVE_TRANSIENTS as f32,
+            default: crate::instruments::warp_grid::PRESERVE_TRANSIENTS as f32,
             kind: ParamKind::Enum {
                 labels: vec![
                     "1 bar".to_string(),
@@ -6145,7 +6145,7 @@ impl EffectDescriptor {
                 ],
             },
             scaling: ParamScaling::Linear,
-            node_param_idx: crate::sampler::PARAM_WARP_PRESERVE as u32,
+            node_param_idx: crate::instruments::sampler::PARAM_WARP_PRESERVE as u32,
             node_param_span: 1,
             host_control: None,
             ui_metadata: None,
@@ -6154,7 +6154,7 @@ impl EffectDescriptor {
             name: "fill".to_string(),
             min: 0.0,
             max: 2.0,
-            default: crate::sampler::SEG_LOOP_FORWARD as f32,
+            default: crate::instruments::sampler::SEG_LOOP_FORWARD as f32,
             kind: ParamKind::Enum {
                 labels: vec![
                     "off".to_string(),
@@ -6163,7 +6163,7 @@ impl EffectDescriptor {
                 ],
             },
             scaling: ParamScaling::Linear,
-            node_param_idx: crate::sampler::PARAM_WARP_SEG_LOOP_MODE as u32,
+            node_param_idx: crate::instruments::sampler::PARAM_WARP_SEG_LOOP_MODE as u32,
             node_param_span: 1,
             host_control: None,
             ui_metadata: None,
@@ -6177,7 +6177,7 @@ impl EffectDescriptor {
                 unit: Some("%".to_string()),
             },
             scaling: ParamScaling::Linear,
-            node_param_idx: crate::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
+            node_param_idx: crate::instruments::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
             node_param_span: 1,
             host_control: None,
             ui_metadata: None,
@@ -6186,10 +6186,10 @@ impl EffectDescriptor {
             name: "Sampler".to_string(),
             input_channels: 0,
             output_channels: 2,
-            instrument_modulators: (1..=crate::voice_modulator::SLOT_COUNT)
+            instrument_modulators: (1..=crate::instruments::voice_modulator::SLOT_COUNT)
                 .map(|slot| InstrumentModulatorDescriptor {
                     slot,
-                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                    label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
             instrument_modulation_targets,
@@ -7359,14 +7359,14 @@ impl EffectSlotState {
         if raw_idx == u32::MAX {
             return None;
         }
-        if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+        if raw_idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
             let logical_id = self.modulator_node_id.load(Ordering::Relaxed) as u64;
             if logical_id == 0 {
                 return None;
             }
             Some(ParamNodeId {
                 logical_id,
-                node_param_idx: raw_idx - crate::voice_modulator::MOD_PARAM_BASE,
+                node_param_idx: raw_idx - crate::instruments::voice_modulator::MOD_PARAM_BASE,
             })
         } else {
             let logical_id = self.node_id.load(Ordering::Relaxed) as u64;

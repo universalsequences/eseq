@@ -2,12 +2,12 @@ use super::*;
 
 /// Read the current sampler playhead position (in seconds) for a track.
 /// Scans all voices and returns the newest active voice.
-pub(crate) fn read_sampler_playhead_seconds(app: &tui::App, track: usize) -> f64 {
+pub(crate) fn read_sampler_playhead_seconds(app: &app::App, track: usize) -> f64 {
     let sampler_ids = match app.graph.track_node_ids.get(track) {
         Some(ids) => &ids.sampler_ids,
         None => return 0.0,
     };
-    let min_state_bytes = sequencer::sampler::SAMPLER_STATE_SIZE * std::mem::size_of::<f32>();
+    let min_state_bytes = sequencer::instruments::sampler::SAMPLER_STATE_SIZE * std::mem::size_of::<f32>();
 
     let mut best_playhead: f64 = 0.0;
     let mut best_gate_counter: f32 = f32::INFINITY;
@@ -18,7 +18,7 @@ pub(crate) fn read_sampler_playhead_seconds(app: &tui::App, track: usize) -> f64
             continue;
         }
         let mut state_size = 0usize;
-        let mut state = [0.0_f32; sequencer::sampler::SAMPLER_STATE_SIZE];
+        let mut state = [0.0_f32; sequencer::instruments::sampler::SAMPLER_STATE_SIZE];
         let copied = unsafe {
             sequencer::audiograph::get_node_state_into(
                 app.graph.lg.0,
@@ -31,12 +31,12 @@ pub(crate) fn read_sampler_playhead_seconds(app: &tui::App, track: usize) -> f64
         if !copied || state_size < min_state_bytes {
             continue;
         }
-        let playing = state[sequencer::sampler::PARAM_TRIGGER as usize] > 0.0;
+        let playing = state[sequencer::instruments::sampler::PARAM_TRIGGER as usize] > 0.0;
         if !playing {
             continue;
         }
 
-        let gate_counter = state[sequencer::sampler::PARAM_GATE_COUNTER as usize];
+        let gate_counter = state[sequencer::instruments::sampler::PARAM_GATE_COUNTER as usize];
         if gate_counter >= best_gate_counter {
             continue;
         }
@@ -80,11 +80,11 @@ pub(crate) fn read_sampler_playhead_seconds(app: &tui::App, track: usize) -> f64
 }
 
 fn sampler_visual_playhead_frame(
-    state: &[f32; sequencer::sampler::SAMPLER_STATE_SIZE],
+    state: &[f32; sequencer::instruments::sampler::SAMPLER_STATE_SIZE],
     sample_frames: f32,
 ) -> f32 {
-    let start = state[sequencer::sampler::PARAM_START_POINT as usize].clamp(0.0, 1.0);
-    let end = state[sequencer::sampler::PARAM_END_POINT as usize].clamp(0.0, 1.0);
+    let start = state[sequencer::instruments::sampler::PARAM_START_POINT as usize].clamp(0.0, 1.0);
+    let end = state[sequencer::instruments::sampler::PARAM_END_POINT as usize].clamp(0.0, 1.0);
     let start_frame = start * sample_frames;
     let end_frame = if end > start {
         end * sample_frames
@@ -92,8 +92,8 @@ fn sampler_visual_playhead_frame(
         sample_frames
     };
     let region_len = (end_frame - start_frame).max(1.0);
-    let playhead = state[sequencer::sampler::PARAM_PLAYHEAD as usize];
-    let scrub = state[sequencer::sampler::PARAM_SCRUB_SMOOTH as usize].clamp(-1.0, 1.0);
+    let playhead = state[sequencer::instruments::sampler::PARAM_PLAYHEAD as usize];
+    let scrub = state[sequencer::instruments::sampler::PARAM_SCRUB_SMOOTH as usize].clamp(-1.0, 1.0);
 
     (playhead + scrub * region_len).clamp(start_frame, end_frame.max(start_frame))
 }
@@ -104,11 +104,11 @@ mod tests {
 
     #[test]
     fn sampler_visual_playhead_includes_scrub_smooth() {
-        let mut state = [0.0_f32; sequencer::sampler::SAMPLER_STATE_SIZE];
-        state[sequencer::sampler::PARAM_START_POINT as usize] = 0.25;
-        state[sequencer::sampler::PARAM_END_POINT as usize] = 0.75;
-        state[sequencer::sampler::PARAM_PLAYHEAD as usize] = 500.0;
-        state[sequencer::sampler::PARAM_SCRUB_SMOOTH as usize] = 0.5;
+        let mut state = [0.0_f32; sequencer::instruments::sampler::SAMPLER_STATE_SIZE];
+        state[sequencer::instruments::sampler::PARAM_START_POINT as usize] = 0.25;
+        state[sequencer::instruments::sampler::PARAM_END_POINT as usize] = 0.75;
+        state[sequencer::instruments::sampler::PARAM_PLAYHEAD as usize] = 500.0;
+        state[sequencer::instruments::sampler::PARAM_SCRUB_SMOOTH as usize] = 0.5;
 
         let frame = sampler_visual_playhead_frame(&state, 1_000.0);
 
@@ -117,10 +117,10 @@ mod tests {
 
     #[test]
     fn sampler_visual_playhead_matches_playhead_without_scrub() {
-        let mut state = [0.0_f32; sequencer::sampler::SAMPLER_STATE_SIZE];
-        state[sequencer::sampler::PARAM_START_POINT as usize] = 0.0;
-        state[sequencer::sampler::PARAM_END_POINT as usize] = 1.0;
-        state[sequencer::sampler::PARAM_PLAYHEAD as usize] = 500.0;
+        let mut state = [0.0_f32; sequencer::instruments::sampler::SAMPLER_STATE_SIZE];
+        state[sequencer::instruments::sampler::PARAM_START_POINT as usize] = 0.0;
+        state[sequencer::instruments::sampler::PARAM_END_POINT as usize] = 1.0;
+        state[sequencer::instruments::sampler::PARAM_PLAYHEAD as usize] = 500.0;
 
         let frame = sampler_visual_playhead_frame(&state, 1_000.0);
 
@@ -129,7 +129,7 @@ mod tests {
 }
 
 pub(crate) fn sync_watched_sampler_voices(
-    app: &tui::App,
+    app: &app::App,
     current_track: usize,
     watched_track: &mut Option<usize>,
     watched_voice_ids: &mut Vec<i32>,

@@ -36,7 +36,7 @@ fn migrate_slot(slot: &ProjectEffectSlot, desc: &EffectDescriptor) -> ProjectEff
     let old_generated_start = slot
         .param_node_indices
         .iter()
-        .rposition(|node| *node >= sequencer::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE)
+        .rposition(|node| *node >= sequencer::instruments::voice_modulator::LEGACY_FIXED_MOD_PARAM_BASE)
         .map(|idx| idx + 1)
         .unwrap_or_else(|| {
             slot.param_node_indices

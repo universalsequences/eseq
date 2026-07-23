@@ -370,7 +370,7 @@ fn expression_string_list(expression: &Expression, option: &str) -> Result<Vec<S
         .collect()
 }
 
-fn apply_capture_project(app: &mut tui::App, project: &CaptureProjectSpec) -> Result<(), String> {
+fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Result<(), String> {
     for (spec_index, spec) in project.tracks.iter().enumerate() {
         let track = match &spec.kind {
             CaptureTrackKind::Sampler => app.graph_controller().add_blank_sampler_track(),
@@ -463,7 +463,7 @@ impl Drop for HeadlessGraphGuard {
 
 fn apply_capture_macro_host_commands(
     editor: &mut Editor,
-    app: &mut tui::App,
+    app: &mut app::App,
     state: &SequencerState,
     current_track: usize,
 ) -> Result<bool, String> {
@@ -493,7 +493,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     let graph = engine.lg_ptr.0;
     let _graph_guard = HeadlessGraphGuard { graph };
     let master_recorder = Arc::clone(&engine.master_recorder);
-    let mut app = tui::App::new(
+    let mut app = app::App::new(
         Arc::clone(&state),
         engine.lg_ptr,
         engine.sample_rate,

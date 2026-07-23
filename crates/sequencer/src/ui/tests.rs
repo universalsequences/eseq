@@ -1,0 +1,3745 @@
+    use super::{
+        apply_bus_mixer_history_host_command, apply_drum_lane_history_host_command,
+        apply_piano_roll_gesture_update,
+        apply_piano_roll_history_host_command,
+        apply_selected_steps_delete, apply_slice3_history_host_command,
+        apply_toggle_step_host_command, bus_mixer_targeted_invalidation,
+        slice3_track_mixer_invalidation, BusMixerInvalidation, TrackMixerInvalidation,
+        build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
+        escape_lisp_string, finish_piano_roll_gesture, instrument_patcher_buffer_source,
+        key_should_reveal_sequencer_track, patcher_layout_sidecar_path_for_dsp,
+        reconciled_track_index,
+        restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
+        show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
+        track_meter_bindings_visible, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
+        FxDeleteChain, Runtime, StepParam, Value, AGENT_INSTRUMENT_STUB_UI,
+        NEW_INSTRUMENT_STARTER_DSP,
+    };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use eseqlisp::parser::{ASTParser, Parser};
+    use std::path::Path;
+
+    fn history_test_app() -> (
+        std::sync::Arc<sequencer::sequencer::SequencerState>,
+        sequencer::app::App,
+    ) {
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = sequencer::app::App::new(
+            state.clone(),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        (state, app)
+    }
+
+    fn history_value_map(entries: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
+        Value::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| {
+                    (
+                        key.to_string(),
+                        std::rc::Rc::new(std::cell::RefCell::new(value)),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn slice3_mixer_drag_ops_route_to_targeted_track_mixer_invalidation() {
+        let volume = history_value_map([("op", Value::Keyword("volume".to_string()))]);
+        assert_eq!(
+            slice3_track_mixer_invalidation(&volume),
+            Some(TrackMixerInvalidation::Volume)
+        );
+        let pan = history_value_map([("op", Value::Keyword("pan".to_string()))]);
+        assert_eq!(
+            slice3_track_mixer_invalidation(&pan),
+            Some(TrackMixerInvalidation::Pan)
+        );
+        let mute_op = history_value_map([("op", Value::Keyword("toggle-mute".to_string()))]);
+        assert_eq!(
+            slice3_track_mixer_invalidation(&mute_op),
+            Some(TrackMixerInvalidation::Mute)
+        );
+        let solo_op = history_value_map([("op", Value::Keyword("toggle-solo".to_string()))]);
+        assert_eq!(
+            slice3_track_mixer_invalidation(&solo_op),
+            Some(TrackMixerInvalidation::Solo)
+        );
+        // Non-mixer ops keep the whole-track + ui-epoch resync path.
+        let attack = history_value_map([("op", Value::Keyword("attack".to_string()))]);
+        assert_eq!(slice3_track_mixer_invalidation(&attack), None);
+        assert_eq!(slice3_track_mixer_invalidation(&Value::Nil), None);
+
+        assert_eq!(
+            bus_mixer_targeted_invalidation(&volume),
+            Some(BusMixerInvalidation::Volume)
+        );
+        let mute = history_value_map([("op", Value::Keyword("toggle-mute".to_string()))]);
+        assert_eq!(bus_mixer_targeted_invalidation(&mute), None);
+    }
+
+    #[test]
+    fn slice3_host_action_enters_track_parameter_history() {
+        let (state, mut app) = history_test_app();
+        let before = state.pattern.track_params[0].get_volume();
+        let payload = history_value_map([
+            ("op", Value::Keyword("volume".to_string())),
+            ("track", Value::Number(0.0)),
+            ("value", Value::Number(0.25)),
+        ]);
+
+        let (outcome, track) = apply_slice3_history_host_command(&mut app, &payload)
+            .expect("apply Slice 3 host action");
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
+        assert_eq!(track, Some(0));
+        sequencer::app::edit::finish_active_gesture(&mut app);
+        assert_eq!(state.pattern.track_params[0].get_volume().to_bits(), 0.25f32.to_bits());
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(state.pattern.track_params[0].get_volume().to_bits(), before.to_bits());
+    }
+
+    #[test]
+    fn bus_mixer_host_action_enters_replayable_history() {
+        let (_state, mut app) = history_test_app();
+        let before = app.buses[1].volume;
+        let payload = history_value_map([
+            ("op", Value::Keyword("volume".to_string())),
+            ("bus", Value::Number(1.0)),
+            ("bus-id", Value::String(app.buses[1].id.0.to_string())),
+            ("value", Value::Number(0.25)),
+        ]);
+
+        let (outcome, bus) = apply_bus_mixer_history_host_command(&mut app, &payload)
+            .expect("apply bus mixer host action");
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
+        assert_eq!(bus, 1);
+        sequencer::app::edit::finish_active_gesture(&mut app);
+        assert_eq!(app.buses[1].volume.to_bits(), 0.25f32.to_bits());
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.buses[1].volume.to_bits(), before.to_bits());
+    }
+
+    #[test]
+    fn metal_step_toggle_host_command_creates_replayable_history() {
+        let (state, mut app) = history_test_app();
+        let payload = Value::Map(
+            [
+                ("track", Value::Number(0.0)),
+                ("step", Value::Number(6.0)),
+            ]
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    key.to_string(),
+                    std::rc::Rc::new(std::cell::RefCell::new(value)),
+                )
+            })
+            .collect(),
+        );
+
+        let (outcome, track, step) =
+            apply_toggle_step_host_command(&mut app, &payload).expect("toggle through host seam");
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
+        assert_eq!((track, step), (0, 6));
+        assert!(state.pattern.patterns[0].is_active(6));
+        assert_eq!(app.history.undo_len(), 1);
+
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(6));
+    }
+
+    #[test]
+    fn metal_selected_step_delete_is_one_replayable_history_entry() {
+        let (state, mut app) = history_test_app();
+        for step in [2, 5] {
+            state.pattern.patterns[0].set_step_active(step, true);
+            state.pattern.step_data[0].set(
+                step,
+                sequencer::sequencer::StepParam::Velocity,
+                step as f32 / 10.0,
+            );
+        }
+        let selected = std::sync::Arc::new(std::sync::Mutex::new(
+            [2_usize, 5].into_iter().collect::<std::collections::HashSet<_>>(),
+        ));
+
+        let (outcome, steps) =
+            apply_selected_steps_delete(&mut app, 0, &selected).expect("delete selected steps");
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
+        assert_eq!(steps, vec![2, 5]);
+        assert!(selected.lock().unwrap().is_empty());
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(5));
+        assert_eq!(app.history.undo_len(), 1);
+
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(state.pattern.patterns[0].is_active(5));
+        assert_eq!(state.pattern.step_data[0].get(
+            5,
+            sequencer::sequencer::StepParam::Velocity,
+        ), 0.5);
+        assert!(matches!(
+            sequencer::app::edit::redo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(5));
+    }
+
+    #[test]
+    fn metal_drum_lane_edits_are_individually_replayable() {
+        let (state, mut app) = history_test_app();
+
+        let toggle = history_value_map([
+            ("op", Value::Keyword("toggle".to_string())),
+            ("track", Value::Number(0.0)),
+            ("pad-note", Value::Number(36.0)),
+            ("step", Value::Number(2.0)),
+        ]);
+        apply_drum_lane_history_host_command(&mut app, &toggle)
+            .expect("toggle drum-lane step");
+        assert!(state.pattern.patterns[0].is_active(2));
+
+        let duration = history_value_map([
+            ("op", Value::Keyword("duration".to_string())),
+            ("track", Value::Number(0.0)),
+            ("pad-note", Value::Number(36.0)),
+            ("step", Value::Number(2.0)),
+            ("duration", Value::Number(3.0)),
+        ]);
+        apply_drum_lane_history_host_command(&mut app, &duration)
+            .expect("set drum-lane duration");
+        assert_eq!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
+
+        let move_action = history_value_map([
+            ("op", Value::Keyword("move".to_string())),
+            ("track", Value::Number(0.0)),
+            ("pad-note", Value::Number(36.0)),
+            ("steps", piano_roll_id_list([2])),
+            ("delta", Value::Number(3.0)),
+            ("move-selection", Value::Bool(false)),
+        ]);
+        apply_drum_lane_history_host_command(&mut app, &move_action)
+            .expect("move drum-lane step");
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert_eq!(state.drum_lane_step_duration(0, 5, 36), Some(3.0));
+
+        let clear = history_value_map([
+            ("op", Value::Keyword("clear".to_string())),
+            ("track", Value::Number(0.0)),
+            ("pad-note", Value::Number(36.0)),
+            ("steps", piano_roll_id_list([5])),
+        ]);
+        apply_drum_lane_history_host_command(&mut app, &clear)
+            .expect("clear drum-lane step");
+        assert!(!state.pattern.patterns[0].is_active(5));
+        assert_eq!(app.history.undo_len(), 4);
+
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(state.drum_lane_step_duration(0, 5, 36), Some(3.0));
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_ne!(state.drum_lane_step_duration(0, 2, 36), Some(3.0));
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+
+        for _ in 0..4 {
+            assert!(matches!(
+                sequencer::app::edit::redo(&mut app),
+                sequencer::app::history::HistoryReplay::Applied(_)
+            ));
+        }
+        assert!(!state.pattern.patterns[0].is_active(5));
+    }
+
+    #[test]
+    fn metal_piano_roll_create_and_delete_are_individually_replayable() {
+        let (state, mut app) = history_test_app();
+        let selection = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashSet::new(),
+        ));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let clipboard = super::new_piano_roll_clipboard();
+        let create_action = history_value_map([
+            ("type", Value::Keyword("finish-create-item".to_string())),
+            ("start", Value::Number(2.0)),
+            ("end", Value::Number(3.0)),
+            ("lane", Value::Number(48.0)),
+        ]);
+        let create_payload = history_value_map([
+            ("track", Value::Number(0.0)),
+            ("action", create_action),
+        ]);
+
+        let (outcome, _, _) = apply_piano_roll_history_host_command(
+            &mut app,
+            &selection,
+            &move_state,
+            &clipboard,
+            &create_payload,
+        )
+        .expect("create piano-roll note through history seam");
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert_eq!(app.history.undo_len(), 1);
+
+        let delete_action = history_value_map([
+            ("type", Value::Keyword("delete-items".to_string())),
+            (
+                "ids",
+                Value::List(vec![std::rc::Rc::new(std::cell::RefCell::new(
+                    Value::Number(super::piano_roll_item_id(2, 0) as f64),
+                ))]),
+            ),
+        ]);
+        let delete_payload = history_value_map([
+            ("track", Value::Number(0.0)),
+            ("action", delete_action),
+        ]);
+        let (outcome, _, _) = apply_piano_roll_history_host_command(
+            &mut app,
+            &selection,
+            &move_state,
+            &clipboard,
+            &delete_payload,
+        )
+        .expect("delete piano-roll note through history seam");
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert_eq!(app.history.undo_len(), 2);
+
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(matches!(
+            sequencer::app::edit::redo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(matches!(
+            sequencer::app::edit::redo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+    }
+
+    fn piano_roll_gesture_payload(action: Value) -> Value {
+        history_value_map([("track", Value::Number(0.0)), ("action", action)])
+    }
+
+    fn piano_roll_id_list(ids: impl IntoIterator<Item = u64>) -> Value {
+        Value::List(
+            ids.into_iter()
+                .map(|id| {
+                    std::rc::Rc::new(std::cell::RefCell::new(Value::Number(id as f64)))
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn metal_piano_roll_move_drag_coalesces_preview_updates_into_one_entry() {
+        let (state, mut app) = history_test_app();
+        state.pattern.patterns[0].set_step_active(2, true);
+        state.pattern.step_data[0].set(
+            2,
+            sequencer::sequencer::StepParam::Duration,
+            1.0,
+        );
+        let id = super::piano_roll_item_id(2, 0);
+        let selection = std::sync::Arc::new(std::sync::Mutex::new([id].into_iter().collect()));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut active = None;
+        let version_before = state.scheduler_snapshot_version();
+
+        for (destination, lane) in [(4.0, 48.0), (6.0, 41.0)] {
+            let action = history_value_map([
+                ("type", Value::Keyword("move-items-absolute".to_string())),
+                ("ids", piano_roll_id_list([id])),
+                ("anchor-id", Value::Number(id as f64)),
+                ("start", Value::Number(destination)),
+                ("lane", Value::Number(lane)),
+            ]);
+            apply_piano_roll_gesture_update(
+                &mut app,
+                &selection,
+                &move_state,
+                &mut active,
+                &piano_roll_gesture_payload(action),
+            )
+            .expect("preview piano-roll move");
+            assert_eq!(app.history.undo_len(), 0);
+        }
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(4));
+        assert!(state.pattern.patterns[0].is_active(6));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 7.0);
+        assert_eq!(state.scheduler_snapshot_version(), version_before + 2);
+
+        let finish = history_value_map([
+            ("type", Value::Keyword("finish-move-items".to_string())),
+            ("ids", piano_roll_id_list([id])),
+            ("anchor-id", Value::Number(id as f64)),
+        ]);
+        let (outcome, _) = finish_piano_roll_gesture(
+            &mut app,
+            &move_state,
+            &mut active,
+            &piano_roll_gesture_payload(finish),
+        )
+        .expect("finish piano-roll move");
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
+        assert_eq!(app.history.undo_len(), 1);
+        assert_eq!(state.scheduler_snapshot_version(), version_before + 2);
+
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(6));
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Transpose),
+            0.0,
+        );
+        assert_eq!(state.scheduler_snapshot_version(), version_before + 3);
+        assert!(matches!(
+            sequencer::app::edit::redo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(state.pattern.patterns[0].is_active(6));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 7.0);
+    }
+
+    #[test]
+    fn metal_piano_roll_multi_note_move_round_trips_every_touched_cell() {
+        let (state, mut app) = history_test_app();
+        for (step, transpose) in [(2, 0.0), (4, 7.0)] {
+            state.pattern.patterns[0].set_step_active(step, true);
+            state.pattern.step_data[0].set(
+                step,
+                sequencer::sequencer::StepParam::Transpose,
+                transpose,
+            );
+            state.pattern.step_data[0].set(
+                step,
+                sequencer::sequencer::StepParam::Duration,
+                1.0,
+            );
+        }
+        let first = super::piano_roll_item_id(2, 0);
+        let second = super::piano_roll_item_id(4, 0);
+        let selection = std::sync::Arc::new(std::sync::Mutex::new(
+            [first, second].into_iter().collect(),
+        ));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut active = None;
+        let move_action = history_value_map([
+            ("type", Value::Keyword("move-items-absolute".to_string())),
+            ("ids", piano_roll_id_list([first, second])),
+            ("anchor-id", Value::Number(first as f64)),
+            ("start", Value::Number(6.0)),
+            ("lane", Value::Number(43.0)),
+        ]);
+        apply_piano_roll_gesture_update(
+            &mut app,
+            &selection,
+            &move_state,
+            &mut active,
+            &piano_roll_gesture_payload(move_action),
+        )
+        .expect("preview multi-note move");
+        let finish = history_value_map([
+            ("type", Value::Keyword("finish-move-items".to_string())),
+            ("ids", piano_roll_id_list([first, second])),
+            ("anchor-id", Value::Number(first as f64)),
+        ]);
+        finish_piano_roll_gesture(
+            &mut app,
+            &move_state,
+            &mut active,
+            &piano_roll_gesture_payload(finish),
+        )
+        .expect("finish multi-note move");
+
+        assert_eq!(app.history.undo_len(), 1);
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(4));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 5.0);
+        assert_eq!(state.pattern.chord_data[0].get(8, 0), 12.0);
+
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Transpose),
+            0.0,
+        );
+        assert_eq!(
+            state.pattern.step_data[0].get(4, sequencer::sequencer::StepParam::Transpose),
+            7.0,
+        );
+        assert!(!state.pattern.patterns[0].is_active(6));
+        assert!(!state.pattern.patterns[0].is_active(8));
+
+        assert!(matches!(
+            sequencer::app::edit::redo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 5.0);
+        assert_eq!(state.pattern.chord_data[0].get(8, 0), 12.0);
+    }
+
+    #[test]
+    fn metal_piano_roll_nudge_time_and_note_is_replayable() {
+        let (state, mut app) = history_test_app();
+        state.pattern.patterns[0].set_step_active(2, true);
+        state.pattern.step_data[0].set(
+            2,
+            sequencer::sequencer::StepParam::Duration,
+            1.0,
+        );
+        let id = super::piano_roll_item_id(2, 0);
+        let selection = std::sync::Arc::new(std::sync::Mutex::new([id].into_iter().collect()));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let clipboard = super::new_piano_roll_clipboard();
+        let action = history_value_map([
+            ("type", Value::Keyword("nudge-selection".to_string())),
+            ("ids", piano_roll_id_list([id])),
+            ("delta-time", Value::Number(3.0)),
+            ("delta-lane", Value::Number(-5.0)),
+        ]);
+
+        let (outcome, _, _) = apply_piano_roll_history_host_command(
+            &mut app,
+            &selection,
+            &move_state,
+            &clipboard,
+            &piano_roll_gesture_payload(action),
+        )
+        .expect("nudge piano-roll note through history seam");
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
+        assert_eq!(app.history.undo_len(), 1);
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(state.pattern.patterns[0].is_active(5));
+        assert_eq!(state.pattern.chord_data[0].get(5, 0), 5.0);
+
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(5));
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Transpose),
+            0.0,
+        );
+
+        assert!(matches!(
+            sequencer::app::edit::redo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!state.pattern.patterns[0].is_active(2));
+        assert!(state.pattern.patterns[0].is_active(5));
+        assert_eq!(state.pattern.chord_data[0].get(5, 0), 5.0);
+    }
+
+    #[test]
+    fn metal_piano_roll_paste_is_replayable_with_shared_clipboard() {
+        let (state, mut app) = history_test_app();
+        state.pattern.patterns[0].set_step_active(2, true);
+        state.pattern.step_data[0].set(
+            2,
+            sequencer::sequencer::StepParam::Transpose,
+            4.0,
+        );
+        state.pattern.step_data[0].set(
+            2,
+            sequencer::sequencer::StepParam::Duration,
+            1.5,
+        );
+        let id = super::piano_roll_item_id(2, 0);
+        let selection = std::sync::Arc::new(std::sync::Mutex::new([id].into_iter().collect()));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let clipboard = super::new_piano_roll_clipboard();
+        let copy_action = history_value_map([
+            ("type", Value::Keyword("copy-items".to_string())),
+            ("ids", piano_roll_id_list([id])),
+        ]);
+        super::apply_piano_roll_action_with_clipboard(
+            &state,
+            0,
+            &selection,
+            &move_state,
+            &clipboard,
+            &copy_action,
+        )
+        .expect("copy piano-roll note");
+
+        let paste_action = history_value_map([
+            ("type", Value::Keyword("paste-items".to_string())),
+            ("time", Value::Number(6.0)),
+        ]);
+        let (outcome, _, _) = apply_piano_roll_history_host_command(
+            &mut app,
+            &selection,
+            &move_state,
+            &clipboard,
+            &piano_roll_gesture_payload(paste_action),
+        )
+        .expect("paste piano-roll note through history seam");
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
+        assert_eq!(app.history.undo_len(), 1);
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(state.pattern.patterns[0].is_active(6));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 4.0);
+        assert_eq!(state.pattern.chord_data[0].get_duration(6, 0), 1.5);
+
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(2));
+        assert!(!state.pattern.patterns[0].is_active(6));
+
+        assert!(matches!(
+            sequencer::app::edit::redo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(state.pattern.patterns[0].is_active(6));
+        assert_eq!(state.pattern.chord_data[0].get(6, 0), 4.0);
+    }
+
+    #[test]
+    fn metal_piano_roll_resize_drag_coalesces_preview_updates_into_one_entry() {
+        let (state, mut app) = history_test_app();
+        state.pattern.patterns[0].set_step_active(2, true);
+        state.pattern.step_data[0].set(
+            2,
+            sequencer::sequencer::StepParam::Duration,
+            1.0,
+        );
+        let id = super::piano_roll_item_id(2, 0);
+        let selection = std::sync::Arc::new(std::sync::Mutex::new([id].into_iter().collect()));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut active = None;
+        let version_before = state.scheduler_snapshot_version();
+
+        for time in [4.0, 5.0] {
+            let action = history_value_map([
+                ("type", Value::Keyword("resize-item-absolute".to_string())),
+                ("id", Value::Number(id as f64)),
+                ("ids", piano_roll_id_list([id])),
+                ("edge", Value::Keyword("end".to_string())),
+                ("time", Value::Number(time)),
+            ]);
+            apply_piano_roll_gesture_update(
+                &mut app,
+                &selection,
+                &move_state,
+                &mut active,
+                &piano_roll_gesture_payload(action),
+            )
+            .expect("preview piano-roll resize");
+            assert_eq!(app.history.undo_len(), 0);
+        }
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Duration),
+            3.0,
+        );
+        assert_eq!(state.scheduler_snapshot_version(), version_before + 2);
+
+        let finish = history_value_map([
+            ("type", Value::Keyword("finish-resize-items".to_string())),
+            ("ids", piano_roll_id_list([id])),
+            ("id", Value::Number(id as f64)),
+        ]);
+        let (outcome, _) = finish_piano_roll_gesture(
+            &mut app,
+            &move_state,
+            &mut active,
+            &piano_roll_gesture_payload(finish),
+        )
+        .expect("finish piano-roll resize");
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
+        assert_eq!(app.history.undo_len(), 1);
+        assert_eq!(state.scheduler_snapshot_version(), version_before + 2);
+
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Duration),
+            1.0,
+        );
+        assert!(matches!(
+            sequencer::app::edit::redo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            state.pattern.step_data[0].get(2, sequencer::sequencer::StepParam::Duration),
+            3.0,
+        );
+    }
+
+    #[test]
+    fn active_delete_target_buffer_switch_preserves_target_claimed_in_new_buffer() {
+        let mixer_target = ActiveDeleteTarget::MixerTrack { track: 0 };
+        assert!(
+            !should_clear_active_delete_target_for_buffer(Some(&mixer_target), "*mixer*"),
+            "clicking a mixer delete target in an inactive mixer tile should survive the tile activation"
+        );
+        assert!(
+            should_clear_active_delete_target_for_buffer(Some(&mixer_target), "*fx*"),
+            "leaving mixer for another buffer should clear a mixer delete target"
+        );
+
+        let fx_target = ActiveDeleteTarget::FxEffect {
+            chain: FxDeleteChain::Audio,
+            bus: None,
+            slot: 2,
+        };
+        assert!(
+            !should_clear_active_delete_target_for_buffer(Some(&fx_target), "*fx*"),
+            "clicking an FX delete target in an inactive FX tile should survive the tile activation"
+        );
+        assert!(
+            should_clear_active_delete_target_for_buffer(Some(&fx_target), "*mixer*"),
+            "leaving FX for mixer should clear an FX delete target"
+        );
+    }
+
+    #[test]
+    fn reconciles_stale_current_track_against_track_count() {
+        assert_eq!(reconciled_track_index(2, 0, 4), Some(2));
+        assert_eq!(reconciled_track_index(7, 1, 4), Some(1));
+        assert_eq!(reconciled_track_index(7, 9, 4), Some(3));
+        assert_eq!(reconciled_track_index(0, 0, 0), None);
+    }
+
+    #[test]
+    fn step_selection_sync_updates_selected_steps_without_deadlocking() {
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, Vec::new()));
+        state.pattern.track_params[0].set_num_steps(8);
+        state
+            .pattern
+            .step_data[0]
+            .set(3, sequencer::sequencer::StepParam::Velocity, 0.66);
+        state
+            .pattern
+            .step_data[0]
+            .set(3, sequencer::sequencer::StepParam::Duration, 2.5);
+        state
+            .pattern
+            .step_data[0]
+            .set(3, sequencer::sequencer::StepParam::Transpose, 7.0);
+        state
+            .pattern
+            .step_data[0]
+            .set(2, sequencer::sequencer::StepParam::Velocity, 0.72);
+        state
+            .pattern
+            .step_data[0]
+            .set(2, sequencer::sequencer::StepParam::Duration, 1.5);
+        state
+            .pattern
+            .step_data[0]
+            .set(2, sequencer::sequencer::StepParam::Transpose, -4.0);
+        let selected_steps = std::sync::Arc::new(std::sync::Mutex::new(
+            [2_usize, 3, 4]
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+        ));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![(
+                "selected-steps",
+                Value::List(
+                    (0..sequencer::sequencer::MAX_STEPS)
+                        .map(|_| std::rc::Rc::new(std::cell::RefCell::new(Value::Bool(false))))
+                        .collect(),
+                ),
+            )],
+            true,
+        );
+        runtime
+            .eval_str("(def cursor-step 3)")
+            .expect("register cursor step");
+
+        let expanded_step_projection = std::sync::Arc::new(ExpandedStepProjectionRegistry::new());
+        super::sync_step_selection_bindings(
+            &mut runtime,
+            &state,
+            None,
+            0,
+            &selected_steps,
+            0,
+            &expanded_step_projection,
+            &(0..sequencer::sequencer::MAX_STEPS).collect::<Vec<_>>(),
+            true,
+        );
+
+        assert_eq!(
+            runtime
+                .eval_str("(nth SEQ.selected-steps 1)")
+                .expect("read unselected step"),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth SEQ.selected-steps 3)")
+                .expect("read selected step"),
+            Some(Value::Bool(true))
+        );
+        for (field, expected) in [
+            ("fx-step-cursor-number", 4.0),
+            ("fx-step-selection-count", 3.0),
+            ("fx-step-value-velocity", 0.72),
+            ("fx-step-value-duration", 1.5),
+            ("fx-step-value-transpose", -4.0),
+        ] {
+            let value = runtime
+                .eval_str(&format!("SEQ.{field}"))
+                .unwrap_or_else(|error| panic!("read {field}: {error:?}"));
+            let Some(Value::Number(value)) = value else {
+                panic!("{field} should be numeric, got {value:?}");
+            };
+            assert!(
+                (value - expected).abs() < 0.0001,
+                "{field} expected {expected}, got {value}"
+            );
+        }
+
+        selected_steps.lock().unwrap().remove(&3);
+        super::sync_step_selection_bindings(
+            &mut runtime,
+            &state,
+            None,
+            0,
+            &selected_steps,
+            0,
+            &expanded_step_projection,
+            &[3],
+            true,
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth SEQ.selected-steps 3)")
+                .expect("read cleared step"),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth SEQ.selected-steps 4)")
+                .expect("read unchanged selected step"),
+            Some(Value::Bool(true)),
+            "delta sync must preserve selection indexes outside changed_steps"
+        );
+    }
+
+    #[test]
+    fn single_step_param_sync_updates_selected_panel_scalar_binding() {
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, Vec::new()));
+        state.pattern.track_params[0].set_num_steps(8);
+        state
+            .pattern
+            .step_data[0]
+            .set(4, sequencer::sequencer::StepParam::Velocity, 0.72);
+        let selected_steps = std::sync::Arc::new(std::sync::Mutex::new(
+            [4, 5, 6, 7].into_iter().collect(),
+        ));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![(
+                "velocities",
+                Value::List(
+                    (0..sequencer::sequencer::MAX_STEPS)
+                        .map(|_| std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.0))))
+                        .collect(),
+                ),
+            )],
+            true,
+        );
+        runtime
+            .eval_str("(def cursor-step 0)")
+            .expect("register cursor step");
+
+        super::sync_single_step_param_binding(
+            &mut runtime,
+            &state,
+            0,
+            4,
+            sequencer::sequencer::StepParam::Velocity,
+            0,
+            &selected_steps,
+            &std::sync::Arc::new(ExpandedStepProjectionRegistry::new()),
+        );
+
+        let value = runtime
+            .eval_str("SEQ.fx-step-value-velocity")
+            .expect("read cursor velocity binding");
+        let Some(Value::Number(value)) = value else {
+            panic!("selected velocity should be numeric, got {value:?}");
+        };
+        assert!((value - 0.72).abs() < 0.0001);
+    }
+
+    #[test]
+    fn instrument_plock_presence_sync_updates_step_markers() {
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, vec![vec![]]));
+        state.pattern.track_params[0].set_num_steps(8);
+        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+        state.pattern.instrument_slots[0].apply_descriptor(&desc, 17);
+        state.pattern.instrument_slots[0].set_plock(2, 8, 22_050.0);
+        let effect_descriptors = vec![Vec::new()];
+        let mut runtime = Runtime::new();
+
+        let selected_steps =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::from([
+                2, 3,
+            ])));
+        super::sync_instrument_plock_presence_fields(
+            &mut runtime,
+            &state,
+            &effect_descriptors,
+            0,
+            &selected_steps,
+        );
+
+        assert_eq!(
+            runtime
+                .eval_str("(nth SEQ.step-has-plocks 2)")
+                .expect("read p-locked step"),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth SEQ.step-has-plocks 3)")
+                .expect("read unp-locked step"),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            runtime
+                .eval_str(&format!(
+                    r#"(reactive-get "SEQ" "{}")"#,
+                    super::track_step_plocked_field(0, 2)
+                ))
+                .expect("read selected p-locked step field"),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            runtime
+                .eval_str(&format!(
+                    r#"(reactive-get "SEQ" "{}")"#,
+                    super::track_step_plocked_field(0, 3)
+                ))
+                .expect("read selected unp-locked step field"),
+            Some(Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn duration_span_sync_updates_covered_steps_after_source_duration_change() {
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(1, Vec::new()));
+        state.pattern.track_params[0].set_num_steps(8);
+        state.pattern.patterns[0].set_step_active(2, true);
+        state.pattern.step_data[0].set(2, StepParam::Duration, 3.0);
+        let mut runtime = Runtime::new();
+
+        super::sync_track_duration_span_binding_fields(&mut runtime, &state, 0, 2);
+
+        assert_eq!(
+            runtime
+                .eval_str(r#"(reactive-get "SEQ" "seq-track-step-duration-0-4")"#)
+                .expect("read covered step"),
+            Some(Value::Bool(true)),
+            "duration source at step 2 with length 3 should mark step 4 covered"
+        );
+        assert_eq!(
+            runtime
+                .eval_str(r#"(reactive-get "SEQ" "seq-track-step-duration-0-5")"#)
+                .expect("read uncovered step"),
+            Some(Value::Bool(false)),
+            "duration source at step 2 with length 3 should not cover step 5"
+        );
+    }
+
+    #[test]
+    fn sequencer_reveal_is_limited_to_navigation_keys() {
+        assert!(key_should_reveal_sequencer_track(&KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE
+        )));
+        assert!(key_should_reveal_sequencer_track(&KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE
+        )));
+        assert!(
+            key_should_reveal_sequencer_track(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            "plain Tab expands the current sequencer track and should reveal that row"
+        );
+        assert!(
+            !key_should_reveal_sequencer_track(&KeyEvent::new(
+                KeyCode::Char('v'),
+                KeyModifiers::NONE
+            )),
+            "parameter shortcuts should not reveal and scroll the current row"
+        );
+        assert!(
+            !key_should_reveal_sequencer_track(&KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL)),
+            "non-track-navigation tab shortcuts should not reveal the sequencer row"
+        );
+    }
+
+    #[test]
+    fn sequencer_visibility_keeps_track_meter_bindings_live_without_mixer() {
+        assert!(track_meter_bindings_visible(true, false));
+        assert!(track_meter_bindings_visible(false, true));
+        assert!(track_meter_bindings_visible(true, true));
+        assert!(!track_meter_bindings_visible(false, false));
+    }
+
+    #[test]
+    fn new_instrument_starter_declares_standard_inputs_and_adsr() {
+        let source = NEW_INSTRUMENT_STARTER_DSP;
+        for (idx, name) in [
+            (1, "gate"),
+            (2, "pitch"),
+            (3, "velocity"),
+            (4, "trigger"),
+            (5, "clock"),
+            (6, "mod1"),
+            (7, "mod2"),
+            (8, "mod3"),
+            (9, "mod4"),
+        ] {
+            assert!(
+                source.contains(&format!("(def {name} (in {idx} @name {name}")),
+                "starter source should declare input {idx} as {name}"
+            );
+        }
+        for (idx, name) in [(1, "mod1"), (2, "mod2"), (3, "mod3"), (4, "mod4")] {
+            assert!(
+                source.contains(&format!(
+                    "(def {name} (in {} @name {name} @modulator {idx}))",
+                    idx + 5
+                )),
+                "starter source should mark {name} as modulator {idx}"
+            );
+        }
+        for (name, role) in [
+            ("attack", "attack"),
+            ("decay", "decay"),
+            ("sustain", "sustain"),
+            ("release", "release"),
+        ] {
+            assert!(
+                source.contains(&format!(
+                    "(param {name} @group amp @env amp-env @role {role}"
+                )),
+                "starter source should tag {name} as amp-env {role}"
+            );
+        }
+        assert!(source.contains("(def env (adsr gate trigger attack decay sustain release))"));
+        assert!(source.contains("(out (* phase env velocity (mod gain)) 1 @name audio)"));
+    }
+
+    #[test]
+    fn new_instrument_starter_compiles() {
+        sequencer::lisp_host::compile_instrument(NEW_INSTRUMENT_STARTER_DSP, 44_100)
+            .expect("starter instrument should compile");
+    }
+
+    #[test]
+    fn new_effect_starter_compiles() {
+        sequencer::lisp_host::compile_lisp(sequencer::lisp_host::EFFECT_TEMPLATE, 44_100)
+            .expect("starter effect should compile");
+    }
+
+    #[test]
+    fn instrument_patcher_buffer_uses_user_source_path_and_preview_command() {
+        let source = instrument_patcher_buffer_source(
+            "*instrument-patcher:digitone*",
+            Path::new("instruments/digitone/dsp.lisp"),
+        );
+
+        assert!(source.contains("(effect-buffer \"*instrument-patcher:digitone*\""));
+        assert!(source.contains(":intent :instrument"));
+        assert!(source.contains(":path \"instruments/digitone/dsp.lisp\""));
+        assert!(source.contains("(host-command \"preview-instrument-patch\" event)"));
+        assert!(!source.contains("defmacro"));
+    }
+
+    #[test]
+    fn effect_patcher_buffer_uses_effect_intent_and_preview_command() {
+        let source = effect_patcher_buffer_source(
+            "*effect-patcher:lexilush*",
+            Path::new("effects/lexilush/dsp.lisp"),
+        );
+
+        assert!(source.contains("(effect-buffer \"*effect-patcher:lexilush*\""));
+        assert!(source.contains(":intent :effect"));
+        assert!(source.contains(":path \"effects/lexilush/dsp.lisp\""));
+        assert!(source.contains("(host-command \"preview-effect-patch\" event)"));
+        assert!(!source.contains("defmacro"));
+    }
+
+    #[test]
+    fn instrument_patcher_buffer_escapes_lisp_path_strings() {
+        assert_eq!(escape_lisp_string("a\\b\"c"), "a\\\\b\\\"c");
+    }
+
+    #[test]
+    fn instrument_patcher_layout_preserves_lower_panel_buffer() {
+        let source = show_instrument_patcher_layout_source("*instrument-patcher:digitone*");
+
+        assert_eq!(
+            source,
+            "(seq-apply-instrument-patcher-layout \"*instrument-patcher:digitone*\")"
+        );
+    }
+
+    #[test]
+    fn instrument_patcher_source_layout_includes_patcher_and_source_buffers() {
+        let source = show_instrument_patcher_source_layout_source(
+            "*instrument-patcher:digitone*",
+            "*patcher-emitted:instruments/digitone/dsp.lisp*",
+        );
+
+        assert_eq!(
+            source,
+            "(seq-apply-instrument-patcher-source-layout \"*instrument-patcher:digitone*\" \"*patcher-emitted:instruments/digitone/dsp.lisp*\")"
+        );
+    }
+
+    #[test]
+    fn patcher_layout_sidecar_uses_stem_for_legacy_single_file_effects() {
+        assert_eq!(
+            patcher_layout_sidecar_path_for_dsp(Path::new("effects/legacy-delay.lisp")),
+            Path::new("effects/legacy-delay.layout.json")
+        );
+        assert_eq!(
+            patcher_layout_sidecar_path_for_dsp(Path::new("effects/lexilush/dsp.lisp")),
+            Path::new("effects/lexilush/dsp.layout.json")
+        );
+    }
+
+    #[test]
+    fn instrument_patcher_layout_restore_uses_remembered_step_panel() {
+        let source = restore_instrument_patcher_layout_source();
+
+        assert_eq!(source, "(seq-restore-instrument-patcher-layout)");
+    }
+
+    #[test]
+    fn agent_instrument_stub_ui_parses() {
+        let tokens = Parser::new(AGENT_INSTRUMENT_STUB_UI.to_string())
+            .parse()
+            .expect("stub UI should tokenize");
+        ASTParser::new(tokens)
+            .parse()
+            .expect("stub UI should parse");
+    }
+
+    #[test]
+    fn agent_instrument_stub_ui_registers_as_custom_synth_ui() {
+        const LEGACY_AGENT_INSTRUMENT_STUB_UI: &str = r#"(defwidget agent-instrument-stub-bg-legacy
+  :width 70 :height 8.2
+  :shader
+  (sdf/fill
+    (sdf/rounded-rect width height 0.45)
+    (material :color (rgba (+ 0.1 (* 0.1 (sin itime))) 0.2 0.4 1.0))))
+
+(defsynth-ui
+  (box :width 70 :height 8.2 :padding 0 :debug-name "agent-instrument-stub-skeleton"
+    (agent-instrument-stub-bg-legacy)))
+"#;
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "agent-draft-1/".to_string(),
+            "instruments/agent-draft-1/ui.lisp".to_string(),
+            LEGACY_AGENT_INSTRUMENT_STUB_UI.to_string(),
+        )));
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str(
+                r#"(def synth-ui-current-inst false)
+                (def synth-ui-current-name "")
+                (def custom-ui-current-kind "instrument")
+                (def custom-ui-selected-section 0)
+                (def custom-ui-selected-section-for-current-scope () 0)
+                (def agent-instrument-stub-bg ()
+                    (box :width 70 :height 8.2
+                      (label "stub" :font-size 10 :color :gray :bg :transparent)))"#,
+            )
+            .expect("install stub widget test double");
+        runtime
+            .eval_str(&custom_ui_source)
+            .expect("stub custom UI should evaluate");
+        let rendered = runtime
+            .eval_str(
+                r#"(custom-instrument-synth-ui
+                     (dict :name "agent-draft-1/"
+                           :synth (list (dict :name "base_note"
+                                              :control "base-note"
+                                              :value 0
+                                              :min -48
+                                              :max 48))))"#,
+            )
+            .expect("stub custom UI should render");
+        assert!(
+            !matches!(rendered, Some(Value::Bool(false)) | None),
+            "stub instrument should dispatch to its custom skeleton UI"
+        );
+    }
+
+    struct SequencerDirGuard {
+        original: std::path::PathBuf,
+    }
+
+    impl SequencerDirGuard {
+        fn enter() -> Self {
+            let original = std::env::current_dir().expect("read current dir");
+            sequencer::paths::enter_sequencer_dir().expect("enter sequencer crate dir");
+            Self { original }
+        }
+    }
+
+    impl Drop for SequencerDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    struct TestEngineGuard {
+        lg_raw: *mut sequencer::audiograph::LiveGraph,
+    }
+
+    impl Drop for TestEngineGuard {
+        fn drop(&mut self) {
+            unsafe {
+                sequencer::audiograph::clear_os_workgroup();
+                sequencer::audiograph::engine_stop_workers();
+                sequencer::audiograph::destroy_live_graph(self.lg_raw);
+            }
+        }
+    }
+
+    struct HeadlessAudioPump {
+        running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl HeadlessAudioPump {
+        fn start(lg_ptr: sequencer::audiograph::LiveGraphPtr, channels: usize) -> Self {
+            let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let worker_running = std::sync::Arc::clone(&running);
+            let handle = std::thread::Builder::new()
+                .name("project-92-headless-audio-pump".to_string())
+                .spawn(move || {
+                    let frames = 512;
+                    let mut output = vec![0.0f32; frames * channels.max(1)];
+                    while worker_running.load(std::sync::atomic::Ordering::Relaxed) {
+                        unsafe {
+                            lg_ptr.process_next_block(output.as_mut_ptr(), frames as i32);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                })
+                .expect("spawn headless audio pump");
+            Self {
+                running,
+                handle: Some(handle),
+            }
+        }
+    }
+
+    impl Drop for HeadlessAudioPump {
+        fn drop(&mut self) {
+            self.running
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn find_layout_node_by_stable_key<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        key: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if node.stable_key.as_deref() == Some(key) {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_layout_node_by_stable_key(child, key))
+    }
+
+    fn find_layout_node_by_stable_key_suffix<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        suffix: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if node
+            .stable_key
+            .as_deref()
+            .is_some_and(|key| key.ends_with(suffix))
+        {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_layout_node_by_stable_key_suffix(child, suffix))
+    }
+
+    fn find_layout_node_by_debug_name<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        name: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if matches!(node.props.get("debug-name"), Some(Value::String(value)) if value == name) {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_layout_node_by_debug_name(child, name))
+    }
+
+    fn layout_prop_number(node: &eseqlisp::layout::LayoutNode, name: &str) -> Option<f64> {
+        match node.props.get(name) {
+            Some(Value::Number(value)) => Some(*value),
+            Some(Value::ReactiveRef { slot, .. }) => {
+                Some(eseqlisp::reactive::read_float_slot(slot) as f64)
+            }
+            _ => None,
+        }
+    }
+
+    fn find_layout_node_by_widget_type<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        widget_type: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if node.widget_type == widget_type {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_layout_node_by_widget_type(child, widget_type))
+    }
+
+    fn visible_layout_revisions(editor: &eseqlisp::Editor) -> Vec<(String, u64)> {
+        let mut revisions = editor
+            .tile_root
+            .leaf_ids()
+            .into_iter()
+            .filter_map(|tile_id| {
+                let leaf = editor.tile_root.find_leaf(tile_id)?;
+                let buffer = editor.buffers.get(leaf.buffer_idx)?;
+                Some((buffer.name.clone(), leaf.layout_revision))
+            })
+            .collect::<Vec<_>>();
+        revisions.sort_by(|a, b| a.0.cmp(&b.0));
+        revisions
+    }
+
+    fn changed_layout_buffers(before: &[(String, u64)], after: &[(String, u64)]) -> Vec<String> {
+        let before = before
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashMap<_, _>>();
+        after
+            .iter()
+            .filter_map(|(name, revision)| {
+                (before.get(name).copied() != Some(*revision)).then(|| name.clone())
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "perf probe: initializes the real metal_seq app graph and loads crates/sequencer/projects/92.json"]
+    fn project_92_mixer_track_badge_switch_reports_layout_work() {
+        std::thread::Builder::new()
+            .name("project-92-track-switch-probe".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(project_92_mixer_track_badge_switch_reports_layout_work_impl)
+            .expect("spawn project 92 track switch probe")
+            .join()
+            .expect("project 92 track switch probe should pass");
+    }
+
+    fn project_92_mixer_track_badge_switch_reports_layout_work_impl() {
+        use super::*;
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use std::collections::HashSet;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+
+        fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        }
+
+        let _dir = SequencerDirGuard::enter();
+        assert!(
+            Path::new("projects/92.json").exists(),
+            "project 92 must be available at crates/sequencer/projects/92.json"
+        );
+
+        let eng = engine::init_headless_engine(44_100, 2).expect("initialize headless app graph");
+        let lg_raw = eng.lg_ptr.0;
+        let state = eng.state.clone();
+        let lg_ptr = eng.lg_ptr;
+        let sample_rate = eng.sample_rate;
+        let _engine_guard = TestEngineGuard { lg_raw };
+        let _audio_pump = HeadlessAudioPump::start(lg_ptr, eng.channels as usize);
+        let master_recorder = eng.master_recorder.clone();
+        let mut app = app::App::new(
+            state.clone(),
+            lg_ptr,
+            sample_rate,
+            eng.buses,
+            eng.master_recorder,
+            eng.keyboard_tx,
+        );
+
+        let mut track_names = Vec::<String>::new();
+        let track_pan_ids = Arc::new(Mutex::new(Vec::<i32>::new()));
+        let track_collapsed = Arc::new(Mutex::new(app.track_collapsed.clone()));
+        let bus_state = Arc::new(Mutex::new(app.buses.clone()));
+        let bus_node_ids = Arc::new(Mutex::new(app.graph.bus_node_ids.clone()));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_tracks = Arc::new(Mutex::new(HashSet::<usize>::new()));
+        let track_groups = Arc::new(Mutex::new(app.groups.clone()));
+        let selected_steps = Arc::new(Mutex::new(HashSet::<usize>::new()));
+        let selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons =
+            Arc::new(Mutex::new(BTreeSet::new()));
+        let piano_roll_selection = Arc::new(Mutex::new(HashSet::<u64>::new()));
+        let piano_roll_move_state = Arc::new(Mutex::new(None));
+        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        let fx_epoch = Arc::new(AtomicUsize::new(0));
+        let ui_invalidations = Arc::new(UiInvalidationQueue::new());
+        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
+        let recording = Arc::new(AtomicBool::new(false));
+        let master_recording = Arc::new(AtomicBool::new(false));
+        let record_armed = Arc::new(Mutex::new(Vec::<bool>::new()));
+        let active_delete_target = Arc::new(Mutex::new(None));
+        let active_delete_target_version = Arc::new(AtomicUsize::new(0));
+        let auto_follow_override_until = Arc::new(Mutex::new(None));
+
+        let RuntimeInit {
+            runtime,
+            accumulator_names,
+            midi_fx_names: _,
+            sample_browser: _,
+            piano_roll_clipboard: _,
+            selected_drum_lane_steps: _,
+        } = init_runtime(
+            &app,
+            state.clone(),
+            &track_names,
+            track_pan_ids.clone(),
+            track_collapsed.clone(),
+            bus_state.clone(),
+            bus_node_ids.clone(),
+            current_track.clone(),
+            selected_tracks.clone(),
+            track_groups.clone(),
+            selected_steps.clone(),
+            piano_roll_selection.clone(),
+            piano_roll_move_state,
+            recording.clone(),
+            master_recording.clone(),
+            master_recorder.clone(),
+            record_armed.clone(),
+            ui_epoch.clone(),
+            fx_epoch.clone(),
+            ui_invalidations.clone(),
+            expanded_step_projection.clone(),
+            selected_neural_neurons.clone(),
+            active_delete_target.clone(),
+            active_delete_target_version.clone(),
+            auto_follow_override_until.clone(),
+            lg_raw,
+        );
+
+        let mut editor = Editor::new(
+            runtime,
+            eseqlisp::EditorConfig {
+                vim_mode: true,
+                ..eseqlisp::EditorConfig::default()
+            },
+        );
+        reload_custom_instrument_ui(&mut editor);
+        let _ = editor.open_or_create_file_buffer(UI_ENTRYPOINT_PATH);
+        let grid_source = editor.active_buffer().text();
+        let overlays = editor.snapshot_file_backed_sources();
+        let report = editor.runtime_mut().eval_source_transactional(
+            Some(std::path::PathBuf::from(UI_ENTRYPOINT_PATH)),
+            &grid_source,
+            overlays,
+        );
+        assert!(
+            report.success,
+            "failed to load grid UI: {}",
+            report.failure_message()
+        );
+        editor.process_lisp_reload_report(report);
+        editor.refresh_runtime_side_effects();
+        reload_custom_instrument_ui(&mut editor);
+        editor.set_layout_viewport(180, 70);
+        editor.update_tile_rects(180, 70);
+        let _ = editor.drain_host_commands();
+
+        app.queue_project_load_named("92")
+            .expect("queue project 92 load");
+        for _ in 0..512 {
+            if !app.has_pending_project_load() {
+                break;
+            }
+            app.advance_pending_project_load()
+                .expect("advance project 92 load");
+        }
+        assert!(
+            !app.has_pending_project_load(),
+            "project 92 load did not finish"
+        );
+        assert!(
+            app.tracks.len() >= 2,
+            "project 92 should have multiple tracks"
+        );
+
+        current_track.store(0, Ordering::Relaxed);
+        *track_pan_ids.lock().unwrap() = app
+            .graph
+            .track_node_ids
+            .iter()
+            .map(|ids| ids.pan_id)
+            .collect();
+        *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
+        *record_armed.lock().unwrap() = vec![false; app.tracks.len()];
+        sync_shared_track_collapsed(&track_collapsed, &app);
+        push_project_scratch_to_named_buffer(&mut editor, &app);
+        if let Err(error) = evaluate_project_scratch_on_ui_runtime(&mut editor, &app) {
+            editor.handle_host_event(HostEvent::Status(format!("Scratch UI eval error: {error}")));
+        }
+
+        let cached_track_peak_levels = vec![0.0; track_names.len()];
+        let cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+        let (cached_modulator_phases, cached_modulator_levels) =
+            read_modulator_display_values(app.graph.lg, &app);
+
+        {
+            let rt = editor.runtime_mut();
+            sync_project_state(rt, &app);
+            sync_track_topology_state(
+                rt,
+                &app,
+                &state,
+                &mut track_names,
+                0,
+                &selected_steps,
+                &piano_roll_selection,
+                &accumulator_names,
+                &record_armed,
+                &cached_track_peak_levels,
+            );
+            rt.set_reactive(
+                "SEQ",
+                "selected-steps",
+                build_selection_value(&selected_steps),
+            );
+            rt.set_reactive(
+                "SEQ",
+                "bus-effects",
+                build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
+            );
+            sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+            sync_modulator_phase_fields(rt, &cached_modulator_phases);
+            sync_modulator_level_fields(rt, &cached_modulator_levels);
+            sync_mixer_delete_target_binding_fields(
+                rt,
+                app.tracks.len(),
+                &state,
+                active_delete_target.lock().unwrap().as_ref(),
+            );
+            rt.set_reactive(
+                "SEQ",
+                "delete-target-version",
+                Value::Number(active_delete_target_version.load(Ordering::Relaxed) as f64),
+            );
+            rt.run_reactive_cycle();
+        }
+        editor.refresh_runtime_side_effects();
+        refresh_visible_track_topology_layouts(&mut editor);
+        editor.update_tile_rects(180, 70);
+        let _ = editor.drain_host_commands();
+
+        let mixer_buffer_idx = editor
+            .buffers
+            .iter()
+            .position(|buffer| buffer.name == "*mixer*")
+            .expect("mixer buffer");
+        let mixer_tile = editor
+            .tile_root
+            .find_leaf_by_buffer_idx(mixer_buffer_idx)
+            .expect("visible mixer tile");
+        let mixer_tile_id = mixer_tile.id;
+        editor.switch_active_tile(mixer_tile_id);
+        let mixer_layout = editor.widget_layout().expect("mixer active layout");
+        let target_track = 1usize;
+        let target_badge = find_layout_node_by_stable_key(
+            &mixer_layout,
+            &format!("mixer-v2-track-label-{target_track}"),
+        )
+        .expect("target mixer track badge");
+        let click_col = target_badge.rect.col + target_badge.rect.width * 0.5;
+        let click_row = target_badge.rect.row + target_badge.rect.height * 0.5;
+        let content_width = mixer_layout.rect.width.ceil().max(1.0) as u16;
+        let content_height = mixer_layout.rect.height.ceil().max(1.0) as u16;
+        let before_revisions = visible_layout_revisions(&editor);
+
+        let measured = Instant::now();
+        let phase = Instant::now();
+        editor.handle_mouse_precise(
+            mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                click_col.floor() as u16,
+                click_row.floor() as u16,
+            ),
+            0,
+            0,
+            content_width,
+            content_height,
+            click_col,
+            click_row,
+        );
+        let commands = editor.drain_host_commands();
+        let click_dispatch = phase.elapsed();
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                HostCommand::Custom { name, .. } if name == "reveal-sequencer-track"
+            )),
+            "mixer track badge click should queue reveal-sequencer-track, got {commands:?}"
+        );
+        assert_eq!(
+            current_track.load(Ordering::Relaxed),
+            target_track,
+            "mixer track badge click should select the target track"
+        );
+
+        let phase = Instant::now();
+        let ct =
+            current_track_for_app(&mut app, &current_track).expect("current track after click");
+        editor.reset_widget_scroll_for_buffer_named("*metal*");
+        editor.reset_widget_scroll_for_buffer_named("*fx*");
+        editor
+            .runtime_mut()
+            .eval_str("(set! selected-bus -1)")
+            .expect("clear selected bus");
+        reset_sampler_waveform_view(&mut editor);
+        let pre_sync = phase.elapsed();
+
+        let phase = Instant::now();
+        {
+            let rt = editor.runtime_mut();
+            sync_track_topology_state(
+                rt,
+                &app,
+                &state,
+                &mut track_names,
+                ct,
+                &selected_steps,
+                &piano_roll_selection,
+                &accumulator_names,
+                &record_armed,
+                &cached_track_peak_levels,
+            );
+        }
+        let topology_sync = phase.elapsed();
+
+        let phase = Instant::now();
+        {
+            let rt = editor.runtime_mut();
+            rt.set_reactive(
+                "SEQ",
+                "selected-steps",
+                build_selection_value(&selected_steps),
+            );
+            rt.set_reactive(
+                "SEQ",
+                "bus-effects",
+                build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
+            );
+            sync_mixer_delete_target_binding_fields(
+                rt,
+                app.tracks.len(),
+                &state,
+                active_delete_target.lock().unwrap().as_ref(),
+            );
+            rt.set_reactive(
+                "SEQ",
+                "delete-target-version",
+                Value::Number(active_delete_target_version.load(Ordering::Relaxed) as f64),
+            );
+            rt.run_reactive_cycle();
+        }
+        let reactive_cycle = phase.elapsed();
+
+        let phase = Instant::now();
+        editor.refresh_runtime_side_effects();
+        let runtime_side_effects = phase.elapsed();
+
+        let phase = Instant::now();
+        reveal_sequencer_current_track(&mut editor, &app, ct);
+        let sequencer_reveal = phase.elapsed();
+
+        let phase = Instant::now();
+        editor.mark_needs_redraw();
+        let redraw_mark = phase.elapsed();
+        let elapsed = measured.elapsed();
+
+        let after_revisions = visible_layout_revisions(&editor);
+        let changed_buffers = changed_layout_buffers(&before_revisions, &after_revisions);
+        let trace = editor
+            .runtime()
+            .last_ui_invalidation_trace()
+            .expect("track switch should produce an invalidation trace");
+        let mut relayout_timings = Vec::<(String, String, f64)>::new();
+        if trace.relayout_duration > std::time::Duration::ZERO {
+            relayout_timings.push((
+                editor.active_buffer().name.clone(),
+                format!(
+                    "active-{}",
+                    trace.relayout_mode.as_deref().unwrap_or("unknown")
+                ),
+                trace.relayout_duration.as_secs_f64() * 1000.0,
+            ));
+        }
+        relayout_timings.extend(editor.last_layout_refresh_timings().iter().map(|timing| {
+            (
+                timing.buffer_name.clone(),
+                format!(
+                    "inactive-{}-tile-{}",
+                    timing.mode,
+                    timing
+                        .tile_id
+                        .map(|tile_id| tile_id.to_string())
+                        .unwrap_or_else(|| "-".to_string())
+                ),
+                timing.elapsed.as_secs_f64() * 1000.0,
+            )
+        }));
+        relayout_timings.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let worst_relayout = relayout_timings.first().cloned();
+
+        eprintln!(
+            "[project-92-track-switch] track=1 elapsed_ms={:.3} click_dispatch_ms={:.3} pre_sync_ms={:.3} topology_sync_ms={:.3} reactive_cycle_ms={:.3} runtime_side_effects_ms={:.3} sequencer_reveal_ms={:.3} redraw_mark_ms={:.3} changed_layout_buffers={:?} sequencer_relayout={} relayout_timings={:?} worst_relayout={:?} dirty_fields={} affected_buffers={:?} widget_tree_flushes={} full_reruns={} subtree_reruns={} relayout_mode={:?} relayout_ms={:.3} relayout_failure={:?}",
+            elapsed.as_secs_f64() * 1000.0,
+            click_dispatch.as_secs_f64() * 1000.0,
+            pre_sync.as_secs_f64() * 1000.0,
+            topology_sync.as_secs_f64() * 1000.0,
+            reactive_cycle.as_secs_f64() * 1000.0,
+            runtime_side_effects.as_secs_f64() * 1000.0,
+            sequencer_reveal.as_secs_f64() * 1000.0,
+            redraw_mark.as_secs_f64() * 1000.0,
+            changed_buffers,
+            changed_buffers.iter().any(|name| name == "*sequencer*"),
+            relayout_timings,
+            worst_relayout,
+            trace.dirty_fields.len(),
+            trace.affected_buffers,
+            trace.widget_tree_flushes,
+            trace.full_buffer_reruns,
+            trace.subtree_reruns,
+            trace.relayout_mode,
+            trace.relayout_duration.as_secs_f64() * 1000.0,
+            trace.relayout_failure_reason,
+        );
+
+        assert!(
+            changed_buffers.iter().any(|name| name == "*fx*"),
+            "fx layout should change after selecting a different track"
+        );
+        assert!(
+            !changed_buffers.iter().any(|name| name == "*sequencer*"),
+            "sequencer should reveal the selected track from its cached layout without relayout"
+        );
+        assert!(
+            !trace.affected_buffers.iter().any(|name| name == "*mixer*"),
+            "mixer track badge selection should use widget bindings instead of rerunning the mixer widget tree"
+        );
+        assert_eq!(
+            trace.subtree_reruns, 0,
+            "track switch should not rerun mixer/sequencer subtree work for badge styling"
+        );
+        assert!(
+            trace.widget_tree_flushes > 0,
+            "track switch should report widget tree work"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf probe: initializes the real metal_seq app graph and loads crates/sequencer/projects/92.json"]
+    fn project_92_scene_switch_reports_layout_work() {
+        std::thread::Builder::new()
+            .name("project-92-scene-switch-probe".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::SceneSwitch))
+            .expect("spawn project 92 scene switch probe")
+            .join()
+            .expect("project 92 scene switch probe should pass");
+    }
+
+    #[test]
+    #[ignore = "release-mode perf probe: focuses a non-sequencer tile, sends Escape through the real binding and invalidation path, builds the tiled frame, and refreshes the retained Metal primitive scene"]
+    fn project_92_escape_clears_48_of_64_selected_steps_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-escape-selection-probe".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::EscapeDeselect))
+            .expect("spawn project 92 Escape selection probe")
+            .join()
+            .expect("project 92 Escape selection probe should pass");
+    }
+
+    #[test]
+    #[ignore = "release-mode perf probe: compares a three-target instrument-rack macro with a direct rack number-picker through the real mouse, host-command, reactive, tiled-frame, and retained-render paths"]
+    fn project_92_rack_macro_drag_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-rack-macro-drag-probe".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::RackMacroDrag))
+            .expect("spawn project 92 rack macro drag probe")
+            .join()
+            .expect("project 92 rack macro drag probe should pass");
+    }
+
+    #[test]
+    #[ignore = "release-mode perf probe: exercises sequencer Cmd+A and real step pointer gestures through host mutation, targeted invalidation, tiled-frame, and retained-render paths"]
+    fn project_92_step_interactions_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-step-interactions-probe".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::StepInteractions))
+            .expect("spawn project 92 step interaction probe")
+            .join()
+            .expect("project 92 step interaction probe should pass");
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Project92UiProbe {
+        SceneSwitch,
+        EscapeDeselect,
+        RackMacroDrag,
+        StepInteractions,
+    }
+
+    fn project_92_ui_performance_probe_impl(probe: Project92UiProbe) {
+        use super::*;
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use std::collections::HashSet;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        fn duration_ms(duration: Duration) -> f64 {
+            duration.as_secs_f64() * 1000.0
+        }
+
+        fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        }
+
+        let _dir = SequencerDirGuard::enter();
+        assert!(
+            Path::new("projects/92.json").exists(),
+            "project 92 must be available at crates/sequencer/projects/92.json"
+        );
+
+        let eng = engine::init_headless_engine(44_100, 2).expect("initialize headless app graph");
+        let lg_raw = eng.lg_ptr.0;
+        let state = eng.state.clone();
+        let lg_ptr = eng.lg_ptr;
+        let sample_rate = eng.sample_rate;
+        let _engine_guard = TestEngineGuard { lg_raw };
+        let _audio_pump = HeadlessAudioPump::start(lg_ptr, eng.channels as usize);
+        let master_recorder = eng.master_recorder.clone();
+        let mut app = app::App::new(
+            state.clone(),
+            lg_ptr,
+            sample_rate,
+            eng.buses,
+            eng.master_recorder,
+            eng.keyboard_tx,
+        );
+
+        let mut track_names = Vec::<String>::new();
+        let track_pan_ids = Arc::new(Mutex::new(Vec::<i32>::new()));
+        let track_collapsed = Arc::new(Mutex::new(app.track_collapsed.clone()));
+        let bus_state = Arc::new(Mutex::new(app.buses.clone()));
+        let bus_node_ids = Arc::new(Mutex::new(app.graph.bus_node_ids.clone()));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_tracks = Arc::new(Mutex::new(HashSet::<usize>::new()));
+        let track_groups = Arc::new(Mutex::new(app.groups.clone()));
+        let selected_steps = Arc::new(Mutex::new(HashSet::<usize>::new()));
+        let selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons =
+            Arc::new(Mutex::new(BTreeSet::new()));
+        let piano_roll_selection = Arc::new(Mutex::new(HashSet::<u64>::new()));
+        let piano_roll_move_state = Arc::new(Mutex::new(None));
+        let ui_epoch = Arc::new(AtomicUsize::new(0));
+        let fx_epoch = Arc::new(AtomicUsize::new(0));
+        let ui_invalidations = Arc::new(UiInvalidationQueue::new());
+        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
+        let recording = Arc::new(AtomicBool::new(false));
+        let master_recording = Arc::new(AtomicBool::new(false));
+        let record_armed = Arc::new(Mutex::new(Vec::<bool>::new()));
+        let active_delete_target = Arc::new(Mutex::new(None));
+        let active_delete_target_version = Arc::new(AtomicUsize::new(0));
+        let auto_follow_override_until = Arc::new(Mutex::new(None));
+
+        let RuntimeInit {
+            runtime,
+            accumulator_names,
+            midi_fx_names: _,
+            sample_browser: _,
+            piano_roll_clipboard: _,
+            selected_drum_lane_steps: _,
+        } = init_runtime(
+            &app,
+            state.clone(),
+            &track_names,
+            track_pan_ids.clone(),
+            track_collapsed.clone(),
+            bus_state.clone(),
+            bus_node_ids.clone(),
+            current_track.clone(),
+            selected_tracks.clone(),
+            track_groups.clone(),
+            selected_steps.clone(),
+            piano_roll_selection.clone(),
+            piano_roll_move_state,
+            recording.clone(),
+            master_recording.clone(),
+            master_recorder.clone(),
+            record_armed.clone(),
+            ui_epoch.clone(),
+            fx_epoch.clone(),
+            ui_invalidations.clone(),
+            expanded_step_projection.clone(),
+            selected_neural_neurons.clone(),
+            active_delete_target.clone(),
+            active_delete_target_version.clone(),
+            auto_follow_override_until.clone(),
+            lg_raw,
+        );
+
+        let mut editor = Editor::new(
+            runtime,
+            eseqlisp::EditorConfig {
+                vim_mode: true,
+                ..eseqlisp::EditorConfig::default()
+            },
+        );
+        reload_custom_instrument_ui(&mut editor);
+        let _ = editor.open_or_create_file_buffer(UI_ENTRYPOINT_PATH);
+        let grid_source = editor.active_buffer().text();
+        let overlays = editor.snapshot_file_backed_sources();
+        let report = editor.runtime_mut().eval_source_transactional(
+            Some(std::path::PathBuf::from(UI_ENTRYPOINT_PATH)),
+            &grid_source,
+            overlays,
+        );
+        assert!(
+            report.success,
+            "failed to load grid UI: {}",
+            report.failure_message()
+        );
+        editor.process_lisp_reload_report(report);
+        editor.refresh_runtime_side_effects();
+        reload_custom_instrument_ui(&mut editor);
+        editor.set_layout_viewport(180, 70);
+        editor.update_tile_rects(180, 70);
+        let _ = editor.drain_host_commands();
+
+        app.queue_project_load_named("92")
+            .expect("queue project 92 load");
+        for _ in 0..512 {
+            if !app.has_pending_project_load() {
+                break;
+            }
+            app.advance_pending_project_load()
+                .expect("advance project 92 load");
+        }
+        assert!(
+            !app.has_pending_project_load(),
+            "project 92 load did not finish"
+        );
+        assert!(
+            app.state.scene_count() >= 2,
+            "project 92 should have multiple scenes"
+        );
+
+        if probe == Project92UiProbe::RackMacroDrag {
+            app.load_rack_preset_onto_track(0, "rifton")
+                .expect("load realistic instrument rack fixture");
+            let slot = state.pattern.rack_tracks.lock().unwrap()[0]
+                .as_ref()
+                .expect("rack fixture track")
+                .slots[0]
+                .clone();
+            let descriptor = app
+                .rack_slot_instrument_descriptor(&slot)
+                .expect("rack fixture instrument descriptor");
+            let mappings = descriptor
+                .params
+                .iter()
+                .enumerate()
+                .take(3)
+                .map(
+                    |(param_index, param)| sequencer::sequencer::RackMacroMapping {
+                        target: sequencer::sequencer::RackMacroTarget::SlotInstrumentParam {
+                            slot: 0,
+                            param: param.name.clone(),
+                            param_index,
+                        },
+                        range_min: param.min,
+                        range_max: param.max,
+                        curve: sequencer::sequencer::RackMacroCurve::Linear,
+                    },
+                )
+                .collect::<Vec<_>>();
+            assert_eq!(mappings.len(), 3, "rack fixture instrument parameters");
+            state.update_rack_macros_for_all_pattern_snapshots(0, |macros| {
+                macros[0].mappings = mappings.clone();
+            });
+        }
+
+        current_track.store(0, Ordering::Relaxed);
+        *track_pan_ids.lock().unwrap() = app
+            .graph
+            .track_node_ids
+            .iter()
+            .map(|ids| ids.pan_id)
+            .collect();
+        *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
+        *record_armed.lock().unwrap() = vec![false; app.tracks.len()];
+        sync_shared_track_collapsed(&track_collapsed, &app);
+        push_project_scratch_to_named_buffer(&mut editor, &app);
+        if let Err(error) = evaluate_project_scratch_on_ui_runtime(&mut editor, &app) {
+            editor.handle_host_event(HostEvent::Status(format!("Scratch UI eval error: {error}")));
+        }
+
+        let cached_track_peak_levels = vec![0.0; app.tracks.len()];
+        let cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+        let (cached_modulator_phases, cached_modulator_levels) =
+            read_modulator_display_values(app.graph.lg, &app);
+
+        {
+            let rt = editor.runtime_mut();
+            sync_project_state(rt, &app);
+            sync_track_topology_state(
+                rt,
+                &app,
+                &state,
+                &mut track_names,
+                0,
+                &selected_steps,
+                &piano_roll_selection,
+                &accumulator_names,
+                &record_armed,
+                &cached_track_peak_levels,
+            );
+            rt.set_reactive(
+                "SEQ",
+                "selected-steps",
+                build_selection_value(&selected_steps),
+            );
+            rt.set_reactive(
+                "SEQ",
+                "bus-effects",
+                build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
+            );
+            sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+            sync_modulator_phase_fields(rt, &cached_modulator_phases);
+            sync_modulator_level_fields(rt, &cached_modulator_levels);
+            sync_mixer_delete_target_binding_fields(
+                rt,
+                app.tracks.len(),
+                &state,
+                active_delete_target.lock().unwrap().as_ref(),
+            );
+            rt.set_reactive(
+                "SEQ",
+                "delete-target-version",
+                Value::Number(active_delete_target_version.load(Ordering::Relaxed) as f64),
+            );
+            rt.run_reactive_cycle();
+        }
+        editor.refresh_runtime_side_effects();
+        refresh_visible_track_topology_layouts(&mut editor);
+        editor.update_tile_rects(180, 70);
+        let _ = editor.drain_host_commands();
+
+        if probe == Project92UiProbe::StepInteractions {
+            const TRACK: usize = 0;
+            const STEP_COUNT: usize = 64;
+            const SELECTED_MOVE_STEPS: usize = 16;
+            const WARMUPS: usize = 5;
+            const SAMPLES: usize = 20;
+
+            let sequencer_buffer_id = editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == "*sequencer*")
+                .expect("sequencer buffer should exist")
+                .id;
+            editor.set_active_buffer(sequencer_buffer_id);
+            state.pattern.track_params[TRACK].set_num_steps(STEP_COUNT);
+            for step in 0..STEP_COUNT {
+                state.pattern.patterns[TRACK].set_step_active(step, step < 24);
+            }
+            sync_all_track_sequencer_state(
+                editor.runtime_mut(),
+                &state,
+                &app,
+                TRACK,
+                &selected_steps,
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            editor.update_tile_rects(180, 70);
+
+            let initial_frame =
+                eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+            let initial_seq_frame = initial_frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                .expect("visible initial sequencer frame");
+            let initial_layout = initial_seq_frame
+                .frame
+                .widget_layout
+                .as_ref()
+                .expect("initial sequencer layout");
+            let viewport = eseqlisp::widget_render::WidgetViewport {
+                cell_w: 8.0,
+                cell_h: 16.0,
+                vp_w: 1440.0,
+                vp_h: 1120.0,
+                time_seconds: 0.0,
+                focused_widget_id: initial_seq_frame.frame.focused_widget_id,
+                focused_branch: true,
+                overlay_viewport_bottom: 70.0,
+                scroll_top: initial_seq_frame.frame.widget_scroll_top
+                    + initial_seq_frame.frame.text_scroll_top as f32,
+                scroll_left: initial_seq_frame.frame.widget_layout_scroll_left,
+                inherited_hover: false,
+            };
+            let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                initial_layout,
+                viewport,
+                viewport.scroll_top,
+                70,
+            );
+            let retained_run_indices =
+                eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+            let step_clipboard = Arc::new(Mutex::new(None));
+            let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
+            let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
+            let step_center = |editor: &mut Editor, step: usize| {
+                let layout = editor.widget_layout().expect("sequencer layout");
+                let cell = find_layout_node_by_stable_key(
+                    &layout,
+                    &format!("seqv-step-cell-{TRACK}-{step}"),
+                )
+                .unwrap_or_else(|| panic!("visible sequencer step cell {step}"));
+                (
+                    cell.rect.col + cell.rect.width * 0.5,
+                    cell.rect.row + cell.rect.height * 0.5,
+                    layout.rect.width.ceil().max(1.0) as u16,
+                    layout.rect.height.ceil().max(1.0) as u16,
+                )
+            };
+
+            let apply_pending_step_commands = |editor: &mut Editor, app: &mut app::App| {
+                for command in editor.drain_host_commands() {
+                    let HostCommand::Custom { name, payload } = command else {
+                        continue;
+                    };
+                    match name.as_str() {
+                        "toggle-step" => {
+                            let (outcome, track, step) =
+                                apply_toggle_step_host_command(app, &payload)
+                                    .expect("apply benchmark step toggle");
+                            assert!(matches!(outcome, app::edit::EditOutcome::Applied(_)));
+                            selected_steps.lock().unwrap().clear();
+                            ui_invalidations.push(UiInvalidation::StepBatch {
+                                track,
+                                steps: vec![step],
+                            });
+                        }
+                        "move-step-history" => {
+                            let (outcome, track, steps, affected_steps, delta, move_selection) =
+                                apply_move_step_history_host_command(app, &payload)
+                                    .expect("apply benchmark step move");
+                            assert!(matches!(outcome, app::edit::EditOutcome::Applied(_)));
+                            let moved_steps = steps
+                                .iter()
+                                .map(|step| (*step as isize + delta) as usize)
+                                .collect::<Vec<_>>();
+                            let mut changed_selection = Vec::new();
+                            if move_selection {
+                                let mut selected = selected_steps.lock().unwrap();
+                                let previous = selected.clone();
+                                selected.clear();
+                                selected.extend(moved_steps.iter().copied());
+                                changed_selection = previous
+                                    .symmetric_difference(&selected)
+                                    .copied()
+                                    .collect();
+                                changed_selection.sort_unstable();
+                            }
+                            ui_invalidations.push(UiInvalidation::StepBatch {
+                                track,
+                                steps: affected_steps,
+                            });
+                            if move_selection {
+                                ui_invalidations.push(UiInvalidation::StepSelection {
+                                    track,
+                                    changed_steps: changed_selection,
+                                });
+                            }
+                        }
+                        other => panic!("unexpected benchmark host command {other}"),
+                    }
+                }
+            };
+
+            let neural = selected_neural_neurons.lock().unwrap().clone();
+            let mut finish_visible_update = |editor: &mut Editor, app: &mut app::App| {
+                let started = Instant::now();
+                let invalidations = ui_invalidations.drain();
+                if !invalidations.is_empty() {
+                    apply_ui_invalidations(
+                        invalidations,
+                        UiInvalidationApplyCtx {
+                            app,
+                            editor,
+                            state: &state,
+                            track_collapsed: &track_collapsed,
+                            bus_state: &bus_state,
+                            current_track_idx: TRACK,
+                            selected_steps: &selected_steps,
+                            selected_neural_neurons: &neural,
+                            piano_roll_selection: &piano_roll_selection,
+                            accumulator_names: &accumulator_names,
+                            cached_track_peak_levels: &cached_track_peak_levels,
+                            cached_bus_peak_levels: &cached_bus_peak_levels,
+                            record_armed: &record_armed,
+                            active_delete_target: &active_delete_target,
+                            active_delete_target_version: &active_delete_target_version,
+                            expanded_step_projection: &expanded_step_projection,
+                            fx_visible,
+                            sequencer_visible: true,
+                            mixer_visible,
+                        },
+                    );
+                }
+                let invalidations_done = Instant::now();
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                let reactive_done = Instant::now();
+                let frame =
+                    eseqlisp::frame::build_tiled_render_frame_borderless(editor, 180, 70);
+                let seq_frame = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                    .expect("visible sequencer frame after benchmark action");
+                let layout = seq_frame
+                    .frame
+                    .widget_layout
+                    .as_ref()
+                    .expect("sequencer layout after benchmark action");
+                let frame_done = Instant::now();
+                let (_, stats) =
+                    eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        layout,
+                        viewport,
+                        viewport.scroll_top,
+                        70,
+                        &mut retained_runs,
+                        &retained_run_indices,
+                        &seq_frame.frame.dirty_widget_ids,
+                    );
+                assert_eq!(stats.missing_previous_runs, 0);
+                assert_eq!(stats.invalid_previous_runs, 0);
+                let retained_done = Instant::now();
+                (
+                    duration_ms(invalidations_done - started),
+                    duration_ms(reactive_done - invalidations_done),
+                    duration_ms(frame_done - reactive_done),
+                    duration_ms(retained_done - frame_done),
+                )
+            };
+
+            let percentile = |samples: &mut Vec<f64>, fraction: f64| {
+                samples.sort_by(|a, b| a.total_cmp(b));
+                let index = ((samples.len() - 1) as f64 * fraction).round() as usize;
+                samples[index]
+            };
+            let mut select_one_samples = Vec::with_capacity(SAMPLES);
+            let mut select_all_samples = Vec::with_capacity(SAMPLES);
+            let mut move_samples = Vec::with_capacity(SAMPLES);
+            let mut toggle_drag_samples = Vec::with_capacity(SAMPLES);
+            let mut select_one_dispatch = Vec::with_capacity(SAMPLES);
+            let mut select_all_dispatch = Vec::with_capacity(SAMPLES);
+            let mut move_dispatch = Vec::with_capacity(SAMPLES);
+            let mut toggle_drag_dispatch = Vec::with_capacity(SAMPLES);
+            let mut move_invalidation = Vec::with_capacity(SAMPLES);
+            let mut move_reactive = Vec::with_capacity(SAMPLES);
+            let mut move_frame = Vec::with_capacity(SAMPLES);
+            let mut move_retained = Vec::with_capacity(SAMPLES);
+
+            for iteration in 0..(WARMUPS + SAMPLES) {
+                selected_steps.lock().unwrap().clear();
+                ui_invalidations.push(UiInvalidation::StepSelection {
+                    track: TRACK,
+                    changed_steps: (0..STEP_COUNT).collect(),
+                });
+                finish_visible_update(&mut editor, &mut app);
+                let (col, row, width, height) = step_center(&mut editor, 8);
+                let started = Instant::now();
+                editor.handle_mouse_precise(
+                    MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: col.floor() as u16,
+                        row: row.floor() as u16,
+                        modifiers: KeyModifiers::SHIFT,
+                    },
+                    0,
+                    0,
+                    width,
+                    height,
+                    col,
+                    row,
+                );
+                apply_pending_step_commands(&mut editor, &mut app);
+                let dispatch_done = Instant::now();
+                finish_visible_update(&mut editor, &mut app);
+                assert_eq!(*selected_steps.lock().unwrap(), HashSet::from([8]));
+                if iteration >= WARMUPS {
+                    select_one_samples.push(duration_ms(started.elapsed()));
+                    select_one_dispatch.push(duration_ms(dispatch_done - started));
+                }
+
+                selected_steps.lock().unwrap().clear();
+                ui_invalidations.push(UiInvalidation::StepSelection {
+                    track: TRACK,
+                    changed_steps: (0..STEP_COUNT).collect(),
+                });
+                finish_visible_update(&mut editor, &mut app);
+                let started = Instant::now();
+                assert!(handle_metal_command_shortcut_with_ui_epoch(
+                    &mut editor,
+                    &crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Char('a'),
+                        KeyModifiers::SUPER,
+                    ),
+                    &state,
+                    &current_track,
+                    &selected_steps,
+                    &step_clipboard,
+                    &ui_epoch,
+                ));
+                let dispatch_done = Instant::now();
+                finish_visible_update(&mut editor, &mut app);
+                assert_eq!(selected_steps.lock().unwrap().len(), STEP_COUNT);
+                if iteration >= WARMUPS {
+                    select_all_samples.push(duration_ms(started.elapsed()));
+                    select_all_dispatch.push(duration_ms(dispatch_done - started));
+                }
+
+                for step in 0..STEP_COUNT {
+                    state.pattern.patterns[TRACK].set_step_active(
+                        step,
+                        step >= 8 && step < 8 + SELECTED_MOVE_STEPS,
+                    );
+                }
+                {
+                    let mut selected = selected_steps.lock().unwrap();
+                    selected.clear();
+                    selected.extend(8..8 + SELECTED_MOVE_STEPS);
+                }
+                ui_invalidations.push(UiInvalidation::Pattern(
+                    PatternInvalidation::WholeTrack { track: TRACK },
+                ));
+                ui_invalidations.push(UiInvalidation::StepSelection {
+                    track: TRACK,
+                    changed_steps: (0..STEP_COUNT).collect(),
+                });
+                finish_visible_update(&mut editor, &mut app);
+                assert_eq!(
+                    editor.runtime_mut().eval_str("(step-selected? 8)").unwrap(),
+                    Some(Value::Bool(true)),
+                    "move fixture must expose step 8 as selected to the gesture Lisp",
+                );
+                assert_eq!(
+                    editor
+                        .runtime_mut()
+                        .eval_str("(seq-track-step-active? 0 8)")
+                        .unwrap(),
+                    Some(Value::Bool(true)),
+                    "move fixture must expose step 8 as active to the gesture Lisp",
+                );
+                assert_eq!(
+                    editor.runtime_mut().eval_str("SEQ.current-track").unwrap(),
+                    Some(Value::Number(0.0)),
+                    "move fixture must target the visible current track",
+                );
+                let (_, _, width, height) = step_center(&mut editor, 8);
+                let (target_col, target_row, _, _) = step_center(&mut editor, 9);
+                // Arm the exact production pointer-down handler with an
+                // explicit left-edge local coordinate. The timed operation is
+                // the subsequent real mouse drag tick; pointer-down is a
+                // precondition and is intentionally outside the sample.
+                editor
+                    .runtime_mut()
+                    .eval_str("(seqv-step-pointer-down 0 8 (dict :sx -1))")
+                    .expect("arm selected-step move gesture");
+                assert_eq!(
+                    editor.runtime_mut().eval_str("step-move-last").unwrap(),
+                    Some(Value::Number(8.0)),
+                    "pointer down on the selected active step must arm move dragging",
+                );
+                let started = Instant::now();
+                editor.handle_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Drag(MouseButton::Left),
+                        target_col.floor() as u16,
+                        target_row.floor() as u16,
+                    ),
+                    0,
+                    0,
+                    width,
+                    height,
+                    target_col,
+                    target_row,
+                );
+                apply_pending_step_commands(&mut editor, &mut app);
+                let dispatch_done = Instant::now();
+                let move_visible_phases = finish_visible_update(&mut editor, &mut app);
+                assert_eq!(
+                    *selected_steps.lock().unwrap(),
+                    (9..9 + SELECTED_MOVE_STEPS).collect::<HashSet<_>>()
+                );
+                if iteration >= WARMUPS {
+                    move_samples.push(duration_ms(started.elapsed()));
+                    move_dispatch.push(duration_ms(dispatch_done - started));
+                    move_invalidation.push(move_visible_phases.0);
+                    move_reactive.push(move_visible_phases.1);
+                    move_frame.push(move_visible_phases.2);
+                    move_retained.push(move_visible_phases.3);
+                }
+                editor
+                    .runtime_mut()
+                    .eval_str("(seqv-step-pointer-up 0 9 (dict :sx -1))")
+                    .expect("finish benchmark selected-step drag");
+
+                selected_steps.lock().unwrap().clear();
+                state.pattern.patterns[TRACK].set_step_active(32, false);
+                state.pattern.patterns[TRACK].set_step_active(33, false);
+                ui_invalidations.push(UiInvalidation::Pattern(
+                    PatternInvalidation::WholeTrack { track: TRACK },
+                ));
+                finish_visible_update(&mut editor, &mut app);
+                let (start_col, start_row, width, height) = step_center(&mut editor, 32);
+                let (target_col, target_row, _, _) = step_center(&mut editor, 33);
+                editor.handle_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Down(MouseButton::Left),
+                        start_col.floor() as u16,
+                        start_row.floor() as u16,
+                    ),
+                    0,
+                    0,
+                    width,
+                    height,
+                    start_col,
+                    start_row,
+                );
+                apply_pending_step_commands(&mut editor, &mut app);
+                finish_visible_update(&mut editor, &mut app);
+                let started = Instant::now();
+                editor.handle_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Drag(MouseButton::Left),
+                        target_col.floor() as u16,
+                        target_row.floor() as u16,
+                    ),
+                    0,
+                    0,
+                    width,
+                    height,
+                    target_col,
+                    target_row,
+                );
+                apply_pending_step_commands(&mut editor, &mut app);
+                let dispatch_done = Instant::now();
+                finish_visible_update(&mut editor, &mut app);
+                assert!(state.pattern.patterns[TRACK].is_active(33));
+                if iteration >= WARMUPS {
+                    toggle_drag_samples.push(duration_ms(started.elapsed()));
+                    toggle_drag_dispatch.push(duration_ms(dispatch_done - started));
+                }
+                editor
+                    .runtime_mut()
+                    .eval_str("(seqv-step-pointer-up 0 33 (dict :sx -1))")
+                    .expect("finish benchmark toggle drag");
+            }
+
+            // Medians recorded by this same release-mode, end-to-end probe on
+            // project 92 before the targeted invalidation work.
+            for (name, reference_ms, samples, dispatch) in [
+                ("select-one", 8.251, &mut select_one_samples, &mut select_one_dispatch),
+                ("cmd-a", 7.773, &mut select_all_samples, &mut select_all_dispatch),
+                ("move-16", 106.412, &mut move_samples, &mut move_dispatch),
+                ("toggle-drag", 21.020, &mut toggle_drag_samples, &mut toggle_drag_dispatch),
+            ] {
+                let median = percentile(samples, 0.50);
+                let dispatch_median = percentile(dispatch, 0.50);
+                eprintln!(
+                    "[project-92-step-{name}] tracks={} steps={} samples={} median_ms={:.3} p95_ms={:.3} speedup={:.1}x dispatch_host_ms={:.3} visible_update_ms={:.3}",
+                    app.tracks.len(),
+                    STEP_COUNT,
+                    SAMPLES,
+                    median,
+                    percentile(samples, 0.95),
+                    reference_ms / median,
+                    dispatch_median,
+                    median - dispatch_median,
+                );
+                assert!(
+                    median <= reference_ms / 10.0,
+                    "{name} median {median:.3} ms did not reach 10x versus the {reference_ms:.3} ms baseline",
+                );
+            }
+            eprintln!(
+                "[project-92-step-move-16-visible-phases] invalidation_ms={:.3} reactive_ms={:.3} frame_ms={:.3} retained_ms={:.3}",
+                percentile(&mut move_invalidation, 0.50),
+                percentile(&mut move_reactive, 0.50),
+                percentile(&mut move_frame, 0.50),
+                percentile(&mut move_retained, 0.50),
+            );
+            return;
+        }
+
+        if probe == Project92UiProbe::RackMacroDrag {
+            const TRACK: usize = 0;
+            const SELECTED_COUNT: usize = 32;
+            const WARMUPS: usize = 5;
+            const SAMPLES: usize = 20;
+            // Recorded before the optimization on this exact project/rack fixture,
+            // after replacing the old cheap slot-gain/pan/mute mappings with three
+            // real instrument-parameter mappings.
+            const REFERENCE_LIVE_MEDIAN_MS: f64 = 5.023;
+            const REFERENCE_PLOCK_MEDIAN_MS: f64 = 2.234;
+
+            struct RackMacroPerfSamples {
+                total: Vec<f64>,
+                host: Vec<f64>,
+                reactive: Vec<f64>,
+                frame: Vec<f64>,
+                retained: Vec<f64>,
+            }
+
+            let fx_buffer_id = editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == "*fx*")
+                .expect("fx buffer should exist")
+                .id;
+            editor.set_active_buffer(fx_buffer_id);
+            editor
+                .runtime_mut()
+                .eval_str("(if (not rack-panel-macros-open) (rack-panel-toggle-macros) false)")
+                .expect("open rack macro bank");
+            editor.refresh_runtime_side_effects();
+            editor.update_tile_rects(180, 70);
+
+            let percentile = |samples: &mut Vec<f64>, fraction: f64| {
+                samples.sort_by(|a, b| a.total_cmp(b));
+                let index = ((samples.len() - 1) as f64 * fraction).round() as usize;
+                samples[index]
+            };
+            let mut run_scenario = |selected_count: usize| {
+                selected_steps.lock().unwrap().clear();
+                selected_steps.lock().unwrap().extend(0..selected_count);
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "selected-steps",
+                    build_selection_value(&selected_steps),
+                );
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+
+                let initial_frame =
+                    eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+                let initial_fx_frame = initial_frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*fx*")
+                    .expect("visible initial fx frame");
+                let initial_fx_layout = initial_fx_frame
+                    .frame
+                    .widget_layout
+                    .as_ref()
+                    .expect("initial fx layout");
+                let initial_viewport = eseqlisp::widget_render::WidgetViewport {
+                    cell_w: 8.0,
+                    cell_h: 16.0,
+                    vp_w: 1440.0,
+                    vp_h: 1120.0,
+                    time_seconds: 0.0,
+                    focused_widget_id: initial_fx_frame.frame.focused_widget_id,
+                    focused_branch: true,
+                    overlay_viewport_bottom: 70.0,
+                    scroll_top: initial_fx_frame.frame.widget_scroll_top
+                        + initial_fx_frame.frame.text_scroll_top as f32,
+                    scroll_left: initial_fx_frame.frame.widget_layout_scroll_left,
+                    inherited_hover: false,
+                };
+                let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                    initial_fx_layout,
+                    initial_viewport,
+                    initial_viewport.scroll_top,
+                    70,
+                );
+                let retained_run_indices =
+                    eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+
+                let mut samples = RackMacroPerfSamples {
+                    total: Vec::with_capacity(SAMPLES),
+                    host: Vec::with_capacity(SAMPLES),
+                    reactive: Vec::with_capacity(SAMPLES),
+                    frame: Vec::with_capacity(SAMPLES),
+                    retained: Vec::with_capacity(SAMPLES),
+                };
+                for iteration in 0..(WARMUPS + SAMPLES) {
+                    let layout = editor.widget_layout().expect("rack macro layout");
+                    let knob = find_layout_node_by_debug_name(&layout, "rack-macro-knob-0")
+                        .expect("first rack macro knob");
+                    let col = knob.rect.col + knob.rect.width * 0.5;
+                    let row = knob.rect.row + knob.rect.height * 0.5;
+                    let target_row = if iteration % 2 == 0 {
+                        row - 1.0
+                    } else {
+                        row + 1.0
+                    };
+                    let width = layout.rect.width.ceil().max(1.0) as u16;
+                    let height = layout.rect.height.ceil().max(1.0) as u16;
+
+                    editor.handle_mouse_precise(
+                        mouse_event(
+                            MouseEventKind::Down(MouseButton::Left),
+                            col.floor() as u16,
+                            row.floor() as u16,
+                        ),
+                        0,
+                        0,
+                        width,
+                        height,
+                        col,
+                        row,
+                    );
+                    let _ = editor.drain_host_commands();
+
+                    let started = Instant::now();
+                    editor.handle_mouse_precise(
+                        mouse_event(
+                            MouseEventKind::Drag(MouseButton::Left),
+                            col.floor() as u16,
+                            target_row.floor() as u16,
+                        ),
+                        0,
+                        0,
+                        width,
+                        height,
+                        col,
+                        target_row,
+                    );
+                    let commands = editor.drain_host_commands();
+                    assert_eq!(commands.len(), 1, "macro drag commands={commands:?}");
+                    let HostCommand::Custom { name, payload } = &commands[0] else {
+                        panic!("macro drag must emit a custom command: {commands:?}");
+                    };
+                    let Value::Map(map) = payload else {
+                        panic!("macro drag payload must be a map: {payload:?}");
+                    };
+                    assert!(apply_rack_macro_host_command(
+                        name,
+                        map,
+                        &mut editor,
+                        &mut app,
+                        &state,
+                        &selected_steps,
+                        &ui_epoch,
+                        &fx_epoch,
+                    ));
+                    let host_done = Instant::now();
+                    editor.runtime_mut().run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    let reactive_done = Instant::now();
+                    let frame =
+                        eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+                    let fx_frame = frame
+                        .tiles
+                        .iter()
+                        .find(|tile| tile.frame.buffer_name == "*fx*")
+                        .expect("visible fx frame after macro drag");
+                    let fx_layout = fx_frame
+                        .frame
+                        .widget_layout
+                        .as_ref()
+                        .expect("fx layout after macro drag");
+                    let frame_done = Instant::now();
+                    let viewport = eseqlisp::widget_render::WidgetViewport {
+                        cell_w: 8.0,
+                        cell_h: 16.0,
+                        vp_w: 1440.0,
+                        vp_h: 1120.0,
+                        time_seconds: 0.0,
+                        focused_widget_id: fx_frame.frame.focused_widget_id,
+                        focused_branch: true,
+                        overlay_viewport_bottom: 70.0,
+                        scroll_top: fx_frame.frame.widget_scroll_top
+                            + fx_frame.frame.text_scroll_top as f32,
+                        scroll_left: fx_frame.frame.widget_layout_scroll_left,
+                        inherited_hover: false,
+                    };
+                    let (_, retained_stats) =
+                        eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                            fx_layout,
+                            viewport,
+                            viewport.scroll_top,
+                            70,
+                            &mut retained_runs,
+                            &retained_run_indices,
+                            &fx_frame.frame.dirty_widget_ids,
+                        );
+                    assert_eq!(retained_stats.missing_previous_runs, 0);
+                    assert_eq!(retained_stats.invalid_previous_runs, 0);
+                    assert!(
+                        !retained_runs.is_empty(),
+                        "macro drag must retain Metal runs"
+                    );
+                    let knob_wrapper =
+                        find_layout_node_by_debug_name(fx_layout, "rack-macro-knob-0")
+                            .expect("rendered first rack macro knob");
+                    let knob = find_layout_node_by_widget_type(knob_wrapper, "knob-number")
+                        .expect("rendered rack macro knob-number");
+                    assert!(layout_prop_number(knob, "value").is_some());
+                    if iteration >= WARMUPS {
+                        let retained_done = Instant::now();
+                        samples.total.push(duration_ms(started.elapsed()));
+                        samples.host.push(duration_ms(host_done - started));
+                        samples
+                            .reactive
+                            .push(duration_ms(reactive_done - host_done));
+                        samples.frame.push(duration_ms(frame_done - reactive_done));
+                        samples
+                            .retained
+                            .push(duration_ms(retained_done - frame_done));
+                    }
+                }
+                samples
+            };
+
+            // Populate frame/layout caches through the production path. The old
+            // comparison happened to do this by running its legacy scenario
+            // first, which hid the dependency from the measured samples.
+            let _unmeasured_cache_warmup = run_scenario(0);
+            let mut live_samples = run_scenario(0);
+            let _unmeasured_plock_cache_warmup = run_scenario(SELECTED_COUNT);
+            let mut plock_samples = run_scenario(SELECTED_COUNT);
+            let live_median = percentile(&mut live_samples.total, 0.50);
+            let plock_median = percentile(&mut plock_samples.total, 0.50);
+            let live_speedup = REFERENCE_LIVE_MEDIAN_MS / live_median;
+            let plock_speedup = REFERENCE_PLOCK_MEDIAN_MS / plock_median;
+            eprintln!(
+                "[project-92-rack-macro-drag] mappings=3 selected=0 samples={} reference_median_ms={:.3} median_ms={:.3} p95_ms={:.3} speedup={:.1}x",
+                SAMPLES,
+                REFERENCE_LIVE_MEDIAN_MS,
+                live_median,
+                percentile(&mut live_samples.total, 0.95),
+                live_speedup,
+            );
+            eprintln!(
+                "[project-92-rack-macro-drag] mappings=3 selected={} samples={} reference_median_ms={:.3} median_ms={:.3} p95_ms={:.3} speedup={:.1}x",
+                SELECTED_COUNT,
+                SAMPLES,
+                REFERENCE_PLOCK_MEDIAN_MS,
+                plock_median,
+                percentile(&mut plock_samples.total, 0.95),
+                plock_speedup,
+            );
+            eprintln!(
+                "[project-92-rack-macro-drag-phases] selected=0 host_ms={:.3} reactive_ms={:.3} frame_ms={:.3} retained_ms={:.3}",
+                percentile(&mut live_samples.host, 0.50),
+                percentile(&mut live_samples.reactive, 0.50),
+                percentile(&mut live_samples.frame, 0.50),
+                percentile(&mut live_samples.retained, 0.50),
+            );
+            eprintln!(
+                "[project-92-rack-macro-drag-phases] selected={} host_ms={:.3} reactive_ms={:.3} frame_ms={:.3} retained_ms={:.3}",
+                SELECTED_COUNT,
+                percentile(&mut plock_samples.host, 0.50),
+                percentile(&mut plock_samples.reactive, 0.50),
+                percentile(&mut plock_samples.frame, 0.50),
+                percentile(&mut plock_samples.retained, 0.50),
+            );
+            drop(run_scenario);
+
+            selected_steps.lock().unwrap().clear();
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                "selected-steps",
+                build_selection_value(&selected_steps),
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+
+            let initial_frame =
+                eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+            let initial_fx_frame = initial_frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == "*fx*")
+                .expect("visible initial fx frame for direct rack control");
+            let initial_fx_layout = initial_fx_frame
+                .frame
+                .widget_layout
+                .as_ref()
+                .expect("initial fx layout for direct rack control");
+            let direct_slot = state.pattern.rack_tracks.lock().unwrap()[TRACK]
+                .as_ref()
+                .expect("direct rack fixture track")
+                .slots[0]
+                .clone();
+            let direct_descriptor = app
+                .rack_slot_instrument_descriptor(&direct_slot)
+                .expect("direct rack fixture instrument descriptor");
+            let (direct_param_idx, direct_param, direct_param_key_suffix) = direct_descriptor
+                .params
+                .iter()
+                .enumerate()
+                .skip(3)
+                .find_map(|(param_idx, param)| {
+                    let is_haptic_free_continuous =
+                        matches!(param.kind, sequencer::effects::ParamKind::Continuous { .. })
+                            && (param.max - param.min).abs() <= 1.0
+                            && !sequencer::instruments::voice_modulator::is_bar_resync_param(
+                                param.node_param_idx,
+                            );
+                    let suffix = format!("-{}", param.name);
+                    (is_haptic_free_continuous
+                        && find_layout_node_by_stable_key_suffix(initial_fx_layout, &suffix)
+                            .and_then(|node| find_layout_node_by_widget_type(node, "knob-number"))
+                            .is_some())
+                    .then(|| (param_idx, param.clone(), suffix))
+                })
+                .expect("visible unmapped 0-1 rack instrument knob");
+            let initial_viewport = eseqlisp::widget_render::WidgetViewport {
+                cell_w: 8.0,
+                cell_h: 16.0,
+                vp_w: 1440.0,
+                vp_h: 1120.0,
+                time_seconds: 0.0,
+                focused_widget_id: initial_fx_frame.frame.focused_widget_id,
+                focused_branch: true,
+                overlay_viewport_bottom: 70.0,
+                scroll_top: initial_fx_frame.frame.widget_scroll_top
+                    + initial_fx_frame.frame.text_scroll_top as f32,
+                scroll_left: initial_fx_frame.frame.widget_layout_scroll_left,
+                inherited_hover: false,
+            };
+            let (mut direct_retained_runs, _) =
+                eseqlisp::widget_render::collect_metal_primitive_runs(
+                    initial_fx_layout,
+                    initial_viewport,
+                    initial_viewport.scroll_top,
+                    70,
+                );
+            let direct_retained_indices =
+                eseqlisp::widget_render::build_metal_primitive_run_index(&direct_retained_runs);
+            let mut direct_samples = RackMacroPerfSamples {
+                total: Vec::with_capacity(SAMPLES),
+                host: Vec::with_capacity(SAMPLES),
+                reactive: Vec::with_capacity(SAMPLES),
+                frame: Vec::with_capacity(SAMPLES),
+                retained: Vec::with_capacity(SAMPLES),
+            };
+            let mut direct_input_samples = Vec::with_capacity(SAMPLES);
+            let mut direct_state_samples = Vec::with_capacity(SAMPLES);
+            let mut direct_sync_samples = Vec::with_capacity(SAMPLES);
+            for iteration in 0..(WARMUPS + SAMPLES) {
+                let layout = editor.widget_layout().expect("direct rack control layout");
+                let control_wrapper =
+                    find_layout_node_by_stable_key_suffix(&layout, &direct_param_key_suffix)
+                        .expect("direct rack instrument parameter wrapper");
+                let control = find_layout_node_by_widget_type(control_wrapper, "knob-number")
+                    .expect("direct rack instrument knob");
+                let col = control.rect.col + control.rect.width * 0.5;
+                let row = control.rect.row + control.rect.height * 0.5;
+                let target_row = if iteration % 2 == 0 {
+                    row - 1.0
+                } else {
+                    row + 1.0
+                };
+                let width = layout.rect.width.ceil().max(1.0) as u16;
+                let height = layout.rect.height.ceil().max(1.0) as u16;
+                editor.handle_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Down(MouseButton::Left),
+                        col.floor() as u16,
+                        row.floor() as u16,
+                    ),
+                    0,
+                    0,
+                    width,
+                    height,
+                    col,
+                    row,
+                );
+                let _ = editor.drain_host_commands();
+
+                let started = Instant::now();
+                editor.handle_mouse_precise(
+                    mouse_event(
+                        MouseEventKind::Drag(MouseButton::Left),
+                        col.floor() as u16,
+                        target_row.floor() as u16,
+                    ),
+                    0,
+                    0,
+                    width,
+                    height,
+                    col,
+                    target_row,
+                );
+                let commands = editor.drain_host_commands();
+                let input_done = Instant::now();
+                assert_eq!(
+                    commands.len(),
+                    1,
+                    "direct rack control commands={commands:?}"
+                );
+                let HostCommand::Custom { name, payload } = &commands[0] else {
+                    panic!("direct rack control must emit a custom command: {commands:?}");
+                };
+                assert_eq!(name, "set-rack-slot-instrument-param");
+                let Value::Map(map) = payload else {
+                    panic!("direct rack control payload must be a map: {payload:?}");
+                };
+                let track = map_usize(map, "track").expect("direct rack track");
+                let slot_idx = map_usize(map, "slot").expect("direct rack slot");
+                let param_idx = map_usize(map, "param-idx").expect("direct rack param");
+                assert_eq!(param_idx, direct_param_idx);
+                let user_value = map_number(map, "value").expect("direct rack value") as f32;
+                let stored = direct_param.clamp(direct_param.user_input_to_stored(user_value));
+                app.set_rack_slot_instrument_param(track, slot_idx, param_idx, stored);
+                let state_done = Instant::now();
+                refresh_rack_direct_param_reactive(
+                    &mut editor,
+                    &app,
+                    &state,
+                    track,
+                    RackDirectDisplayTarget::InstrumentParam {
+                        slot_idx,
+                        param_idx,
+                    },
+                    &selected_steps,
+                    false,
+                    &ui_epoch,
+                );
+                let host_done = Instant::now();
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                let reactive_done = Instant::now();
+                let frame =
+                    eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+                let fx_frame = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*fx*")
+                    .expect("visible fx frame after direct rack edit");
+                let fx_layout = fx_frame
+                    .frame
+                    .widget_layout
+                    .as_ref()
+                    .expect("fx layout after direct rack edit");
+                let frame_done = Instant::now();
+                let viewport = eseqlisp::widget_render::WidgetViewport {
+                    cell_w: 8.0,
+                    cell_h: 16.0,
+                    vp_w: 1440.0,
+                    vp_h: 1120.0,
+                    time_seconds: 0.0,
+                    focused_widget_id: fx_frame.frame.focused_widget_id,
+                    focused_branch: true,
+                    overlay_viewport_bottom: 70.0,
+                    scroll_top: fx_frame.frame.widget_scroll_top
+                        + fx_frame.frame.text_scroll_top as f32,
+                    scroll_left: fx_frame.frame.widget_layout_scroll_left,
+                    inherited_hover: false,
+                };
+                let (_, retained_stats) =
+                    eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        fx_layout,
+                        viewport,
+                        viewport.scroll_top,
+                        70,
+                        &mut direct_retained_runs,
+                        &direct_retained_indices,
+                        &fx_frame.frame.dirty_widget_ids,
+                    );
+                assert_eq!(retained_stats.missing_previous_runs, 0);
+                assert_eq!(retained_stats.invalid_previous_runs, 0);
+                let rendered_wrapper =
+                    find_layout_node_by_stable_key_suffix(fx_layout, &direct_param_key_suffix)
+                        .expect("rendered direct rack instrument parameter wrapper");
+                let rendered_control =
+                    find_layout_node_by_widget_type(rendered_wrapper, "knob-number")
+                        .expect("rendered direct rack instrument knob");
+                let rendered_value = layout_prop_number(rendered_control, "value")
+                    .expect("rendered direct rack instrument value");
+                assert!((rendered_value - user_value as f64).abs() < 0.0001);
+                if iteration >= WARMUPS {
+                    let retained_done = Instant::now();
+                    direct_samples.total.push(duration_ms(started.elapsed()));
+                    direct_samples.host.push(duration_ms(host_done - started));
+                    direct_samples
+                        .reactive
+                        .push(duration_ms(reactive_done - host_done));
+                    direct_samples
+                        .frame
+                        .push(duration_ms(frame_done - reactive_done));
+                    direct_samples
+                        .retained
+                        .push(duration_ms(retained_done - frame_done));
+                    direct_input_samples.push(duration_ms(input_done - started));
+                    direct_state_samples.push(duration_ms(state_done - input_done));
+                    direct_sync_samples.push(duration_ms(host_done - state_done));
+                }
+            }
+            let direct_median = percentile(&mut direct_samples.total, 0.50);
+            eprintln!(
+                "[project-92-direct-rack-instrument-drag] param={:?} selected=0 samples={} median_ms={:.3} p95_ms={:.3} versus_macro={:.1}x slower",
+                direct_param.name,
+                SAMPLES,
+                direct_median,
+                percentile(&mut direct_samples.total, 0.95),
+                direct_median / live_median,
+            );
+            eprintln!(
+                "[project-92-direct-rack-instrument-drag-phases] host_ms={:.3} reactive_ms={:.3} frame_ms={:.3} retained_ms={:.3}",
+                percentile(&mut direct_samples.host, 0.50),
+                percentile(&mut direct_samples.reactive, 0.50),
+                percentile(&mut direct_samples.frame, 0.50),
+                percentile(&mut direct_samples.retained, 0.50),
+            );
+            eprintln!(
+                "[project-92-direct-rack-instrument-drag-host-detail] input_ms={:.3} state_ms={:.3} sync_ms={:.3}",
+                percentile(&mut direct_input_samples, 0.50),
+                percentile(&mut direct_state_samples, 0.50),
+                percentile(&mut direct_sync_samples, 0.50),
+            );
+            assert!(
+                live_speedup >= 20.0,
+                "live macro speedup={live_speedup:.1}x"
+            );
+            assert!(
+                plock_speedup >= 20.0,
+                "selected-step macro speedup={plock_speedup:.1}x"
+            );
+            return;
+        }
+
+        if probe == Project92UiProbe::EscapeDeselect {
+            const TRACK: usize = 0;
+            const STEP_COUNT: usize = 64;
+            const SELECTED_COUNT: usize = 48;
+            const WARMUPS: usize = 5;
+            const SAMPLES: usize = 20;
+
+            let sequencer_buffer_id = editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == "*sequencer*")
+                .expect("sequencer buffer should exist")
+                .id;
+            let sequencer_buffer_idx = editor
+                .buffers
+                .iter()
+                .position(|buffer| buffer.id == sequencer_buffer_id)
+                .expect("sequencer buffer index");
+            let step_buffer_idx = editor
+                .buffers
+                .iter()
+                .position(|buffer| buffer.name == "*step*")
+                .expect("step buffer index");
+            editor.set_active_buffer(sequencer_buffer_id);
+            let non_sequencer_tile = editor
+                .split_active_tile(eseqlisp::tile::SplitDir::Vertical, step_buffer_idx)
+                .expect("split visible sequencer and step tiles");
+            editor.switch_active_tile(non_sequencer_tile);
+            let focused_buffer_name = editor.active_buffer().name.clone();
+            assert_eq!(focused_buffer_name, "*step*");
+            assert!(
+                editor.tile_root.leaf_ids().into_iter().any(|tile_id| editor
+                    .tile_root
+                    .find_leaf(tile_id)
+                    .is_some_and(|leaf| leaf.buffer_idx == sequencer_buffer_idx)),
+                "the Escape benchmark must keep *sequencer* visible"
+            );
+            state.pattern.track_params[TRACK].set_num_steps(STEP_COUNT);
+            for step in 0..STEP_COUNT {
+                state.pattern.patterns[TRACK].set_step_active(step, step % 2 == 0);
+            }
+            sync_all_track_sequencer_state(
+                editor.runtime_mut(),
+                &state,
+                &app,
+                TRACK,
+                &selected_steps,
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+
+            let mut samples = Vec::with_capacity(SAMPLES);
+            for iteration in 0..(WARMUPS + SAMPLES) {
+                selected_steps.lock().unwrap().extend(0..SELECTED_COUNT);
+                let neural = selected_neural_neurons.lock().unwrap().clone();
+                apply_ui_invalidations(
+                    vec![UiInvalidation::StepSelection {
+                        track: TRACK,
+                        changed_steps: (0..SELECTED_COUNT).collect(),
+                    }],
+                    UiInvalidationApplyCtx {
+                        app: &mut app,
+                        editor: &mut editor,
+                        state: &state,
+                        track_collapsed: &track_collapsed,
+                        bus_state: &bus_state,
+                        current_track_idx: TRACK,
+                        selected_steps: &selected_steps,
+                        selected_neural_neurons: &neural,
+                        piano_roll_selection: &piano_roll_selection,
+                        accumulator_names: &accumulator_names,
+                        cached_track_peak_levels: &cached_track_peak_levels,
+                        cached_bus_peak_levels: &cached_bus_peak_levels,
+                        record_armed: &record_armed,
+                        active_delete_target: &active_delete_target,
+                        active_delete_target_version: &active_delete_target_version,
+                        expanded_step_projection: &expanded_step_projection,
+                        fx_visible: true,
+                        sequencer_visible: true,
+                        mixer_visible: true,
+                    },
+                );
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                let frame =
+                    eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+                let sequencer_frame = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                    .expect("visible sequencer frame after selection setup");
+                assert!(
+                    !sequencer_frame.frame.dirty_widget_ids.is_empty(),
+                    "selection setup from {focused_buffer_name} must dirty the visible *sequencer* step widgets"
+                );
+                let selected_layout = sequencer_frame
+                    .frame
+                    .widget_layout
+                    .as_ref()
+                    .expect("visible sequencer layout after selection setup");
+                let viewport = eseqlisp::widget_render::WidgetViewport {
+                    cell_w: 8.0,
+                    cell_h: 16.0,
+                    vp_w: 1440.0,
+                    vp_h: 1120.0,
+                    time_seconds: 0.0,
+                    focused_widget_id: sequencer_frame.frame.focused_widget_id,
+                    focused_branch: false,
+                    overlay_viewport_bottom: 70.0,
+                    scroll_top: sequencer_frame.frame.widget_scroll_top
+                        + sequencer_frame.frame.text_scroll_top as f32,
+                    scroll_left: sequencer_frame.frame.widget_layout_scroll_left,
+                    inherited_hover: false,
+                };
+                let (mut retained_runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                    selected_layout,
+                    viewport,
+                    viewport.scroll_top,
+                    70,
+                );
+                let retained_run_indices =
+                    eseqlisp::widget_render::build_metal_primitive_run_index(&retained_runs);
+                let selected_step_frame = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*step*")
+                    .expect("visible step frame after selection setup");
+                let step_viewport = eseqlisp::widget_render::WidgetViewport {
+                    focused_widget_id: selected_step_frame.frame.focused_widget_id,
+                    focused_branch: true,
+                    scroll_top: selected_step_frame.frame.widget_scroll_top
+                        + selected_step_frame.frame.text_scroll_top as f32,
+                    scroll_left: selected_step_frame.frame.widget_layout_scroll_left,
+                    ..viewport
+                };
+
+                assert!(
+                    editor.focus_widget_by_stable_key(
+                        "fx-step-param-velocity",
+                        Some("number-picker")
+                    ),
+                    "the Escape benchmark must reproduce a focused *step* number picker"
+                );
+
+                let started = Instant::now();
+                editor.handle_key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Esc,
+                    crossterm::event::KeyModifiers::NONE,
+                ));
+                let invalidations = ui_invalidations.drain();
+                assert!(
+                    selected_steps.lock().unwrap().is_empty(),
+                    "the real Escape binding must clear all selected steps"
+                );
+                assert_eq!(
+                    invalidations,
+                    vec![UiInvalidation::StepSelection {
+                        track: TRACK,
+                        changed_steps: (0..SELECTED_COUNT).collect(),
+                    }],
+                    "Escape must preserve the exact changed-step delta"
+                );
+                apply_ui_invalidations(
+                    invalidations,
+                    UiInvalidationApplyCtx {
+                        app: &mut app,
+                        editor: &mut editor,
+                        state: &state,
+                        track_collapsed: &track_collapsed,
+                        bus_state: &bus_state,
+                        current_track_idx: TRACK,
+                        selected_steps: &selected_steps,
+                        selected_neural_neurons: &neural,
+                        piano_roll_selection: &piano_roll_selection,
+                        accumulator_names: &accumulator_names,
+                        cached_track_peak_levels: &cached_track_peak_levels,
+                        cached_bus_peak_levels: &cached_bus_peak_levels,
+                        record_armed: &record_armed,
+                        active_delete_target: &active_delete_target,
+                        active_delete_target_version: &active_delete_target_version,
+                        expanded_step_projection: &expanded_step_projection,
+                        fx_visible: true,
+                        sequencer_visible: true,
+                        mixer_visible: true,
+                    },
+                );
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                let frame =
+                    eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+                let sequencer_frame = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                    .expect("visible sequencer frame after Escape");
+                assert!(
+                    !sequencer_frame.frame.dirty_widget_ids.is_empty(),
+                    "Escape from {focused_buffer_name} must dirty the visible *sequencer* step widgets in the same frame"
+                );
+                let deselected_layout = sequencer_frame
+                    .frame
+                    .widget_layout
+                    .as_ref()
+                    .expect("visible sequencer layout after Escape");
+                let (_, retained_stats) =
+                    eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                        deselected_layout,
+                        viewport,
+                        viewport.scroll_top,
+                        70,
+                        &mut retained_runs,
+                        &retained_run_indices,
+                        &sequencer_frame.frame.dirty_widget_ids,
+                    );
+                assert_eq!(
+                    retained_stats.missing_previous_runs, 0,
+                    "Escape render must update the retained scene without missing runs"
+                );
+                assert_eq!(
+                    retained_stats.invalid_previous_runs, 0,
+                    "Escape render must update the retained scene without invalid runs"
+                );
+                let deselected_step_frame = frame
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.frame.buffer_name == "*step*")
+                    .expect("visible step frame after Escape");
+                let deselected_step_layout = deselected_step_frame
+                    .frame
+                    .widget_layout
+                    .as_ref()
+                    .expect("visible step layout after Escape");
+                let (deselected_step_runs, _) =
+                    eseqlisp::widget_render::collect_metal_primitive_runs(
+                        deselected_step_layout,
+                        step_viewport,
+                        step_viewport.scroll_top,
+                        70,
+                    );
+                assert!(
+                    !deselected_step_runs.is_empty(),
+                    "Escape render must rebuild the active *step* Metal scene"
+                );
+                let selected_shells_after_escape = retained_runs
+                    .iter()
+                    .flat_map(|run| &run.primitives)
+                    .filter(|primitive| {
+                        matches!(
+                            eseqlisp::widget_render::innermost_primitive(primitive),
+                            eseqlisp::widget_render::MetalPrimitive::WidgetInstance {
+                                widget_type,
+                                instance,
+                                ..
+                            } if widget_type == "seqv-step-shell" && instance.uniform_b[0] > 0.5
+                        )
+                    })
+                    .count();
+                assert_eq!(
+                    selected_shells_after_escape, 0,
+                    "the retained Metal scene must contain no selected step shells after Escape"
+                );
+                if iteration >= WARMUPS {
+                    samples.push(duration_ms(started.elapsed()));
+                }
+            }
+            samples.sort_by(|a, b| a.total_cmp(b));
+            let percentile = |fraction: f64| {
+                let index = ((samples.len() - 1) as f64 * fraction).round() as usize;
+                samples[index]
+            };
+            eprintln!(
+                "[project-92-escape-deselect] focused_buffer={} tracks={} steps={} active={} selected={} samples={} median_ms={:.3} p95_ms={:.3} min_ms={:.3} max_ms={:.3}",
+                focused_buffer_name,
+                app.tracks.len(),
+                STEP_COUNT,
+                STEP_COUNT / 2,
+                SELECTED_COUNT,
+                SAMPLES,
+                percentile(0.50),
+                percentile(0.95),
+                samples[0],
+                samples[samples.len() - 1],
+            );
+            return;
+        }
+
+        let before_revisions = visible_layout_revisions(&editor);
+        let start_pattern = app.state.current_scene_index();
+        let target_pattern = (start_pattern + 1) % app.state.scene_count();
+        let ct = current_track.load(Ordering::Relaxed);
+        let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
+
+        let measured = Instant::now();
+        let switch_bus_elapsed;
+        let state_switch_elapsed;
+        let state_switch_profile;
+        let apply_samples_elapsed;
+        let restored_defaults_elapsed;
+        let sync_names_pattern_elapsed;
+        let sync_current_steps_elapsed;
+        let sync_sequencer_elapsed;
+        let sync_sequencer_profile;
+        let sync_step_params_elapsed;
+        let sync_mixer_elapsed;
+        let sync_fx_lists_elapsed;
+        let mut sync_effects_elapsed = Duration::ZERO;
+        let mut sync_midi_effects_elapsed = Duration::ZERO;
+        let mut sync_instrument_panel_elapsed = Duration::ZERO;
+        let mut sync_accumulators_elapsed = Duration::ZERO;
+        let sync_track_params_elapsed;
+        let sync_fx_bindings_elapsed;
+        let sync_plocks_sidebar_elapsed;
+        let reactive_elapsed;
+        let side_effects_elapsed;
+        let mut mixer_refresh_elapsed = Duration::ZERO;
+
+        let started = Instant::now();
+        app.switch_bus_pattern(target_pattern);
+        switch_bus_elapsed = started.elapsed();
+
+        let started = Instant::now();
+        let switched = app.state.switch_pattern_profiled(
+            target_pattern,
+            app.tracks.len(),
+            &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates,
+            &app.tracks,
+            &app.graph.track_instrument_types,
+        );
+        state_switch_elapsed = started.elapsed();
+        let switched = switched.expect("project 92 scene switch should change sample ids");
+        state_switch_profile = switched.profile;
+        let sample_ids = switched.sample_ids;
+
+        let started = Instant::now();
+        app.graph_controller().apply_sample_ids(&sample_ids);
+        let apply_ids_only = started.elapsed();
+        app.graph_controller().sync_current_pattern_mod_routes();
+        apply_samples_elapsed = started.elapsed();
+        if std::env::var("ESEQ_SCENE_TRACE").is_ok_and(|v| v == "1") {
+            eprintln!(
+                "[apply-samples-trace] apply_ids_ms={:.3} mod_routes_ms={:.3}",
+                duration_ms(apply_ids_only),
+                duration_ms(apply_samples_elapsed - apply_ids_only)
+            );
+        }
+
+        let started = Instant::now();
+        app.push_all_restored_defaults();
+        restored_defaults_elapsed = started.elapsed();
+
+        {
+            let rt = editor.runtime_mut();
+            let started = Instant::now();
+            sync_shared_track_collapsed(&track_collapsed, &app);
+            sync_track_name_state(rt, &mut track_names, &app);
+            sync_pattern_state(rt, &state);
+            sync_names_pattern_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
+            sync_current_steps_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            sync_sequencer_profile =
+                sync_all_track_sequencer_state_profiled(rt, &state, &app, ct, &selected_steps);
+            sync_sequencer_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            sync_step_param_lists(rt, &state, ct);
+            sync_step_params_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            sync_track_mixer_state(rt, &app, &state);
+            sync_bus_mixer_state(rt, &app);
+            sync_track_peak_fields(rt, &cached_track_peak_levels);
+            sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+            sync_mixer_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            if fx_visible {
+                let sub_started = Instant::now();
+                rt.set_reactive(
+                    "SEQ",
+                    "effects",
+                    build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps),
+                );
+                sync_effects_elapsed = sub_started.elapsed();
+
+                let sub_started = Instant::now();
+                rt.set_reactive(
+                    "SEQ",
+                    "midi-effects",
+                    build_midi_effects_value(&state, ct, &selected_steps),
+                );
+                sync_midi_effects_elapsed = sub_started.elapsed();
+
+                let sub_started = Instant::now();
+                rt.set_reactive(
+                    "SEQ",
+                    "instrument-panel",
+                    build_instrument_panel_value(&app, ct, &selected_steps),
+                );
+                sync_instrument_panel_elapsed = sub_started.elapsed();
+
+                let sub_started = Instant::now();
+                *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                sync_accumulators_elapsed = sub_started.elapsed();
+            } else {
+                fx_epoch.fetch_add(1, Ordering::Relaxed);
+            }
+            sync_fx_lists_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            let selected_neural_snapshot = selected_neural_neurons.lock().unwrap().clone();
+            sync_track_params_with_neural_selection(
+                rt,
+                &app,
+                &state,
+                ct,
+                &selected_steps,
+                Some(&selected_neural_snapshot),
+            );
+            sync_track_params_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            sync_fx_param_binding_fields_with_neural_selection(
+                rt,
+                &app,
+                &state,
+                ct,
+                &selected_steps,
+                Some(&selected_neural_snapshot),
+            );
+            sync_fx_bindings_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            rt.set_reactive(
+                "SEQ",
+                "step-has-plocks",
+                build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
+            );
+            sync_sidebar_browser(rt, &app, ct);
+            sync_plocks_sidebar_elapsed = started.elapsed();
+
+            let started = Instant::now();
+            rt.run_reactive_cycle();
+            reactive_elapsed = started.elapsed();
+        }
+
+        let started = Instant::now();
+        editor.refresh_runtime_side_effects();
+        side_effects_elapsed = started.elapsed();
+
+        if editor_has_visible_buffer(&editor, "*mixer*") {
+            let started = Instant::now();
+            editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+            mixer_refresh_elapsed = started.elapsed();
+        }
+        let elapsed = measured.elapsed();
+
+        let after_revisions = visible_layout_revisions(&editor);
+        let changed_buffers = changed_layout_buffers(&before_revisions, &after_revisions);
+        let trace = editor
+            .runtime()
+            .last_ui_invalidation_trace()
+            .expect("scene switch should produce an invalidation trace");
+        let mut reactive_hot = trace.reactive_exec_timings.clone();
+        reactive_hot.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        if std::env::var("ESEQ_SCENE_TRACE").is_ok_and(|v| v == "1") {
+            eprintln!(
+                "[project-92-scene-switch-fields] dirty_fields={:?}",
+                trace.dirty_fields
+            );
+            for (label, elapsed) in &reactive_hot {
+                eprintln!(
+                    "[project-92-scene-switch-exec] {:.3}ms {}",
+                    duration_ms(*elapsed),
+                    label
+                );
+            }
+        }
+        let reactive_hot = reactive_hot
+            .into_iter()
+            .take(6)
+            .map(|(label, elapsed)| (label, duration_ms(elapsed)))
+            .collect::<Vec<_>>();
+        let mut relayout_timings = Vec::<(String, String, f64)>::new();
+        if trace.relayout_duration > Duration::ZERO {
+            relayout_timings.push((
+                editor.active_buffer().name.clone(),
+                format!(
+                    "active-{}",
+                    trace.relayout_mode.as_deref().unwrap_or("unknown")
+                ),
+                duration_ms(trace.relayout_duration),
+            ));
+        }
+        relayout_timings.extend(editor.last_layout_refresh_timings().iter().map(|timing| {
+            (
+                timing.buffer_name.clone(),
+                format!(
+                    "inactive-{}-tile-{}",
+                    timing.mode,
+                    timing
+                        .tile_id
+                        .map(|tile_id| tile_id.to_string())
+                        .unwrap_or_else(|| "-".to_string())
+                ),
+                duration_ms(timing.elapsed),
+            )
+        }));
+        relayout_timings.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let worst_relayout = relayout_timings.first().cloned();
+
+        eprintln!(
+            "[project-92-scene-switch] from={} to={} elapsed_ms={:.3} switch_bus_ms={:.3} state_switch_ms={:.3} apply_samples_ms={:.3} defaults_ms={:.3} names_pattern_ms={:.3} current_steps_ms={:.3} sequencer_bindings_ms={:.3} step_params_ms={:.3} mixer_ms={:.3} fx_lists_ms={:.3} effects_ms={:.3} midi_effects_ms={:.3} instrument_panel_ms={:.3} accumulators_ms={:.3} track_params_ms={:.3} fx_bindings_ms={:.3} plocks_sidebar_ms={:.3} reactive_ms={:.3} side_effects_ms={:.3} mixer_refresh_ms={:.3} changed_layout_buffers={:?} relayout_timings={:?} worst_relayout={:?} dirty_fields={} affected_buffers={:?} widget_tree_flushes={} full_reruns={} subtree_reruns={} relayout_mode={:?} relayout_ms={:.3} relayout_failure={:?}",
+            start_pattern,
+            target_pattern,
+            duration_ms(elapsed),
+            duration_ms(switch_bus_elapsed),
+            duration_ms(state_switch_elapsed),
+            duration_ms(apply_samples_elapsed),
+            duration_ms(restored_defaults_elapsed),
+            duration_ms(sync_names_pattern_elapsed),
+            duration_ms(sync_current_steps_elapsed),
+            duration_ms(sync_sequencer_elapsed),
+            duration_ms(sync_step_params_elapsed),
+            duration_ms(sync_mixer_elapsed),
+            duration_ms(sync_fx_lists_elapsed),
+            duration_ms(sync_effects_elapsed),
+            duration_ms(sync_midi_effects_elapsed),
+            duration_ms(sync_instrument_panel_elapsed),
+            duration_ms(sync_accumulators_elapsed),
+            duration_ms(sync_track_params_elapsed),
+            duration_ms(sync_fx_bindings_elapsed),
+            duration_ms(sync_plocks_sidebar_elapsed),
+            duration_ms(reactive_elapsed),
+            duration_ms(side_effects_elapsed),
+            duration_ms(mixer_refresh_elapsed),
+            changed_buffers,
+            relayout_timings,
+            worst_relayout,
+            trace.dirty_fields.len(),
+            trace.affected_buffers,
+            trace.widget_tree_flushes,
+            trace.full_buffer_reruns,
+            trace.subtree_reruns,
+            trace.relayout_mode,
+            duration_ms(trace.relayout_duration),
+            trace.relayout_failure_reason,
+        );
+
+        eprintln!(
+            "[project-92-scene-switch-detail] state_total_ms={:.3} state_capture_ms={:.3} state_lock_wait_ms={:.3} state_save_current_ms={:.3} state_launch_data_ms={:.3} state_restore_tracks_ms={:.3} state_collect_samples_ms={:.3} state_update_atoms_ms={:.3} state_mod_resync_ms={:.3} state_publish_snapshot_ms={:.3} seq_total_ms={:.3} seq_track_steps_ms={:.3} seq_track_num_steps_ms={:.3} seq_track_timebases_ms={:.3} seq_track_duration_spans_ms={:.3} seq_track_step_has_plocks_ms={:.3} seq_track_playheads_ms={:.3} seq_track_velocities_ms={:.3} seq_track_durations_ms={:.3} seq_track_auxas_ms={:.3} seq_track_transposes_ms={:.3} seq_track_pans_ms={:.3} seq_track_syncs_ms={:.3} seq_track_delays_ms={:.3} seq_step_bindings_ms={:.3} seq_playhead_fields_ms={:.3} step_active_ms={:.3} step_duration_ms={:.3} step_plocked_ms={:.3} step_selected_ms={:.3} step_slider_ms={:.3} step_haptic_ms={:.3} step_active_sets={:?} step_duration_sets={:?} step_plocked_sets={:?} step_selected_sets={:?} step_slider_sets={:?} step_haptic_sets={:?} reactive_apply_ms={:.3} reactive_flush_ms={:.3} reactive_cycle_trace_ms={:.3} reactive_hot={:?}",
+            duration_ms(state_switch_profile.total),
+            duration_ms(state_switch_profile.capture_current_snapshot),
+            duration_ms(state_switch_profile.scene_lock_wait),
+            duration_ms(state_switch_profile.save_current_snapshot),
+            duration_ms(state_switch_profile.launch_scene_data),
+            duration_ms(state_switch_profile.restore_tracks),
+            duration_ms(state_switch_profile.collect_sample_ids),
+            duration_ms(state_switch_profile.update_pattern_atoms),
+            duration_ms(state_switch_profile.schedule_mod_resync),
+            duration_ms(state_switch_profile.publish_scheduler_snapshot),
+            duration_ms(sync_sequencer_profile.elapsed),
+            duration_ms(sync_sequencer_profile.track_steps),
+            duration_ms(sync_sequencer_profile.track_num_steps),
+            duration_ms(sync_sequencer_profile.track_timebases),
+            duration_ms(sync_sequencer_profile.track_duration_spans),
+            duration_ms(sync_sequencer_profile.track_step_has_plocks),
+            duration_ms(sync_sequencer_profile.track_playheads),
+            duration_ms(sync_sequencer_profile.track_velocities),
+            duration_ms(sync_sequencer_profile.track_durations),
+            duration_ms(sync_sequencer_profile.track_auxas),
+            duration_ms(sync_sequencer_profile.track_transposes),
+            duration_ms(sync_sequencer_profile.track_pans),
+            duration_ms(sync_sequencer_profile.track_syncs),
+            duration_ms(sync_sequencer_profile.track_delays),
+            duration_ms(sync_sequencer_profile.step_bindings.elapsed),
+            duration_ms(sync_sequencer_profile.playhead_fields),
+            duration_ms(sync_sequencer_profile.step_bindings.active_elapsed),
+            duration_ms(sync_sequencer_profile.step_bindings.duration_elapsed),
+            duration_ms(sync_sequencer_profile.step_bindings.plocked_elapsed),
+            duration_ms(sync_sequencer_profile.step_bindings.selected_elapsed),
+            duration_ms(sync_sequencer_profile.step_bindings.slider_elapsed),
+            duration_ms(sync_sequencer_profile.step_bindings.haptic_elapsed),
+            sync_sequencer_profile.step_bindings.active_sets,
+            sync_sequencer_profile.step_bindings.duration_sets,
+            sync_sequencer_profile.step_bindings.plocked_sets,
+            sync_sequencer_profile.step_bindings.selected_sets,
+            sync_sequencer_profile.step_bindings.slider_sets,
+            sync_sequencer_profile.step_bindings.haptic_sets,
+            duration_ms(trace.reactive_apply_duration),
+            duration_ms(trace.reactive_flush_duration),
+            duration_ms(trace.reactive_cycle_duration),
+            reactive_hot,
+        );
+
+        assert_eq!(
+            app.state.current_scene_index(),
+            target_pattern,
+            "scene switch should update the current project scene"
+        );
+        assert!(
+            trace.widget_tree_flushes > 0,
+            "scene switch should report widget tree work"
+        );
+    }

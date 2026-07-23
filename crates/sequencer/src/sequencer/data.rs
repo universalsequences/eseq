@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use crate::voice::MAX_VOICES;
+use crate::audio::MAX_VOICES;
 
 pub const MAX_TRACKS: usize = 64;
 pub const MAX_RACK_SLOTS: usize = 16;

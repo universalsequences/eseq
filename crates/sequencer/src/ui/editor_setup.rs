@@ -1,7 +1,7 @@
 use eseqlisp::backend::Backend;
 use eseqlisp::metal_backend::MetalBackend;
 use eseqlisp::{Editor, EditorConfig, Runtime};
-use sequencer::tui;
+use sequencer::app;
 
 use super::constants::UI_ENTRYPOINT_PATH;
 use super::custom_ui::reload_custom_instrument_ui;
@@ -12,7 +12,7 @@ const STARTUP_GRID_LAYOUT_EXPR: &str = "(seq-apply-fx-layout)";
 
 pub(crate) fn create_editor_and_backend(
     runtime: Runtime,
-    app: &tui::App,
+    app: &app::App,
 ) -> Result<(Editor, MetalBackend), Box<dyn std::error::Error>> {
     let mut editor = create_editor(runtime, app)?;
     let mut backend =
@@ -28,7 +28,7 @@ pub(crate) fn create_editor_and_backend(
 
 pub(crate) fn create_editor(
     runtime: Runtime,
-    app: &tui::App,
+    app: &app::App,
 ) -> Result<Editor, Box<dyn std::error::Error>> {
     let (init_src, init_path) = read_eseqlisp_init_source();
     let mut editor = Editor::new(

@@ -78,7 +78,7 @@ The three threads communicate only through:
 
 A single long-lived `analysis_worker` thread, spawned at app startup, owns a
 `std::sync::mpsc::Receiver<AnalysisJob>`. New jobs are submitted from the UI
-thread when a WAV is loaded (`load_wav_buffer` in `src/sampler.rs`).
+thread when a WAV is loaded (`load_wav_buffer` in `src/instruments/sampler.rs`).
 
 ```rust
 pub struct AnalysisJob {
@@ -150,7 +150,7 @@ write lock; only the analysis worker does, and only once per buffer.
 
 ## Sampler State Additions
 
-Extend `src/sampler.rs` state layout. New atomic slots (all `f32`):
+Extend `src/instruments/sampler.rs` state layout. New atomic slots (all `f32`):
 
 | Slot | Name | Purpose |
 |---|---|---|

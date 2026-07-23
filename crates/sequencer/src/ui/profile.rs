@@ -202,7 +202,7 @@ pub(crate) fn log_active_voice_counts(state: &SequencerState, track_names: &[Str
         eprintln!("[dgen-voice-runs] {}", engine_parts.join(" | "));
     }
 
-    let mod_stats = sequencer::voice_modulator::take_process_stats();
+    let mod_stats = sequencer::instruments::voice_modulator::take_process_stats();
     if mod_stats.calls > 0 {
         eprintln!(
             "[modulator-runs] calls={} rendered={} disabled_custom={} disabled_sampler={} all_slots_off={} unbound_rendered={} rendered_frames={} disabled_frames={} all_slots_off_frames={}",

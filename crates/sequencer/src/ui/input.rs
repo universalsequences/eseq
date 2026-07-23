@@ -650,7 +650,7 @@ fn sync_soft_step_param_commit(
 
 fn commit_soft_step_param_edit(
     editor: &mut Editor,
-    app: &mut tui::App,
+    app: &mut app::App,
     current_track: &Arc<AtomicUsize>,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     target: &SoftStepParamEditTarget,
@@ -658,9 +658,9 @@ fn commit_soft_step_param_edit(
 ) -> bool {
     match &target.kind {
         SoftStepParamEditKind::StepParam(param) => {
-            if tui::try_apply_command(
+            if app::try_apply_command(
                 app,
-                tui::AppCommand::SetStepParam {
+                app::AppCommand::SetStepParam {
                     track: target.track,
                     step: target.step,
                     param: *param,
@@ -820,7 +820,7 @@ fn starts_unarmed_number_picker_edit(key: &crossterm::event::KeyEvent) -> bool {
 pub(crate) fn handle_metal_soft_step_param_key(
     editor: &mut Editor,
     key: &crossterm::event::KeyEvent,
-    app: &mut tui::App,
+    app: &mut app::App,
     current_track: &Arc<AtomicUsize>,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     edit: &mut SoftStepParamEdit,
@@ -1561,13 +1561,13 @@ mod live_keyboard_tests {
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
-    fn soft_edit_test_app(state: Arc<SequencerState>) -> sequencer::tui::App {
+    fn soft_edit_test_app(state: Arc<SequencerState>) -> sequencer::app::App {
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
-        let mut app = sequencer::tui::App::new(
+        let mut app = sequencer::app::App::new(
             state,
             sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
             44_100,
-            sequencer::tui::AudioBuses {
+            sequencer::app::AudioBuses {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),

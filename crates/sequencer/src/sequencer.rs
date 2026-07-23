@@ -4,7 +4,7 @@ mod clock;
 mod data;
 #[path = "sequencer/snapshot.rs"]
 mod snapshot;
-#[path = "sequencer/state.rs"]
+#[path = "sequencer/state/mod.rs"]
 mod state;
 
 #[allow(unused_imports)]
