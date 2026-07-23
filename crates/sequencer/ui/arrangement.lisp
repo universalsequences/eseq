@@ -5,13 +5,15 @@
 ;; sidebar-less instance per visible track, all driven by the same shared
 ;; time-axis state so every lane stays in sync by construction (spec 5).
 
-(defstate arrangement-tool :pointer)
 (defstate arrangement-view-start 0)
 (defstate arrangement-view-duration 64)
 (defstate arrangement-cursor-time 0)
+;; The edit cursor is track-specific (Ableton-style): clicking a time in a
+;; track lane parks the cursor on that track; -1 is the scene lane. Later
+;; edits ("paste clip at cursor") get both a time and a target track.
+(defstate arrangement-cursor-track -1)
 (defstate arrangement-selection '())
 (defstate arrangement-selection-rect nil)
-(defstate arrangement-status "arrangement")
 ;; Live-drag preview state (spec 9.1): live gesture actions update this ghost
 ;; only; the terminal :finish-* action lowers to exactly one song primitive
 ;; via seq-arrangement-action and clears it. A primitive rejection reports on
@@ -62,13 +64,21 @@
               (- anchor (* anchor-ratio next-duration))
               next-duration)))))))
 
-(def set-arrangement-cursor-time (time)
-  (if (= time nil) nil (set! arrangement-cursor-time (max 0 time))))
+(def set-arrangement-cursor (time track)
+  (if (= time nil)
+    nil
+    (do
+      (set! arrangement-cursor-time (max 0 time))
+      (set! arrangement-cursor-track track))))
 
-;; Shared view-action routing (spec 5.2): every lane funnels scroll/zoom/
-;; cursor/tool changes into the one shared axis, regardless of which lane the
-;; pointer is over. `:lane-scroll`/`:delta-lanes` are ignored per spec 4.2 —
-;; vertical navigation belongs to the buffer viewport, not the lanes.
+;; The lane that owns the cursor shows it; every other lane passes nil.
+(def arrangement-lane-cursor-time (track)
+  (if (= arrangement-cursor-track track) arrangement-cursor-time nil))
+
+;; Shared view-action routing (spec 5.2): every lane funnels scroll/zoom
+;; into the one shared time axis, regardless of which lane the pointer is
+;; over. `:lane-scroll`/`:delta-lanes` are ignored per spec 4.2 — vertical
+;; navigation belongs to the track scroll container.
 (def arrangement-view-action (event)
   (match event.type
     :scroll-view
@@ -79,17 +89,11 @@
           view-start)
         arrangement-view-duration))
     :zoom-view
-    (set-arrangement-zoom event)
-    :set-cursor
-    (set-arrangement-cursor-time (get event :time))
-    :set-tool
-    (set! arrangement-tool event.tool)))
+    (set-arrangement-zoom event)))
 
 (def arrangement-view-action? (event)
   (or (= event.type :scroll-view)
-      (= event.type :zoom-view)
-      (= event.type :set-cursor)
-      (= event.type :set-tool)))
+      (= event.type :zoom-view)))
 
 ;; ── Items from the song read surface (spec 6/8) ────────────────────────────
 
@@ -294,7 +298,7 @@
 (def arrangement-edit-finish (payload)
   (do
     (set! arrangement-ghost nil)
-    (set! arrangement-status (seq-arrangement-action payload))))
+    (seq-arrangement-action payload)))
 
 ;; Scene lane (spec 9.2: the only editable lane). View actions route to the
 ;; shared axis; live edit actions update the ghost preview only; terminal
@@ -307,12 +311,14 @@
       (do
         (set! arrangement-selection-rect nil)
         (set! arrangement-selection (get event :ids))
-        (set-arrangement-cursor-time (get event :time)))
+        (set-arrangement-cursor (get event :time) -1))
       :clear-selection
       (do
         (set! arrangement-selection-rect nil)
         (set! arrangement-selection '())
-        (set-arrangement-cursor-time (get event :time)))
+        (set-arrangement-cursor (get event :time) -1))
+      :set-cursor
+      (set-arrangement-cursor (get event :time) -1)
       :marquee-select
       (set! arrangement-selection-rect event)
       :finish-marquee-select
@@ -365,12 +371,38 @@
       (arrangement-edit-finish
         (dict :type :delete-items :ids (get event :ids))))))
 
-;; Track lanes are read-only previews of the lane projection (spec 9.2):
-;; only shared view actions are honored.
-(def arrangement-track-action (event)
+;; Track lanes are read-only previews of the lane projection (spec 9.2), but
+;; clicking a time parks the track-specific edit cursor there.
+(def arrangement-track-action (i event)
   (if (arrangement-view-action? event)
     (arrangement-view-action event)
-    nil))
+    (match event.type
+      :select
+      (set-arrangement-cursor (get event :time) i)
+      :clear-selection
+      (set-arrangement-cursor (get event :time) i)
+      :set-cursor
+      (set-arrangement-cursor (get event :time) i))))
+
+;; ── Scene drag-and-drop (Ableton-style, replaces the draw tool) ────────────
+;; The transport scene pills are drag sources (:drag-type "transport-scene");
+;; dropping one on any lane inserts a row launching that scene at the drop
+;; beat, snapped to the bar grid. The drop event's :sx is the normalized
+;; (-1..1) position within the lane, which maps straight onto the shared view
+;; span because lanes have no sidebar.
+(def arrangement-drop-time (event)
+  (let ((ratio (max 0 (min 1 (/ (+ (arrangement-event-num event :sx -1) 1) 2)))))
+    (let ((time (+ arrangement-view-start (* ratio arrangement-view-duration))))
+      (max 0 (* arrangement-snap (floor (/ time arrangement-snap)))))))
+
+(def arrangement-drop-scene (event)
+  (let ((scene (get (get event :payload) :scene)))
+    (if (= scene nil)
+      nil
+      (arrangement-edit-finish
+        (dict :type :finish-create-item
+          :start (arrangement-drop-time event)
+          :scene scene)))))
 
 ;; ── Lane instances (spec 4.1/4.2) ──────────────────────────────────────────
 
@@ -390,9 +422,10 @@
     :time-ruler (dict :mode :bars-beats :beats-per-bar arrangement-beats-per-bar)
     :item-color (list 0.52 0.56 0.62)
     :loop-color (list 0.92 0.72 0.25)
-    :tool arrangement-tool
     :playhead-time (bind-seq "song-position-beats")
-    :cursor-time arrangement-cursor-time
+    :cursor-time (arrangement-lane-cursor-time -1)
+    :drop-types (list "transport-scene")
+    :on-drop (lambda (event) (arrangement-drop-scene event))
     :items (arrangement-scene-items)
     :selection arrangement-selection
     :selection-rect arrangement-selection-rect
@@ -426,9 +459,10 @@
     :scroll-passthrough :vertical
     :sidebar-width 0
     :header-height 0
-    :tool arrangement-tool
     :playhead-time (bind-seq "song-position-beats")
-    :cursor-time arrangement-cursor-time
+    :cursor-time (arrangement-lane-cursor-time i)
+    :drop-types (list "transport-scene")
+    :on-drop (lambda (event) (arrangement-drop-scene event))
     :items (arrangement-track-items i)
     :view-start arrangement-view-start
     :view-duration arrangement-view-duration
@@ -438,35 +472,9 @@
     :lane-scroll 0
     :snap arrangement-snap
     :scroll-mode :smooth
-    :on-action |event| (arrangement-track-action event)))
+    :on-action |event| (arrangement-track-action i event)))
 
 ;; ── Buffer composition (spec 4.1) ──────────────────────────────────────────
-
-(def arrangement-tool-button (label tool)
-  (button label
-    :key (str "arrangement-tool-" tool)
-    :width 3.4 :height 1.2 :padding 0 :font-size 10
-    :background-color (if (= arrangement-tool tool)
-      (rgba 0.30 0.44 0.80 1.0)
-      (rgba 0.10 0.11 0.13 1.0))
-    :color (if (= arrangement-tool tool) :white :dim)
-    :on-click |x y r| (set! arrangement-tool tool)))
-
-(def arrangement-toolbar ()
-  (h-stack :gap 0.4 :align :center :padding 0.3
-    (arrangement-tool-button "Sel" :pointer)
-    (arrangement-tool-button "Draw" :draw)
-    (arrangement-tool-button "Erase" :erase)
-    (arrangement-tool-button "Pan" :pan)
-    (box :width 1 :height 0.1 :bg :transparent)
-    (badge arrangement-status
-      :key "arrangement-status-badge"
-      :font-size 10 :height 1.2 :padding 0.2
-      :h-align :left
-      :background-color :transparent
-      :border-color :transparent
-      :color :dim
-      :bg :transparent)))
 
 (def arrangement-empty-banner ()
   (box :width :fill :height 2.2 :padding 0.4
@@ -490,13 +498,12 @@
 ;; the pointer is always over a lane, keeping scroll/zoom gestures captured
 ;; by the timelines instead of leaking to the buffer viewport.
 ;;
-;; The toolbar and scene lane (the arrangement's one ruler) sit OUTSIDE the
-;; track scroll container, so they stay pinned while the track rows scroll
-;; vertically inside it. Track lanes pass vertical scrolling through to the
-;; container (:scroll-passthrough :vertical).
+;; No mode toolbar (Ableton-style): pointer gestures + scene drag-and-drop
+;; and double-click cover editing; Backspace deletes the selection. The scene
+;; lane (the arrangement's one ruler) sits OUTSIDE the track scroll container
+;; so it stays pinned while track rows scroll vertically inside it.
 (effect-buffer "*arrangement*"
   (v-stack :padding 0.0 :gap 0.0
-    (arrangement-toolbar)
     (if SEQ.song-exists
       (box :width 0 :height 0 :bg :transparent)
       (arrangement-empty-banner))

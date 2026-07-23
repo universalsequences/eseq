@@ -837,52 +837,6 @@ fn build_metal_primitives(
         }));
     }
 
-    if let Some(playhead_x) = view.metal_playhead_x() {
-        if view.header_height > 0.0 {
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-                x: playhead_x - 0.0625,
-                y: rect.row,
-                width: 0.125,
-                height: view.header_height,
-                color: theme::YELLOW(),
-            }));
-        }
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-            x: playhead_x - 0.0625,
-            y: content.row,
-            width: 0.125,
-            height: content.height,
-            color: theme::YELLOW(),
-        }));
-    }
-
-    if let Some(cursor_x) = view.metal_cursor_x() {
-        let line_width = (1.0 / viewport.cell_w).max(0.08);
-        let marker_width = (8.0 / viewport.cell_w).max(line_width * 4.0);
-        let marker_height = (5.0 / viewport.cell_h).max(0.28).min(content.height);
-        if marker_height > 0.0 {
-            primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
-                points: [
-                    [cursor_x - marker_width * 0.5, content.row],
-                    [cursor_x + marker_width * 0.5, content.row],
-                    [cursor_x, content.row + marker_height],
-                ],
-                color: theme::CURSOR(),
-            }));
-        }
-        let line_y = content.row + marker_height;
-        let line_height = (content.row + content.height - line_y).max(0.0);
-        if line_height > 0.0 {
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-                x: cursor_x - line_width * 0.5,
-                y: line_y,
-                width: line_width,
-                height: line_height,
-                color: theme::CURSOR(),
-            }));
-        }
-    }
-
     if let Some((x, y, width, height)) = view.unavailable_rect() {
         primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
             x,
@@ -1071,6 +1025,54 @@ fn build_metal_primitives(
                 },
             }));
         }
+    }
+
+    // Cursor and playhead draw ABOVE items so position markers stay visible
+    // through clip bodies (DAW convention).
+    if let Some(cursor_x) = view.metal_cursor_x() {
+        let line_width = (1.0 / viewport.cell_w).max(0.08);
+        let marker_width = (8.0 / viewport.cell_w).max(line_width * 4.0);
+        let marker_height = (5.0 / viewport.cell_h).max(0.28).min(content.height);
+        if marker_height > 0.0 {
+            primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
+                points: [
+                    [cursor_x - marker_width * 0.5, content.row],
+                    [cursor_x + marker_width * 0.5, content.row],
+                    [cursor_x, content.row + marker_height],
+                ],
+                color: theme::CURSOR(),
+            }));
+        }
+        let line_y = content.row + marker_height;
+        let line_height = (content.row + content.height - line_y).max(0.0);
+        if line_height > 0.0 {
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x: cursor_x - line_width * 0.5,
+                y: line_y,
+                width: line_width,
+                height: line_height,
+                color: theme::CURSOR(),
+            }));
+        }
+    }
+
+    if let Some(playhead_x) = view.metal_playhead_x() {
+        if view.header_height > 0.0 {
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x: playhead_x - 0.0625,
+                y: rect.row,
+                width: 0.125,
+                height: view.header_height,
+                color: theme::YELLOW(),
+            }));
+        }
+        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            x: playhead_x - 0.0625,
+            y: content.row,
+            width: 0.125,
+            height: content.height,
+            color: theme::YELLOW(),
+        }));
     }
 
     primitives

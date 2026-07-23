@@ -19963,12 +19963,59 @@
             "no ghost -> nothing to commit"
         );
 
-        // Track lanes are read-only: edit actions are ignored entirely.
+        // Track lanes are read-only: edit actions never commit.
         eval(
             &mut editor,
-            "(arrangement-track-action (dict :type :delete-items :ids (list 0)))",
+            "(arrangement-track-action 0 (dict :type :delete-items :ids (list 0)))",
         );
         assert_eq!(recorded.lock().unwrap().len(), 5);
+
+        // Clicking a time in a track lane parks the track-specific cursor
+        // there (Ableton-style); the scene lane parks it on -1. Only the
+        // owning lane renders it.
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :clear-selection :time 5))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-cursor-time"), Value::Number(5.0));
+        assert_eq!(read(&mut editor, "arrangement-cursor-track"), Value::Number(0.0));
+        assert_eq!(
+            read(&mut editor, "(arrangement-lane-cursor-time 0)"),
+            Value::Number(5.0)
+        );
+        assert_eq!(read(&mut editor, "(arrangement-lane-cursor-time -1)"), Value::Nil);
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :clear-selection :time 7))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-cursor-track"), Value::Number(-1.0));
+        assert_eq!(
+            read(&mut editor, "(arrangement-lane-cursor-time -1)"),
+            Value::Number(7.0)
+        );
+
+        // Dropping a transport scene pill inserts a row at the drop beat,
+        // snapped to the bar grid (replaces the draw tool). sx 0.0 is the
+        // view's midpoint: view 0..64 -> beat 32.
+        eval(
+            &mut editor,
+            "(do (set! arrangement-view-start 0) (set! arrangement-view-duration 64) \
+             (arrangement-drop-scene (dict :sx 0.02 :payload (dict :scene 1))))",
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 6);
+            assert_eq!(
+                action_field(&recorded[5], "type"),
+                Value::Keyword("finish-create-item".to_string())
+            );
+            assert_eq!(
+                action_field(&recorded[5], "start"),
+                Value::Number(32.0),
+                "drop position snaps down to the bar grid"
+            );
+            assert_eq!(action_field(&recorded[5], "scene"), Value::Number(1.0));
+        }
     }
 
     /// One completed gesture is one undo entry: the translator's commands
