@@ -63,7 +63,7 @@ use crate::sequencer::{
 use crate::app::BusGateRuntimeState;
 use crate::voice::{VoicePool, MAX_VOICES};
 
-pub const FALLBACK_SAMPLE_RATE: u32 = 44_100;
+const FALLBACK_SAMPLE_RATE: u32 = 44_100;
 const CUSTOM_ENGINE_RELEASE_TAIL_SECONDS: f64 = 20.0;
 const SCHEDULED_EVENT_QUEUE_CAPACITY: usize = 4096;
 const SCHEDULED_COUNTDOWN_CAPACITY: usize =
