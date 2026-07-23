@@ -19760,6 +19760,14 @@
             read(&mut editor, "(len (nth SEQ.song-lane-events 0))"),
             Value::Number(3.0)
         );
+        // Default 16-step sixteenth-note patterns are one 4-beat cycle.
+        assert_eq!(
+            read(
+                &mut editor,
+                "(get (nth (nth SEQ.song-lane-events 0) 0) :length-beats)"
+            ),
+            Value::Number(4.0)
+        );
 
         // Value diffing: an unchanged frame publishes nothing.
         assert!(
@@ -20076,11 +20084,14 @@
         let sparse = LanePatternEvents {
             pattern_id: 1,
             num_steps: 16,
+            // 16 sixteenth steps = one 4-beat cycle.
+            length_beats: 4.0,
             events: vec![(0.0, 0.0, 1.0), (4.0, 12.0, 1.0), (8.0, -12.0, 1.0)],
         };
         let dense = LanePatternEvents {
             pattern_id: 2,
             num_steps: 64,
+            length_beats: 16.0,
             events: (0..600)
                 .map(|index| (index as f64 * 0.1, 0.0, 1.0))
                 .collect(),
@@ -20114,6 +20125,15 @@
         assert_eq!(
             read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :kind)"),
             Value::Keyword("midi".to_string())
+        );
+        // A 16-beat clip over a 4-beat pattern loops 4 times: the content
+        // declares the cycle fraction so the widget tiles the preview.
+        assert_eq!(
+            read(
+                &mut editor,
+                "(get (get (nth (arrangement-track-items 0) 0) :content) :cycle)"
+            ),
+            Value::Number(0.25)
         );
         let dots = "(get (get (nth (arrangement-track-items 0) 0) :content) :dots)";
         assert_eq!(

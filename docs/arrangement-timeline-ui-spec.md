@@ -199,9 +199,19 @@ so piano-roll's current usage is byte-for-byte unaffected:
 ```lisp
 (dict :id ... :lane 0 :start 16 :end 32 :label "Verse" :color ...
   :kind :midi                          ; new — :midi | :audio | :scene
-  :content (dict :dots (list (dict :offset 0.25 :value 0.6) ...)))
-                                       ; new — :dots or :peaks payload
+  :content (dict :dots (list (dict :offset 0.25 :value 0.6) ...)
+             :cycle 0.25))            ; new — :dots or :peaks payload;
+                                       ; optional :cycle = fraction of the
+                                       ; item one repetition covers (0..1],
+                                       ; default 1 (no tiling)
 ```
+
+A looping clip (a span longer than its pattern) declares `:cycle` =
+pattern-length / span; the widget tiles the dots at that period and draws a
+separator line per cycle boundary, so repeats read at a glance (both are
+skipped below a few px of per-cycle width). The widget still knows nothing
+about steps or timebases — the host computes the fraction. Out-of-range or
+malformed `:cycle` degrades to 1.
 
 parsed into:
 

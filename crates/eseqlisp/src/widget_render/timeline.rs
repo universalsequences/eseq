@@ -56,10 +56,13 @@ enum TimelineItemKind {
 
 /// Content drawn inside an item's rect. The widget stays dumb: dots and peak
 /// buckets are pre-normalized by the host; no musical or audio-decoding
-/// knowledge lives here.
+/// knowledge lives here. `cycle` is the fraction of the item span one
+/// repetition covers (0..1]; content repeats at that period with a separator
+/// line per boundary (a looping clip shows its cycles, DAW-style). 1.0 (the
+/// default) means the content spans the whole item — no tiling.
 #[derive(Clone)]
 enum TimelineItemContent {
-    Dots(Vec<TimelineDot>),
+    Dots { dots: Vec<TimelineDot>, cycle: f64 },
     Peaks(Vec<PeakBucket>),
 }
 
@@ -819,7 +822,8 @@ fn build_metal_primitives(
         }));
     }
 
-    for (x, is_major) in view.metal_grid_lines() {
+    let grid_lines = view.metal_grid_lines();
+    for &(x, is_major) in &grid_lines {
         primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
             x: x - 0.0625,
             y: content.row,
@@ -957,6 +961,26 @@ fn build_metal_primitives(
             height,
             color: item_color,
         }));
+        // Faint grid continuation inside the clip body (DAW convention): the
+        // background grid stays legible through items without competing with
+        // their content.
+        for &(grid_x, is_major) in &grid_lines {
+            if grid_x <= x + 0.1 || grid_x >= x + width - 0.1 {
+                continue;
+            }
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x: grid_x - 0.0625,
+                y,
+                width: 0.125,
+                height,
+                color: crate::backend::Color {
+                    r: 0.02,
+                    g: 0.025,
+                    b: 0.03,
+                    a: if is_major { 0.22 } else { 0.10 },
+                },
+            }));
+        }
         if let Some(label) = &item.label {
             if width >= 3.0 && height >= 0.85 {
                 primitives.push(MetalPrimitive::ProportionalText(
@@ -1076,37 +1100,76 @@ fn push_item_content_primitives(
         return;
     }
     match &item.content {
-        Some(TimelineItemContent::Dots(dots)) => {
+        Some(TimelineItemContent::Dots { dots, cycle }) => {
             let span = item.end - item.start;
             if span <= 0.0 {
+                return;
+            }
+            let cycle = cycle.clamp(f64::EPSILON, 1.0);
+            let cycles = (1.0 / cycle).ceil().min(512.0) as usize;
+            let cycle_width_px = (width * viewport.cell_w) as f64 * cycle;
+            let view_end = view.view_start + view.view_duration;
+
+            // Cycle separators: one line per repetition boundary, so a
+            // looping clip reads as its repeats (skipped when the cycles are
+            // too narrow to resolve).
+            if cycles > 1 && cycle_width_px >= 5.0 {
+                let separator_color = crate::backend::Color {
+                    r: 0.02,
+                    g: 0.025,
+                    b: 0.03,
+                    a: 0.42,
+                };
+                for index in 1..cycles {
+                    let time = item.start + span * cycle * index as f64;
+                    if time < view.view_start || time >= view_end || time >= item.end {
+                        continue;
+                    }
+                    let line_x = view.x_for_time(time);
+                    primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                        x: line_x - 0.0625,
+                        y,
+                        width: 0.125,
+                        height,
+                        color: separator_color,
+                    }));
+                }
+            }
+
+            if cycle_width_px < 8.0 {
                 return;
             }
             let dot_width = (3.0 / viewport.cell_w).min(width);
             let dot_height = (3.0 / viewport.cell_h).min(height);
             let inner_height = (height - dot_height).max(0.0);
-            let view_end = view.view_start + view.view_duration;
             let dot_color = crate::backend::Color {
                 r: 0.02,
                 g: 0.025,
                 b: 0.03,
                 a: 0.78,
             };
-            for dot in dots {
-                let time = item.start + dot.offset * span;
-                if time < view.view_start || time >= view_end {
-                    continue;
+            for index in 0..cycles {
+                for dot in dots {
+                    let offset = (index as f64 + dot.offset) * cycle;
+                    if offset >= 1.0 {
+                        break;
+                    }
+                    let time = item.start + offset * span;
+                    if time < view.view_start || time >= view_end {
+                        continue;
+                    }
+                    let dot_x = view
+                        .x_for_time(time)
+                        .clamp(x, (x + width - dot_width).max(x));
+                    let dot_y = y + (1.0 - dot.value) as f32 * inner_height;
+                    primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                        x: dot_x,
+                        y: dot_y,
+                        width: dot_width,
+                        height: dot_height,
+                        color: dot_color,
+                    }));
                 }
-                let dot_x = view
-                    .x_for_time(time)
-                    .clamp(x, (x + width - dot_width).max(x));
-                let dot_y = y + (1.0 - dot.value) as f32 * inner_height;
-                primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-                    x: dot_x,
-                    y: dot_y,
-                    width: dot_width,
-                    height: dot_height,
-                    color: dot_color,
-                }));
             }
         }
         // Peaks rendering lands with the audio-track asset pipeline
@@ -2547,7 +2610,13 @@ fn parse_item_content(value: &Value) -> Option<TimelineItemContent> {
                 })
             })
             .collect();
-        return Some(TimelineItemContent::Dots(dots));
+        // A malformed or out-of-range :cycle degrades to no tiling.
+        let cycle = map
+            .get("cycle")
+            .and_then(as_number)
+            .filter(|cycle| *cycle > 0.0 && *cycle <= 1.0)
+            .unwrap_or(1.0);
+        return Some(TimelineItemContent::Dots { dots, cycle });
     }
     if let Some(Value::List(entries)) = map.get("peaks") {
         let peaks = entries
@@ -2809,7 +2878,7 @@ mod tests {
         assert!(items[0].content.is_none());
 
         assert_eq!(items[1].kind, Some(TimelineItemKind::Midi));
-        let Some(TimelineItemContent::Dots(dots)) = &items[1].content else {
+        let Some(TimelineItemContent::Dots { dots, cycle }) = &items[1].content else {
             panic!("expected dots content");
         };
         assert_eq!(dots.len(), 2, "malformed dot entries are skipped");
@@ -2817,6 +2886,7 @@ mod tests {
         assert_eq!(dots[0].value, 0.5);
         assert_eq!(dots[1].offset, 1.0, "offset clamps to 0..1");
         assert_eq!(dots[1].value, 0.0, "value clamps to 0..1");
+        assert_eq!(*cycle, 1.0, "absent :cycle means content spans the item");
 
         assert_eq!(items[2].kind, Some(TimelineItemKind::Audio));
         let Some(TimelineItemContent::Peaks(peaks)) = &items[2].content else {
@@ -2826,6 +2896,38 @@ mod tests {
 
         assert!(items[3].kind.is_none(), "unknown kind parses to None");
         assert!(items[3].content.is_none(), "malformed content parses to None");
+    }
+
+    /// `:cycle` marks how much of the item one content repetition covers
+    /// (looping-clip visualization); out-of-range values degrade to 1.0.
+    #[test]
+    fn dots_content_parses_optional_cycle_fraction() {
+        let content_with_cycle = |cycle: Value| {
+            map_value_raw(vec![
+                (
+                    "dots",
+                    list_value_raw(vec![map_value_raw(vec![
+                        ("offset", number_value(0.5)),
+                        ("value", number_value(0.5)),
+                    ])]),
+                ),
+                ("cycle", cycle),
+            ])
+        };
+        let parsed_cycle = |value: Value| match parse_item_content(&content_with_cycle(value)) {
+            Some(TimelineItemContent::Dots { cycle, .. }) => cycle,
+            _ => panic!("expected dots content"),
+        };
+        assert_eq!(parsed_cycle(number_value(0.25)), 0.25);
+        assert_eq!(parsed_cycle(number_value(1.0)), 1.0);
+        assert_eq!(parsed_cycle(number_value(0.0)), 1.0, "zero degrades");
+        assert_eq!(parsed_cycle(number_value(4.0)), 1.0, ">1 degrades");
+        assert_eq!(parsed_cycle(number_value(-0.5)), 1.0, "negative degrades");
+        assert_eq!(
+            parsed_cycle(Value::String("junk".to_string())),
+            1.0,
+            "malformed degrades"
+        );
     }
 
     /// The ruler must not invent a grid line/label at the view's left edge:

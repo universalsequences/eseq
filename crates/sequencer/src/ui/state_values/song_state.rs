@@ -61,6 +61,9 @@ pub(crate) struct SongFrameState {
 pub(crate) struct LanePatternEvents {
     pub(crate) pattern_id: u64,
     pub(crate) num_steps: usize,
+    /// One pattern cycle in musical beats (`num_steps * step_beats` of the
+    /// pattern's timebase) — what the view needs to tile a looping clip.
+    pub(crate) length_beats: f64,
     pub(crate) events: Vec<(f64, f64, f64)>,
 }
 
@@ -88,6 +91,8 @@ pub(crate) fn collect_lane_pattern_events(
                 .filter_map(|id| {
                     let data = scenes.track_pools.get(track)?.get(PatternId(id))?;
                     let num_steps = data.track_params.num_steps.max(1);
+                    let length_beats =
+                        data.track_params.timebase.step_beats(num_steps) * num_steps as f64;
                     let mut events = Vec::new();
                     for step in 0..num_steps.min(data.step_data.len()) {
                         if events.len() >= LANE_PATTERN_EVENT_CAP {
@@ -131,6 +136,7 @@ pub(crate) fn collect_lane_pattern_events(
                     Some(LanePatternEvents {
                         pattern_id: id,
                         num_steps,
+                        length_beats,
                         events,
                     })
                 })
@@ -167,6 +173,10 @@ pub(crate) fn build_song_lane_events_value(events: &[Vec<LanePatternEvents>]) ->
                     map.insert(
                         "num-steps".to_string(),
                         Rc::new(RefCell::new(Value::Number(pattern.num_steps as f64))),
+                    );
+                    map.insert(
+                        "length-beats".to_string(),
+                        Rc::new(RefCell::new(Value::Number(pattern.length_beats))),
                     );
                     map.insert(
                         "events".to_string(),

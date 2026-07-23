@@ -251,12 +251,24 @@
             events)
           :dots)))))
 
+;; One repetition's fraction of the clip span (widget :cycle key): a clip
+;; longer than the pattern tiles the preview per cycle with separator lines,
+;; DAW-style; a clip at or shorter than one cycle spans the whole item.
+(def arrangement-clip-cycle (entry clip)
+  (let ((span (- (get clip :end-beat) (get clip :start-beat)))
+        (length-beats (get entry :length-beats)))
+    (if (and (> length-beats 0) (> span length-beats))
+      (/ length-beats span)
+      1)))
+
 (def arrangement-clip-content (i clip)
   (let ((entry (arrangement-lane-pattern-events i (get clip :pattern-id))))
     (if (= entry nil)
       nil
       (let ((dots (arrangement-pattern-dots entry)))
-        (if (= (len dots) 0) nil (dict :dots dots))))))
+        (if (= (len dots) 0)
+          nil
+          (dict :dots dots :cycle (arrangement-clip-cycle entry clip)))))))
 
 ;; Track-lane items (spec 6): spans whose resolved pattern is nil produce NO
 ;; item — a track with nothing playing renders as an empty lane.
