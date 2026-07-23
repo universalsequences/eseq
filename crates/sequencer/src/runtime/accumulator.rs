@@ -1,3 +1,22 @@
+/*!
+Step-accumulator machinery: transform each triggered step with a running
+per-track value.
+
+An *accumulator* rewrites a step as it fires using accumulated state — e.g.
+ramping transpose, decaying velocity, echoing an octave up, or forwarding a
+copy to another track. This module owns the value/limit semantics
+([`AccumMode`]'s rtz/clip/rvtz/rvbp behaviors via [`apply_limit_mode`]), the
+audio-thread-safe [`ActionBuffer`] of [`StepAction`]s an accumulator emits,
+and the builtin [`ACCUMULATOR_REGISTRY`] of native `AccumulatorFn`s.
+Lisp-defined accumulators (`def-accumulator`, hosted in `lisp_host`) build on
+the same `ResolvedStep` payload and emit path.
+
+Also defines [`ResolvedStep`] itself — a step's parameters resolved from
+`StepData` atomics into plain `f32` fields — which has outgrown this file to
+become the universal event payload shared by the generator, graph, and
+neural runtimes.
+*/
+
 use crate::sequencer::{StepData, StepParam};
 
 /// A step's parameters resolved from StepData atomics into plain f32 fields.

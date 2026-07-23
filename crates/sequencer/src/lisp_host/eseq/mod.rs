@@ -1,7 +1,9 @@
-//! Eseqlisp side of the lisp host: live-coding / sequencing natives —
-//! sequencer + process + neural natives, graph-mode authoring, the scratch
-//! runtime, and MIDI-FX event scripting. Everything is surfaced through the
-//! `lisp_host` façade re-exports; nothing imports these modules directly.
+/*!
+Eseqlisp side of the lisp host: live-coding / sequencing natives —
+sequencer + process + neural natives, graph-mode authoring, the scratch
+runtime, and MIDI-FX event scripting. Everything is surfaced through the
+`lisp_host` façade re-exports; nothing imports these modules directly.
+*/
 
 pub mod graph_authoring;
 pub mod graph_dsl;

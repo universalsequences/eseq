@@ -1,3 +1,18 @@
+/*!
+Implementation bodies for the MIDI-FX event-scripting natives (`fx-*`).
+
+MIDI FX are eseqlisp scripts that transform sequencer events as they pass
+through the accumulator pipeline. Each `eval_*` function here implements one
+native against the `SharedAccumulatorEvalContext` holding the event being
+processed: suppress/emit (`fx-suppress`, `fx-emit`), arpeggiator helpers
+(`fx-arp-note`, `fx-arp-emit`, `fx-arp-emit-directed`), timing (`fx-time`,
+`fx-source-time`, `fx-phase-time`, `fx-phase-tick`), parameter and track
+reads (`fx-param`, `midi-fx-param`, `fx-track`, `fx-velocity`), note spans
+(`fx-note`, `fx-notes`, `fx-note-start`/`-end`), and persistent per-FX state
+(`fx-state-get`/`-set`). Registration of these names lives in
+`sequencer_natives`; descriptor loading lives in `scratch_runtime`.
+*/
+
 use super::super::*;
 
 pub(in crate::lisp_host) fn eval_suppress_current_event(

@@ -1,3 +1,18 @@
+/*!
+Defines the FFI surface between the audio engine and compiled DGenLisp dylibs.
+
+A compiled effect or instrument is a C dylib exposing a process function
+(`DGenProcessFn`). This file owns the raw state-buffer contract shared with the
+generated C: the header slot layout (enabled flag, host sample rate, canary,
+read/write buffer pointers), the trick of smuggling the process-fn pointer
+through f32 state slots (`process_fn_pointer_chunks` /
+`dgen_process_fn_from_state`), and the `dgenlisp_wrapper_process` /
+`dgenlisp_init` shims plus `dgenlisp_vtable()` that adapt a dylib into a
+`LiveGraph` node. Also home to engine-wide limits (`MAX_CUSTOM_FX`,
+`MAX_MIDI_FX_SLOTS`, ...) and the queued tensor/sample-rate write helpers used
+to mutate dgen state at runtime.
+*/
+
 use super::super::*;
 
 /// Monotonic counter so each compile produces a unique dylib filename,

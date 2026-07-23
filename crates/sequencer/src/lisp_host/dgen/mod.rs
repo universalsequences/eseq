@@ -1,7 +1,9 @@
-//! DGenLisp side of the lisp host: the DSP-compile pipeline
-//! (source → dgen → C → dylib → engine node) plus dylib caching and
-//! instrument/effect storage. Everything is surfaced through the
-//! `lisp_host` façade re-exports; nothing imports these modules directly.
+/*!
+DGenLisp side of the lisp host: the DSP-compile pipeline
+(source → dgen → C → dylib → engine node) plus dylib caching and
+instrument/effect storage. Everything is surfaced through the
+`lisp_host` façade re-exports; nothing imports these modules directly.
+*/
 
 pub mod dgen_ffi;
 pub mod dgen_manifest;

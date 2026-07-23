@@ -1,3 +1,16 @@
+/*!
+Instrument-flavored side of the DGenLisp compile pipeline.
+
+Instruments share `effect_compile`'s machinery but get their own injected
+preamble (`INSTRUMENT_PREAMBLE`: gate/pitch/velocity plumbing, `def-voice`
+helpers) and voice-count handling. Entry points mirror the effect ones
+(`compile_instrument*`, `compile_and_load_instrument*`). Also contains the
+offline render harness used by tests and the audition tool
+(`render_instrument_source_for_test`, `render_loaded_effect_for_test`, ...),
+compile-failure logging, and `INSTRUMENT_TEMPLATE` for newly created
+instruments.
+*/
+
 use super::super::*;
 
 pub(in crate::lisp_host) const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers injected at compile time.

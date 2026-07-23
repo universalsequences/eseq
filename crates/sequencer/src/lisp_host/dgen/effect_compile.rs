@@ -1,3 +1,17 @@
+/*!
+Compile pipeline entry points for DGenLisp effects, plus on-disk source
+storage.
+
+`compile_and_load*` run the full pipeline: expand defmacro imports
+(`materialize_defmacro_imports`), inject the effect preamble, invoke the
+external dgenlisp tool (`compile_lisp*` / `compile_effective_dgen_source_to_dir`),
+parse the resulting manifest, and load the dylib — going through `dylib_cache`
+unless the uncached variant is used. `CompileResult` bundles the loaded lib +
+manifest. Also owns the effects/instruments source directories (`save_effect`,
+`list_saved_effects`, `load_effect_source`, ...) and the render-report types
+used by offline effect/instrument test rendering in `instrument_compile`.
+*/
+
 use super::super::*;
 
 pub struct CompileResult {

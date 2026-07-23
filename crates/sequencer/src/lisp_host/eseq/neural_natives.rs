@@ -1,3 +1,17 @@
+/*!
+Argument parsing for the `neural-*` authoring natives.
+
+The builtin neural sequencer is edited from lisp via natives like
+`neural-create`, `neural-set`, `neural-neuron`, `neural-weight`, and
+`neural-plock-*`. This module defines the intermediate edit types those
+natives produce — `NeuralCreateOptions`, `NeuralSetEdits`,
+`NeuralNeuronEdits`, `NeuralWeightEdit`, plus `NeuralNetworkRef` for
+name-or-id lookups — and the `parse_neural_*` functions that build them from
+raw `EValue` args. The natives themselves are registered in
+`sequencer_natives`, which applies these edits to the project's
+`ProjectNeuralNetwork` list.
+*/
+
 use super::super::*;
 
 #[derive(Clone, Debug)]

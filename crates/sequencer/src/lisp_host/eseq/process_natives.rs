@@ -1,3 +1,18 @@
+/*!
+Registers the live-coding natives for first-class processes and channels.
+
+This is the native surface of the eseqlisp process layer: definition and
+lifecycle (`process`, `processes`, `start`, `stop`, `connect!`, `patch`,
+`inlet`/`process-inlet`), channel plumbing (`defchan`, `send`, `hear`,
+`tap`), per-tick emission and event shaping inside a process body (`emit`,
+`lane`/`lane!`, `ratchet!`, `veto!`, `transpose!`, `gate?`,
+`current-note`, `step-length`, `timebase-beats`), field access
+(`scalar-field`, `gate-field`, `pitch-field`, `field-domain`,
+`field-nearest-delta`), and parameter targeting (`target-set!`,
+`target-add!`). Argument parsing lives in `process_dsl_parse`; the engine
+that folds these processes each block is `crate::runtime::process`.
+*/
+
 use super::super::*;
 
 pub(in crate::lisp_host) fn publish_process_authoring(

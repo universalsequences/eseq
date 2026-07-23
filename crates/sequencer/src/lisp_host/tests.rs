@@ -1,3 +1,9 @@
+/*!
+The `lisp_host` test suite, extracted verbatim from the inline
+`#[cfg(test)] mod tests` block of the pre-split `lisp_host.rs`. Everything
+here is reached through `use super::…`, i.e. the façade's re-exports.
+*/
+
     use super::{
         clear_neural_effect_plock_by_network_id, clear_neural_instrument_plock_by_network_id,
         compile_instrument, compile_instrument_with_asset_base, effect_has_host_modulation,

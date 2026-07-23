@@ -1,3 +1,15 @@
+/*!
+Live audio-graph surgery for per-track effect chains.
+
+Small `unsafe` helpers that splice compiled effect nodes in and out of a
+running `LiveGraph` without rebuilding it: `add_effect_to_chain_at` /
+`add_effect_to_chain_at_successor` wire a new node between its neighbors
+(including sidechain/control ports via `connect_effect_port`), and
+`remove_effect_from_chain` / `remove_effect_modulator` reconnect the
+predecessor to the successor (`EffectChainSuccessor`) before dropping the node.
+Used by the lisp host when effects are added, removed, or reordered live.
+*/
+
 use super::super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

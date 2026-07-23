@@ -1,3 +1,17 @@
+/*!
+Parsing layer for the process/channel DSL (`def-process` and friends).
+
+Turns the s-expression surface of a process definition into the plain data
+structures in `crate::process`: `parse_process_def` builds a `ProcessDef`
+(inlets, fields, fold body), `parse_process_inlets` and
+`parse_process_inlet_kind_and_range` handle inlet declarations, and the
+field helpers normalize scalar/gate/pitch field values. Also owns the
+ratchet-event value conversions and `register_process_ratchet_event_natives`
+(the small read/write natives a ratchet callback uses). The full native
+surface (`process`, `start`, `connect!`, ...) is registered in the sibling
+`process_natives`.
+*/
+
 use super::super::*;
 
 pub(in crate::lisp_host) fn process_symbol_name(value: &EValue) -> Result<String, String> {

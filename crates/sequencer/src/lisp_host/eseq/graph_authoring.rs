@@ -1,3 +1,17 @@
+/*!
+Registers the authoring/UI-side natives for graph-mode sequencers.
+
+`register_graph_authoring_natives` installs the GRAPH reactive namespace (a
+writable mirror of resolved graph values that `reactive-set` dirties) plus the
+natives a graph-editing UI script uses: reactive bindings (`bind-graph`,
+`bind-graph-edge`, `bind-graph-config`, `graph-key`/`graph-edge-key`/
+`graph-config-key`), inspection (`graph-list`, `graph-describe`, `graph-node`,
+`graph-param`, `graph-edge`, `graph-config`), and the duration/swing spec
+forms (`steps`, `beats`, `swing`, `delay`, `seed`). Spec values are parsed
+with the helpers in the sibling `graph_dsl` module; the runtime node `:update`
+natives live in `graph_update`.
+*/
+
 use super::graph_dsl::*;
 use super::super::*;
 

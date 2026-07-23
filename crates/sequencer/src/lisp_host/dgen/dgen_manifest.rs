@@ -1,3 +1,16 @@
+/*!
+Parses and models the JSON manifest emitted by the dgenlisp compiler.
+
+Compiling a DGenLisp source produces a dylib plus a manifest describing its
+interface; `parse_manifest` / `parse_manifest_with_base` turn that JSON into
+`DGenManifest` (params, tensor inits, envelopes, inputs, sidechains, modulators,
+mod destinations, UI groups). From the manifest this module derives host-facing
+descriptors (`instrument_descriptor_from_manifest`, sidechain and host-
+modulation param appenders) and loads the dylib itself (`load_dylib` ->
+`LoadedDGenLib`, `build_init_message`). Consumed by `effect_compile` /
+`instrument_compile` after each compile.
+*/
+
 use super::super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

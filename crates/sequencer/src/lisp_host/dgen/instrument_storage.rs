@@ -1,3 +1,17 @@
+/*!
+On-disk instrument storage (sources, metadata, presets) and the global
+registry of loaded instrument process functions.
+
+The storage half resolves instrument names to source/metadata/preset paths
+(supporting both flat files and `name/dsp.lisp` folder layouts) and
+loads/saves `InstrumentPreset` banks and `CustomInstrumentRunMode` metadata.
+The registry half is a set of lock-free static tables indexed by
+engine/voice slot (`DGEN_INSTRUMENT_FNS`, output counts, enabled-voice
+counts, process-call stats) that the audio thread reads through
+`dgenlisp_instrument_vtable()` while the UI/compile side swaps entries in
+(`set_dgen_instrument_fn`, ...).
+*/
+
 use super::super::*;
 use crate::sequencer::MAX_INSTRUMENT_ENGINES;
 use crate::voice::MAX_VOICES;

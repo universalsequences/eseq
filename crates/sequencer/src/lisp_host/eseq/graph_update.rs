@@ -1,3 +1,18 @@
+/*!
+Evaluates a graph node's `:update` body and registers the `node-*` natives it
+uses.
+
+A graph-mode node's fire decision is an eseqlisp closure. This module holds
+`GraphNodeContext` (the per-node-event view — input, energy, tick, params,
+state, incoming payload — bound to a shared slot while the update body runs),
+the `CompiledGraphUpdate` source-keyed callback cache on
+`ScratchControlRuntime`, and `register_graph_node_natives`, which installs the
+accessors and effects available inside `:update`: `input`, `energy`, `index`,
+`node-param`, `node-state`, `node-set!`, `node-input-event`, `emit`,
+`dampen-incoming`, `recover-incoming`, `reset-graph-state`, and the
+event-payload readers (`in-note`, `in-vel`, `in-dur`, `event-note`, ...).
+*/
+
 use super::graph_dsl::{graph_keyword, graph_parse_swing_spec, graph_swing_value_from_args};
 use super::super::*;
 

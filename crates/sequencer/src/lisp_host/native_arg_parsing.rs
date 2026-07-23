@@ -1,3 +1,17 @@
+/*!
+Argument parsing and runtime-global helpers shared by the native
+implementations.
+
+`parse_step_arg` / `parse_slot_arg` / `parse_param_index_arg` and friends
+convert raw `EValue` argument lists into validated indices and param targets
+with consistent error messages, and `apply_acc_emit_overrides` folds
+`acc-emit` keyword overrides into a `ResolvedStep`. Also provides the
+fallback effect/instrument descriptor tables used when no live descriptors
+are supplied, and `install_runtime_globals`, which (re)binds the current
+track's effect/instrument descriptor globals into a `Runtime` before each
+evaluation.
+*/
+
 use super::*;
 
 pub(super) fn fallback_effect_descriptors(track_count: usize) -> Vec<Vec<EffectDescriptor>> {

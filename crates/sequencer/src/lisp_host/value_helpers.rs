@@ -1,3 +1,12 @@
+/*!
+Small constructors for building eseqlisp `EValue`s from Rust.
+
+`lisp_string` / `lisp_number` / `lisp_bool` / `lisp_list` wrap plain values
+in the `Rc<RefCell<EValue>>` cells the VM expects, and
+`step_snapshot_to_value` renders a `StepSnapshot` as the field map that the
+`seq-*` natives hand to lisp code.
+*/
+
 use super::*;
 
 pub(super) fn lisp_string(value: impl Into<String>) -> Rc<RefCell<EValue>> {

@@ -1,3 +1,16 @@
+/*!
+Shared parsing helpers for the graph-mode s-expression DSL.
+
+Small value coercions (`graph_keyword`, `graph_number`, `graph_timebase`,
+`graph_list_items`, `graph_head_symbol`) and spec parsers for the pieces of a
+graph-mode `def-sequencer` form: duration (`graph_parse_duration_spec`), swing
+(`graph_parse_swing_spec`), node params/state/leak (`graph_parse_param_list`,
+`graph_parse_state_list`, `graph_parse_leak`), and shape/topology/edge
+distribution (`graph_parse_shape`, `graph_parse_topology`). Nothing here
+registers natives; the siblings `graph_manifest`, `graph_authoring`, and
+`graph_update` build on these parsers.
+*/
+
 use super::super::*;
 use crate::graph::{
     GraphDurationSpec, GraphSwingSpec, LeakSpec, ParamSpec, ShapeSpec, StateSpec, Topology,

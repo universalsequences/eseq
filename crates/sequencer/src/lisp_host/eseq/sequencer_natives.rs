@@ -1,3 +1,19 @@
+/*!
+The registration hub for the scheduler-side sequencing natives.
+
+`register_sequencer_natives` (and the `_with_accumulators` variant) installs
+the bulk of what a scratch-buffer or scheduler script can call: step editing
+and querying (`seq-toggle-step`, `seq-step-on`/`-off`, `seq-plock-*`,
+`seq-track-steps`, `seq-emit`, ...), `def-sequencer` (dispatching to
+`graph_manifest` when a `def-node` sub-form makes it graph-mode),
+accumulator emission (`acc-emit`, `acc-chord`, `acc-set-*`/`acc-add-*`
+param natives), MIDI-FX scripting (`fx-*`, bodies in `midi_fx`), generator
+tick natives (`gen-tick`, `gen-beat`, `gen-rand`, ...), and the `neural-*`
+authoring natives (arg parsing in `neural_natives`). The `__register-*`
+natives are the internal hooks `def-accumulator`/`def-midi-fx`/
+`def-sequencer` expand into.
+*/
+
 use super::super::*;
 
 pub(in crate::lisp_host) fn register_sequencer_natives(

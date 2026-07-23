@@ -1,3 +1,15 @@
+/*!
+Parses a graph-mode `def-sequencer` form into a `GraphManifest`.
+
+`graph_mode_present` detects whether a `def-sequencer` arg list carries a
+`def-node` sub-form (which switches the sequencer from step mode to graph
+mode), and `parse_graph_manifest` turns the full arg list — shape, node
+prototype, `edges` sets, energy decay/reset/seed, max-poly, duration and
+swing — into the manifest the scheduler-side runtime instantiates as a
+`crate::graph` engine. Uses the value/spec parsers from the sibling
+`graph_dsl` module; called from `def-sequencer` in `sequencer_natives`.
+*/
+
 use super::graph_dsl::*;
 use super::super::*;
 use crate::graph::{

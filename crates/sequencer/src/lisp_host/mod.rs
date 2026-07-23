@@ -1,3 +1,22 @@
+/*!
+The lisp host: façade over everything the sequencer crate layers on top of
+the core lisp language.
+
+Two language sides live in subfolders. `dgen/` is the DGenLisp DSP-compile
+pipeline (lisp source → dgen → C → dylib → live audio-graph node, plus dylib
+caching and instrument/effect storage). `eseq/` is the eseqlisp live-coding
+surface (sequencer/process/neural natives, graph-mode authoring, the scratch
+runtime, MIDI-FX event scripting). Shared plumbing both sides use — the
+`Shared*` eval contexts and registries (`shared_state`), native argument
+parsing, `EValue` construction helpers, and the embedded editor flow — stays
+at this root.
+
+This module is a pure façade: every submodule is surfaced through the
+re-exports below, so in-crate consumers import from `crate::lisp_host::` and
+never name the submodules directly (the lone exception is the
+`lisp_host::dylib_cache` module path, kept alive by a module re-export).
+*/
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{CStr, CString};

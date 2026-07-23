@@ -1,3 +1,16 @@
+/*!
+Content-addressed cache of compiled DGenLisp dylibs.
+
+Compiling through the external dgenlisp tool is slow, so `DylibCacheManager`
+(see `global_cache_manager()`) keys each artifact by a fingerprint of the
+effective source, referenced assets, compile kind (`DGenCompileKind`), source
+origin, sample rate, and the dgenlisp tool binary itself. A cache hit hands out
+a `DylibLease` (refcounted so an artifact directory is not evicted while a
+loaded dylib still points into it); a miss compiles into a fresh artifact
+directory and records `CacheMetadata`. Includes a small lisp tokenizer used to
+discover `(asset ...)` references that must participate in the fingerprint.
+*/
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};

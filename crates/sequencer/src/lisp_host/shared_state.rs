@@ -1,3 +1,23 @@
+/*!
+Shared eval-context state and registries that both lisp_host language sides
+depend on.
+
+Defines the `Shared*` type aliases (`SharedSequencerEvalContext`,
+`SharedAccumulatorEvalContext`, `SharedProcessAuthoring`, …) — `Arc<Mutex<…>>`
+handles threaded through every native so registration code, the UI, and the
+scheduler can exchange state — together with the structs behind them:
+`RegisteredAccumulator` / `RegisteredSequencer` (lisp-defined accumulators,
+MIDI FX, and `def-sequencer` generators), `ProcessAuthoringRegistry`, the
+per-invocation eval contexts, and `EmittedAccumulatorEvent`, the payload
+every lisp emit path produces.
+
+Also home to [`ScratchControlRuntime`]: an eseqlisp `Runtime` bundled with
+all of the above, which the UI scratch buffer and the scheduler both drive
+(`eval`, `invoke_accumulator`, `invoke_midi_fx`, `invoke_process_run`,
+`invoke_sequencer_tick`, …). This file is the seam the rest of `lisp_host`
+plugs into, which is why it was extracted first in the split.
+*/
+
 use super::*;
 
 #[derive(Clone, Debug, Default)]

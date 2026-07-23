@@ -1,3 +1,19 @@
+/*!
+Builds the scratch-buffer control runtimes and loads the bundled lisp
+libraries.
+
+`scratch_runtime_with_fallbacks` (UI side) and
+`scheduler_scratch_runtime_with_fallbacks` construct a
+`ScratchControlRuntime` (struct in `shared_state`) with the control prelude,
+the scratch-buffer template shown on first open, and fallback descriptors.
+Also owns discovery/loading of the two on-disk lisp libraries: the MIDI-FX
+library (`load_midi_fx_library_source`, `load_midi_fx_descriptors`, path
+resolution under the midi-fx library roots) and the process library
+(`load_process_library_source`, which appends the compiled-in
+`processes/builtin.lisp`), plus the metadata parsing that turns library
+sources into `EffectDescriptor`s for the browser.
+*/
+
 use super::super::*;
 
 pub(in crate::lisp_host) fn scratch_buffer_template() -> String {

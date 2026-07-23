@@ -1,3 +1,15 @@
+/*!
+The embedded external-editor flow for authoring DGenLisp effects.
+
+`run_editor_flow` drives the full edit → compile → load → wire → name → save
+loop: it opens the user's editor on `EFFECT_TEMPLATE` (or the previous
+source), compiles the result, splices the new node between its predecessor
+and successor in the live audio graph, and returns a [`LispEditResult`]. It
+runs while the terminal is in normal (non-raw) mode. Also home to the
+`sanitize_effect_name` / `sanitize_symbol_name` helpers used to turn
+user-facing names into lisp symbols.
+*/
+
 use super::*;
 
 pub const EFFECT_TEMPLATE: &str = r#"; DGenLisp stereo effect
