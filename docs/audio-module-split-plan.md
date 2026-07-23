@@ -158,6 +158,44 @@ not mechanical — do after the module split settles, if at all.
 - `voice.rs` / `scheduled_event.rs` / `sampler.rs` are inputs to the callback,
   used well beyond it. Stay at root (candidates for a later loose-file pass).
 
+## Follow-on: `scheduler.rs` + `scheduled_event.rs` → `src/scheduler/`
+
+`scheduler.rs` is a sixth god-file: **13,073 lines**, of which ~5,370 (41%) is
+the `#[cfg(test)] mod tests` at lines 7702–13073. Its entire public surface is
+one function, `spawn_scheduler_thread`, whose sole caller is
+`audio/stream.rs:122`. It does NOT belong inside `audio/`:
+
+- `scheduler` is the **producer** — a dedicated thread that walks the timeline
+  snapshot and resolves steps/plocks/midi-fx/neural/generator/process
+  emissions into `ScheduledEvent`s pushed onto the queue.
+- `audio/events.rs` is the **consumer** — callback-side drain of that queue
+  into the countdown/block machinery and `fire.rs`, welded to
+  `AudioCallbackData`. It stays in `audio/`.
+- `scheduled_event.rs` (527 lines) is the **contract** between the two, used
+  by 8+ files (`audio/*`, `neural.rs`, `runtime/process.rs`, `lisp_host`).
+
+Plan:
+1. `src/scheduler/` directory module: `scheduler.rs` → `scheduler/mod.rs`,
+   plus `git mv scheduled_event.rs` → `scheduler/scheduled_event.rs` (the
+   scheduler owns the event vocabulary it emits). lib.rs compat re-export:
+   `pub use scheduler::scheduled_event;` keeps all `crate::scheduled_event::`
+   paths working.
+2. Phase 1: extract tests → `scheduler/tests.rs` (13.1k → 7.7k).
+3. Phase 2 carve by the visible clusters: snapshot clock state
+   (`SnapshotSequencerClock`), snapshot-side param/plock resolution
+   (`resolve_*_params/defaults/plocks`), midi-fx chain machinery
+   (`midi_fx_*`), neural/generator/graph emission merging + runtime
+   reconciliation, note-span/trigger geometry, and the
+   `enqueue_*<const QUEUE_CAP>` pipeline + thread loop.
+
+Known duplication (do NOT try to fix during the mechanical split):
+`scheduler.rs` has private copies of `swing_delay_samples`,
+`slot_param_identity`, `plock_identity_matches`, `resolved_slot_param_value`,
+`ceil_to_grid`, `instrument_sound_fingerprint` that parallel the live-side
+versions in `audio/params.rs`/`audio/events.rs`/`audio/render.rs` — snapshot
+vs live variants with different signatures. Unifying them is a separate,
+behavior-risky refactor; the split just makes the duplication visible.
+
 ## Gotchas checklist
 
 - [ ] `audiograph.rs` has `#[cfg(test)] pub fn initialize_engine_for_test`
