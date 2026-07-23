@@ -137,6 +137,11 @@ struct TimelineView {
     move_alignment_helper: bool,
     resize_alignment_helper: bool,
     smooth_scroll: bool,
+    /// `:scroll-passthrough :vertical` — this instance owns no vertical
+    /// scrolling: vertical-dominant wheel/touchpad deltas are declined so an
+    /// enclosing scroll container can handle them, while horizontal deltas
+    /// still pan the shared time axis.
+    vertical_scroll_passthrough: bool,
     tool: TimelineTool,
     lanes: Vec<TimelineLane>,
     items: Vec<TimelineItem>,
@@ -435,7 +440,7 @@ impl WidgetDefinition for TimelineWidget {
         _modifiers: KeyModifiers,
     ) -> Option<Value> {
         let view = TimelineView::from_props(&node.props, node.rect);
-        view.begin_gesture(local_col, local_row)
+        view.begin_gesture(local_col, scroll_adjusted_row(local_row))
     }
 
     fn mouse_event(
@@ -450,6 +455,7 @@ impl WidgetDefinition for TimelineWidget {
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
+        let local_row = scroll_adjusted_row(local_row);
         let view = TimelineView::from_props(&node.props, node.rect);
         match mouse_kind {
             MouseEventKind::Moved => {
@@ -489,7 +495,7 @@ impl WidgetDefinition for TimelineWidget {
 
     fn cursor(&self, node: &LayoutNode, local_col: f32, local_row: f32) -> super::WidgetCursor {
         let view = TimelineView::from_props(&node.props, node.rect);
-        match view.hit_test(local_col, local_row) {
+        match view.hit_test(local_col, scroll_adjusted_row(local_row)) {
             Some(HitRegion::ItemEdgeEnd { .. }) | Some(HitRegion::ContentLengthEnd) => {
                 super::WidgetCursor::EwResize
             }
@@ -513,7 +519,7 @@ impl WidgetDefinition for TimelineWidget {
         local_row: f32,
     ) -> Option<WidgetEvent> {
         let view = TimelineView::from_props(&node.props, node.rect);
-        view.handle_double_click(local_col, local_row)
+        view.handle_double_click(local_col, scroll_adjusted_row(local_row))
             .map(WidgetEvent::Custom)
     }
 
@@ -525,7 +531,7 @@ impl WidgetDefinition for TimelineWidget {
         delta: f64,
     ) -> Option<WidgetEvent> {
         let view = TimelineView::from_props(&node.props, node.rect);
-        view.handle_magnify(local_col, local_row, delta)
+        view.handle_magnify(local_col, scroll_adjusted_row(local_row), delta)
             .map(WidgetEvent::Custom)
     }
 
@@ -538,12 +544,14 @@ impl WidgetDefinition for TimelineWidget {
         delta_y: f32,
     ) -> Option<WidgetEvent> {
         let view = TimelineView::from_props(&node.props, node.rect);
-        view.handle_touchpad_scroll(local_col, local_row, delta_x, delta_y)
+        view.handle_touchpad_scroll(local_col, scroll_adjusted_row(local_row), delta_x, delta_y)
             .map(WidgetEvent::Custom)
     }
 
-    fn captures_scroll_gesture(&self) -> bool {
-        true
+    fn captures_scroll_gesture(&self, node: &LayoutNode) -> bool {
+        // Pass-through instances let declined (vertical) gestures bubble to
+        // the enclosing scroll container instead of swallowing them.
+        !vertical_scroll_passthrough(&node.props)
     }
 
     #[cfg(target_os = "macos")]
@@ -1194,6 +1202,7 @@ impl TimelineView {
                 props.get("scroll-mode"),
                 Some(Value::Keyword(mode)) | Some(Value::String(mode)) if mode == "smooth"
             ),
+            vertical_scroll_passthrough: vertical_scroll_passthrough(props),
             tool: get_tool(props),
             lanes: get_lanes(props),
             items: get_items(props),
@@ -2017,6 +2026,9 @@ impl TimelineView {
         }
         match mouse_kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                if self.vertical_scroll_passthrough {
+                    return None;
+                }
                 let lane_step = if self.smooth_scroll { 0.35 } else { 1.0 };
                 let delta_lanes = match mouse_kind {
                     MouseEventKind::ScrollUp => -lane_step,
@@ -2127,6 +2139,9 @@ impl TimelineView {
         }
 
         let horizontal_dominant = delta_x.abs() >= delta_y.abs();
+        if !horizontal_dominant && self.vertical_scroll_passthrough {
+            return None;
+        }
         let lane_height = self.lane_height();
         let delta_time = if horizontal_dominant {
             -(delta_x as f64 / content.width.max(1.0) as f64) * self.view_duration * 0.0625
@@ -2408,6 +2423,20 @@ impl TimelineView {
     fn scroll_time_step(&self) -> f64 {
         self.snap.max(1.0)
     }
+}
+
+fn vertical_scroll_passthrough(props: &HashMap<String, Value>) -> bool {
+    matches!(
+        props.get("scroll-passthrough"),
+        Some(Value::Keyword(mode)) | Some(Value::String(mode)) if mode == "vertical"
+    )
+}
+
+/// Pointer rows arrive in scroll-viewport coordinates when this instance
+/// lives inside a `scroll` container; node rects are in content coordinates,
+/// so shift by the per-event scroll offset (0 outside a container).
+fn scroll_adjusted_row(local_row: f32) -> f32 {
+    local_row + super::scroll::current_event_scroll_offset()
 }
 
 fn get_tool(props: &HashMap<String, Value>) -> TimelineTool {
@@ -2797,6 +2826,115 @@ mod tests {
 
         assert!(items[3].kind.is_none(), "unknown kind parses to None");
         assert!(items[3].content.is_none(), "malformed content parses to None");
+    }
+
+    /// The ruler must not invent a grid line/label at the view's left edge:
+    /// the first mark is the first one at or after view-start, not an
+    /// off-screen mark clamped to the edge.
+    #[test]
+    fn ruler_starts_at_first_mark_inside_the_view() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(2.5)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(2.0)),
+            (
+                "time-ruler".to_string(),
+                map_value_raw(vec![
+                    ("mode", keyword_value("bars-beats")),
+                    ("beats-per-bar", number_value(4.0)),
+                ]),
+            ),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        let ruler = view.time_ruler.clone();
+        let viewport = view.time_viewport();
+        // At this zoom the grid step is 4 beats; the first mark inside
+        // [2.5, 18.5) is beat 4 — nothing may sit clamped at the left edge.
+        let lines = viewport.metal_grid_lines(ruler.as_ref());
+        assert!(!lines.is_empty());
+        let content_left = viewport.content_rect().col;
+        let expected_x = view.x_for_time(4.0);
+        assert!(
+            (lines[0].0 - expected_x).abs() < 0.01,
+            "first grid line must be at beat 4 (x {expected_x}), got {}",
+            lines[0].0
+        );
+        assert!(lines[0].0 > content_left + 0.5, "no edge-clamped line");
+
+        let labels = viewport.metal_time_ruler_labels(ruler.as_ref());
+        assert!(!labels.is_empty());
+        assert_eq!(labels[0].1, "2", "beat 4 labels as bar 2");
+        assert!(
+            (labels[0].0 - expected_x).abs() < 0.5,
+            "first label sits on its grid line, not pinned to the view edge"
+        );
+    }
+
+    /// `:scroll-passthrough :vertical` declines vertical wheel/touchpad
+    /// deltas (so an enclosing scroll container can take them) while
+    /// horizontal deltas still pan the shared time axis.
+    #[test]
+    fn vertical_scroll_passthrough_declines_vertical_but_pans_horizontal() {
+        let props = HashMap::from([
+            ("scroll-passthrough".to_string(), keyword_value("vertical")),
+            ("view-start".to_string(), number_value(8.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("lanes".to_string(), lanes_value(8)),
+            ("lane-height".to_string(), number_value(1.0)),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 4.0,
+            },
+        );
+        assert!(vertical_scroll_passthrough(&props));
+        // Vertical-dominant touchpad delta: declined even though the lanes
+        // could scroll (8 lanes in a 4-row viewport).
+        assert!(view.handle_touchpad_scroll(10.0, 2.0, 0.0, -30.0).is_none());
+        // Vertical wheel: declined.
+        assert!(view
+            .handle_scroll(MouseEventKind::ScrollDown, 10.0, 2.0)
+            .is_none());
+        // Horizontal-dominant touchpad delta still pans the time axis.
+        let action = view
+            .handle_touchpad_scroll(10.0, 2.0, -30.0, 2.0)
+            .expect("horizontal pan still handled");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("scroll-view".to_string()))
+        );
+
+        // Without the prop, the same vertical deltas scroll the lanes.
+        let mut default_props = props.clone();
+        default_props.remove("scroll-passthrough");
+        let view = TimelineView::from_props(
+            &default_props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 4.0,
+            },
+        );
+        assert!(view.handle_touchpad_scroll(10.0, 2.0, 0.0, -30.0).is_some());
+        assert!(view
+            .handle_scroll(MouseEventKind::ScrollDown, 10.0, 2.0)
+            .is_some());
     }
 
     /// The content-length drag gets a terminal action on release (mirroring

@@ -20297,6 +20297,30 @@
             track_lane.rect.row
         );
 
+        // Sticky ruler: the track rows live inside a scroll container that
+        // starts flush under the pinned scene lane and absorbs the rest of
+        // the pane, so vertical track scrolling never moves the ruler.
+        let track_scroll = find_layout_node_by_stable_key(&layout, "arrangement-track-scroll")
+            .expect("track scroll container");
+        assert_eq!(track_scroll.widget_type, "scroll");
+        assert_finite_nonzero_rect(track_scroll, "arrangement-track-scroll");
+        assert!(
+            (track_scroll.rect.row - scene_bottom).abs() < 0.01,
+            "scroll container starts at the scene lane's bottom edge"
+        );
+        assert!(
+            find_layout_node_by_stable_key(track_scroll, "arr-track-0").is_some(),
+            "track rows are children of the scroll container"
+        );
+        // The track lane delegates vertical scrolling to the container.
+        assert!(
+            matches!(
+                track_lane.props.get("scroll-passthrough"),
+                Some(Value::Keyword(mode)) if mode == "vertical"
+            ),
+            "track lanes must declare :scroll-passthrough :vertical"
+        );
+
         // Sparse lanes (spec 6): the nil-pattern span produces NO item.
         let read = |editor: &mut eseqlisp::Editor, expr: &str| {
             editor

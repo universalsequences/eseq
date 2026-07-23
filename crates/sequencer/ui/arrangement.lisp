@@ -409,6 +409,9 @@
     :key (str "arrangement-track-lane-" i)
     :width 0 :flex 1
     :height arrangement-track-lane-height
+    ;; Vertical scrolling belongs to the enclosing track scroll container;
+    ;; horizontal deltas still pan the shared time axis.
+    :scroll-passthrough :vertical
     :sidebar-width 0
     :header-height 0
     :tool arrangement-tool
@@ -474,6 +477,11 @@
 ;; Rows stack with :gap 0 so the timeline instances are vertically flush —
 ;; the pointer is always over a lane, keeping scroll/zoom gestures captured
 ;; by the timelines instead of leaking to the buffer viewport.
+;;
+;; The toolbar and scene lane (the arrangement's one ruler) sit OUTSIDE the
+;; track scroll container, so they stay pinned while the track rows scroll
+;; vertically inside it. Track lanes pass vertical scrolling through to the
+;; container (:scroll-passthrough :vertical).
 (effect-buffer "*arrangement*"
   (v-stack :padding 0.0 :gap 0.0
     (arrangement-toolbar)
@@ -486,6 +494,8 @@
           :width arrangement-header-width :height arrangement-scene-lane-height
           :bg :transparent)
         (arrangement-scene-lane)))
-    (each (seq-visible-track-indices) |i|
-      (subtree :key (str "arr-track-" (nth SEQ.track-ids i))
-        (arrangement-track-row i)))))
+    (scroll :key "arrangement-track-scroll" :width :fill :flex 1
+      (v-stack :width :fill :gap 0.0
+        (each (seq-visible-track-indices) |i|
+          (subtree :key (str "arr-track-" (nth SEQ.track-ids i))
+            (arrangement-track-row i)))))))

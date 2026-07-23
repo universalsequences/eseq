@@ -262,7 +262,9 @@ impl TimeViewport {
 
         let (step, major_every) = self.grid_step_and_major_every(ruler);
 
-        let start = (self.view_start / step).floor() as i64;
+        // First mark at or after view_start: a mark before it would clamp to
+        // the content's left edge and draw an invented grid line/label there.
+        let start = (self.view_start / step).ceil() as i64;
         let end = ((self.view_start + self.view_duration) / step).ceil() as i64;
         let mut cols = Vec::new();
         let mut last = None;

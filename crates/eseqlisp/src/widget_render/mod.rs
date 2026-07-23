@@ -861,7 +861,12 @@ pub trait WidgetDefinition: Sync {
     ) -> Option<WidgetEvent> {
         None
     }
-    fn captures_scroll_gesture(&self) -> bool {
+    /// Whether a declined scroll gesture (a `None` from
+    /// `scroll_gesture_event`) should still be swallowed instead of bubbling
+    /// to an enclosing scroll container. Node-aware so widgets can opt
+    /// specific instances into pass-through (e.g. a timeline lane inside a
+    /// scroll container that delegates vertical scrolling to it).
+    fn captures_scroll_gesture(&self, _node: &LayoutNode) -> bool {
         false
     }
     fn captures_drag(&self) -> bool {
@@ -2477,7 +2482,7 @@ pub fn map_scroll_gesture_event(
 
 pub fn captures_scroll_gesture(node: &LayoutNode) -> bool {
     widget_definition(&node.widget_type)
-        .map(WidgetDefinition::captures_scroll_gesture)
+        .map(|definition| definition.captures_scroll_gesture(node))
         .unwrap_or(false)
 }
 

@@ -435,7 +435,7 @@ impl WidgetDefinition for WaveformWidget {
             .map(WidgetEvent::Custom)
     }
 
-    fn captures_scroll_gesture(&self) -> bool {
+    fn captures_scroll_gesture(&self, _node: &LayoutNode) -> bool {
         true
     }
 
