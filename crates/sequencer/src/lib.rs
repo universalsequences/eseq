@@ -41,7 +41,6 @@
     clippy::useless_format
 )]
 
-mod accumulator;
 #[allow(dead_code)]
 pub mod agent;
 pub mod analysis;
@@ -51,8 +50,6 @@ pub mod audiograph;
 pub mod crash;
 #[allow(dead_code)]
 pub mod effects;
-pub mod generator;
-pub mod graph;
 #[allow(dead_code)]
 pub mod lisp_host;
 pub mod macro_engine;
@@ -60,11 +57,14 @@ pub mod mixer_volume;
 pub mod neural;
 pub mod paths;
 pub mod plock_variants;
-pub mod process;
 pub mod project;
 pub mod quantized_launch;
 pub mod record_quantize;
 pub mod recorder;
+pub mod runtime;
+// Path-compat re-exports: the runtime engines moved into `runtime/` but keep
+// their historical `crate::<name>::` / `sequencer::<name>::` paths.
+pub use runtime::{accumulator, generator, graph, process};
 pub mod sample_db;
 pub mod sample_import;
 pub mod sampler;
