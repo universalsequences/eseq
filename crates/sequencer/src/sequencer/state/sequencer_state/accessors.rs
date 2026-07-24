@@ -399,6 +399,77 @@ impl SequencerState {
         );
     }
 
+    /// Insert `chunks` into `track`'s pattern pool and register a take over
+    /// them (takes spec 6.1). Production facade for scenes mutation (the raw
+    /// `with_scenes_mut` seam is test-only).
+    pub(crate) fn register_track_take(
+        &self,
+        track: usize,
+        name: Option<String>,
+        chunks: Vec<TrackPatternData>,
+        total_len_steps: u32,
+    ) -> Result<TakeId, String> {
+        if chunks.is_empty() {
+            return Err("a take requires at least one chunk pattern".to_string());
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        if track >= scenes.track_pools.len() {
+            return Err(format!("track {} does not exist", track + 1));
+        }
+        let chunk_ids: Vec<PatternId> = {
+            let pool = &mut scenes.track_pools[track];
+            chunks.into_iter().map(|data| pool.insert(data)).collect()
+        };
+        while scenes.take_pools.len() < scenes.track_pools.len() {
+            scenes.take_pools.push(TrackTakePool::default());
+        }
+        Ok(scenes.take_pools[track].insert(name, chunk_ids, total_len_steps))
+    }
+
+    /// Remove a take and delete its chunk patterns from the pattern pool
+    /// (takes spec 6.4). The caller owns removing song overrides that
+    /// reference the take and committing the combined undo entry.
+    pub(crate) fn remove_track_take(&self, track: usize, take_id: TakeId) -> Result<(), String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let take = scenes
+            .take_pools
+            .get_mut(track)
+            .and_then(|takes| takes.remove(take_id))
+            .ok_or_else(|| {
+                format!("take {} does not exist on track {}", take_id.0, track + 1)
+            })?;
+        if let Some(pool) = scenes.track_pools.get_mut(track) {
+            for chunk in take.chunks {
+                pool.remove(chunk);
+            }
+        }
+        Ok(())
+    }
+
+    /// Clones of a track's takes for UI listings (takes spec 11.3).
+    pub fn track_takes(&self, track: usize) -> Vec<TrackTake> {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .take_pools
+            .get(track)
+            .map(|takes| takes.takes.clone())
+            .unwrap_or_default()
+    }
+
+    /// Clone of one take.
+    pub fn track_take(&self, track: usize, take_id: TakeId) -> Option<TrackTake> {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .take_pools
+            .get(track)
+            .and_then(|takes| takes.get(take_id))
+            .cloned()
+    }
+
     /// Load-side arrangement install (takes spec 6.1/11.1), run right after
     /// `replace_pattern_repository`: re-apply per-scene cell absence so bare
     /// lanes survive reload (the pattern bank is dense; the loader

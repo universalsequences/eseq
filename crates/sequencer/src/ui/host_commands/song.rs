@@ -19,6 +19,9 @@ pub(super) const COMMANDS: &[&str] = &[
     "song-set-loop",
     "song-replace",
     "song-clear",
+    // Take lifecycle (takes spec 6.4) + the Phase C region→take harness.
+    "song-take-delete",
+    "song-region-to-take",
     // Transport authority (docs/song-mode-spec.md 12/13): routed through the
     // state machine in app/song_transport.rs.
     "song-transport-toggle-play",
@@ -94,6 +97,31 @@ fn parse_override(value: &Value) -> Result<ProjectSongTrackOverride, String> {
             }
             // Optional clip start offset in pattern steps (takes spec 6.2).
             let offset_steps = map_number(map, "offset-steps").unwrap_or(0.0);
+            // Optional take source (takes spec 6.2): mutually exclusive with
+            // a pattern id per validation 6.3.
+            if let Some(take_id) = map_number(map, "take-id") {
+                if !take_id.is_finite() || take_id < 0.0 || take_id.fract() != 0.0 {
+                    return Err("override take-id must be a non-negative integer".to_string());
+                }
+                if pattern_id.is_some_and(|id| id != 0.0) {
+                    return Err(
+                        "an override cannot carry both :take-id and :pattern-id".to_string()
+                    );
+                }
+                if !track.is_finite() || track < 0.0 || track.fract() != 0.0 {
+                    return Err("override track must be a non-negative integer".to_string());
+                }
+                if !offset_steps.is_finite() || offset_steps < 0.0 {
+                    return Err(
+                        "override offset-steps must be a finite, non-negative number".to_string()
+                    );
+                }
+                return Ok(ProjectSongTrackOverride::new_take(
+                    track as usize,
+                    take_id as u64,
+                    offset_steps,
+                ));
+            }
             override_from_numbers(track, pattern_id, offset_steps)
         }
         _ => Err("override entries must be (track pattern-id) pairs or maps".to_string()),
@@ -292,6 +320,35 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
         "song-clear" => {
             app.song_clear()?;
             Ok("Cleared song".to_string())
+        }
+        "song-take-delete" => {
+            let map = payload_map(payload)?;
+            let track = require_number(map, "track")?;
+            let take_id = require_number(map, "take-id")?;
+            if track < 0.0 || track.fract() != 0.0 || take_id < 0.0 || take_id.fract() != 0.0 {
+                return Err("track and take-id must be non-negative integers".to_string());
+            }
+            app.song_take_delete(track as usize, take_id as u64)?;
+            Ok(format!(
+                "Deleted take {} on track {}",
+                take_id as u64,
+                track as usize + 1
+            ))
+        }
+        "song-region-to-take" => {
+            let map = payload_map(payload)?;
+            let track = require_number(map, "track")?;
+            if track < 0.0 || track.fract() != 0.0 {
+                return Err("track must be a non-negative integer".to_string());
+            }
+            let start_beat = require_number(map, "start-beat")?;
+            let end_beat = require_number(map, "end-beat")?;
+            let take_id = app.song_region_to_take(track as usize, start_beat, end_beat)?;
+            Ok(format!(
+                "Converted track {} beats {start_beat}-{end_beat} into take {}",
+                track as usize + 1,
+                take_id.0
+            ))
         }
         _ => Err(format!("unknown song command: {name}")),
     }

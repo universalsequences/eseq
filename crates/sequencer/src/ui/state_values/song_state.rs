@@ -64,11 +64,62 @@ pub(crate) struct SongFrameState {
 #[derive(Clone, PartialEq)]
 pub(crate) struct LanePatternEvents {
     pub(crate) pattern_id: u64,
+    /// `Some` when this entry is a TAKE's aggregated content (takes spec
+    /// 11.3): `pattern_id` is then meaningless (0), `num_steps` is the
+    /// take's total playable length, and event times run continuously
+    /// across chunk boundaries.
+    pub(crate) take_id: Option<u64>,
     pub(crate) num_steps: usize,
     /// One pattern cycle in musical beats (`num_steps * step_beats` of the
     /// pattern's timebase) — what the view needs to tile a looping clip.
+    /// For a take entry: the take's full length in beats (takes never tile).
     pub(crate) length_beats: f64,
     pub(crate) events: Vec<(f64, f64, f64)>,
+}
+
+/// Flatten one pattern's step/chord content into `(time, transpose,
+/// velocity)` events, with times based at `base_step` and truncated at
+/// `step_limit` steps of the pattern.
+fn flatten_pattern_events(
+    data: &sequencer::sequencer::TrackPatternData,
+    base_step: f64,
+    step_limit: usize,
+    events: &mut Vec<(f64, f64, f64)>,
+) {
+    for step in 0..step_limit.min(data.step_data.len()) {
+        if events.len() >= LANE_PATTERN_EVENT_CAP {
+            break;
+        }
+        let velocity = f64::from(data.step_data[step][StepParam::Velocity as usize]);
+        let chord = data.chord_snapshot.steps.get(step);
+        match chord {
+            Some(notes) if !notes.is_empty() => {
+                for (voice, transpose) in notes.iter().enumerate() {
+                    let delay = data
+                        .chord_snapshot
+                        .delays
+                        .get(step)
+                        .and_then(|delays| delays.get(voice))
+                        .copied()
+                        .unwrap_or(0.0);
+                    events.push((
+                        base_step + step as f64 + f64::from(delay),
+                        f64::from(*transpose),
+                        velocity,
+                    ));
+                }
+            }
+            _ => {
+                let active = (data.track_bits[step / 64] >> (step % 64)) & 1 == 1;
+                if active {
+                    let delay = f64::from(data.step_data[step][StepParam::Delay as usize]);
+                    let transpose =
+                        f64::from(data.step_data[step][StepParam::Transpose as usize]);
+                    events.push((base_step + step as f64 + delay, transpose, velocity));
+                }
+            }
+        }
+    }
 }
 
 /// Bound on published events per pattern so a pathological pattern cannot
@@ -91,60 +142,80 @@ pub(crate) fn collect_lane_pattern_events(
                 .collect();
             ids.sort_unstable();
             ids.dedup();
-            ids.into_iter()
+            let mut entries: Vec<LanePatternEvents> = ids
+                .into_iter()
                 .filter_map(|id| {
                     let data = scenes.track_pools.get(track)?.get(PatternId(id))?;
                     let num_steps = data.track_params.num_steps.max(1);
                     let length_beats =
                         data.track_params.timebase.step_beats(num_steps) * num_steps as f64;
                     let mut events = Vec::new();
-                    for step in 0..num_steps.min(data.step_data.len()) {
-                        if events.len() >= LANE_PATTERN_EVENT_CAP {
-                            break;
-                        }
-                        let velocity =
-                            f64::from(data.step_data[step][StepParam::Velocity as usize]);
-                        let chord = data.chord_snapshot.steps.get(step);
-                        match chord {
-                            Some(notes) if !notes.is_empty() => {
-                                for (voice, transpose) in notes.iter().enumerate() {
-                                    let delay = data
-                                        .chord_snapshot
-                                        .delays
-                                        .get(step)
-                                        .and_then(|delays| delays.get(voice))
-                                        .copied()
-                                        .unwrap_or(0.0);
-                                    events.push((
-                                        step as f64 + f64::from(delay),
-                                        f64::from(*transpose),
-                                        velocity,
-                                    ));
-                                }
-                            }
-                            _ => {
-                                let active = (data.track_bits[step / 64] >> (step % 64)) & 1 == 1;
-                                if active {
-                                    let delay = f64::from(
-                                        data.step_data[step][StepParam::Delay as usize],
-                                    );
-                                    let transpose = f64::from(
-                                        data.step_data[step][StepParam::Transpose as usize],
-                                    );
-                                    events.push((step as f64 + delay, transpose, velocity));
-                                }
-                            }
-                        }
-                    }
+                    flatten_pattern_events(data, 0.0, num_steps, &mut events);
                     events.truncate(LANE_PATTERN_EVENT_CAP);
                     Some(LanePatternEvents {
                         pattern_id: id,
+                        take_id: None,
                         num_steps,
                         length_beats,
                         events,
                     })
                 })
-                .collect()
+                .collect();
+            // Take entries (takes spec 11.3): one aggregated entry per take
+            // the lane references, MIDI-dot content concatenated across
+            // chunks on a continuous step axis.
+            let mut take_ids: Vec<u64> = clips
+                .iter()
+                .filter_map(|clip| clip.source.take().map(|take| take.0))
+                .collect();
+            take_ids.sort_unstable();
+            take_ids.dedup();
+            for take_id in take_ids {
+                let Some(take) = scenes
+                    .take_pools
+                    .get(track)
+                    .and_then(|takes| takes.get(sequencer::sequencer::TakeId(take_id)))
+                else {
+                    continue;
+                };
+                let Some(first_chunk) = take
+                    .chunks
+                    .first()
+                    .and_then(|id| scenes.track_pools.get(track)?.get(*id))
+                else {
+                    continue;
+                };
+                let step_beats = first_chunk
+                    .track_params
+                    .timebase
+                    .step_beats(sequencer::sequencer::MAX_STEPS);
+                let total_len = take.total_len_steps.max(1) as usize;
+                let mut events = Vec::new();
+                for (chunk_idx, chunk_id) in take.chunks.iter().enumerate() {
+                    let Some(data) =
+                        scenes.track_pools.get(track).and_then(|pool| pool.get(*chunk_id))
+                    else {
+                        continue;
+                    };
+                    let base = chunk_idx * sequencer::sequencer::MAX_STEPS;
+                    let limit = total_len
+                        .saturating_sub(base)
+                        .min(sequencer::sequencer::MAX_STEPS);
+                    if limit == 0 || events.len() >= LANE_PATTERN_EVENT_CAP {
+                        break;
+                    }
+                    flatten_pattern_events(data, base as f64, limit, &mut events);
+                }
+                events.truncate(LANE_PATTERN_EVENT_CAP);
+                entries.push(LanePatternEvents {
+                    pattern_id: 0,
+                    take_id: Some(take_id),
+                    num_steps: total_len,
+                    length_beats: step_beats * total_len as f64,
+                    events,
+                });
+            }
+            entries
         })
         .collect()
 }
@@ -172,7 +243,18 @@ pub(crate) fn build_song_lane_events_value(events: &[Vec<LanePatternEvents>]) ->
                     let mut map = HashMap::new();
                     map.insert(
                         "pattern-id".to_string(),
-                        Rc::new(RefCell::new(Value::Number(pattern.pattern_id as f64))),
+                        Rc::new(RefCell::new(match pattern.take_id {
+                            // Take entries carry no pattern identity.
+                            Some(_) => Value::Nil,
+                            None => Value::Number(pattern.pattern_id as f64),
+                        })),
+                    );
+                    map.insert(
+                        "take-id".to_string(),
+                        Rc::new(RefCell::new(match pattern.take_id {
+                            Some(id) => Value::Number(id as f64),
+                            None => Value::Nil,
+                        })),
                     );
                     map.insert(
                         "num-steps".to_string(),
@@ -329,6 +411,13 @@ pub(crate) fn build_song_lanes_value(lanes: Option<&Vec<Vec<LaneClip>>>) -> Valu
                         "pattern-id".to_string(),
                         Rc::new(RefCell::new(match clip.pattern {
                             Some(id) => Value::Number(id.0 as f64),
+                            None => Value::Nil,
+                        })),
+                    );
+                    map.insert(
+                        "take-id".to_string(),
+                        Rc::new(RefCell::new(match clip.source.take() {
+                            Some(take) => Value::Number(take.0 as f64),
                             None => Value::Nil,
                         })),
                     );

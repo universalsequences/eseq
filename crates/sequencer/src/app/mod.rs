@@ -44,6 +44,7 @@ mod params;
 mod projects;
 pub mod song_capture;
 pub mod song_edit;
+pub mod take_edit;
 pub mod song_transport;
 mod synth;
 

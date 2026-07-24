@@ -350,6 +350,27 @@ impl App {
         })
     }
 
+    /// Steps-per-beat and playable length of `take_id` on `track` (the
+    /// chunk-domain `steps()` mapping, takes spec 6.1: chunks are
+    /// `MAX_STEPS`-long patterns under the first chunk's base timebase).
+    pub(crate) fn take_step_mapping(&self, track: usize, take_id: u64) -> Option<(f64, f64)> {
+        self.state.with_project_scenes(|scenes| {
+            let take = scenes
+                .take_pools
+                .get(track)?
+                .get(crate::sequencer::TakeId(take_id))?;
+            let first_chunk = scenes
+                .track_pools
+                .get(track)?
+                .get(*take.chunks.first()?)?;
+            let step_beats = first_chunk
+                .track_params
+                .timebase
+                .step_beats(crate::sequencer::MAX_STEPS);
+            (step_beats > 0.0).then(|| (1.0 / step_beats, take.total_len_steps as f64))
+        })
+    }
+
     /// Advance `offset_steps` by `delta_beats` of playback in the given
     /// pattern's step domain, normalized into `[0, num_steps)`. Offsets
     /// within stamping epsilon of a pattern boundary collapse to 0 so
@@ -379,7 +400,7 @@ impl App {
     /// track. Scene-resolved lanes whose advanced offset is nonzero get a
     /// materialized override (locked decision: phase lives on overrides
     /// only; rows and scenes carry none).
-    fn split_row_state(
+    pub(super) fn split_row_state(
         &self,
         governing: &ProjectSongRow,
         split_beat: f64,
@@ -403,7 +424,21 @@ impl App {
             match existing {
                 Some(over) => {
                     let mut over = *over;
-                    if let Some(pattern_id) = over.pattern_id {
+                    if let Some(take_id) = over.take_id {
+                        // Take lanes advance linearly, never wrapping (takes
+                        // spec 6.1); a split past the take end becomes an
+                        // explicit-empty override (the silent tail).
+                        if let Some((steps_per_beat, total_len)) =
+                            self.take_step_mapping(track, take_id)
+                        {
+                            let advanced = over.offset_steps + delta_beats * steps_per_beat;
+                            if advanced >= total_len - 1e-6 {
+                                over = ProjectSongTrackOverride::new(track, None);
+                            } else {
+                                over.offset_steps = advanced.max(0.0);
+                            }
+                        }
+                    } else if let Some(pattern_id) = over.pattern_id {
                         over.offset_steps = self.advanced_offset(
                             track,
                             pattern_id,

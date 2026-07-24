@@ -145,7 +145,7 @@ fn rollback_effect_chain_edit<S: EffectChainHistoryState>(
 }
 
 impl App {
-    fn capture_synchronized_scene_structure_state(
+    pub(super) fn capture_synchronized_scene_structure_state(
         &mut self,
     ) -> Result<crate::sequencer::ProjectScenes, String> {
         finish_active_gesture(self);
@@ -1877,7 +1877,7 @@ impl App {
         Ok(())
     }
 
-    fn restore_scene_structure_state(
+    pub(super) fn restore_scene_structure_state(
         &mut self,
         target: &crate::sequencer::ProjectScenes,
     ) -> Result<(), String> {

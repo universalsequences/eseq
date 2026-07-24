@@ -25,6 +25,77 @@ pub struct TrackPatternData {
     pub key_lock_variant_registry: PlockVariantRegistry,
 }
 
+impl TrackPatternData {
+    /// Strip every per-step lane (notes, params, chords, timing plocks),
+    /// keeping the track-level device/param state. Used to mint empty take
+    /// chunks from a template pattern (takes spec 6.1).
+    pub fn clear_step_content(&mut self) {
+        self.track_bits = [0u64; TRACK_PATTERN_WORDS];
+        self.neural_reset_bits = [0u64; TRACK_PATTERN_WORDS];
+        for step in self.step_data.iter_mut() {
+            for param in StepParam::ALL {
+                step[param.index()] = param.default_value();
+            }
+        }
+        for lane in [
+            &mut self.chord_snapshot.steps,
+            &mut self.chord_snapshot.durations,
+            &mut self.chord_snapshot.delays,
+        ] {
+            for step in lane.iter_mut() {
+                step.clear();
+            }
+        }
+        self.timebase_plock_snapshot = [None; MAX_STEPS];
+        self.swing_plock_snapshot = [None; MAX_STEPS];
+        self.swing_resolution_plock_snapshot = [None; MAX_STEPS];
+    }
+
+    /// Copy one step's complete per-step content (activation, params,
+    /// chord notes/durations/delays, timing plocks) from `src`'s
+    /// `src_step` into this pattern's `dst_step`.
+    pub fn copy_step_content_from(
+        &mut self,
+        dst_step: usize,
+        src: &TrackPatternData,
+        src_step: usize,
+    ) {
+        if dst_step >= MAX_STEPS || src_step >= MAX_STEPS {
+            return;
+        }
+        let src_active = src.track_bits[src_step / 64] >> (src_step % 64) & 1 == 1;
+        if src_active {
+            self.track_bits[dst_step / 64] |= 1 << (dst_step % 64);
+        } else {
+            self.track_bits[dst_step / 64] &= !(1 << (dst_step % 64));
+        }
+        let src_reset = src.neural_reset_bits[src_step / 64] >> (src_step % 64) & 1 == 1;
+        if src_reset {
+            self.neural_reset_bits[dst_step / 64] |= 1 << (dst_step % 64);
+        } else {
+            self.neural_reset_bits[dst_step / 64] &= !(1 << (dst_step % 64));
+        }
+        if let (Some(dst), Some(src_row)) =
+            (self.step_data.get_mut(dst_step), src.step_data.get(src_step))
+        {
+            *dst = *src_row;
+        }
+        for (dst_lane, src_lane) in [
+            (&mut self.chord_snapshot.steps, &src.chord_snapshot.steps),
+            (&mut self.chord_snapshot.durations, &src.chord_snapshot.durations),
+            (&mut self.chord_snapshot.delays, &src.chord_snapshot.delays),
+        ] {
+            if let Some(dst) = dst_lane.get_mut(dst_step) {
+                *dst = src_lane.get(src_step).cloned().unwrap_or_default();
+            }
+        }
+        self.timebase_plock_snapshot[dst_step] = src.timebase_plock_snapshot[src_step];
+        self.swing_plock_snapshot[dst_step] = src.swing_plock_snapshot[src_step];
+        self.swing_resolution_plock_snapshot[dst_step] =
+            src.swing_resolution_plock_snapshot[src_step];
+    }
+}
+
 /// Instrument-owned authoring state for one track pattern.  Structural
 /// instrument replacement deliberately resets these fields; keeping them in a
 /// separate snapshot lets undo restore the binding without overwriting notes,

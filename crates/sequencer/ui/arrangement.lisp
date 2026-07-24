@@ -231,17 +231,28 @@
 ;; the later span continues the earlier clip iff its stored offset equals the
 ;; earlier anchor's offset advanced by the elapsed beats, modulo the pattern
 ;; length. Discontinuous spans are separate clips (the later one re-anchors).
+;; Take spans (spec 6.1) are linear — continuity is exact offset advance, no
+;; modulo.
 (def arrangement-offsets-continuous? (track cur clip)
-  (let ((spb (arrangement-pattern-steps-per-beat track (get cur :pattern-id)))
-        (entry (arrangement-lane-pattern-events track (get cur :pattern-id))))
-    (if (or (= spb nil) (= entry nil))
-      true
-      (let ((num-steps (max 1 (get entry :num-steps)))
-            (expected (+ (or (get cur :offset-steps) 0)
-                        (* spb (- (get clip :start-beat) (get cur :start-beat))))))
-        (let ((cycles (/ (- expected (or (get clip :offset-steps) 0)) num-steps)))
-          (let ((wrap-error (- cycles (floor (+ cycles 0.5)))))
-            (< (max wrap-error (- 0 wrap-error)) 0.0001)))))))
+  (if (not (= (get cur :take-id) nil))
+    (let ((entry (arrangement-lane-take-events track (get cur :take-id))))
+      (if (or (= entry nil) (<= (get entry :length-beats) 0))
+        true
+        (let ((spb (/ (get entry :num-steps) (get entry :length-beats))))
+          (let ((expected (+ (or (get cur :offset-steps) 0)
+                            (* spb (- (get clip :start-beat) (get cur :start-beat))))))
+            (let ((err (- expected (or (get clip :offset-steps) 0))))
+              (< (max err (- 0 err)) 0.0001))))))
+    (let ((spb (arrangement-pattern-steps-per-beat track (get cur :pattern-id)))
+          (entry (arrangement-lane-pattern-events track (get cur :pattern-id))))
+      (if (or (= spb nil) (= entry nil))
+        true
+        (let ((num-steps (max 1 (get entry :num-steps)))
+              (expected (+ (or (get cur :offset-steps) 0)
+                          (* spb (- (get clip :start-beat) (get cur :start-beat))))))
+          (let ((cycles (/ (- expected (or (get clip :offset-steps) 0)) num-steps)))
+            (let ((wrap-error (- cycles (floor (+ cycles 0.5)))))
+              (< (max wrap-error (- 0 wrap-error)) 0.0001))))))))
 
 ;; Merge adjacent same-pattern, phase-continuous spans into one clip (the
 ;; spec's "merging is a view concern"): a row split made to edit ANOTHER
@@ -254,6 +265,7 @@
     (if (= cur nil)
       (dict :done (get acc :done) :cur clip)
       (if (and (= (get cur :pattern-id) (get clip :pattern-id))
+            (= (get cur :take-id) (get clip :take-id))
             (= (get cur :end-beat) (get clip :start-beat))
             (arrangement-offsets-continuous? i cur clip))
         (dict :done (get acc :done)
@@ -262,6 +274,7 @@
                  :start-beat (get cur :start-beat)
                  :end-beat (get clip :end-beat)
                  :pattern-id (get cur :pattern-id)
+                 :take-id (get cur :take-id)
                  :offset-steps (get cur :offset-steps)
                  :from-override (or (get cur :from-override)
                                   (get clip :from-override))))
@@ -270,7 +283,9 @@
 (def arrangement-merged-track-clips (i)
   (let ((folded (reduce |acc clip| (arrangement-merge-clip-fold i acc clip)
                   (dict :done '() :cur nil)
-                  (filter (lambda (clip) (not (= (get clip :pattern-id) nil)))
+                  (filter (lambda (clip)
+                            (not (and (= (get clip :pattern-id) nil)
+                                   (= (get clip :take-id) nil))))
                     (arrangement-track-clips i)))))
     (if (= (get folded :cur) nil)
       (get folded :done)
@@ -294,6 +309,16 @@
                    (nth SEQ.song-lane-events track)
                    '())))
     (let ((matches (filter (lambda (entry) (= (get entry :pattern-id) pattern-id))
+                     entries)))
+      (if (> (len matches) 0) (nth matches 0) nil))))
+
+;; Aggregated take content (takes spec 11.3): one entry per take, event
+;; times continuous across chunk boundaries, :num-steps = take length.
+(def arrangement-lane-take-events (track take-id)
+  (let ((entries (if (< track (len SEQ.song-lane-events))
+                   (nth SEQ.song-lane-events track)
+                   '())))
+    (let ((matches (filter (lambda (entry) (= (get entry :take-id) take-id))
                      entries)))
       (if (> (len matches) 0) (nth matches 0) nil))))
 
@@ -342,13 +367,19 @@
       1)))
 
 (def arrangement-clip-content (i clip)
-  (let ((entry (arrangement-lane-pattern-events i (get clip :pattern-id))))
+  (let ((entry (if (= (get clip :take-id) nil)
+                 (arrangement-lane-pattern-events i (get clip :pattern-id))
+                 (arrangement-lane-take-events i (get clip :take-id)))))
     (if (= entry nil)
       nil
       (let ((dots (arrangement-pattern-dots entry)))
         (if (= (len dots) 0)
           nil
-          (dict :dots dots :cycle (arrangement-clip-cycle entry clip)))))))
+          (dict :dots dots
+            ;; Takes never loop (spec 11.3): one item, no repeat tiling.
+            :cycle (if (= (get clip :take-id) nil)
+                     (arrangement-clip-cycle entry clip)
+                     1)))))))
 
 ;; Live resize ghost for a track clip: while the edge drag is in flight the
 ;; clip previews its new end; the finish action lowers to one song-track-paint.
@@ -362,6 +393,7 @@
       :end-beat (max (+ (get clip :start-beat) 1)
                   (min SEQ.song-end-beat (get arrangement-ghost :end)))
       :pattern-id (get clip :pattern-id)
+      :take-id (get clip :take-id)
       :from-override (get clip :from-override))
     clip))
 

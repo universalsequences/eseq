@@ -20746,6 +20746,7 @@
         };
         let sparse = LanePatternEvents {
             pattern_id: 1,
+            take_id: None,
             num_steps: 16,
             // 16 sixteenth steps = one 4-beat cycle.
             length_beats: 4.0,
@@ -20753,6 +20754,7 @@
         };
         let dense = LanePatternEvents {
             pattern_id: 2,
+            take_id: None,
             num_steps: 64,
             length_beats: 16.0,
             events: (0..600)
