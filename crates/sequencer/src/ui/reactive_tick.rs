@@ -340,6 +340,9 @@ pub(crate) fn reactive_tick_and_render(
         // The render-rate song position drives the transport readout and the
         // arrangement playhead, so it publishes while either is visible.
         let arrangement_visible = editor_has_visible_buffer(&editor, "*arrangement*");
+        // Clip selection is dormant while the timeline is off screen (takes
+        // spec 16.6), so the binding needs the view state before it resolves.
+        app.set_arrangement_view_visible(arrangement_visible);
         // Sound binding (takes spec 16.2): keep the live device mirror on the
         // bound source before anything reads it. This is where a song row
         // transition (rule 2) re-binds the panel and the monitor sound, and

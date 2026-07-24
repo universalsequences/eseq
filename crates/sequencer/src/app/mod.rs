@@ -924,10 +924,21 @@ pub struct App {
     /// the sound-binding order. Timeline state, not view state: it survives
     /// view switches and transport and never decays implicitly.
     pub song_clip_selection: Option<sound_binding::SongClipSelection>,
+    /// Whether the arrangement view is on screen. The clip selection is
+    /// DORMANT while it is not (takes spec 16.6): a take selected in the
+    /// timeline must not keep owning the device panel after the user has
+    /// switched to the Seq tab, where nothing shows what the panel is bound
+    /// to. Returning to the arrangement re-binds to the same selection.
+    pub(crate) arrangement_view_visible: bool,
     /// Per track, the non-scene source whose device state is currently
     /// loaded into the live mirror (takes spec 16.2). `None` = the mirror
     /// holds the effective scene pattern's devices, i.e. nothing is borrowed.
     pub(crate) loaded_sound_binding: Vec<Option<sound_binding::BoundSource>>,
+    /// Per track, whether the ENGINE currently reflects the loaded binding
+    /// (takes spec 16.7). False while a non-audible clip is bound during song
+    /// playback: the panel and the edit target move, the sound does not —
+    /// the arrangement keeps playing what it was playing.
+    pub(crate) sound_binding_monitored: Vec<bool>,
     /// Deferred edit-through target (takes spec 16.7): a device edit made
     /// during a coalescing drag records its pool pattern here and the
     /// gesture end re-preflights once, instead of per drag frame.
@@ -2265,7 +2276,9 @@ impl App {
             take_recording: None,
             record_arm_sync_pending: false,
             song_clip_selection: None,
+            arrangement_view_visible: false,
             loaded_sound_binding: Vec::new(),
+            sound_binding_monitored: Vec::new(),
             pending_song_row_invalidation: None,
             sound_binding_epoch: 0,
             graph: GraphState {

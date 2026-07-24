@@ -99,6 +99,29 @@ impl App {
             )
     }
 
+    /// Recording engaged while the song is ALREADY playing: promote
+    /// `SongPlayback` into `ArrangementCapture` so armed note input records
+    /// into takes (takes spec 8) and commits with the splice at Stop.
+    ///
+    /// Without this, record-arm-then-record during song playback left the
+    /// mode at `SongPlayback`, `take_recording_active()` read false, and the
+    /// performance fell through to the live-pattern write path — layering an
+    /// unrolled arrangement performance into the scene's looping clip.
+    ///
+    /// The capture origin stays song beat zero: the record clock the take
+    /// stamps against is the transport beat clock, which song playback
+    /// started from zero. Returns whether the promotion happened.
+    pub fn promote_song_playback_to_capture(&mut self) -> bool {
+        if self.song_transport_mode != SongTransportMode::SongPlayback
+            || self.song_capture_take.is_some()
+        {
+            return false;
+        }
+        self.begin_song_capture_take();
+        self.set_song_transport_mode(SongTransportMode::ArrangementCapture);
+        true
+    }
+
     /// Back to Song (takes spec 10): clear the manual-override latch so the
     /// affected lanes snap back to whatever the song resolves at the
     /// current beat with anchored phase. Audible on the next scheduled
@@ -170,6 +193,12 @@ impl App {
             return Err(USE_ARRANGEMENT_WHILE_PLAYING_ERROR.to_string());
         }
         self.use_arrangement = enabled;
+        if !enabled {
+            // Leaving song mode entirely: the timeline selection has no
+            // surface left to explain itself, so it is dropped rather than
+            // left binding the device panel to a take (takes spec 16.6).
+            self.set_song_clip_selection(None);
+        }
         Ok(())
     }
 
@@ -664,6 +693,47 @@ mod tests {
             "a launch-free capture never rewrites the committed song"
         );
         app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn recording_mid_song_playback_promotes_into_arrangement_capture() {
+        // Arming a track and engaging record while the song is ALREADY
+        // playing must record into a take, not into the scene's looping
+        // pattern — so the note path promotes the mode first.
+        let mut app = app_with_song();
+        app.set_use_arrangement(true).unwrap();
+        app.song_transport_play(false).expect("song playback");
+        assert!(!app.take_recording_active());
+        assert!(app.promote_song_playback_to_capture(), "promotion happens");
+        assert_eq!(app.song_transport_mode, SongTransportMode::ArrangementCapture);
+        assert!(app.song_capture_take.is_some());
+        assert!(
+            app.take_recording_active(),
+            "armed note input now retargets into takes"
+        );
+        assert!(
+            !app.promote_song_playback_to_capture(),
+            "promotion is idempotent"
+        );
+        // Stop runs the capture stop-commit (nothing performed here, so the
+        // committed song is unchanged) and leaves no capture behind.
+        app.state.set_scheduler_rendered_beats(8.0);
+        app.song_transport_stop().expect("stop resolves the capture");
+        assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
+        assert!(app.song_capture_take.is_none());
+        assert!(!app.promote_song_playback_to_capture(), "no-op when stopped");
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn session_playback_recording_is_left_alone() {
+        // Arrangement off: record + play is ordinary live pattern recording.
+        let mut app = app_with_song();
+        app.song_transport_play(true).expect("session playback");
+        assert!(!app.promote_song_playback_to_capture());
+        assert_eq!(app.song_transport_mode, SongTransportMode::SessionPlayback);
+        assert!(!app.take_recording_active());
+        app.song_transport_stop().unwrap();
     }
 
     #[test]

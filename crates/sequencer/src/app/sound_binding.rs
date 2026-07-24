@@ -137,6 +137,12 @@ impl App {
     /// exists (16.6 cause 4 — deleting the selected clip falls back without
     /// any explicit unbinding).
     fn selected_bound_source(&self, track: usize) -> Option<BoundSource> {
+        // Dormant while the timeline is off screen (16.6): in the Seq tab
+        // nothing renders the bound clip, so a selection silently owning the
+        // device panel reads as the panel showing the wrong sound.
+        if !self.arrangement_view_visible {
+            return None;
+        }
         let selection = self.song_clip_selection?;
         if selection.track != track {
             return None;
@@ -259,6 +265,17 @@ impl App {
         Some((bar(first), bar((last - 1e-9).max(first))))
     }
 
+    /// Follow the arrangement view on/off screen (16.6 dormancy). Called
+    /// from the reactive tick before the bindings resolve; re-resolves only
+    /// on a real transition, where the panel and monitor must both move.
+    pub fn set_arrangement_view_visible(&mut self, visible: bool) {
+        if self.arrangement_view_visible == visible {
+            return;
+        }
+        self.arrangement_view_visible = visible;
+        self.sync_track_sound_bindings();
+    }
+
     /// Set/clear the timeline clip selection (16.6). Returns true when the
     /// selection actually changed, so callers can resync the binding only on
     /// a real transition.
@@ -283,6 +300,16 @@ impl App {
         if self.loaded_sound_binding.len() != self.tracks.len() {
             self.loaded_sound_binding.resize(self.tracks.len(), None);
         }
+        if self.sound_binding_monitored.len() != self.tracks.len() {
+            // A track with nothing borrowed is monitoring by construction:
+            // the engine already reflects the mirror.
+            self.sound_binding_monitored.resize(self.tracks.len(), true);
+        }
+        // While the song is sounding, a binding that is NOT what the playhead
+        // is currently playing is display + edit only (16.7): the performer
+        // must keep hearing the arrangement while tuning a past or future
+        // clip. The tweaks become audible when the playhead reaches it.
+        let song_sounding = self.song_playback_authority_active() && self.state.is_playing();
         let borrowed = self.state.sound_binding_borrowed_mask();
         for track in 0..self.tracks.len() {
             // A lane the state released underneath us (a launch or row
@@ -297,32 +324,72 @@ impl App {
                 BindingOrigin::Scene => None,
                 _ => binding.source,
             };
-            if desired == self.loaded_sound_binding[track] {
+            let audible = self.audible_lane_source(track).and_then(BoundSource::from_lane);
+            let monitors = !song_sounding || desired.is_none() || desired == audible;
+            if desired != self.loaded_sound_binding[track] {
+                match desired {
+                    Some(source) => {
+                        let Some(pattern) = self.source_read_pattern(track, source) else {
+                            continue;
+                        };
+                        let data = self.state.with_project_scenes(|scenes| {
+                            scenes
+                                .track_pools
+                                .get(track)
+                                .and_then(|pool| pool.get(pattern))
+                                .cloned()
+                        });
+                        let Some(data) = data else { continue };
+                        if !self.state.borrow_track_device_state(track, pattern, &data) {
+                            continue;
+                        }
+                    }
+                    None => self.state.release_bound_track_device_state(track),
+                }
+                self.loaded_sound_binding[track] = desired;
+                self.sound_binding_epoch += 1;
+                // The engine now lags the mirror; whether it catches up is
+                // the monitor decision below.
+                self.sound_binding_monitored[track] = false;
+            }
+            if !monitors {
+                // Silent binding: leave the engine on the audible row's
+                // sound, and remember that it no longer matches the mirror.
+                self.sound_binding_monitored[track] = false;
                 continue;
             }
-            match desired {
-                Some(source) => {
-                    let Some(pattern) = self.source_read_pattern(track, source) else {
-                        continue;
-                    };
-                    let data = self.state.with_project_scenes(|scenes| {
-                        scenes
-                            .track_pools
-                            .get(track)
-                            .and_then(|pool| pool.get(pattern))
-                            .cloned()
-                    });
-                    let Some(data) = data else { continue };
-                    if !self.state.borrow_track_device_state(track, pattern, &data) {
-                        continue;
-                    }
-                }
-                None => self.state.release_bound_track_device_state(track),
+            if !self.sound_binding_monitored[track] {
+                // Either the binding moved onto what is sounding, or the
+                // selection was released — push the mirror out for real.
+                self.sound_binding_monitored[track] = true;
+                self.push_track_sound_to_engine(track);
             }
-            self.loaded_sound_binding[track] = desired;
-            self.sound_binding_epoch += 1;
-            self.push_track_sound_to_engine(track);
         }
+    }
+
+    /// True while the mirror holds a bound source the engine must NOT hear
+    /// (16.7): a clip selected in the timeline that the playhead is not
+    /// currently playing. Every "push the mirror's value to the engine" path
+    /// checks this, so tuning a past or future clip is display + edit only
+    /// and the arrangement keeps sounding what it was sounding.
+    ///
+    /// Derived from live state rather than the `sound_binding_monitored`
+    /// bookkeeping on purpose: a song row transition RELEASES the borrow and
+    /// pushes the row's sound through these same senders, and that push must
+    /// never be swallowed — with nothing borrowed, the mirror is the track's
+    /// own sound and is always audible.
+    pub(crate) fn sound_binding_is_silent(&self, track: usize) -> bool {
+        if track >= 64 || self.state.sound_binding_borrowed_mask() >> track & 1 == 0 {
+            return false;
+        }
+        // Stopped or in session mode the bound source IS the monitor (16.2):
+        // hearing what you are editing is the whole point.
+        if !(self.song_playback_authority_active() && self.state.is_playing()) {
+            return false;
+        }
+        let loaded = self.loaded_sound_binding.get(track).copied().flatten();
+        let audible = self.audible_lane_source(track).and_then(BoundSource::from_lane);
+        loaded != audible
     }
 
     /// The pool pattern holding `source`'s device snapshot: a take is
@@ -677,6 +744,9 @@ mod tests {
         app.tracks = vec!["Track 1".to_string()];
         app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app.graph.instrument_descriptors = vec![descriptor];
+        // These cases are all "the user is looking at the timeline": rule 1
+        // is dormant while the arrangement view is off screen (16.6).
+        app.arrangement_view_visible = true;
         (app, take, scene_pattern, chunks)
     }
 
@@ -758,6 +828,116 @@ mod tests {
             instrument_default(&app, chunks[0]),
             chunk_before,
             "an unbound take keeps its frozen sound"
+        );
+    }
+
+    /// 16.6 dormancy: leaving the arrangement view hands the panel — and the
+    /// edit target — back to the scene pattern; returning re-binds the same
+    /// selection. Without this the Seq tab keeps showing a take's devices
+    /// with nothing on screen explaining why.
+    #[test]
+    fn selection_is_dormant_while_the_arrangement_view_is_hidden() {
+        let (mut app, take, scene_pattern, _chunks) = app_with_take();
+        app.select_song_clip(0, crate::sequencer::SongRowId(0))
+            .expect("clip selects");
+
+        app.set_arrangement_view_visible(false);
+        let binding = app.track_sound_binding(0);
+        assert!(binding.is_scene(), "the Seq tab binds the scene pattern");
+        assert_eq!(binding.source, Some(BoundSource::Pattern(scene_pattern)));
+        assert!(
+            app.song_clip_selection.is_some(),
+            "dormant, not cleared: the timeline selection survives the switch"
+        );
+
+        app.set_arrangement_view_visible(true);
+        assert_eq!(
+            app.track_sound_binding(0).source,
+            Some(BoundSource::Take(take)),
+            "returning to the timeline re-binds the selection"
+        );
+    }
+
+    /// 16.7: while the song plays, selecting a clip the playhead is NOT on
+    /// binds the panel and the edit target but must stay SILENT — you keep
+    /// hearing the arrangement while you tune a past or future clip.
+    /// Deselecting (or the playhead reaching it) hands the monitor back.
+    #[test]
+    fn a_non_audible_selection_is_display_and_edit_only_while_the_song_plays() {
+        let (mut app, take, scene_pattern, _chunks) = app_with_take();
+        // A second clip that is nowhere in the song: selecting it can never
+        // be what the playhead is playing.
+        let other = app.state.with_scenes_mut(|scenes| {
+            let data = scenes.track_pools[0]
+                .get(scene_pattern)
+                .expect("scene pattern")
+                .clone();
+            scenes.track_pools[0].insert(data)
+        });
+        app.set_use_arrangement(true).expect("song mode on");
+        app.song_transport_play(false).expect("song playback starts");
+        // Row zero plays the take; nothing selected -> the take is audible
+        // AND monitored.
+        app.sync_track_sound_bindings();
+        assert_eq!(
+            app.track_sound_binding(0).source,
+            Some(BoundSource::Take(take))
+        );
+        assert!(!app.sound_binding_is_silent(0), "what plays is what sounds");
+
+        app.set_song_clip_selection(Some(SongClipSelection {
+            track: 0,
+            row_id: crate::sequencer::SongRowId(0),
+            source: BoundSource::Pattern(other),
+        }));
+        assert_eq!(
+            app.track_sound_binding(0).source,
+            Some(BoundSource::Pattern(other)),
+            "the panel follows the selection"
+        );
+        assert!(
+            app.sound_binding_is_silent(0),
+            "a clip the playhead is not on must not be heard"
+        );
+
+        // Deselect: the audible take owns the panel and the monitor again.
+        app.set_song_clip_selection(None);
+        assert_eq!(
+            app.track_sound_binding(0).source,
+            Some(BoundSource::Take(take))
+        );
+        assert!(!app.sound_binding_is_silent(0));
+        app.song_transport_stop().expect("stop succeeds");
+    }
+
+    /// Stopped, the bound source IS the monitor (16.2) — tweaking a selected
+    /// clip while paused must be audible, otherwise sound design is deaf.
+    #[test]
+    fn a_selection_is_audible_while_the_transport_is_stopped() {
+        let (mut app, take, _scene_pattern, _chunks) = app_with_take();
+        app.select_song_clip(0, crate::sequencer::SongRowId(0))
+            .expect("clip selects");
+        app.sync_track_sound_bindings();
+        assert_eq!(
+            app.track_sound_binding(0).source,
+            Some(BoundSource::Take(take))
+        );
+        assert!(!app.sound_binding_is_silent(0));
+    }
+
+    /// Leaving song mode outright has no timeline left to explain a binding,
+    /// so the selection is dropped rather than left dormant.
+    #[test]
+    fn turning_off_use_arrangement_clears_the_selection() {
+        let (mut app, _take, scene_pattern, _chunks) = app_with_take();
+        app.set_use_arrangement(true).expect("song mode on");
+        app.select_song_clip(0, crate::sequencer::SongRowId(0))
+            .expect("clip selects");
+        app.set_use_arrangement(false).expect("back to session mode");
+        assert_eq!(app.song_clip_selection, None);
+        assert_eq!(
+            app.track_sound_binding(0).source,
+            Some(BoundSource::Pattern(scene_pattern))
         );
     }
 
