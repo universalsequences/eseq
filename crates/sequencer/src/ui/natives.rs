@@ -1087,6 +1087,21 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "seq-song-back-to-song",
+        "(seq-song-back-to-song)",
+        "Back to Song (takes spec 10): clear the manual-override latch so \
+         every latched lane snaps back to what the song resolves at the \
+         current beat, with anchored phase.",
+        move |_args, ctx| {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-back-to-song".to_string(),
+                payload: Value::Nil,
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "seq-song-status",
         "(seq-song-status)",
         "Report the song transport status on the status line: mode, row \

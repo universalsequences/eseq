@@ -1531,6 +1531,21 @@ impl App {
             self.graph_controller().sync_current_pattern_mod_routes();
         }
         self.push_all_restored_defaults();
+        // Manual-override latch (takes spec 10): a manual launch while the
+        // committed song is the playback authority suspends the song's
+        // launch authority for its scope — globally for a scene launch,
+        // per-track for a track launch. Cleared by Back to Song, transport
+        // stop, or the capture punch-out.
+        if self.song_playback_authority_active() {
+            match target {
+                PatternLaunchTarget::Scene { .. } => {
+                    self.state.latch_song_manual_override_all(num_tracks);
+                }
+                PatternLaunchTarget::SceneTracks { tracks, .. } => {
+                    self.state.latch_song_manual_override(tracks.iter().copied());
+                }
+            }
+        }
         // Slice C capture observation (spec 8.1/10.3): record the audible
         // launch after it successfully applied. Cheap control-thread Vec
         // push; no-op unless an arrangement-capture take is active.

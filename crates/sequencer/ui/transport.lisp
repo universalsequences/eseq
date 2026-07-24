@@ -620,9 +620,32 @@
             (v-stack :align :center
               (label (if SEQ.use-arrangement "SONG" "SESSION")
                 :font-size 9
-                :color (if SEQ.use-arrangement :white :gray)
+                ;; Amber while a manual launch has latched over the song
+                ;; (takes spec 10) — the song's launch authority is
+                ;; suspended for the latched lanes.
+                :color (if SEQ.song-manual-latch
+                         '(rgba 0.98 0.72 0.25 1)
+                         (if SEQ.use-arrangement :white :gray))
                 :hover-color :white
-                :bg :transparent))))))
+                :bg :transparent))))
+        ;; Back to Song (takes spec 10): visible only while latched; clears
+        ;; the latch so latched lanes snap back to the song's resolution
+        ;; with anchored phase.
+        (subtree :key "transport-back-to-song"
+          (if SEQ.song-manual-latch
+            (box :debug-name "transport-back-to-song"
+              :width 3.4 :height 1.1
+              :background "pattern-pill-bg"
+              :active 1
+              :style transport-icon-style
+              :on-click |x y r| (seq-song-back-to-song)
+              (v-stack :align :center
+                (label "->SONG"
+                  :font-size 9
+                  :color '(rgba 0.98 0.72 0.25 1)
+                  :hover-color :white
+                  :bg :transparent)))
+            nil))))
 
     ;; Song transport status (docs/song-mode-spec.md 7.5/11): a dedicated
     ;; SESSION / SONG / ARR REC readout — ARR REC is its own clearly visible

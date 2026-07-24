@@ -416,6 +416,37 @@ impl SequencerState {
         &self.song_playback
     }
 
+    /// Manual-override latch bitmask (takes spec 10). While a track's bit is
+    /// set, the scheduler schedules it from the live session snapshot
+    /// (free-running) instead of the active song row.
+    pub fn song_manual_latch_mask(&self) -> u64 {
+        self.song_manual_latch.load(Ordering::Acquire)
+    }
+
+    /// Latch specific tracks (a manual track launch during song playback).
+    pub fn latch_song_manual_override(&self, tracks: impl IntoIterator<Item = usize>) {
+        let mut bits = 0u64;
+        for track in tracks {
+            if track < 64 {
+                bits |= 1 << track;
+            }
+        }
+        if bits != 0 {
+            self.song_manual_latch.fetch_or(bits, Ordering::AcqRel);
+        }
+    }
+
+    /// Latch every track (a manual scene launch latches globally, spec 10).
+    pub fn latch_song_manual_override_all(&self, track_count: usize) {
+        self.latch_song_manual_override(0..track_count.min(64));
+    }
+
+    /// Back to Song / punch-out: the song resumes launch authority for
+    /// every lane (takes spec 10). Transient state; never serialized.
+    pub fn clear_song_manual_latch(&self) {
+        self.song_manual_latch.store(0, Ordering::Release);
+    }
+
     /// Hand a preflighted song to the scheduler thread. The initial row is
     /// found via `state_at_beat` semantics on the runtime rows; V1 callers
     /// pass `start_beat = 0.0` (spec 10.1). The scheduler installs the song

@@ -5700,6 +5700,59 @@
     }
 
     #[test]
+    fn manual_latch_schedules_track_from_live_snapshot_until_cleared() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            // Live session state: track 0 plays a distinct pattern
+            // (transpose 9). Row content is scene 1 (transpose 2).
+            state
+                .apply_song_row(0, &[], 2, &[], &[], &[], &[], true)
+                .expect("seed live state from scene 0");
+            let live = state.with_scenes_mut(|scenes| {
+                scenes.track_pools[0]
+                    .get(crate::sequencer::PatternId(4))
+                    .expect("override pool pattern")
+                    .clone()
+            });
+            let mut live_snapshot = crate::sequencer::PatternSnapshot::new_default(2, &[]);
+            live_snapshot.set_track_pattern_data(0, live);
+            assert!(live_snapshot.restore_track(&state, 0));
+            song_mode_commit(
+                &state,
+                vec![song_mode_row(0, 0.0, 1, Vec::new())],
+                4.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+
+            // Latched: track 0 schedules from the LIVE snapshot (transpose
+            // 9, free-running), track 1 from the song row (transpose 2).
+            state.latch_song_manual_override([0]);
+            let (events, _) =
+                drive_song_lookahead(&state, Arc::clone(&runtime), 16_000, 48_000);
+            assert!(!events.is_empty());
+            for event in &events {
+                let expected = if event.track == 0 { 9.0 } else { 2.0 };
+                assert_eq!(
+                    event.transpose, expected,
+                    "latched track plays the live pattern: {event:?}"
+                );
+            }
+
+            // Back to Song: the row's content resumes for track 0.
+            state.clear_song_manual_latch();
+            let (events, _) = drive_song_lookahead(&state, runtime, 16_000, 48_000);
+            assert!(events.iter().any(|event| event.track == 0));
+            for event in &events {
+                assert_eq!(
+                    event.transpose, 2.0,
+                    "cleared latch restores song resolution: {event:?}"
+                );
+            }
+        });
+    }
+
+    #[test]
     fn song_unquantized_row_boundary_keeps_sample_offset() {
         run_with_scheduler_stack(|| {
             let (state, _) = song_mode_fixture();

@@ -296,6 +296,32 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     // the anchors survive it.
                     let (anchor_beat, lane_offsets) = song.row_clock_anchor(row);
                     clock.set_song_row_anchors(anchor_beat, lane_offsets);
+                    // Manual-override latch (takes spec 10): latched tracks
+                    // suspend the song's launch authority — they schedule
+                    // from the LIVE session snapshot, free-running (anchor
+                    // cleared), and row boundaries neither swap their
+                    // content nor reset their accumulators.
+                    let latch = state.song_manual_latch_mask();
+                    if latch != 0 {
+                        let mut merged =
+                            (*song_row_snapshot.take().expect("row snapshot set above")).clone();
+                        let track_count = merged
+                            .tracks
+                            .len()
+                            .min(base_snapshot.tracks.len())
+                            .min(64);
+                        for track in 0..track_count {
+                            if latch >> track & 1 == 1 {
+                                merged.tracks[track] =
+                                    Arc::clone(&base_snapshot.tracks[track]);
+                                clock.clear_track_anchor(track);
+                                if !wrapped {
+                                    pending_accum_reset[track] = false;
+                                }
+                            }
+                        }
+                        song_row_snapshot = Some(Arc::new(merged));
+                    }
                 }
             }
         }

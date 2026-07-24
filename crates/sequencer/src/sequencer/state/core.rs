@@ -251,6 +251,13 @@ pub struct SequencerState {
     /// Song playback command/notice channels plus render-rate position
     /// atomics (docs/song-mode-spec.md 10.2).
     pub(super) song_playback: SongPlaybackMailbox,
+    /// Manual-override latch bitmask (takes spec 10): while a bit is set,
+    /// the song's launch authority is suspended for that track — the
+    /// scheduler schedules the track from the LIVE session snapshot
+    /// (free-running) instead of the active song row, and the control-side
+    /// row mirror leaves the lane alone. Transient transport state; never
+    /// serialized. Bit `t` = track `t` (`MAX_TRACKS <= 64`).
+    pub(super) song_manual_latch: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

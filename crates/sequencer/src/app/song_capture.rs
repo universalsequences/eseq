@@ -36,6 +36,13 @@ pub struct CapturedSongState {
     pub start_beat: f64,
     pub scene: usize,
     pub overrides: Vec<(usize, PatternId)>,
+    /// Tracks the performer has launch authority over at this boundary
+    /// (takes spec 9.4/10): a scene launch touches every track, a track
+    /// launch adds its tracks. Lanes NOT here inherit the pre-existing
+    /// arrangement's resolution at commit (capture runs on top of song
+    /// playback, spec 9.3). All tracks when capturing from an empty song
+    /// (the performer is the sole authority there).
+    pub touched: std::collections::BTreeSet<usize>,
 }
 
 /// The resolved launch identity of one captured event.
@@ -108,8 +115,14 @@ fn consolidate(initial: &CapturedSongState, events: &[CaptureLaunchEvent]) -> Ve
                 CaptureLaunchKind::Scene { scene } => Some(*scene),
                 CaptureLaunchKind::Tracks { .. } => None,
             });
+        let mut touched = previous.touched.clone();
         let (scene, mut overrides) = match last_scene {
-            Some(scene) => (scene, BTreeMap::new()),
+            Some(scene) => {
+                // A scene launch latches globally (takes spec 10): every
+                // lane is the performer's from here on.
+                touched.extend(0..crate::sequencer::MAX_TRACKS);
+                (scene, BTreeMap::new())
+            }
             None => (
                 previous.scene,
                 previous.overrides.iter().copied().collect::<BTreeMap<_, _>>(),
@@ -119,6 +132,7 @@ fn consolidate(initial: &CapturedSongState, events: &[CaptureLaunchEvent]) -> Ve
             if let CaptureLaunchKind::Tracks { overrides: pairs } = &event.kind {
                 for (track, pattern) in pairs {
                     overrides.insert(*track, *pattern);
+                    touched.insert(*track);
                 }
             }
         }
@@ -126,6 +140,7 @@ fn consolidate(initial: &CapturedSongState, events: &[CaptureLaunchEvent]) -> Ve
             start_beat: boundary,
             scene,
             overrides: overrides.into_iter().collect(),
+            touched,
         };
         if boundary <= 0.0 {
             // A launch audible exactly at the capture start replaces the
@@ -140,9 +155,14 @@ fn consolidate(initial: &CapturedSongState, events: &[CaptureLaunchEvent]) -> Ve
     }
 
     // Spec 7.4.6/10.4.4: repeated identical states produce no row. The
-    // earlier row survives, mirroring `ProjectSong::normalize`.
+    // earlier row survives, mirroring `ProjectSong::normalize`. Authority
+    // (`touched`) participates in identity: relaunching the current scene
+    // during capture-on-playback audibly takes the lanes over (takes spec
+    // 9.3/10) even though scene+overrides look unchanged.
     rows.dedup_by(|later, earlier| {
-        earlier.scene == later.scene && earlier.overrides == later.overrides
+        earlier.scene == later.scene
+            && earlier.overrides == later.overrides
+            && earlier.touched == later.touched
     });
     rows
 }
@@ -167,12 +187,24 @@ impl App {
             .filter_map(|(track, over)| over.map(|id| (track, id)))
             .collect();
         let origin_beats = self.state.scheduler_rendered_beats();
+        // With a committed song, capture runs ON TOP of song playback
+        // (takes spec 9.3): the song keeps launch authority until the
+        // performer touches a lane, so the initial state starts untouched.
+        // Recording from an empty song keeps the performer as sole
+        // authority (every lane touched — the pre-spec whole-song capture).
+        let touched: std::collections::BTreeSet<usize> =
+            if self.state.committed_song().is_some() {
+                std::collections::BTreeSet::new()
+            } else {
+                (0..self.tracks.len()).collect()
+            };
         self.song_capture_take = Some(SongCaptureTake {
             origin_beats,
             initial: CapturedSongState {
                 start_beat: 0.0,
                 scene: scenes.current_scene,
                 overrides,
+                touched,
             },
             events: Vec::new(),
         });
@@ -312,8 +344,11 @@ impl App {
                 final_end_beat = previous.end_beat;
             }
             (Some(previous), Some(punch_in)) => {
-                // Existing rows before the punch-in survive verbatim
-                // (offsets and explicit-empty overrides included).
+                // Full region splice (takes spec 9.1/9.2): replace-in-place
+                // between the first captured launch `P` and the stop beat
+                // `Q`. Existing rows before `P` survive verbatim (offsets
+                // and explicit-empty overrides included).
+                let punch_out = end_beat.max(punch_in);
                 specs.extend(
                     previous
                         .rows
@@ -325,10 +360,12 @@ impl App {
                             overrides: row.overrides.clone(),
                         }),
                 );
-                // Captured state from the punch-in on: the captured row
-                // governing `punch_in` (re-based to start exactly there),
-                // then every later captured row. Row zero of `captured`
-                // always exists, so a governing row is guaranteed.
+                // Captured state over [P, Q): the captured row governing
+                // `punch_in` (re-based to start exactly there), then every
+                // later captured row inside the region. Row zero of
+                // `captured` always exists, so a governing row is
+                // guaranteed. Untouched lanes inherit the pre-existing
+                // arrangement's resolution, materialized (spec 9.4).
                 let governing = captured
                     .iter()
                     .rposition(|row| row.start_beat <= punch_in)
@@ -339,12 +376,43 @@ impl App {
                     } else {
                         row.start_beat
                     };
-                    if start_beat > 0.0 && start_beat >= end_beat {
+                    if start_beat > 0.0 && start_beat >= punch_out {
                         // A launch audible at or after the Stop boundary was
                         // never part of the audible performance: drop it.
                         continue;
                     }
-                    specs.push(self.stamped_captured_row_spec(start_beat, row));
+                    specs.push(self.stamped_captured_row_spec(start_beat, row, Some(previous)));
+                }
+                // The row beginning at `Q` restores the pre-existing
+                // arrangement from `Q` onward (spec 9.2 step 5): nothing
+                // after `Q` moves; rows past `Q` survive verbatim.
+                if punch_out < previous.end_beat {
+                    if !previous
+                        .rows
+                        .iter()
+                        .any(|row| row.start_beat == punch_out)
+                    {
+                        if let Some(governing_prev) =
+                            crate::sequencer::state_at_beat(previous, punch_out)
+                        {
+                            specs.push(SongRowSpec {
+                                start_beat: punch_out,
+                                scene: governing_prev.scene,
+                                overrides: self.split_row_state(governing_prev, punch_out),
+                            });
+                        }
+                    }
+                    specs.extend(
+                        previous
+                            .rows
+                            .iter()
+                            .filter(|row| row.start_beat >= punch_out)
+                            .map(|row| SongRowSpec {
+                                start_beat: row.start_beat,
+                                scene: row.scene,
+                                overrides: row.overrides.clone(),
+                            }),
+                    );
                 }
                 final_end_beat = previous.end_beat.max(end_beat);
             }
@@ -354,7 +422,7 @@ impl App {
                     captured
                         .iter()
                         .filter(|row| row.start_beat == 0.0 || row.start_beat < end_beat)
-                        .map(|row| self.stamped_captured_row_spec(row.start_beat, row)),
+                        .map(|row| self.stamped_captured_row_spec(row.start_beat, row, None)),
                 );
                 final_end_beat = end_beat;
             }
@@ -522,7 +590,12 @@ impl App {
     /// resolved through the scene cell get a materialized override whenever
     /// their offset is nonzero (locked decision: phase lives on overrides
     /// only).
-    fn stamped_captured_row_spec(&self, start_beat: f64, row: &CapturedSongState) -> SongRowSpec {
+    fn stamped_captured_row_spec(
+        &self,
+        start_beat: f64,
+        row: &CapturedSongState,
+        previous: Option<&crate::sequencer::ProjectSong>,
+    ) -> SongRowSpec {
         let scene_cells: Vec<Option<PatternId>> = self.state.with_project_scenes(|scenes| {
             (0..scenes.track_pools.len())
                 .map(|track| {
@@ -535,8 +608,80 @@ impl App {
                 })
                 .collect()
         });
+        // Inheritance for untouched lanes (takes spec 9.4): the pre-existing
+        // arrangement's resolution at this beat, with lane offsets advanced
+        // so playback continues unchanged. `split_row_state` computes
+        // exactly that (override sources advanced; scene-resolved lanes
+        // materialized only when their offset is nonzero).
+        let inherited = previous.and_then(|previous| {
+            crate::sequencer::state_at_beat(previous, start_beat).map(|governing| {
+                (
+                    governing.scene,
+                    self.split_row_state(governing, start_beat),
+                    governing.start_beat,
+                )
+            })
+        });
         let mut overrides = Vec::new();
         for (track, cell) in scene_cells.iter().enumerate() {
+            if !row.touched.contains(&track) {
+                if let Some(previous) = previous {
+                    // Untouched lane: the song kept playing it (spec 9.3).
+                    // Materialize its inherited resolution as an override so
+                    // scene-clears-overrides consolidation cannot silence it
+                    // (spec 9.4).
+                    let over = match &inherited {
+                        Some((prev_scene, inherited_overrides, prev_row_start)) => {
+                            match inherited_overrides
+                                .iter()
+                                .find(|over| over.track == track)
+                            {
+                                Some(over) => *over,
+                                None => {
+                                    // Scene-resolved in the pre-existing
+                                    // arrangement with offset 0 (or a
+                                    // whole-cycle offset the split
+                                    // collapsed): materialize explicitly.
+                                    let prev_cell =
+                                        self.state.with_project_scenes(|scenes| {
+                                            scenes
+                                                .scenes
+                                                .get(*prev_scene)
+                                                .and_then(|scene| scene.cells.get(track))
+                                                .copied()
+                                                .flatten()
+                                        });
+                                    match prev_cell {
+                                        Some(pattern) => {
+                                            let offset = self.advanced_offset(
+                                                track,
+                                                pattern.0,
+                                                0.0,
+                                                start_beat - prev_row_start,
+                                            );
+                                            crate::sequencer::ProjectSongTrackOverride {
+                                                track,
+                                                pattern_id: Some(pattern.0),
+                                                take_id: None,
+                                                offset_steps: offset,
+                                            }
+                                        }
+                                        None => crate::sequencer::ProjectSongTrackOverride::new(
+                                            track, None,
+                                        ),
+                                    }
+                                }
+                            }
+                        }
+                        // Past the pre-existing song's end: the lane was
+                        // silent there.
+                        None => crate::sequencer::ProjectSongTrackOverride::new(track, None),
+                    };
+                    let _ = previous;
+                    overrides.push(over);
+                    continue;
+                }
+            }
             let explicit = row
                 .overrides
                 .iter()
@@ -572,7 +717,20 @@ mod tests {
             start_beat,
             scene,
             overrides,
+            touched: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// A scene launch latches every lane (takes spec 10).
+    fn all_touched(mut state: CapturedSongState) -> CapturedSongState {
+        state.touched = (0..crate::sequencer::MAX_TRACKS).collect();
+        state
+    }
+
+    /// A track launch latches its tracks.
+    fn touched(mut state: CapturedSongState, tracks: &[usize]) -> CapturedSongState {
+        state.touched = tracks.iter().copied().collect();
+        state
     }
 
     fn scene_event(beat: f64, scene: usize) -> CaptureLaunchEvent {
@@ -602,8 +760,8 @@ mod tests {
             rows,
             vec![
                 state(0.0, 0, vec![(1, PatternId(2))]),
-                state(4.0, 1, Vec::new()),
-                state(4.7, 2, Vec::new()),
+                all_touched(state(4.0, 1, Vec::new())),
+                all_touched(state(4.7, 2, Vec::new())),
             ]
         );
     }
@@ -617,7 +775,7 @@ mod tests {
             tracks_event(4.0, vec![(1, PatternId(5))]),
         ];
         let rows = consolidate(&initial, &launches);
-        let expected = state(4.0, 2, vec![(0, PatternId(3)), (1, PatternId(5))]);
+        let expected = all_touched(state(4.0, 2, vec![(0, PatternId(3)), (1, PatternId(5))]));
         assert_eq!(rows, vec![initial.clone(), expected.clone()]);
 
         // Reversed input order: identical result (spec 10.4).
@@ -638,7 +796,7 @@ mod tests {
             rows,
             vec![
                 initial,
-                state(2.5, 1, vec![(0, PatternId(9)), (1, PatternId(4))]),
+                touched(state(2.5, 1, vec![(0, PatternId(9)), (1, PatternId(4))]), &[1]),
             ]
         );
     }
@@ -654,8 +812,8 @@ mod tests {
             rows,
             vec![
                 state(0.0, 0, Vec::new()),
-                state(2.0, 1, Vec::new()),
-                state(6.0, 0, Vec::new()),
+                all_touched(state(2.0, 1, Vec::new())),
+                all_touched(state(6.0, 0, Vec::new())),
             ]
         );
     }
@@ -664,7 +822,7 @@ mod tests {
     fn launch_at_beat_zero_replaces_the_initial_row() {
         let initial = state(0.0, 0, vec![(0, PatternId(1))]);
         let rows = consolidate(&initial, &[scene_event(0.0, 2)]);
-        assert_eq!(rows, vec![state(0.0, 2, Vec::new())]);
+        assert_eq!(rows, vec![all_touched(state(0.0, 2, Vec::new()))]);
     }
 
     #[test]
@@ -677,6 +835,9 @@ mod tests {
                 tracks_event(4.0, vec![(0, PatternId(3))]),
             ],
         );
-        assert_eq!(rows, vec![initial, state(4.0, 0, vec![(0, PatternId(3))])]);
+        assert_eq!(
+            rows,
+            vec![initial, touched(state(4.0, 0, vec![(0, PatternId(3))]), &[0])]
+        );
     }
 }

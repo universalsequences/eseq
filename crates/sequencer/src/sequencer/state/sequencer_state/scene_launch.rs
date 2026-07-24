@@ -284,6 +284,37 @@ impl SequencerState {
         instrument_types: &[InstrumentType],
         bump_pattern_epoch: bool,
     ) -> Result<Vec<(i32, String, u32)>, String> {
+        self.apply_song_row_latched(
+            scene,
+            overrides,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+            bump_pattern_epoch,
+            0,
+        )
+    }
+
+    /// `apply_song_row` with a manual-override latch mask (takes spec 10):
+    /// latched tracks keep their live state, their session override slot,
+    /// and their silencing untouched — the song's mirror leaves them to the
+    /// performer until Back to Song clears the latch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_song_row_latched(
+        &self,
+        scene: usize,
+        overrides: &[(usize, Option<PatternId>)],
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+        bump_pattern_epoch: bool,
+        latched_mask: u64,
+    ) -> Result<Vec<(i32, String, u32)>, String> {
+        let latched = |track: usize| track < 64 && latched_mask >> track & 1 == 1;
         if overrides.iter().any(|(track, _)| *track >= num_tracks) {
             return Err("Song row override targets a track that does not exist".to_string());
         }
@@ -294,7 +325,7 @@ impl SequencerState {
             names,
             instrument_types,
         );
-        let launched: Vec<(usize, Option<TrackPatternData>)> = {
+        let launched = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             if scene >= scenes.scene_count() {
                 return Err(format!("Song row references scene {} which does not exist", scene + 1));
@@ -304,6 +335,9 @@ impl SequencerState {
             let mut resolved: Vec<(usize, Option<PatternId>, Option<TrackPatternData>)> =
                 Vec::with_capacity(num_tracks);
             for track in 0..num_tracks {
+                if latched(track) {
+                    continue;
+                }
                 // `Some(None)` is an explicit-empty override: the track is
                 // silenced for the row and must NOT fall back to the scene
                 // cell. Only an absent override resolves through the scene.
@@ -346,8 +380,10 @@ impl SequencerState {
                 return Err("Could not save the outgoing session state".to_string());
             }
             scenes.current_scene = scene;
-            for slot in scenes.track_overrides.iter_mut() {
-                *slot = None;
+            for (track, slot) in scenes.track_overrides.iter_mut().enumerate() {
+                if !latched(track) {
+                    *slot = None;
+                }
             }
             for (track, override_id, _) in &resolved {
                 if override_id.is_some() {
@@ -356,19 +392,32 @@ impl SequencerState {
                     }
                 }
             }
-            resolved
+            let sample_ids: Vec<(i32, String, u32)> = (0..num_tracks)
+                .map(|track| {
+                    if latched(track) {
+                        // Latched lanes keep their current (performer's)
+                        // binding.
+                        scenes
+                            .effective_track_pattern(track)
+                            .map(|data| data.sample_id.clone())
+                            .unwrap_or((-1, String::new(), 44_100))
+                    } else {
+                        resolved
+                            .iter()
+                            .find(|(t, _, _)| *t == track)
+                            .and_then(|(_, _, data)| data.as_ref())
+                            .map(|data| data.sample_id.clone())
+                            .unwrap_or((-1, String::new(), 44_100))
+                    }
+                })
+                .collect();
+            let launched: Vec<(usize, Option<TrackPatternData>)> = resolved
                 .into_iter()
                 .map(|(track, _, data)| (track, data))
-                .collect()
+                .collect();
+            (launched, sample_ids)
         };
-        let sample_ids = launched
-            .iter()
-            .map(|(_, data)| {
-                data.as_ref()
-                    .map(|data| data.sample_id.clone())
-                    .unwrap_or((-1, String::new(), 44_100))
-            })
-            .collect();
+        let (launched, sample_ids) = launched;
         for (track, data) in launched {
             match data {
                 Some(data) => {

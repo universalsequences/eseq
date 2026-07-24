@@ -106,6 +106,16 @@ impl SnapshotSequencerClock {
         }
     }
 
+    /// Clear one track's anchor (manual-override latch, takes spec 10): the
+    /// latched track free-runs against the clock like session playback while
+    /// every other lane keeps its song-row anchor.
+    pub(super) fn clear_track_anchor(&mut self, track: usize) {
+        if let Some(clock) = self.track_clocks.get_mut(track) {
+            clock.anchor_beat = 0.0;
+            clock.offset_steps = 0.0;
+        }
+    }
+
     /// The track's clip-local beat position (takes spec 7.1):
     /// `steps(beat - start_beat) + offset`, expressed in cycle beats. The
     /// stored step offset converts to beats through the precomputed

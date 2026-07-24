@@ -34,6 +34,10 @@ pub(crate) struct SongBindingsSnapshot {
     /// by the next successful edit. Bound to `SEQ.song-edit-error` so the
     /// arrangement view can surface it (the step tile hides the status line).
     pub(crate) edit_error: Option<String>,
+    /// True while any lane is manual-override latched during song playback
+    /// (takes spec 10): the SONG indicator glows amber and the Back to Song
+    /// control appears.
+    pub(crate) manual_latch: bool,
 }
 
 /// Per-frame diff state for the song bindings: the committed song is cached
@@ -327,6 +331,7 @@ pub(crate) fn build_song_bindings_snapshot(
         capture_failed: app.song_capture_failed,
         capture_error: app.song_capture_error.clone(),
         edit_error: app.song_edit_error.clone(),
+        manual_latch: app.state.song_manual_latch_mask() != 0,
     }
 }
 
@@ -565,6 +570,11 @@ pub(crate) fn sync_song_state(
             Some(error) => Value::String(error.clone()),
             None => Value::Nil,
         }
+    );
+    publish_on_change!(
+        "song-manual-latch",
+        manual_latch,
+        Value::Bool(next.manual_latch)
     );
     publish_on_change!(
         "song-edit-error",
