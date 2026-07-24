@@ -128,6 +128,7 @@ fn override_from_numbers(
     Ok(ProjectSongTrackOverride {
         track: track as usize,
         pattern_id,
+        take_id: None,
         offset_steps,
     })
 }

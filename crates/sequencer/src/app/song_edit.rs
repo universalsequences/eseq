@@ -423,6 +423,7 @@ impl App {
                             overrides.push(ProjectSongTrackOverride {
                                 track,
                                 pattern_id: Some(pattern.0),
+                                take_id: None,
                                 offset_steps: offset,
                             });
                         }
@@ -579,6 +580,7 @@ impl App {
             row.overrides.push(ProjectSongTrackOverride {
                 track,
                 pattern_id,
+                take_id: None,
                 offset_steps,
             });
             row.overrides.sort_by_key(|over| over.track);
@@ -1056,6 +1058,7 @@ mod tests {
         ProjectSongTrackOverride {
             track,
             pattern_id: Some(pattern_id),
+            take_id: None,
             offset_steps,
         }
     }

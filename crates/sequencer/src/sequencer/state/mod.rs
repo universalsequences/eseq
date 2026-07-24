@@ -61,6 +61,8 @@ mod track_pattern_data;
 pub use track_pattern_data::*;
 mod scenes;
 pub use scenes::*;
+mod takes;
+pub use takes::*;
 mod song;
 pub use song::*;
 mod song_runtime;

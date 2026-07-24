@@ -30,11 +30,17 @@ pub struct SongRowId(pub u64);
 pub struct ProjectSongTrackOverride {
     pub track: usize,
     pub pattern_id: Option<u64>,
+    /// If `Some`, this override plays a take (takes spec 6.2) and
+    /// `pattern_id` must be `None` (validation 6.3). Serde-defaulted so
+    /// existing files load unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take_id: Option<u64>,
     /// Start offset into the source in fractional pattern steps of this
     /// track's timebase (takes spec 6.2): the anchored phase formula plays
     /// source step `steps(beat - start_beat) + offset_steps` (mod pattern
-    /// length). `0.0` — the serde default, so existing files load
-    /// unchanged — means the clip begins at source step 0 at its row start.
+    /// length for pattern sources; takes are silent past their end). `0.0`
+    /// — the serde default, so existing files load unchanged — means the
+    /// clip begins at source step 0 at its row start.
     #[serde(default, skip_serializing_if = "offset_steps_is_zero")]
     pub offset_steps: f64,
 }
@@ -45,8 +51,58 @@ impl ProjectSongTrackOverride {
         Self {
             track,
             pattern_id,
+            take_id: None,
             offset_steps: 0.0,
         }
+    }
+
+    /// Take-playing override (takes spec 6.2).
+    pub fn new_take(track: usize, take_id: u64, offset_steps: f64) -> Self {
+        Self {
+            track,
+            pattern_id: None,
+            take_id: Some(take_id),
+            offset_steps,
+        }
+    }
+
+    /// The override's resolved source (takes spec 6.2): a take wins over
+    /// `pattern_id` (validation forbids carrying both).
+    pub fn source(&self) -> LaneSource {
+        match (self.take_id, self.pattern_id) {
+            (Some(take), _) => LaneSource::Take(TakeId(take)),
+            (None, Some(pattern)) => LaneSource::Pattern(PatternId(pattern)),
+            (None, None) => LaneSource::Empty,
+        }
+    }
+}
+
+/// Resolved lane content source (takes spec 6.2), so downstream code never
+/// juggles the two id options on the override.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LaneSource {
+    Pattern(PatternId),
+    Take(TakeId),
+    Empty,
+}
+
+impl LaneSource {
+    pub fn pattern(&self) -> Option<PatternId> {
+        match self {
+            LaneSource::Pattern(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    pub fn take(&self) -> Option<TakeId> {
+        match self {
+            LaneSource::Take(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        matches!(self, LaneSource::Empty)
     }
 }
 
@@ -87,12 +143,16 @@ pub struct LaneClip {
     pub start_beat: f64,
     /// Next row's start, or the song end.
     pub end_beat: f64,
-    /// Resolved pattern: override, else scene cell, else `None`.
+    /// Resolved pattern: override, else scene cell, else `None`. For a take
+    /// span this stays `None`; consult `source`.
     pub pattern: Option<PatternId>,
-    /// Start offset into the pattern in fractional steps (takes spec 6.2):
+    /// Resolved content source (takes spec 6.2): override source, else the
+    /// scene cell's pattern, else `Empty`.
+    pub source: LaneSource,
+    /// Start offset into the source in fractional steps (takes spec 6.2):
     /// the override's stored offset, or `0.0` for scene-resolved spans.
     pub offset_steps: f64,
-    /// Render hint: `true` when the pattern came from a row override.
+    /// Render hint: `true` when the source came from a row override.
     pub from_override: bool,
 }
 
@@ -102,6 +162,12 @@ pub trait SongProjectContext {
     fn song_scene_count(&self) -> usize;
     fn song_track_count(&self) -> usize;
     fn song_track_pattern_exists(&self, track: usize, pattern_id: u64) -> bool;
+    /// Playable length in steps of `take_id` in `track`'s take pool, or
+    /// `None` when the take does not exist (takes spec 6.3). Defaults to
+    /// "no takes exist" so contexts predating takes stay valid.
+    fn song_track_take_len(&self, _track: usize, _take_id: u64) -> Option<u32> {
+        None
+    }
 }
 
 impl SongProjectContext for ProjectScenes {
@@ -117,6 +183,13 @@ impl SongProjectContext for ProjectScenes {
         self.track_pools
             .get(track)
             .is_some_and(|pool| pool.contains(PatternId(pattern_id)))
+    }
+
+    fn song_track_take_len(&self, track: usize, take_id: u64) -> Option<u32> {
+        self.take_pools
+            .get(track)
+            .and_then(|takes| takes.get(TakeId(take_id)))
+            .map(|take| take.total_len_steps)
     }
 }
 
@@ -228,6 +301,38 @@ impl ProjectSong {
                         ));
                     }
                 }
+                if let Some(take_id) = over.take_id {
+                    // Takes spec 6.3: a take override carries no pattern id,
+                    // must name an existing take, and cannot start past the
+                    // take's end (takes never wrap).
+                    if over.pattern_id.is_some() {
+                        return Err(format!(
+                            "Song row {} track {} carries both a take and a pattern; a take \
+                             override must have no pattern id",
+                            idx + 1,
+                            over.track + 1
+                        ));
+                    }
+                    let Some(total_len) = ctx.song_track_take_len(over.track, take_id) else {
+                        return Err(format!(
+                            "Song row {} references take {} which is not in track {}'s \
+                             take pool",
+                            idx + 1,
+                            take_id,
+                            over.track + 1
+                        ));
+                    };
+                    if over.offset_steps >= total_len as f64 {
+                        return Err(format!(
+                            "Song row {} track {} take offset {} is at or past the take's \
+                             end ({} steps); takes never wrap",
+                            idx + 1,
+                            over.track + 1,
+                            over.offset_steps,
+                            total_len
+                        ));
+                    }
+                }
                 if !over.offset_steps.is_finite() || over.offset_steps < 0.0 {
                     return Err(format!(
                         "Song row {} track {} offset {} must be a finite, non-negative \
@@ -334,17 +439,20 @@ pub fn project_lanes(song: &ProjectSong, scenes: &ProjectScenes) -> Vec<Vec<Lane
                         .overrides
                         .iter()
                         .find(|over| over.track == track);
-                    let (pattern, offset_steps, from_override) = match override_entry {
-                        // Explicit-empty (`pattern_id: None`) resolves to no
-                        // pattern WITHOUT falling back to the scene cell.
-                        Some(over) => (over.pattern_id.map(PatternId), over.offset_steps, true),
+                    let (source, offset_steps, from_override) = match override_entry {
+                        // Explicit-empty (`pattern_id: None`, no take)
+                        // resolves to no source WITHOUT falling back to the
+                        // scene cell.
+                        Some(over) => (over.source(), over.offset_steps, true),
                         None => (
                             scenes
                                 .scenes
                                 .get(row.scene)
                                 .and_then(|scene| scene.cells.get(track))
                                 .copied()
-                                .flatten(),
+                                .flatten()
+                                .map(LaneSource::Pattern)
+                                .unwrap_or(LaneSource::Empty),
                             0.0,
                             false,
                         ),
@@ -353,7 +461,8 @@ pub fn project_lanes(song: &ProjectSong, scenes: &ProjectScenes) -> Vec<Vec<Lane
                         row_id: row.id,
                         start_beat: row.start_beat,
                         end_beat,
-                        pattern,
+                        pattern: source.pattern(),
+                        source,
                         offset_steps,
                         from_override,
                     }
@@ -502,6 +611,81 @@ mod tests {
             PatternSnapshot::new_default(2, &[]),
         ];
         ProjectScenes::from_pattern_snapshots(&snapshots, 0)
+    }
+
+    /// `test_scenes` plus one 300-step, two-chunk take on track 0.
+    fn scenes_with_take() -> (ProjectScenes, TakeId) {
+        let mut scenes = test_scenes();
+        let chunk_data = scenes.track_pools[0].get(PatternId(1)).unwrap().clone();
+        let chunk_a = scenes.track_pools[0].insert(chunk_data.clone());
+        let chunk_b = scenes.track_pools[0].insert(chunk_data);
+        let take = scenes.take_pools[0].insert(None, vec![chunk_a, chunk_b], 300);
+        (scenes, take)
+    }
+
+    #[test]
+    fn take_override_validates_against_the_take_pool() {
+        let (scenes, take) = scenes_with_take();
+        let mut song = valid_song();
+        song.rows[1].overrides = vec![ProjectSongTrackOverride::new_take(0, take.0, 12.5)];
+        song.validate(&scenes).expect("take override validates");
+
+        // Unknown take id.
+        song.rows[1].overrides = vec![ProjectSongTrackOverride::new_take(0, 99, 0.0)];
+        let err = song.validate(&scenes).unwrap_err();
+        assert!(err.contains("take 99"), "{err}");
+
+        // Take and pattern on the same override.
+        song.rows[1].overrides = vec![ProjectSongTrackOverride {
+            track: 0,
+            pattern_id: Some(1),
+            take_id: Some(take.0),
+            offset_steps: 0.0,
+        }];
+        let err = song.validate(&scenes).unwrap_err();
+        assert!(err.contains("both a take and a pattern"), "{err}");
+
+        // Offset at/past the take end (takes never wrap, spec 6.3).
+        song.rows[1].overrides = vec![ProjectSongTrackOverride::new_take(0, take.0, 300.0)];
+        let err = song.validate(&scenes).unwrap_err();
+        assert!(err.contains("past the take's end"), "{err}");
+    }
+
+    #[test]
+    fn take_override_serde_round_trips_and_is_skipped_when_absent() {
+        let over = ProjectSongTrackOverride::new_take(1, 3, 7.5);
+        let json = serde_json::to_string(&over).expect("serialize take override");
+        assert!(json.contains("take_id"), "{json}");
+        let restored: ProjectSongTrackOverride =
+            serde_json::from_str(&json).expect("deserialize take override");
+        assert_eq!(restored, over);
+
+        // Pattern overrides keep the pre-take wire shape.
+        let json = serde_json::to_string(&super::tests::over(0, 5)).expect("serialize");
+        assert!(!json.contains("take_id"), "{json}");
+        let legacy = r#"{"track":1,"pattern_id":3}"#;
+        let restored: ProjectSongTrackOverride =
+            serde_json::from_str(legacy).expect("deserialize legacy override");
+        assert_eq!(restored.take_id, None);
+    }
+
+    #[test]
+    fn project_lanes_resolves_take_sources() {
+        let (scenes, take) = scenes_with_take();
+        let mut song = valid_song();
+        song.rows[1].overrides = vec![ProjectSongTrackOverride::new_take(0, take.0, 4.0)];
+        let lanes = project_lanes(&song, &scenes);
+        let clip = &lanes[0][1];
+        assert_eq!(clip.source, LaneSource::Take(take));
+        assert_eq!(clip.pattern, None, "take spans expose no pattern id");
+        assert_eq!(clip.offset_steps, 4.0);
+        assert!(clip.from_override);
+        // Scene-resolved spans stay pattern sources.
+        assert_eq!(lanes[0][0].source, LaneSource::Pattern(PatternId(1)));
+        // Explicit-empty resolves to `Empty`.
+        song.rows[1].overrides = vec![empty_over(0)];
+        let lanes = project_lanes(&song, &scenes);
+        assert!(lanes[0][1].source.is_empty());
     }
 
     #[test]
@@ -771,6 +955,7 @@ mod tests {
         song.rows[0].overrides = vec![ProjectSongTrackOverride {
             track: 1,
             pattern_id: Some(2),
+            take_id: None,
             offset_steps: 7.25,
         }];
         song.validate(&ctx()).expect("offset override validates");
@@ -795,6 +980,7 @@ mod tests {
         song.rows[0].overrides = vec![ProjectSongTrackOverride {
             track: 1,
             pattern_id: Some(2),
+            take_id: None,
             offset_steps: -1.0,
         }];
         let err = song.validate(&ctx()).unwrap_err();
@@ -808,6 +994,7 @@ mod tests {
         song.rows[2].overrides = vec![ProjectSongTrackOverride {
             track: 0,
             pattern_id: Some(1),
+            take_id: None,
             offset_steps: 3.5,
         }];
         let lanes = project_lanes(&song, &scenes);

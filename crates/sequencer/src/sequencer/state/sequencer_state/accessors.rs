@@ -543,6 +543,7 @@ impl SequencerState {
                 row.overrides.push(ProjectSongTrackOverride {
                     track,
                     pattern_id: Some(pattern.0),
+                    take_id: None,
                     offset_steps: offset,
                 });
                 row.overrides.sort_by_key(|over| over.track);

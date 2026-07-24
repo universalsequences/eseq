@@ -108,6 +108,10 @@ pub struct Scene {
 #[derive(Clone, Debug)]
 pub struct ProjectScenes {
     pub track_pools: Vec<TrackPatternPool>,
+    /// Per-track take ownership over pool patterns (takes spec 6.1). Grown
+    /// alongside `track_pools`; chunk patterns live in the pattern pool and
+    /// are hidden from the clip grid because a take claims them.
+    pub take_pools: Vec<TrackTakePool>,
     pub scenes: Vec<Scene>,
     pub current_scene: usize,
     pub track_overrides: Vec<Option<PatternId>>,
@@ -160,6 +164,7 @@ impl ProjectScenes {
         }
 
         Self {
+            take_pools: vec![TrackTakePool::default(); track_pools.len()],
             track_pools,
             scenes,
             current_scene: current_scene.min(snapshots.len().saturating_sub(1)),
@@ -247,10 +252,14 @@ impl ProjectScenes {
     pub fn save_scene_snapshot(&mut self, scene_idx: usize, snapshot: PatternSnapshot) -> bool {
         while self.track_pools.len() < snapshot.track_bits.len() {
             self.track_pools.push(TrackPatternPool::default());
+            self.take_pools.push(TrackTakePool::default());
             self.track_overrides.push(None);
             for scene in &mut self.scenes {
                 scene.cells.push(None);
             }
+        }
+        while self.take_pools.len() < self.track_pools.len() {
+            self.take_pools.push(TrackTakePool::default());
         }
         let Some(scene) = self.scenes.get_mut(scene_idx) else {
             return false;
@@ -523,7 +532,15 @@ impl ProjectScenes {
         let override_id = self.track_overrides.get(track).copied().flatten();
         let active = override_id.or(assigned);
         let overridden = override_id.is_some();
-        let mut ids = pool.patterns.keys().copied().collect::<Vec<_>>();
+        // Take chunks are hidden from the clip grid (takes spec 11.2):
+        // ownership by a take is the single source of truth for "hidden".
+        let takes = self.take_pools.get(track);
+        let mut ids = pool
+            .patterns
+            .keys()
+            .copied()
+            .filter(|id| !takes.is_some_and(|takes| takes.is_claimed(*id)))
+            .collect::<Vec<_>>();
         ids.sort_by_key(|id| id.0);
         ids.into_iter()
             .map(|pattern_id| TrackPatternCellView {
@@ -605,6 +622,15 @@ impl ProjectScenes {
     }
 
     pub fn delete_track_pattern(&mut self, track: usize, id: PatternId) -> bool {
+        // Chunk patterns are deleted only through their owning take
+        // (takes spec 6.4); direct deletion would corrupt the take.
+        if self
+            .take_pools
+            .get(track)
+            .is_some_and(|takes| takes.is_claimed(id))
+        {
+            return false;
+        }
         let Some(pool) = self.track_pools.get_mut(track) else {
             return false;
         };
@@ -675,6 +701,9 @@ impl ProjectScenes {
         }
 
         self.track_pools.remove(track);
+        if track < self.take_pools.len() {
+            self.take_pools.remove(track);
+        }
         for scene in &mut self.scenes {
             if track < scene.cells.len() {
                 scene.cells.remove(track);
@@ -697,6 +726,11 @@ impl ProjectScenes {
             }
             if let Some(id) = self.track_overrides.get(track).copied().flatten() {
                 referenced.insert(id);
+            }
+            // Take chunks are referenced through take ownership, never scene
+            // cells (takes spec 6.1); purging must not drop them.
+            if let Some(takes) = self.take_pools.get(track) {
+                referenced.extend(takes.claimed());
             }
 
             let before = self.track_pools[track].patterns.len();

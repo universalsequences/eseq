@@ -387,6 +387,7 @@ impl App {
                 overrides.push(crate::sequencer::ProjectSongTrackOverride {
                     track,
                     pattern_id: Some(pattern.0),
+                    take_id: None,
                     offset_steps,
                 });
             }
