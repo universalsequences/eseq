@@ -340,6 +340,31 @@ pub(crate) fn reactive_tick_and_render(
         // The render-rate song position drives the transport readout and the
         // arrangement playhead, so it publishes while either is visible.
         let arrangement_visible = editor_has_visible_buffer(&editor, "*arrangement*");
+        // Sound binding (takes spec 16.2): keep the live device mirror on the
+        // bound source before anything reads it. This is where a song row
+        // transition (rule 2) re-binds the panel and the monitor sound, and
+        // where a lane released by a session save-back is reloaded.
+        app.sync_track_sound_bindings();
+        // A binding move rewrites the mirror's devices without touching the
+        // pattern epoch, so the panels would keep showing the old source's
+        // knobs (and the old badge) until some unrelated edit republished
+        // them. Drive the same rebuild a device change does.
+        if app.sound_binding_epoch != ctx.frame.prev_sound_binding_epoch {
+            ctx.frame.prev_sound_binding_epoch = app.sound_binding_epoch;
+            ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+            // The FX panels carry their values in the `effects` map, but every
+            // instrument knob reads a per-param `SEQ` value field that only a
+            // param sync republishes — without this the instrument panel keeps
+            // the previous source's knob positions while the FX panel updates.
+            needs_reactive_cycle |= sync_fx_param_binding_fields_with_neural_selection(
+                editor.runtime_mut(),
+                &app,
+                &ctx.shared.state,
+                ct,
+                &ctx.shared.selected_steps,
+                Some(&selected_neural_snapshot),
+            );
+        }
         needs_reactive_cycle |= sync_song_state(
             editor.runtime_mut(),
             &app,

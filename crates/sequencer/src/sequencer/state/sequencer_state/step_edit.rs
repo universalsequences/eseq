@@ -533,7 +533,7 @@ impl SequencerState {
         pattern_id: PatternId,
     ) -> Result<f32, String> {
         let scenes = self.pattern.scenes.lock().unwrap();
-        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+        if self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id) {
             return self
                 .pattern
                 .instrument_base_note_offsets
@@ -556,7 +556,7 @@ impl SequencerState {
         value: f32,
     ) -> Result<bool, String> {
         let mut scenes = self.pattern.scenes.lock().unwrap();
-        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let is_effective = self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id);
         let data = scenes
             .track_pools
             .get_mut(track)
@@ -579,7 +579,7 @@ impl SequencerState {
         pattern_id: PatternId,
     ) -> Result<InstrumentDeviceValuesSnapshot, String> {
         let scenes = self.pattern.scenes.lock().unwrap();
-        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+        if self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id) {
             let slot = self
                 .pattern
                 .instrument_slots
@@ -634,7 +634,7 @@ impl SequencerState {
         values: &InstrumentDeviceValuesSnapshot,
     ) -> Result<bool, String> {
         let mut scenes = self.pattern.scenes.lock().unwrap();
-        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let is_effective = self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id);
         let data = scenes
             .track_pools
             .get_mut(track)
@@ -708,7 +708,7 @@ impl SequencerState {
         slot_idx: usize,
     ) -> Result<EffectSlotValuesSnapshot, String> {
         let scenes = self.pattern.scenes.lock().unwrap();
-        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+        if self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id) {
             return self
                 .pattern
                 .effect_chains
@@ -1168,7 +1168,7 @@ impl SequencerState {
         slot_idx: usize,
     ) -> Result<EffectSlotValuesSnapshot, String> {
         let scenes = self.pattern.scenes.lock().unwrap();
-        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+        if self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id) {
             return self
                 .pattern
                 .midi_fx_slots
@@ -1413,7 +1413,7 @@ impl SequencerState {
         midi_fx: bool,
     ) -> Result<bool, String> {
         let mut scenes = self.pattern.scenes.lock().unwrap();
-        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let is_effective = self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id);
         let data = scenes
             .track_pools
             .get_mut(track)
@@ -1460,7 +1460,7 @@ impl SequencerState {
         slot_idx: usize,
     ) -> Result<RackSlotValuesSnapshot, String> {
         let scenes = self.pattern.scenes.lock().unwrap();
-        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+        if self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id) {
             return self
                 .pattern
                 .rack_tracks
@@ -1490,7 +1490,7 @@ impl SequencerState {
         values: &RackSlotValuesSnapshot,
     ) -> Result<bool, String> {
         let mut scenes = self.pattern.scenes.lock().unwrap();
-        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let is_effective = self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id);
         let stored = scenes
             .track_pools
             .get_mut(track)

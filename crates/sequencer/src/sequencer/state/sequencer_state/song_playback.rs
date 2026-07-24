@@ -439,6 +439,88 @@ impl SequencerState {
         }
     }
 
+    /// Lanes whose live device state is on loan to a sound binding (takes
+    /// spec 16.2).
+    pub fn sound_binding_borrowed_mask(&self) -> u64 {
+        self.sound_binding_borrowed.load(Ordering::Acquire)
+    }
+
+    /// Load `pattern`'s devices into `track`'s live mirror and mark the lane
+    /// borrowed, so a later session save-back restores the scene pattern's
+    /// sound first instead of writing this one over it.
+    pub fn borrow_track_device_state(
+        &self,
+        track: usize,
+        pattern: PatternId,
+        data: &TrackPatternData,
+    ) -> bool {
+        if track >= 64 || !data.restore_device_state_to(self, track) {
+            return false;
+        }
+        self.sound_binding_patterns
+            .lock()
+            .unwrap()
+            .insert(track, pattern);
+        self.sound_binding_borrowed
+            .fetch_or(1u64 << track, Ordering::AcqRel);
+        true
+    }
+
+    /// The pool pattern whose device state the live mirror currently shows
+    /// for `track`: the bound source's pattern while a sound binding holds
+    /// the lane (takes spec 16.2), else the effective scene pattern. Device
+    /// edits use this to decide whether the live surface IS the target.
+    pub(crate) fn mirror_device_pattern_id(
+        &self,
+        track: usize,
+        scenes: &ProjectScenes,
+    ) -> Option<PatternId> {
+        if track < 64 && self.sound_binding_borrowed.load(Ordering::Acquire) >> track & 1 == 1 {
+            if let Some(pattern) = self.sound_binding_patterns.lock().unwrap().get(&track) {
+                return Some(*pattern);
+            }
+        }
+        scenes.effective_pattern_id(track)
+    }
+
+    /// Put every borrowed lane's effective scene pattern back behind the
+    /// device panel. Idempotent, and a no-op in the overwhelmingly common
+    /// case where nothing is borrowed.
+    pub fn release_bound_device_state(&self) {
+        self.release_borrowed_lanes(self.sound_binding_borrowed.swap(0, Ordering::AcqRel));
+    }
+
+    /// Release one lane (its binding fell back to the scene pattern).
+    pub fn release_bound_track_device_state(&self, track: usize) {
+        if track >= 64 {
+            return;
+        }
+        let bit = 1u64 << track;
+        self.release_borrowed_lanes(self.sound_binding_borrowed.fetch_and(!bit, Ordering::AcqRel) & bit);
+    }
+
+    fn release_borrowed_lanes(&self, mask: u64) {
+        if mask == 0 {
+            return;
+        }
+        {
+            let mut bound = self.sound_binding_patterns.lock().unwrap();
+            bound.retain(|track, _| *track >= 64 || mask >> *track & 1 == 0);
+        }
+        let restore: Vec<(usize, TrackPatternData)> = {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            (0..64)
+                .filter(|track| mask >> track & 1 == 1)
+                .filter_map(|track| {
+                    Some((track, scenes.effective_track_pattern(track)?.clone()))
+                })
+                .collect()
+        };
+        for (track, data) in restore {
+            data.restore_device_state_to(self, track);
+        }
+    }
+
     /// Which lanes the currently mirrored song row resolves to a take chunk
     /// (takes spec 11.2 UX). Written by the control-side row mirror.
     pub fn song_take_lane_mask(&self) -> u64 {
@@ -489,6 +571,14 @@ impl SequencerState {
         SongPlaybackRuntime::new(Arc::clone(&song), start_beat, 1.0)?;
         self.song_playback
             .send_command(SongPlaybackCommand::Start { song, start_beat })
+    }
+
+    /// Hand the scheduler re-preflighted rows for the song already playing
+    /// (takes spec 16.7 edit-through). Content-only: the scheduler ignores
+    /// it if the row layout moved.
+    pub fn refresh_song_playback(&self, song: Arc<RuntimeSong>) -> Result<(), String> {
+        self.song_playback
+            .send_command(SongPlaybackCommand::Refresh { song })
     }
 
     /// Tear down scheduler-side song playback. Callers stop the transport

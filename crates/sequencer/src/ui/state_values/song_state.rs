@@ -44,6 +44,9 @@ pub(crate) struct SongBindingsSnapshot {
     /// (takes spec 10): the SONG indicator glows amber and the Back to Song
     /// control appears.
     pub(crate) manual_latch: bool,
+    /// The bound clip's `(track, row-id)` when a timeline selection holds the
+    /// binding (rule 1), for the bound-clip highlight. `None` under rules 2/3.
+    pub(crate) bound_clip: Option<(usize, u64)>,
 }
 
 /// Per-frame diff state for the song bindings: the committed song is cached
@@ -339,6 +342,9 @@ pub(crate) fn build_song_bindings_snapshot(
         edit_error: app.song_edit_error.clone(),
         manual_latch: app.state.song_manual_latch_mask() != 0,
         take_lane_states: song_take_lane_states(app),
+        bound_clip: app
+            .song_clip_selection
+            .map(|selection| (selection.track, selection.row_id.0)),
     }
 }
 
@@ -652,6 +658,17 @@ pub(crate) fn sync_song_state(
         );
         dirty = true;
     }
+    publish_on_change!(
+        "song-bound-clip",
+        bound_clip,
+        match next.bound_clip {
+            Some((track, row_id)) => Value::List(vec![
+                Rc::new(RefCell::new(Value::Number(track as f64))),
+                Rc::new(RefCell::new(Value::Number(row_id as f64))),
+            ]),
+            None => Value::Nil,
+        }
+    );
     let position_changed = prev
         .map(|prev| prev.position_beats != next.position_beats)
         .unwrap_or(true);

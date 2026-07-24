@@ -1854,6 +1854,7 @@
             vec![
                 ("num-tracks", Value::Number(0.0)),
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
                 ("track-instrument-types", test_list(vec![])),
                 ("sidebar-kind", Value::String("sampler".to_string())),
                 ("sidebar-track-index", Value::Number(0.0)),
@@ -5342,6 +5343,7 @@
             "SEQ",
             vec![
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
                 ("macros", test_list(vec![])),
                 ("track-plocks", test_list(vec![])),
                 ("track-plock-variants", test_list(vec![])),
@@ -5404,6 +5406,7 @@
             "SEQ",
             vec![
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
                 ("macros", test_list(vec![])),
                 ("track-plocks", test_list(vec![])),
                 ("track-plock-variants", test_list(vec![])),
@@ -12702,6 +12705,19 @@
             .register_native("seq-toggle-master-recording", |_args, _ctx| {
                 Ok(Value::Bool(true))
             });
+        // Sound binding (takes spec 16): the arrangement lanes and device
+        // panel call these on selection and propagation gestures; the layout
+        // tests only need them to exist.
+        for name in [
+            "seq-song-select-clip",
+            "seq-song-deselect-clip",
+            "seq-sound-push-to-pattern",
+            "seq-sound-apply-to-all-takes",
+        ] {
+            editor
+                .runtime_mut()
+                .register_native(name, |_args, _ctx| Ok(Value::Bool(true)));
+        }
     }
 
     fn full_grid_editor_for_scroll_tests() -> eseqlisp::Editor {
@@ -12755,6 +12771,7 @@
                     ])]),
                 ),
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_bool_list(&[false])),
                 ("track-mutes", test_bool_list(&[false])),
@@ -13926,6 +13943,7 @@
                 ),
                 ("num-tracks", Value::Number(track_count as f64)),
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_repeated_bool_list(false, track_count)),
                 ("track-mutes", test_repeated_bool_list(false, track_count)),
@@ -21884,6 +21902,7 @@
                 ("track-colors", test_multi_track_colors(3)),
                 ("track-collapsed", test_bool_list(&[false, true, false])),
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_repeated_bool_list(false, 3)),
                 ("track-mutes", test_repeated_bool_list(false, 3)),
@@ -27355,6 +27374,7 @@
                 ("track-collapsed", test_bool_list(&[false])),
                 ("num-tracks", Value::Number(1.0)),
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
                 (
                     "record-armed",
@@ -38848,6 +38868,7 @@
                 ),
                 ("num-tracks", Value::Number(2.0)),
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
                 ("track-selected-0", Value::Bool(true)),
                 ("track-selected-1", Value::Bool(false)),
                 ("delete-target-version", Value::Number(0.0)),
@@ -40177,6 +40198,7 @@
             vec![
                 ("playhead", Value::Number(0.0)),
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
                 ("track-colors", test_track_colors()),
                 ("tp-num-steps", Value::Number(16.0)),
                 ("piano-roll-lanes", build_piano_roll_lanes_value()),
@@ -40429,6 +40451,7 @@
             vec![
                 ("playhead", Value::Number(0.0)),
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
                 ("track-colors", test_track_colors()),
                 ("tp-num-steps", Value::Number(16.0)),
                 ("piano-roll-lanes", build_piano_roll_lanes_value()),

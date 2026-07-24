@@ -1125,6 +1125,95 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "seq-song-select-clip",
+        "(seq-song-select-clip track row-id)",
+        "Bind a track's device panel, monitor sound and take punch-in \
+         template to the clip identified by `row-id` on `track` (takes spec \
+         16.2/16.6). Call with no arguments (or seq-song-deselect-clip) to \
+         fall back to the playing/scene source.",
+        move |args, ctx| {
+            let (Some(Value::Number(track)), Some(Value::Number(row_id))) =
+                (args.first(), args.get(1))
+            else {
+                return Err("seq-song-select-clip: expected track and row-id".into());
+            };
+            let mut payload = HashMap::new();
+            payload.insert(
+                "track".to_string(),
+                Rc::new(RefCell::new(Value::Number(*track))),
+            );
+            payload.insert(
+                "row-id".to_string(),
+                Rc::new(RefCell::new(Value::Number(*row_id))),
+            );
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-select-clip".to_string(),
+                payload: Value::Map(payload),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-deselect-clip",
+        "(seq-song-deselect-clip)",
+        "Clear the timeline clip selection (takes spec 16.6 cause 1): every \
+         track falls back to the song-audible source, else its scene pattern.",
+        move |_args, ctx| {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-deselect-clip".to_string(),
+                payload: Value::Nil,
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-sound-push-to-pattern",
+        "(seq-sound-push-to-pattern track)",
+        "Push to pattern (takes spec 16.5): copy the track's bound sound \
+         into the CURRENT scene's effective pattern. One undo entry; other \
+         scenes are untouched.",
+        move |args, ctx| {
+            let Some(Value::Number(track)) = args.first() else {
+                return Err("seq-sound-push-to-pattern: expected track number".into());
+            };
+            let mut payload = HashMap::new();
+            payload.insert(
+                "track".to_string(),
+                Rc::new(RefCell::new(Value::Number(*track))),
+            );
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "sound-push-to-pattern".to_string(),
+                payload: Value::Map(payload),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-sound-apply-to-all-takes",
+        "(seq-sound-apply-to-all-takes track)",
+        "Apply to all takes on track (takes spec 16.5): copy the track's \
+         bound sound into every take (every chunk). One undo entry.",
+        move |args, ctx| {
+            let Some(Value::Number(track)) = args.first() else {
+                return Err("seq-sound-apply-to-all-takes: expected track number".into());
+            };
+            let mut payload = HashMap::new();
+            payload.insert(
+                "track".to_string(),
+                Rc::new(RefCell::new(Value::Number(*track))),
+            );
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "sound-apply-to-all-takes".to_string(),
+                payload: Value::Map(payload),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "seq-song-status",
         "(seq-song-status)",
         "Report the song transport status on the status line: mode, row \
@@ -1584,6 +1673,7 @@ pub(crate) fn init_runtime(
                 ("song-capture-error", Value::Nil),
                 ("song-edit-error", Value::Nil),
                 ("song-track-governed", Value::List(vec![])),
+                ("song-bound-clip", Value::Nil),
                 ("song-rows", Value::List(vec![])),
                 ("song-lanes", Value::List(vec![])),
                 ("song-lane-events", Value::List(vec![])),

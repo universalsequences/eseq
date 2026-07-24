@@ -107,6 +107,11 @@ pub enum SongPlaybackCommand {
         song: Arc<RuntimeSong>,
         start_beat: f64,
     },
+    /// Re-preflighted rows for the song already playing (takes spec 16.7):
+    /// swapped in place, keeping the cursor. Ignored if the row layout moved.
+    Refresh {
+        song: Arc<RuntimeSong>,
+    },
     Stop,
 }
 
@@ -391,6 +396,29 @@ impl SongPlaybackRuntime {
 
     pub fn song(&self) -> &Arc<RuntimeSong> {
         &self.song
+    }
+
+    /// Swap in a re-preflighted song without disturbing the cursor (takes
+    /// spec 16.7): an edit-through during playback rebuilds the row
+    /// snapshots, and the rows that are not yet audible must simply become
+    /// correct — no clock reset, no retrigger, no row re-entry. Rejected
+    /// when the row layout changed, since the cursor would no longer mean
+    /// the same thing; edit-through only ever changes row CONTENT.
+    pub fn replace_song_in_place(&mut self, song: Arc<RuntimeSong>) -> bool {
+        let same_layout = song.rows.len() == self.song.rows.len()
+            && song.end_beat.to_bits() == self.song.end_beat.to_bits()
+            && song
+                .rows
+                .iter()
+                .zip(&self.song.rows)
+                .all(|(next, prev)| {
+                    next.id == prev.id && next.start_beat.to_bits() == prev.start_beat.to_bits()
+                });
+        if !same_layout {
+            return false;
+        }
+        self.song = song;
+        true
     }
 
     pub fn current_row(&self) -> usize {

@@ -9,6 +9,11 @@ impl SequencerState {
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> PatternSnapshot {
+        // A borrowed lane's mirror holds a take's/clip's devices, not the
+        // scene pattern's; capturing it would save that sound over the scene
+        // (takes spec 16.2). Release first — the App rebinds on its next
+        // tick, after whatever launch or row transition triggered this.
+        self.release_bound_device_state();
         let (mod_connections, neural_networks, graph_overrides) = self.current_scene_metadata();
         let mut snapshot = PatternSnapshot::capture_with_mod_connections(
             self,
@@ -258,6 +263,8 @@ impl SequencerState {
             song_playback: SongPlaybackMailbox::default(),
             song_manual_latch: AtomicU64::new(0),
             song_take_lane_mask: AtomicU64::new(0),
+            sound_binding_borrowed: AtomicU64::new(0),
+            sound_binding_patterns: Mutex::new(HashMap::new()),
         };
         state.publish_scheduler_snapshot();
         state
@@ -587,6 +594,40 @@ impl SequencerState {
         let result = f(&mut self.pattern.song.lock().unwrap());
         self.pattern.song_revision.fetch_add(1, Ordering::Release);
         result
+    }
+
+    /// Copy `source`'s device snapshot onto `targets` within `track`'s
+    /// pattern pool, leaving every target's step content alone. The one
+    /// production seam for moving a sound between patterns: the explicit
+    /// propagation gestures (takes spec 16.5). Returns how many targets
+    /// actually changed hands.
+    pub(crate) fn copy_track_pattern_device_state(
+        &self,
+        track: usize,
+        source: PatternId,
+        targets: &[PatternId],
+    ) -> Result<usize, String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} does not exist", track + 1))?;
+        let sound = pool
+            .get(source)
+            .ok_or_else(|| format!("Pattern {} is not in the track's pool", source.0))?
+            .clone();
+        let mut copied = 0;
+        for target in targets {
+            if *target == source {
+                continue;
+            }
+            let Some(data) = pool.get_mut(*target) else {
+                continue;
+            };
+            data.copy_device_state_from(&sound);
+            copied += 1;
+        }
+        Ok(copied)
     }
 
     #[cfg(test)]

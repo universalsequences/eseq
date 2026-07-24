@@ -35,6 +35,44 @@ impl SequencerState {
         cells
     }
 
+    /// Repaint the live grid from the current scene's cells, dropping
+    /// whatever song playback left there. Song rows own the live lanes while
+    /// they play — including silencing a lane the row resolves nothing for
+    /// (takes spec 6.1) — and that state is transport state, not the scene's:
+    /// leaving song playback with it still applied shows a scene whose clips
+    /// are visible but not launched.
+    ///
+    /// Unlike `launch_scene` this never saves the mirror back: the mirror
+    /// holds the song's row content, not this scene's, so capturing it would
+    /// write the arrangement over the scene's patterns.
+    pub fn resync_live_grid_to_current_scene(&self) {
+        // The mirror is about to be rewritten from the scene cells; a
+        // borrowed device lane would be silently clobbered (takes spec 16.2).
+        // The App rebinds on its next tick.
+        self.release_bound_device_state();
+        let scene_idx = self.current_scene_index();
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(launched) = scenes.launch_scene(scene_idx) else {
+            return;
+        };
+        for (track, data) in launched.into_iter().enumerate() {
+            match data {
+                Some(data) => {
+                    data.restore_to(self, track);
+                    self.set_scene_silenced(track, false);
+                }
+                None => {
+                    self.clear_live_track_note_content(track);
+                    self.set_scene_silenced(track, true);
+                }
+            }
+        }
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        drop(scenes);
+        self.schedule_mod_resync();
+        self.publish_scheduler_snapshot();
+    }
+
     pub fn launch_scene(
         &self,
         scene_idx: usize,

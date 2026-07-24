@@ -618,6 +618,12 @@ impl App {
             ]),
             retained_bytes,
         );
+        // Recording auto-selects (takes spec 16.3): post-record tweaks bind
+        // to the take the performer just played. With several lanes recorded
+        // the lowest track wins — the binding selection is a single clip.
+        if let Some(lane) = lanes.iter().min_by_key(|lane| lane.track) {
+            self.select_committed_take(lane.track, lane.take_id);
+        }
         Ok(format!(
             "Arrangement capture committed: {} row(s), {} take(s), end beat {:.3}",
             song_after.rows.len(),

@@ -100,6 +100,15 @@ pub fn spawn_scheduler_thread(
                                 }
                             }
                         }
+                        // Edit-through (takes spec 16.7): rows the playhead
+                        // has not reached pick up the edit; the queue and
+                        // clock are untouched, so nothing already scheduled
+                        // is disturbed.
+                        crate::sequencer::SongPlaybackCommand::Refresh { song } => {
+                            if let Some(runtime) = lookahead_state.song.as_mut() {
+                                runtime.replace_song_in_place(song);
+                            }
+                        }
                         crate::sequencer::SongPlaybackCommand::Stop => {
                             lookahead_state.song = None;
                             state.song_playback().clear_position();

@@ -270,6 +270,18 @@ pub struct SequencerState {
     /// "playing" while the lane is actually playing a take. Transient
     /// transport state; never serialized. Bit `t` = track `t`.
     pub(super) song_take_lane_mask: AtomicU64,
+    /// Tracks whose live device state is on loan to a sound binding (takes
+    /// spec 16.2): the mirror shows a take's or a track clip's frozen
+    /// devices instead of the effective scene pattern's. Any session
+    /// save-back (`capture_current_pattern_snapshot`) would otherwise write
+    /// the borrowed sound over the scene pattern, so capture releases these
+    /// lanes first. Transient; never serialized. Bit `t` = track `t`.
+    pub(super) sound_binding_borrowed: AtomicU64,
+    /// Per borrowed track, the pool pattern whose device state the live
+    /// mirror is showing. Device edits key off "is this pattern the live
+    /// mirror?" (`mirror_device_pattern_id`), which is the bound pattern
+    /// while a lane is borrowed and the effective scene pattern otherwise.
+    pub(super) sound_binding_patterns: Mutex<HashMap<usize, PatternId>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

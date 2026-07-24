@@ -166,8 +166,51 @@ pub fn validate_track_take_pool(
                 ));
             }
         }
+        debug_assert!(
+            take_chunk_device_state_agrees(take, pattern_pool),
+            "Track {} take {} has chunks whose device state diverged; take-bound \
+             edits must fan out to every chunk (takes spec 16.4)",
+            track + 1,
+            take.id.0
+        );
     }
     Ok(())
+}
+
+/// Takes spec 16.4: a take's device snapshot is duplicated per chunk (16.8),
+/// so every chunk must carry the same one. Debug-only — the fan-out in
+/// `edit.rs` is what keeps it true.
+#[cfg(debug_assertions)]
+fn take_chunk_device_state_agrees(take: &TrackTake, pattern_pool: &TrackPatternPool) -> bool {
+    let mut chunks = take.chunks.iter().filter_map(|id| pattern_pool.get(*id));
+    let Some(first) = chunks.next() else {
+        return true;
+    };
+    chunks.all(|chunk| {
+        first
+            .instrument_slot
+            .authoring_values()
+            .bit_exact_eq(&chunk.instrument_slot.authoring_values())
+            && first.instrument_base_note_offset.to_bits()
+                == chunk.instrument_base_note_offset.to_bits()
+            && first.effect_slots.len() == chunk.effect_slots.len()
+            && first
+                .effect_slots
+                .iter()
+                .zip(&chunk.effect_slots)
+                .all(|(a, b)| a.authoring_values().bit_exact_eq(&b.authoring_values()))
+            && first.midi_fx_slots.len() == chunk.midi_fx_slots.len()
+            && first
+                .midi_fx_slots
+                .iter()
+                .zip(&chunk.midi_fx_slots)
+                .all(|(a, b)| a.authoring_values().bit_exact_eq(&b.authoring_values()))
+    })
+}
+
+#[cfg(not(debug_assertions))]
+fn take_chunk_device_state_agrees(_take: &TrackTake, _pattern_pool: &TrackPatternPool) -> bool {
+    true
 }
 
 #[cfg(test)]

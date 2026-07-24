@@ -288,6 +288,10 @@ impl App {
                 self.state.clear_song_manual_latch();
                 self.state.stop_playback();
                 self.set_song_transport_mode(SongTransportMode::Stopped);
+                // Hand the live grid back to the scene: the last row played
+                // may have silenced lanes it resolved nothing for, and that
+                // silencing belongs to the song, not to session mode.
+                self.state.resync_live_grid_to_current_scene();
                 teardown.map_err(|error| format!("Song playback teardown failed: {error}"))?;
                 Ok(Some("Song playback stopped".to_string()))
             }
@@ -315,6 +319,11 @@ impl App {
                 // commit itself goes through `song_replace`.
                 self.set_song_transport_mode(SongTransportMode::Stopped);
                 let result = self.finish_song_capture_take(end_raw_beats).map(Some);
+                // Capture ran on top of song playback, so the same row-owned
+                // lane state has to be handed back to the scene.
+                if playback_teardown.is_some() {
+                    self.state.resync_live_grid_to_current_scene();
+                }
                 if let Some(Err(error)) = playback_teardown {
                     return Err(format!("Song playback teardown failed: {error}"));
                 }
@@ -525,6 +534,30 @@ mod tests {
         )
         .expect("song_replace succeeds");
         app
+    }
+
+    /// A song row that resolves nothing for a lane silences it. That is the
+    /// song's state, not the scene's: stopping must hand the lane back, or
+    /// session mode shows the scene's pattern sitting there unlaunched until
+    /// the performer switches scenes and back.
+    #[test]
+    fn stopping_song_playback_unsilences_lanes_the_last_row_left_empty() {
+        let mut app = app_with_song();
+        app.set_use_arrangement(true).expect("toggle while stopped");
+        app.song_transport_play(false).expect("song playback starts");
+        app.apply_song_row_control(0, &[(0, None)], false)
+            .expect("sparse row applies");
+        assert!(
+            app.state.is_scene_silenced(0),
+            "an explicit-empty lane is silenced while the row plays"
+        );
+
+        app.song_transport_stop().expect("stop succeeds");
+
+        assert!(
+            !app.state.is_scene_silenced(0),
+            "the scene resolves a pattern for track 0, so its clip is launched again"
+        );
     }
 
     #[test]

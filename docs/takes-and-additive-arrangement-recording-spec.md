@@ -641,3 +641,262 @@ independently shippable.
 - Whether the dev harness in Phase C ("region → take") is worth promoting
   to a user feature (consolidate/flatten), which would also be the seed of
   comping.
+
+## 16. Sound binding — device-parameter ownership for takes
+
+Status: design addendum, 2026-07-24. Extends this spec after Phases A–E
+landed; addresses "who owns the instrument/fx parameters" once takes exist.
+
+### 16.1 Current state (facts)
+
+- Every pool pattern owns a full device snapshot: `TrackPatternData` carries
+  `instrument_slot`, `effect_slots`, `midi_fx_slots`, `track_params`, etc.
+  (`track_pattern_data.rs:3-26`). This is what makes pattern 1 delay-wet 80%
+  and pattern 2 wet 20%.
+- Take chunks are full copies of that snapshot: punch-in clones the track's
+  effective pattern and `clear_step_content()` strips only per-step content,
+  deliberately keeping the device/param state (`track_pattern_data.rs:28-52`,
+  `app/take_recording.rs:382-392`). Every chunk of a take is a clone of that
+  template, so a take's sound is frozen at punch-in and duplicated per chunk.
+- Song playback applies the chunk's params: preflight clones the chunk out of
+  the pool into the row snapshot (`song_playback.rs:300-395`), so audio
+  correctly plays the take's frozen sound.
+- The device UI is blind to all of this: panels read the live authoring
+  surface `state.pattern.instrument_slots[track]`
+  (`ui/state_values/instrument_panel.rs:581`), synced only from
+  `effective_pattern_id()` (override else current-scene cell,
+  `scenes.rs:438-451`). Song row transitions are an `Arc` swap on the audio
+  side (`song_runtime.rs`) and never touch the live surface. Param edits and
+  preset loads write through the same resolution
+  (`app/edit.rs:4893`, `command.rs:3356-3375`) — take chunks are never a
+  write target because no scene cell or override may reference them (6.3).
+
+Net effect today: in song mode the panel shows (and edits) the scene
+pattern while the audible sound is the take's frozen snapshot. Edits made
+while a take plays are inaudible over it.
+
+### 16.2 The invariant
+
+**Panel binding = live monitor sound = record-clone source.**
+
+Per track there is exactly one **bound source** at any moment, and three
+things read from it:
+
+1. The device/param UI displays it (and edits write to it).
+2. Live note input (auditioning, and monitoring while armed) sounds
+   through its params.
+3. Take punch-in clones its device snapshot as the chunk template.
+
+Every "where did my edit go / why does the new take sound stale" failure is
+a divergence between these three; unifying them is the design. The system
+communicates the binding through eyes (panel header, 16.6) *and* ears (the
+monitor sound changes when the binding changes).
+
+### 16.3 Binding resolution order
+
+Per track, first match wins:
+
+1. **Clip selected in the timeline** (playing or paused): the selected
+   clip's source (take or pattern). Selection is the explicit binding
+   gesture and always wins — this is how you tweak an upcoming clip while
+   the song plays.
+2. **Song playback authoritative** (`song_playback_authority_active()`),
+   nothing selected: the track's audible resolved source at the playhead —
+   `RuntimeSongRow.resolved_sources` (take → that take; pattern clip → that
+   pattern; empty → fall through to rule 3). The panel mirrors what is
+   sounding and re-binds on row transitions.
+3. **Fallback**: today's behavior — `effective_pattern_id()` (track
+   override else current-scene cell). Session/pattern mode is always this
+   rule; nothing changes outside song mode.
+
+**Recording auto-selects.** Committing a take (8.5) leaves that take as the
+timeline selection for its track, so rule 2 binds post-record tweaks to the
+take the user just played. Deselecting (click empty lane / Esc) is the
+explicit gesture to return to the scene pattern — and the panel values and
+monitor sound both change at that moment, so the switch is never silent.
+
+Playhead position is deliberately **not** a binding key while paused:
+scrubbing must not silently retarget edits. Selection is intent; the
+playhead is not.
+
+### 16.4 Edit routing
+
+- Edits under rule 3 behave exactly as today (write to the effective scene
+  pattern via the existing paths).
+- Edits under rules 1–2 with a **take** bound write the take's device
+  snapshot. Because chunks each carry a copy (16.1), a take-bound edit
+  fans out to **every chunk** of the take — chunks must never diverge in
+  device state (new invariant; add to 6.3 validation as a debug assertion).
+  Same for preset loads.
+- Edits under rules 1–2 with a **pattern clip** bound write that pool
+  pattern (which may not be the current scene's cell — that is the point).
+- No dual-write. Editing a bound take never touches the scene pattern;
+  per-pattern ownership stays intact. Cross-propagation is explicit only
+  (16.5).
+
+### 16.5 Explicit propagation gestures
+
+Two commands, no implicit coupling:
+
+- **Push to pattern** — copy the bound take's device snapshot into the
+  track's effective pattern **in the current scene only** ("promote this
+  sound to the track's working sound"). Other scenes' patterns are
+  untouched — per-scene sound design is exactly what the pattern model
+  protects, so the blast radius stays scene-scoped.
+- **Apply to all takes on track** — copy the bound source's device snapshot
+  into every take (all chunks) on the track.
+
+Both are single undo entries. These, plus the binding invariant, cover
+"tweak just this take" and "change it for all of them" without any silent
+data flow.
+
+Deferred (named, out of scope for V1): **Apply sound to entire track** —
+the bound snapshot into every scene's pattern *and* every take on the
+track, one undo entry. This keeps the escalation ladder deliberate: this
+take → this scene's pattern → the whole track.
+
+### 16.6 UI surface
+
+- Binding header on the device panel: `▸ Take 2 · bars 0–2` vs
+  `▸ Pattern 2 (scene)`. Always visible in song mode; this is what saves
+  the user who is paused and about to tweak.
+- The bound clip renders highlighted in the timeline (reuses selection
+  affordance under rule 2; under rule 1 the playing clip carries the
+  binding highlight).
+- **Selection lifecycle — never decays implicitly.** Timeline selection is
+  persistent timeline state (like the playhead or zoom): it survives
+  Arr ↔ session view switches and transport start/stop. While in
+  session/pattern mode the selection is dormant (rule 3 applies there
+  regardless); returning to the Arr view re-binds to it, announced by the
+  binding header and — when paused — the monitor sound. Selection changes
+  only through these causes, exhaustively:
+  1. Explicit deselect: Esc, or clicking empty lane space / the background.
+  2. Selecting another clip/take.
+  3. A new recording committing (auto-selects the new take, 16.3).
+  4. Deletion of the selected clip/take (falls back to rule 2/3).
+
+### 16.7 Runtime notes
+
+- Binding changes push the bound snapshot's params to the live engine
+  surface (same path as `send_effective_instrument_param` /
+  `mark_track_sound_dirty`, applied wholesale), and restore the scene
+  pattern's on fallback. This is what makes the monitor half of 16.2 real.
+- Rule-2 mirroring means the panel re-binds on row transitions while the
+  song plays. The read is cheap (resolved source is already in
+  `RuntimeSongRow`); avoid per-frame pool clones — read through the pool by
+  id as the panels do today.
+- **Edit-through is locked**: edits during song playback are live, not
+  display-only. Take/clip-bound edits must (a) write the pool data, (b)
+  invalidate the affected prebuilt row snapshots (the row
+  `SequencerSnapshot`s clone chunk data at preflight,
+  `song_playback.rs:317`) — reuse the targeted-invalidation pattern from
+  the undo-drag work — and (c) if the bound source is currently audible,
+  push the param directly to the engine for zero-latency response.
+- **Monitor leg while playing with a non-audible selection**: the engine
+  keeps sounding the audible row's params; a selected-but-not-yet-audible
+  binding is display + edit only, and the tweaks become audible when the
+  playhead reaches the clip ("editing the future"). The full three-way
+  invariant (16.2) holds whenever the bound source is audible or the
+  transport is paused/stopped.
+
+### 16.8 Storage: per-chunk vs take-level snapshot
+
+V1 keeps the snapshot per-chunk (no serialization change; fan-out writes
+per 16.4). Hoisting the device snapshot to `TrackTake` and overlaying it at
+resolve time would remove the N-way duplication and make the no-divergence
+invariant structural — deferred; revisit if fan-out writes ever show up in
+profiles or the duplication complicates comping.
+
+### 16.9 Locked decisions (addendum)
+
+- One bound source per track; panel, monitor, and record-clone template all
+  read from it (16.2).
+- Resolution order: timeline selection > playback-audible > effective scene
+  pattern (16.3). Selection always wins, playing or paused.
+- Edit-through during playback: edits are live (pool write + row-snapshot
+  invalidation + direct engine push when audible), never display-only.
+  With a non-audible selection bound while playing, the engine keeps the
+  audible sound; edits land in the clip and are heard when it arrives.
+- Recording auto-selects the committed take.
+- Selection persists across view switches and transport state; it never
+  decays implicitly. The only selection changes are the four causes in
+  16.6 (explicit deselect, select-other, new recording, deletion).
+- Paused playhead position never selects the binding.
+- No dual-write; cross-propagation only via the explicit gestures in 16.5.
+- Push to pattern targets the current scene's effective pattern only;
+  track-wide broadcast is the deferred "Apply sound to entire track"
+  gesture, not a variant of this one.
+- Take chunks never diverge in device state; take-bound edits fan out to
+  all chunks.
+
+### 16.10 Open questions (addendum)
+
+None — all three original questions (rule-1 edit-through, selection
+persistence, Push-to-pattern scope) were resolved 2026-07-24 and folded
+into 16.3–16.7 and the locked decisions in 16.9.
+
+### 16.11 Implementation notes (BUILT 2026-07-24)
+
+The mechanism is **"the live mirror follows the binding"**, not a parallel
+read path. Every device panel already reads `state.pattern.*` and every
+device command already writes it (`command.rs`), with `edit.rs` snapshotting
+the result into the pool pattern that `effective_pattern_id()` resolves. So
+the binding generalizes exactly one notion — "which pattern is the live
+mirror" — from *effective scene pattern* to *bound source*:
+
+- `app/sound_binding.rs` owns resolution (16.3), the selection lifecycle
+  (16.6), the propagation gestures (16.5) and the per-track engine push.
+- `SequencerState` gains a `sound_binding_borrowed` mask plus the bound
+  pattern per lane; `mirror_device_pattern_id()` replaces
+  `effective_pattern_id()` in the eight device-value capture/restore
+  functions in `step_edit.rs`, which is what makes reads, writes and undo
+  all follow the binding at once.
+- `TrackPatternData::restore_device_state_to` loads a source's devices into
+  the mirror without touching any per-step lane or the step grid
+  (`num_steps`/timebase/swing stay the session's — a take chunk is always
+  `MAX_STEPS` wide and adopting that would resize the step view).
+- **The one hazard, and its guard**: the mirror is saved back into the
+  current scene's pattern by `capture_current_pattern_snapshot`, on every
+  launch and every song row transition. A borrowed lane would leak a take's
+  sound into the scene pattern there, so capture calls
+  `release_bound_device_state()` first (restoring each borrowed lane's
+  effective pattern devices) and the reactive tick re-binds afterwards.
+  This is the same reason `apply_song_row_latched` refuses to paint take
+  chunks into the live grid.
+- Take-chunk fan-out (16.4) rides `restore_device_value_snapshot`, so undo
+  and redo fan out for free without widening the stored patch (16.8).
+  `validate_track_take_pool` carries the no-divergence debug assertion.
+- Edit-through (16.7) adds `SongPlaybackCommand::Refresh`, an in-place
+  runtime-song swap that keeps the scheduler's cursor and is rejected if the
+  row layout moved (content-only). Drags defer their re-preflight to gesture
+  end — the audible row already heard the value through the direct engine
+  push.
+
+Deliberate scope calls, all noted rather than silently dropped:
+
+- **Track params stay on the effective scene pattern.** `TrackParamsSnapshot`
+  mixes mixer state (volume/pan/send/mute) with the step grid
+  (`num_steps`, timebase, swing), and the mixer strip has its own edit path;
+  routing it through the binding is a separate change.
+- **Selection is a single clip, not per track.** This matches the timeline's
+  own exclusive selection. A multi-lane recording therefore auto-selects the
+  lowest track's take (16.3 says "the take the user just played"; with
+  several, one must win).
+- **Scene-lane selections release the binding** — a scene row spans every
+  track and names no single clip.
+- **The binding header is a badge in the instrument panel's header row**, not
+  a strip above the FX panels: that panel's vertical space is tuned to fit
+  exactly, so nothing may be added above it. The badge rides the
+  `SEQ.instrument-panel` `inst` map (`:sound-binding`) rather than a
+  per-track reactive list — the whole FX strip is driven by `inst`, and a
+  panel-scope read of an unrelated `SEQ.*` field breaks the buffer's
+  evaluation (it takes the `*fx*` and instrument panels down with it).
+- **The 16.5 gestures have no button yet.** `seq-sound-push-to-pattern` and
+  `seq-sound-apply-to-all-takes` are registered natives (and
+  `sound-push-to-pattern` / `sound-apply-to-all-takes` host commands) but
+  are not bound to any control, for the same "no free space in that header"
+  reason. They need a home — most likely the instrument header actions menu.
+- **Rule-2 bound-clip highlight is not drawn.** Under rule 1 the bound clip
+  is the selected clip and already highlights (now driven by the persistent
+  Rust-side `SEQ.song-bound-clip`, so it survives view switches per 16.6).
+  Under rule 2 the playing clip does not yet carry a distinct highlight.

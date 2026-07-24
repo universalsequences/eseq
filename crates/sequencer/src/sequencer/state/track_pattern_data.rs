@@ -505,6 +505,118 @@ impl TrackPatternData {
         process_chain
     }
 
+    /// Adopt `source`'s sound, keeping every per-step lane and the step grid.
+    /// The explicit-propagation gestures (takes spec 16.5) and the take-chunk
+    /// fan-out are the only things that move a device snapshot between
+    /// patterns; the step-grid fields stay this pattern's own for the same
+    /// reason `restore_device_state_to` keeps them.
+    pub fn copy_device_state_from(&mut self, source: &TrackPatternData) {
+        let num_steps = self.track_params.num_steps;
+        let timebase = self.track_params.timebase;
+        let swing = self.track_params.swing;
+        let swing_resolution = self.track_params.swing_resolution;
+        self.track_params = source.track_params.clone();
+        self.track_params.num_steps = num_steps;
+        self.track_params.timebase = timebase;
+        self.track_params.swing = swing;
+        self.track_params.swing_resolution = swing_resolution;
+
+        self.effect_slots = source.effect_slots.clone();
+        self.midi_fx_slots = source.midi_fx_slots.clone();
+        self.instrument_slot = source.instrument_slot.clone();
+        self.instrument_base_note_offset = source.instrument_base_note_offset;
+        self.instrument_type = source.instrument_type;
+        self.instrument_run_mode = source.instrument_run_mode;
+        self.track_sound_state = source.track_sound_state.clone();
+        self.rack_track = source.rack_track.clone();
+        self.process_chain = source.process_chain.clone();
+        self.sample_id = source.sample_id.clone();
+    }
+
+    /// Restore only the device/sound half of this snapshot into the live
+    /// mirror — instruments, effects, MIDI FX, rack and the mixer-side track
+    /// params — leaving every per-step lane and the step grid itself alone.
+    ///
+    /// This is how a sound binding (takes spec 16.2) puts a take's or a
+    /// track clip's frozen sound behind the device panel without dragging
+    /// its step content into the session surface. The step-grid fields
+    /// (`num_steps`, timebase, swing) are deliberately kept from the live
+    /// mirror: a take chunk is always `MAX_STEPS` wide and adopting that
+    /// would resize the session's step view.
+    pub(super) fn restore_device_state_to(&self, state: &SequencerState, track: usize) -> bool {
+        if track >= state.pattern.track_params.len()
+            || track >= state.pattern.effect_chains.len()
+            || track >= state.pattern.midi_fx_slots.len()
+            || track >= state.pattern.instrument_slots.len()
+            || track >= state.pattern.instrument_base_note_offsets.len()
+            || track >= state.pattern.instrument_run_modes.len()
+            || track >= state.runtime.instrument_run_mode_flags.len()
+        {
+            return false;
+        }
+
+        let tp = &state.pattern.track_params[track];
+        let mut params = self.track_params.clone();
+        params.num_steps = tp.get_num_steps();
+        params.timebase = tp.get_timebase();
+        params.swing = tp.get_swing();
+        params.swing_resolution = tp.get_swing_resolution();
+        restore_track_params_snapshot(tp, &params);
+
+        for (slot_idx, slot_snap) in self.effect_slots.iter().enumerate() {
+            if slot_idx < state.pattern.effect_chains[track].len() {
+                slot_snap.restore(&state.pattern.effect_chains[track][slot_idx]);
+            }
+        }
+        for (slot_idx, slot_snap) in self.midi_fx_slots.iter().enumerate() {
+            if slot_idx < state.pattern.midi_fx_slots[track].len() {
+                slot_snap.restore(&state.pattern.midi_fx_slots[track][slot_idx]);
+            }
+        }
+
+        self.instrument_slot
+            .restore(&state.pattern.instrument_slots[track]);
+        state.pattern.instrument_base_note_offsets[track].store(
+            self.instrument_base_note_offset.to_bits(),
+            Ordering::Relaxed,
+        );
+        state.pattern.instrument_run_modes[track]
+            .store(self.instrument_run_mode.runtime_flag(), Ordering::Relaxed);
+        state.runtime.instrument_run_mode_flags[track]
+            .store(self.instrument_run_mode.runtime_flag(), Ordering::Relaxed);
+
+        {
+            let mut track_sound_state = state.pattern.track_sound_state.lock().unwrap();
+            if track < track_sound_state.len() {
+                track_sound_state[track] = self.track_sound_state.clone();
+            }
+        }
+        {
+            let mut rack_tracks = state.pattern.rack_tracks.lock().unwrap();
+            if track < rack_tracks.len() {
+                rack_tracks[track] = self.rack_track.clone();
+            }
+        }
+        let refreshed_process_chain = {
+            let effect_descriptors = state.scratch_effect_descriptors.lock().unwrap();
+            let instrument_descriptors = state.scratch_instrument_descriptors.lock().unwrap();
+            self.refreshed_process_chain(
+                instrument_descriptors.get(track),
+                effect_descriptors
+                    .get(track)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            )
+        };
+        {
+            let mut process_chains = state.pattern.process_chains.lock().unwrap();
+            if track < process_chains.len() {
+                process_chains[track] = refreshed_process_chain;
+            }
+        }
+        true
+    }
+
     pub(super) fn restore_to(&self, state: &SequencerState, track: usize) -> bool {
         if track >= state.pattern.patterns.len()
             || track >= state.pattern.neural_reset_patterns.len()

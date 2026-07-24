@@ -466,8 +466,16 @@
     (arrangement-merged-track-clips i)))
 
 ;; Selection prop for one track lane: only the owning track shows its ids.
+;; The bound clip (takes spec 16.6) is Rust-side persistent timeline state,
+;; so it carries the highlight after a view switch, when this buffer's own
+;; selection defstate has been reset.
 (def arrangement-lane-selection (i)
-  (if (= arrangement-selected-track i) arrangement-track-selection '()))
+  (if (= arrangement-selected-track i)
+    arrangement-track-selection
+    (if (and (not (= SEQ.song-bound-clip nil))
+          (= (nth SEQ.song-bound-clip 0) i))
+      (list (nth SEQ.song-bound-clip 1))
+      '())))
 
 ;; ── Action handlers ────────────────────────────────────────────────────────
 
@@ -492,11 +500,15 @@
         (set! arrangement-track-selection '())
         (set! arrangement-selected-track -1)
         (set! arrangement-selection (get event :ids))
+        ;; A scene row spans every track and names no single clip, so it
+        ;; releases the sound binding (takes spec 16.6 cause 2).
+        (seq-song-deselect-clip)
         (set-arrangement-cursor (get event :time) -1))
       :clear-selection
       (do
         (set! arrangement-selection-rect nil)
         (set! arrangement-selection '())
+        (seq-song-deselect-clip)
         (set-arrangement-cursor (get event :time) -1))
       :set-cursor
       (set-arrangement-cursor (get event :time) -1)
@@ -598,6 +610,7 @@
 (def arrangement-track-delete (i ids)
   (do
     (set! arrangement-track-selection '())
+    (seq-song-deselect-clip)
     (map
       (lambda (row-id)
         (let ((clip (arrangement-find-track-clip i row-id)))
@@ -617,10 +630,18 @@
         (set! arrangement-selection-rect nil)
         (set! arrangement-selected-track i)
         (set! arrangement-track-selection (get event :ids))
+        ;; Selecting a clip is the explicit sound-binding gesture (takes
+        ;; spec 16.2/16.6): it re-binds this track's device panel, monitor
+        ;; sound and take punch-in template. The binding lives in Rust so it
+        ;; survives view switches and transport.
+        (if (= (len (get event :ids)) 0)
+          (seq-song-deselect-clip)
+          (seq-song-select-clip i (nth (get event :ids) 0)))
         (set-arrangement-cursor (get event :time) i))
       :clear-selection
       (do
         (set! arrangement-track-selection '())
+        (seq-song-deselect-clip)
         (set-arrangement-cursor (get event :time) i))
       :set-cursor
       (set-arrangement-cursor (get event :time) i)

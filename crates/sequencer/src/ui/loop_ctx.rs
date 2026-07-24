@@ -74,6 +74,7 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_current_track_playhead_visible: bool,
     pub(crate) prev_ui_epoch: usize,
     pub(crate) prev_fx_epoch: usize,
+    pub(crate) prev_sound_binding_epoch: usize,
     pub(crate) prev_instrument_active_notes: Vec<u8>,
     pub(crate) prev_active_buffer_name: String,
     pub(crate) prev_selected_neural_neurons:

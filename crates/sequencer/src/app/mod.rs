@@ -44,6 +44,7 @@ mod params;
 mod projects;
 pub mod song_capture;
 pub mod song_edit;
+pub mod sound_binding;
 pub mod take_edit;
 pub mod take_recording;
 pub mod song_transport;
@@ -919,6 +920,22 @@ pub struct App {
     /// `graph.record_armed` must be pushed INTO the UI-shared arm vector
     /// (the per-tick sync runs the other way).
     pub record_arm_sync_pending: bool,
+    /// Persistent arrangement clip selection (takes spec 16.6) — rule 1 of
+    /// the sound-binding order. Timeline state, not view state: it survives
+    /// view switches and transport and never decays implicitly.
+    pub song_clip_selection: Option<sound_binding::SongClipSelection>,
+    /// Per track, the non-scene source whose device state is currently
+    /// loaded into the live mirror (takes spec 16.2). `None` = the mirror
+    /// holds the effective scene pattern's devices, i.e. nothing is borrowed.
+    pub(crate) loaded_sound_binding: Vec<Option<sound_binding::BoundSource>>,
+    /// Deferred edit-through target (takes spec 16.7): a device edit made
+    /// during a coalescing drag records its pool pattern here and the
+    /// gesture end re-preflights once, instead of per drag frame.
+    pub(crate) pending_song_row_invalidation: Option<(usize, crate::sequencer::PatternId)>,
+    /// Bumped whenever a track's loaded binding actually moves. The device
+    /// panels are rebuilt from epochs, not polled, so swapping the mirror is
+    /// invisible until this tells the reactive tick to republish them.
+    pub sound_binding_epoch: usize,
 }
 
 struct RecordingHistoryTransaction {
@@ -2247,6 +2264,10 @@ impl App {
             song_edit_error: None,
             take_recording: None,
             record_arm_sync_pending: false,
+            song_clip_selection: None,
+            loaded_sound_binding: Vec::new(),
+            pending_song_row_invalidation: None,
+            sound_binding_epoch: 0,
             graph: GraphState {
                 lg,
                 track_node_ids: Vec::new(),

@@ -377,12 +377,20 @@ impl App {
                 .record_quantize
                 .load(std::sync::atomic::Ordering::Relaxed) as u8,
         );
-        // Template for a lazily minted lane: the track's effective pattern
-        // (device state rides along), else a default lane for bare tracks.
+        // Template for a lazily minted lane: the track's BOUND source
+        // (takes spec 16.2 — punch-in clones whatever the panel shows and
+        // the monitor sounds), else a default lane for bare tracks.
+        let bound = self.bound_read_pattern(track);
         let template = || {
             let mut data = self
                 .state
-                .with_project_scenes(|scenes| scenes.effective_track_pattern(track).cloned())
+                .with_project_scenes(|scenes| {
+                    let pool = scenes.track_pools.get(track)?;
+                    bound
+                        .and_then(|id| pool.get(id))
+                        .or_else(|| scenes.effective_track_pattern(track))
+                        .cloned()
+                })
                 .or_else(|| {
                     PatternSnapshot::new_default(1, &[]).track_pattern_data(0)
                 })?;

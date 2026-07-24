@@ -1206,6 +1206,16 @@ pub(crate) fn build_instrument_panel_value(
             &instrument_name,
         )))),
     );
+    // Sound-binding badge (takes spec 16.6): which source this panel is
+    // showing and editing. Rides the panel map rather than a per-track
+    // reactive list because the FX strip is driven entirely by `inst`.
+    panel_map.insert(
+        "sound-binding".to_string(),
+        Rc::new(RefCell::new(match app.track_binding_label(track) {
+            Some(label) => Value::String(label),
+            None => Value::Nil,
+        })),
+    );
     panel_map.insert(
         "synth".to_string(),
         Rc::new(RefCell::new(Value::List(synth_params))),

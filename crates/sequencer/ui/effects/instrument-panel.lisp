@@ -731,7 +731,8 @@
                     :font-size 11  :color :white :bg :transparent)
                   (instrument-synth-button)
                   (instrument-mods-toggle-button)
-                  (instrument-keys-button))
+                  (instrument-keys-button)
+                  (instrument-sound-binding-badge inst))
                 (box :flex 1 :height 0.15)
                 (instrument-header-actions-menu inst)
                 (box :debug-name "instrument-preset-button" :padding 0.0 :width 2 :align :center

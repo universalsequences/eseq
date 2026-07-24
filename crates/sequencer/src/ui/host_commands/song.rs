@@ -32,6 +32,12 @@ pub(super) const COMMANDS: &[&str] = &[
     "song-back-to-song",
     "song-back-to-song-track",
     "song-status",
+    // Sound binding (takes spec 16): timeline clip selection is the explicit
+    // binding gesture, plus the two explicit propagation gestures.
+    "song-select-clip",
+    "song-deselect-clip",
+    "sound-push-to-pattern",
+    "sound-apply-to-all-takes",
 ];
 
 fn payload_map(payload: &Value) -> Result<&HashMap<String, Rc<RefCell<Value>>>, String> {
@@ -416,6 +422,30 @@ fn run_transport(
             app.back_to_song_track(track).map(Some)
         }
         "song-status" => Ok(Some(song_status_summary(app))),
+        // Selecting a clip re-binds the track's device panel, monitor sound
+        // and record-clone template in one move (takes spec 16.2/16.6), so
+        // it lives with the transport commands: it changes what is sounding.
+        "song-select-clip" => {
+            let map = payload_map(payload)?;
+            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            let row_id = require_row_id(map)?;
+            app.select_song_clip(track, row_id)?;
+            Ok(app.track_binding_label(track).map(|label| format!("Bound: {label}")))
+        }
+        "song-deselect-clip" => {
+            app.set_song_clip_selection(None);
+            Ok(None)
+        }
+        "sound-push-to-pattern" => {
+            let map = payload_map(payload)?;
+            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            app.push_bound_sound_to_pattern(track).map(Some)
+        }
+        "sound-apply-to-all-takes" => {
+            let map = payload_map(payload)?;
+            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            app.apply_bound_sound_to_all_takes(track).map(Some)
+        }
         _ => Err(format!("unknown song transport command: {name}")),
     }
 }
@@ -458,6 +488,10 @@ const TRANSPORT_COMMANDS: &[&str] = &[
     "song-back-to-song",
     "song-back-to-song-track",
     "song-status",
+    "song-select-clip",
+    "song-deselect-clip",
+    "sound-push-to-pattern",
+    "sound-apply-to-all-takes",
 ];
 
 pub(super) fn handle(

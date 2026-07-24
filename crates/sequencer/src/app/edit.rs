@@ -4899,8 +4899,14 @@ fn resolve_device_value_target(
         .track_registry
         .id_at(track)
         .ok_or(EditError::TrackOutOfRange { track })?;
-    let pattern =
-        ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?;
+    // Device edits follow the track's sound binding (takes spec 16.4): a
+    // bound take or track clip owns them, and only rule 3 falls back to the
+    // effective scene pattern (which is materialized on demand for a bare
+    // scene). No dual-write — a bound edit never touches the scene pattern.
+    let pattern = match app.bound_read_pattern(track) {
+        Some(pattern) if !app.track_sound_binding(track).is_scene() => pattern,
+        _ => ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?,
+    };
     let (id, slot_idx) = match cmd {
         AppCommand::SetEffectParam { slot_idx, .. }
         | AppCommand::SetEffectTensorCell { slot_idx, .. } => (
@@ -5147,6 +5153,35 @@ fn restore_device_value_snapshot(
     }
 }
 
+/// Mirror a device write onto the rest of the bound take's chunks (takes
+/// spec 16.4). Every write path funnels through `restore_device_value_snapshot`,
+/// so calling this right after it keeps undo and redo fanned out too without
+/// widening the stored patch (16.8 keeps the snapshot per-chunk).
+fn fan_out_device_values_to_take_chunks(
+    app: &mut App,
+    target: ResolvedDeviceTarget,
+    snapshot: &DeviceValueSnapshot,
+) -> Result<(), EditError> {
+    for chunk in app.take_sibling_chunks(target.track, target.pattern) {
+        let sibling = ResolvedDeviceTarget {
+            pattern: chunk,
+            ..target
+        };
+        restore_device_value_snapshot(app, sibling, snapshot)?;
+    }
+    // Edit-through (16.7): the playing song's prebuilt rows cloned this
+    // pattern at preflight and would otherwise keep the pre-edit sound.
+    // Re-preflighting is far too heavy for every frame of a knob drag, and
+    // the audible row already heard the value through the direct engine
+    // push — so a drag defers to its gesture end.
+    if app.history.active_gesture().is_some() {
+        app.pending_song_row_invalidation = Some((target.track, target.pattern));
+    } else {
+        app.invalidate_song_rows_for_pattern(target.track, target.pattern);
+    }
+    Ok(())
+}
+
 fn device_command_changes_key_locks(cmd: &AppCommand) -> bool {
     matches!(
         cmd,
@@ -5243,7 +5278,9 @@ fn apply_recorded_device_value_commands(
     if current_before.bit_exact_eq(&after) {
         return Ok(EditOutcome::NoOp);
     }
-    if let Err(error) = restore_device_value_snapshot(app, target, &after) {
+    if let Err(error) = restore_device_value_snapshot(app, target, &after)
+        .and_then(|_| fan_out_device_values_to_take_chunks(app, target, &after))
+    {
         return Err(rollback_device_value_edit(
             app,
             target,
@@ -5345,9 +5382,11 @@ pub fn apply_recorded_instrument_values_mutation(
         .track_registry
         .id_at(track)
         .ok_or(EditError::TrackOutOfRange { track })?;
+    // Preset loads follow the sound binding like any other device edit
+    // (takes spec 16.4).
     let pattern = app
-        .state
-        .effective_track_pattern_id(track)
+        .bound_read_pattern(track)
+        .or_else(|| app.state.effective_track_pattern_id(track))
         .ok_or(EditError::MissingTrackPattern)?;
     let target = ResolvedDeviceTarget {
         id: DeviceId::TrackInstrument(track_id),
@@ -5367,7 +5406,9 @@ pub fn apply_recorded_instrument_values_mutation(
     if before.bit_exact_eq(&after) {
         return Ok(EditOutcome::NoOp);
     }
-    if let Err(error) = restore_device_value_snapshot(app, target, &after) {
+    if let Err(error) = restore_device_value_snapshot(app, target, &after)
+        .and_then(|_| fan_out_device_values_to_take_chunks(app, target, &after))
+    {
         let _ = restore_device_value_snapshot(app, target, &before);
         let _ = push_live_device_values(app, target, Some(&before));
         return Err(error);
@@ -7056,6 +7097,7 @@ fn replay_device_values_patch(
     };
     let current = capture_device_value_snapshot(app, target)?;
     let is_effective = restore_device_value_snapshot(app, target, snapshot)?;
+    fan_out_device_values_to_take_chunks(app, target, snapshot)?;
     if is_effective {
         if let Err(error) = push_live_device_values(app, target, Some(snapshot)) {
             let _ = restore_device_value_snapshot(app, target, &current);
@@ -7443,6 +7485,11 @@ pub fn finish_active_gesture(app: &mut App) -> bool {
     let finished = app.history.finish_active_gesture().is_some();
     if finished && publish_scheduler {
         app.state.publish_scheduler_snapshot();
+    }
+    if finished {
+        if let Some((track, pattern)) = app.pending_song_row_invalidation.take() {
+            app.invalidate_song_rows_for_pattern(track, pattern);
+        }
     }
     finished
 }
