@@ -88,6 +88,37 @@ pub struct ProjectFile {
     /// 7.1): selects session vs song behavior for the next Play.
     #[serde(default)]
     pub use_arrangement: bool,
+    /// Per-scene, per-track cell presence (takes spec 11.1): `false` marks a
+    /// scene cell that held no pattern, so bare tracks survive save/reload
+    /// (`patterns` is dense and cannot encode absence). Outer index = scene,
+    /// inner = track. Empty (legacy files) means every cell is present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scene_cell_presence: Vec<Vec<bool>>,
+    /// Per-track take pools (takes spec 6.1). Chunk patterns are not in any
+    /// scene cell, so they serialize here, inline with their take.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub take_pools: Vec<ProjectTrackTakePool>,
+}
+
+/// Serialized form of one track's `TrackTakePool` (takes spec 6.1).
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct ProjectTrackTakePool {
+    #[serde(default)]
+    pub takes: Vec<ProjectTake>,
+    #[serde(default)]
+    pub next_take_id: u64,
+}
+
+/// Serialized `TrackTake`. Each chunk is stored as a full-width
+/// `ProjectPattern` (only the owning track's lane is meaningful) so chunk
+/// content reuses the scene-pattern wire format and load-time sample
+/// resolution unchanged.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectTake {
+    pub id: u64,
+    pub name: String,
+    pub total_len_steps: u32,
+    pub chunks: Vec<ProjectPattern>,
 }
 
 #[derive(Deserialize)]
@@ -121,6 +152,10 @@ struct ProjectFileWire {
     song: Option<ProjectSong>,
     #[serde(default)]
     use_arrangement: bool,
+    #[serde(default)]
+    scene_cell_presence: Vec<Vec<bool>>,
+    #[serde(default)]
+    take_pools: Vec<ProjectTrackTakePool>,
 }
 
 impl<'de> Deserialize<'de> for ProjectFile {
@@ -149,16 +184,30 @@ impl<'de> Deserialize<'de> for ProjectFile {
             next_macro_id: wire.next_macro_id,
             song: wire.song,
             use_arrangement: wire.use_arrangement,
+            scene_cell_presence: wire.scene_cell_presence,
+            take_pools: wire.take_pools,
         };
         project.normalize_device_instances().map_err(D::Error::custom)?;
         // Reject malformed song data with an actionable error rather than
         // clamping, reordering, or dropping invalid references (spec 5.3).
         // Pattern pools are rebuilt from scene cells on load, so track pools
-        // hold exactly the ids 1..=scene_count (`SerializedSongContext`).
+        // hold exactly the ids 1..=scene_count (`SerializedSongContext`);
+        // take pools are rebuilt from the serialized take list, keeping the
+        // stable take ids the song references (takes spec 6.3).
         if let Some(song) = &project.song {
             let context = SerializedSongContext {
                 scene_count: project.patterns.len().max(1),
                 track_count: project.tracks.len(),
+                takes: project
+                    .take_pools
+                    .iter()
+                    .map(|pool| {
+                        pool.takes
+                            .iter()
+                            .map(|take| (take.id, take.total_len_steps))
+                            .collect()
+                    })
+                    .collect(),
             };
             song.validate(&context)
                 .map_err(|error| D::Error::custom(format!("invalid project song: {error}")))?;
@@ -2952,6 +3001,8 @@ mod tests {
             next_macro_id: 1,
             song: None,
             use_arrangement: false,
+            scene_cell_presence: Vec::new(),
+            take_pools: Vec::new(),
         }
     }
 
@@ -3020,6 +3071,84 @@ mod tests {
         let restored: ProjectFile =
             serde_json::from_value(value).expect("deserialize pre-song-mode project");
         assert!(!restored.use_arrangement);
+    }
+
+    #[test]
+    fn take_pools_and_scene_cell_presence_round_trip_and_default_empty() {
+        let mut project = sample_project();
+        project.scene_cell_presence = vec![vec![true, false]];
+        project.take_pools = vec![
+            ProjectTrackTakePool {
+                takes: vec![ProjectTake {
+                    id: 3,
+                    name: "Take 4".to_string(),
+                    total_len_steps: 300,
+                    chunks: vec![project.patterns[0].clone(), project.patterns[0].clone()],
+                }],
+                next_take_id: 4,
+            },
+            ProjectTrackTakePool::default(),
+        ];
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+        assert_eq!(restored.scene_cell_presence, vec![vec![true, false]]);
+        assert_eq!(restored.take_pools.len(), 2);
+        let take = &restored.take_pools[0].takes[0];
+        assert_eq!((take.id, take.total_len_steps), (3, 300));
+        assert_eq!(take.name, "Take 4");
+        assert_eq!(take.chunks.len(), 2);
+        assert_eq!(restored.take_pools[0].next_take_id, 4);
+        assert!(restored.take_pools[1].takes.is_empty());
+
+        // Legacy files (no fields) load with empty defaults, and a project
+        // without takes/bare lanes writes neither field.
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        let object = value.as_object_mut().expect("project is a json object");
+        object.remove("take_pools");
+        object.remove("scene_cell_presence");
+        let restored: ProjectFile =
+            serde_json::from_value(value).expect("deserialize pre-takes project");
+        assert!(restored.take_pools.is_empty());
+        assert!(restored.scene_cell_presence.is_empty());
+        let bare = sample_project();
+        let json = serde_json::to_string(&bare).expect("serialize project");
+        assert!(!json.contains("take_pools"), "empty take pools are skipped");
+        assert!(!json.contains("scene_cell_presence"), "full presence is skipped");
+    }
+
+    #[test]
+    fn song_take_references_validate_against_serialized_take_pools() {
+        use crate::sequencer::ProjectSongTrackOverride;
+        let mut project = sample_project();
+        project.take_pools = vec![ProjectTrackTakePool {
+            takes: vec![ProjectTake {
+                id: 3,
+                name: "Take 4".to_string(),
+                total_len_steps: 300,
+                chunks: vec![project.patterns[0].clone()],
+            }],
+            next_take_id: 4,
+        }];
+        let mut song = sample_song();
+        song.rows[0].overrides = vec![ProjectSongTrackOverride::new_take(0, 3, 10.0)];
+        project.song = Some(song.clone());
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("take reference loads");
+        assert_eq!(
+            restored.song.unwrap().rows[0].overrides[0].take_id,
+            Some(3)
+        );
+
+        // A song referencing a take absent from the serialized pools is
+        // rejected at deserialize time.
+        song.rows[0].overrides = vec![ProjectSongTrackOverride::new_take(0, 9, 0.0)];
+        project.song = Some(song);
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let error = match serde_json::from_str::<ProjectFile>(&json) {
+            Ok(_) => panic!("dangling take reference must be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("take 9"), "{error}");
     }
 
     #[test]

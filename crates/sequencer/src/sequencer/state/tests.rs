@@ -3851,6 +3851,54 @@
     }
 
     #[test]
+    fn install_project_arrangement_restores_bare_cells_and_take_pools() {
+        // Two tracks, two scenes, freshly rebuilt as the project loader does:
+        // per-track pool ids are 1..=2 with scene j's cell holding id j+1.
+        let state = make_state_with_tracks(2);
+        state.replace_pattern_repository(
+            vec![snapshot_with_active_step(2, 0, 3), snapshot_with_active_step(2, 0, 5)],
+            0,
+        );
+
+        // Simulated file data: scene 1's cell for track 1 was bare, and
+        // track 0 owned one 300-step take of two chunks (stable id 3).
+        let presence = vec![vec![true, true], vec![true, false]];
+        let mut chunk_a = sample_pattern_snapshot(1).track_pattern_data(0).unwrap();
+        chunk_a.track_bits[0] = 0b1010;
+        let mut chunk_b = chunk_a.clone();
+        chunk_b.track_bits[0] = 0b0111;
+        state.install_project_arrangement(
+            &presence,
+            vec![
+                (7, vec![(3, "Take 4".to_string(), 300, vec![chunk_a, chunk_b])]),
+                (0, Vec::new()),
+            ],
+        );
+
+        let scenes = state.pattern.scenes.lock().unwrap();
+        // Bare cell restored: the loader-materialized pattern is gone.
+        assert_eq!(scenes.scenes[1].cells[1], None);
+        assert!(!scenes.track_pools[1].contains(PatternId(2)));
+        assert!(scenes.track_pools[1].contains(PatternId(1)));
+        // Take rebuilt with its stable id, chunk content, and allocator.
+        let take = scenes.take_pools[0].get(TakeId(3)).expect("take restored");
+        assert_eq!(take.name, "Take 4");
+        assert_eq!(take.total_len_steps, 300);
+        assert_eq!(take.chunks.len(), 2);
+        let chunk_bits: Vec<u64> = take
+            .chunks
+            .iter()
+            .map(|id| scenes.track_pools[0].get(*id).unwrap().track_bits[0])
+            .collect();
+        assert_eq!(chunk_bits, vec![0b1010, 0b0111]);
+        assert_eq!(scenes.take_pools[0].next_take_id, 7);
+        // Chunks are claimed (hidden from the grid) and scene cells for
+        // track 0 are untouched.
+        assert!(scenes.take_pools[0].is_claimed(take.chunks[0]));
+        assert_eq!(scenes.scenes[0].cells[0], Some(PatternId(1)));
+    }
+
+    #[test]
     fn reorder_scene_moves_only_scene_references_and_follows_the_current_scene() {
         let first = snapshot_with_active_step(1, 0, 2);
         let second = snapshot_with_active_step(1, 0, 7);

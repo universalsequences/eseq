@@ -295,9 +295,15 @@ impl ProjectScenes {
                 // first real content (any active step) so live edits
                 // persist; an untouched bare track keeps its empty pool
                 // and None cell.
-                if self.track_pools[track].patterns.is_empty()
-                    && data.track_bits.iter().any(|bits| *bits != 0)
-                {
+                // Take chunks don't make a track non-bare: only grid-visible
+                // (unclaimed) patterns count.
+                let has_grid_pattern = self.track_pools[track].patterns.keys().any(|id| {
+                    !self
+                        .take_pools
+                        .get(track)
+                        .is_some_and(|takes| takes.is_claimed(*id))
+                });
+                if !has_grid_pattern && data.track_bits.iter().any(|bits| *bits != 0) {
                     let id = self.track_pools[track].insert(data);
                     scene.cells[track] = Some(id);
                 }

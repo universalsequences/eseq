@@ -197,10 +197,13 @@ impl SongProjectContext for ProjectScenes {
 /// pools are rebuilt from scene cells (`ProjectScenes::from_pattern_snapshots`
 /// inserts one pool entry per scene per track, ids starting at 1), so every
 /// track's pool holds exactly the ids `1..=scene_count`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SerializedSongContext {
     pub scene_count: usize,
     pub track_count: usize,
+    /// `(take_id, total_len_steps)` per track from the serialized take
+    /// pools (takes spec 6.3). Empty for files predating takes.
+    pub takes: Vec<Vec<(u64, u32)>>,
 }
 
 impl SongProjectContext for SerializedSongContext {
@@ -214,6 +217,14 @@ impl SongProjectContext for SerializedSongContext {
 
     fn song_track_pattern_exists(&self, track: usize, pattern_id: u64) -> bool {
         track < self.track_count && pattern_id >= 1 && pattern_id <= self.scene_count as u64
+    }
+
+    fn song_track_take_len(&self, track: usize, take_id: u64) -> Option<u32> {
+        self.takes
+            .get(track)?
+            .iter()
+            .find(|(id, _)| *id == take_id)
+            .map(|(_, len)| *len)
     }
 }
 
@@ -586,6 +597,7 @@ mod tests {
         SerializedSongContext {
             scene_count: 3,
             track_count: 2,
+            takes: Vec::new(),
         }
     }
 

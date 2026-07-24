@@ -1784,6 +1784,101 @@ impl App {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
+        // Takes spec 6.1/11.1: record per-scene cell presence (the dense
+        // `patterns` bank cannot encode a bare lane) and serialize each
+        // track's take pool with its chunk patterns inline — chunks are in
+        // no scene cell, so the pattern bank never carries them.
+        let scenes_for_takes = self.state.capture_project_scenes();
+        let scene_cell_presence: Vec<Vec<bool>> = scenes_for_takes
+            .scenes
+            .iter()
+            .map(|scene| {
+                (0..num_tracks)
+                    .map(|track| scene.cells.get(track).copied().flatten().is_some())
+                    .collect()
+            })
+            .collect();
+        // Skip the field entirely when every cell is present, keeping files
+        // byte-identical to the pre-takes format.
+        let scene_cell_presence = if scene_cell_presence
+            .iter()
+            .all(|mask| mask.iter().all(|present| *present))
+        {
+            Vec::new()
+        } else {
+            scene_cell_presence
+        };
+        let mut take_pools = Vec::new();
+        for (track, takes) in scenes_for_takes.take_pools.iter().enumerate() {
+            let mut file_takes = Vec::new();
+            for take in &takes.takes {
+                let mut chunks = Vec::with_capacity(take.chunks.len());
+                for chunk_id in &take.chunks {
+                    let data = scenes_for_takes
+                        .track_pools
+                        .get(track)
+                        .and_then(|pool| pool.get(*chunk_id))
+                        .cloned()
+                        .ok_or_else(|| {
+                            format!(
+                                "Track {} take '{}' references chunk pattern {} which is \
+                                 not in the track's pattern pool",
+                                track + 1,
+                                take.name,
+                                chunk_id.0
+                            )
+                        })?;
+                    let mut snapshot = PatternSnapshot::new_default(num_tracks, &[]);
+                    snapshot.set_track_pattern_data(track, data);
+                    let mut sample_paths = vec![None; num_tracks];
+                    let mut sample_names = vec![String::new(); num_tracks];
+                    let (buffer_id, sample_name, _) = snapshot.sample_ids[track].clone();
+                    if snapshot
+                        .instrument_types
+                        .get(track)
+                        .copied()
+                        .unwrap_or(InstrumentType::Sampler)
+                        == InstrumentType::Sampler
+                        && !sample_name.is_empty()
+                    {
+                        // `usize::MAX` bypasses the current-scene live-path
+                        // shortcut; chunks resolve through the registries.
+                        sample_paths[track] = self
+                            .resolve_sample_path_for_snapshot(
+                                usize::MAX,
+                                track,
+                                buffer_id,
+                                &sample_name,
+                            )?
+                            .map(|path| path.to_string_lossy().to_string());
+                    }
+                    sample_names[track] = sample_name;
+                    chunks.push(ProjectPattern::from_snapshot(
+                        &snapshot,
+                        sample_paths,
+                        sample_names,
+                        Vec::new(),
+                    ));
+                }
+                file_takes.push(crate::project::ProjectTake {
+                    id: take.id.0,
+                    name: take.name.clone(),
+                    total_len_steps: take.total_len_steps,
+                    chunks,
+                });
+            }
+            take_pools.push(crate::project::ProjectTrackTakePool {
+                takes: file_takes,
+                next_take_id: takes.next_take_id,
+            });
+        }
+        // Skip the field when no track holds any take.
+        let take_pools = if take_pools.iter().all(|pool| pool.takes.is_empty()) {
+            Vec::new()
+        } else {
+            take_pools
+        };
+
         Ok(ProjectFile {
             version: project_file_version(),
             name: project_name.to_string(),
@@ -1834,6 +1929,8 @@ impl App {
                 .collect(),
             next_macro_id: self.macro_engine.next_id(),
             use_arrangement: self.use_arrangement,
+            scene_cell_presence,
+            take_pools,
         })
     }
 
@@ -2800,6 +2897,8 @@ impl App {
             macros,
             next_macro_id,
             use_arrangement,
+            scene_cell_presence,
+            take_pools,
         } = pending.project;
         let bank = pending.built_patterns;
         let bus_pattern_bank = pending.built_bus_patterns;
@@ -2823,6 +2922,35 @@ impl App {
         };
         self.state
             .replace_pattern_repository(pattern_repository, current_pattern);
+        // Takes spec 6.1/11.1: re-apply per-scene cell absence (bare lanes)
+        // and rebuild each track's take pool. Chunk patterns convert through
+        // the same snapshot path as scene patterns (sample resolution
+        // included) and are inserted into the freshly rebuilt pools; take
+        // ids are restored verbatim so serialized song overrides stay valid.
+        let mut loaded_take_pools = Vec::with_capacity(take_pools.len());
+        for (track, pool) in take_pools.into_iter().enumerate() {
+            let mut takes = Vec::with_capacity(pool.takes.len());
+            for take in pool.takes {
+                let mut chunk_data = Vec::with_capacity(take.chunks.len());
+                for chunk in take.chunks {
+                    let (snapshot, _, fallback_count) =
+                        self.project_pattern_into_snapshot(chunk)?;
+                    let data = snapshot.track_pattern_data(track).ok_or_else(|| {
+                        format!(
+                            "Take '{}' chunk is missing lane data for track {}",
+                            take.name,
+                            track + 1
+                        )
+                    })?;
+                    let _ = fallback_count;
+                    chunk_data.push(data);
+                }
+                takes.push((take.id, take.name, take.total_len_steps, chunk_data));
+            }
+            loaded_take_pools.push((pool.next_take_id, takes));
+        }
+        self.state
+            .install_project_arrangement(&scene_cell_presence, loaded_take_pools);
         // The serialized song was validated at deserialize time against the
         // deterministic rebuilt-pool id domain, which is exactly what
         // `replace_pattern_repository` just installed; re-check against the
@@ -4178,6 +4306,8 @@ mod tests {
             macros: Vec::new(),
             next_macro_id: 1,
             use_arrangement: false,
+            scene_cell_presence: Vec::new(),
+            take_pools: Vec::new(),
         }
     }
 

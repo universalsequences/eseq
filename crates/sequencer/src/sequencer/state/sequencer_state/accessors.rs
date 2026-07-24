@@ -399,6 +399,60 @@ impl SequencerState {
         );
     }
 
+    /// Load-side arrangement install (takes spec 6.1/11.1), run right after
+    /// `replace_pattern_repository`: re-apply per-scene cell absence so bare
+    /// lanes survive reload (the pattern bank is dense; the loader
+    /// materializes every cell), and rebuild each track's take pool. Chunk
+    /// patterns are inserted into the freshly rebuilt pattern pools with new
+    /// pool ids; take ids are restored verbatim (song overrides reference
+    /// them by stable id).
+    pub(crate) fn install_project_arrangement(
+        &self,
+        scene_cell_presence: &[Vec<bool>],
+        take_pools: Vec<(u64, Vec<(u64, String, u32, Vec<TrackPatternData>)>)>,
+    ) {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        for (scene_idx, mask) in scene_cell_presence.iter().enumerate() {
+            for (track, present) in mask.iter().enumerate() {
+                if *present {
+                    continue;
+                }
+                let cleared = scenes
+                    .scenes
+                    .get_mut(scene_idx)
+                    .and_then(|scene| scene.cells.get_mut(track))
+                    .and_then(|cell| cell.take());
+                if let Some(id) = cleared {
+                    if let Some(pool) = scenes.track_pools.get_mut(track) {
+                        pool.remove(id);
+                    }
+                }
+            }
+        }
+        for (track, (next_take_id, takes)) in take_pools.into_iter().enumerate() {
+            for (id, name, total_len_steps, chunk_data) in takes {
+                let Some(pool) = scenes.track_pools.get_mut(track) else {
+                    continue;
+                };
+                let chunks: Vec<PatternId> =
+                    chunk_data.into_iter().map(|data| pool.insert(data)).collect();
+                let Some(take_pool) = scenes.take_pools.get_mut(track) else {
+                    continue;
+                };
+                take_pool.takes.push(TrackTake {
+                    id: TakeId(id),
+                    name,
+                    chunks,
+                    total_len_steps,
+                });
+                take_pool.next_take_id = take_pool.next_take_id.max(id.saturating_add(1));
+            }
+            if let Some(take_pool) = scenes.take_pools.get_mut(track) {
+                take_pool.next_take_id = take_pool.next_take_id.max(next_take_id);
+            }
+        }
+    }
+
     pub fn current_pattern_sample_ids(&self) -> Vec<(i32, String, u32)> {
         let current_pattern = self.current_pattern_index();
         self.pattern
