@@ -135,6 +135,7 @@ typedef struct LiveGraph {
     int *list;
     int count;
     int capacity;
+    _Atomic uint32_t update_counter;
     pthread_mutex_t mutex;
     void **snapshots;        // state copies indexed by node_id
     size_t *sizes;           // state sizes indexed by node_id

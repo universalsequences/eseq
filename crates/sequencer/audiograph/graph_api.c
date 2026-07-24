@@ -106,6 +106,7 @@ LiveGraph *create_live_graph(int initial_capacity, int block_size,
   lg->watch.capacity = 16;
   lg->watch.list = calloc(lg->watch.capacity, sizeof(int));
   lg->watch.count = 0;
+  atomic_init(&lg->watch.update_counter, 0);
   pthread_mutex_init(&lg->watch.mutex, NULL);
 
   // Initialize state store arrays (indexed by node_id)

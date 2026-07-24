@@ -220,6 +220,42 @@
         }
     }
 
+    #[test]
+    fn watchlist_throttle_starts_each_live_graph_with_a_snapshot() {
+        let first = TestLiveGraph::new("first-watchlist-throttle-test");
+        let second = TestLiveGraph::new("second-watchlist-throttle-test");
+        let first_node = first.add_gain(0.25, "first_watched_gain");
+        let second_node = second.add_gain(0.75, "second_watched_gain");
+
+        assert!(unsafe {
+            crate::audiograph::add_node_to_watchlist(first.ptr.0, first_node)
+        });
+        assert!(unsafe {
+            crate::audiograph::add_node_to_watchlist(second.ptr.0, second_node)
+        });
+        first.process_block();
+        second.process_block();
+
+        for (graph, node_id, expected) in [
+            (&first, first_node, 0.25_f32),
+            (&second, second_node, 0.75_f32),
+        ] {
+            let mut state = [0.0_f32; 1];
+            let mut state_size = 0;
+            assert!(unsafe {
+                crate::audiograph::get_node_state_into(
+                    graph.ptr.0,
+                    node_id,
+                    state.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&state),
+                    &mut state_size,
+                )
+            });
+            assert_eq!(state_size, std::mem::size_of_val(&state));
+            assert_eq!(state[0], expected);
+        }
+    }
+
     struct RouteTargets {
         voice_sum_id: i32,
         voice_sum_r_id: i32,

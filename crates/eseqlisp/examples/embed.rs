@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,7 @@ use eseqlisp::{CompileKind, Editor, EditorConfig, HostCommand, HostEvent, Runtim
 struct DemoHost {
     steps: Vec<bool>,
     pending_jobs: Vec<PendingJob>,
+    authoring_transactions: HashMap<u64, String>,
 }
 
 struct PendingJob {
@@ -30,6 +32,7 @@ fn main() -> std::io::Result<()> {
     let host = Rc::new(RefCell::new(DemoHost {
         steps: vec![false; 16],
         pending_jobs: Vec::new(),
+        authoring_transactions: HashMap::new(),
     }));
 
     let mut runtime = Runtime::with_init_source(init_src);
@@ -127,6 +130,24 @@ fn register_demo_natives(runtime: &mut Runtime, host: Rc<RefCell<DemoHost>>) {
 fn process_host_commands(editor: &mut Editor, host: &Rc<RefCell<DemoHost>>) {
     for command in editor.drain_host_commands() {
         match command {
+            HostCommand::AuthoringTransactionBegin { id, label } => {
+                host.borrow_mut()
+                    .authoring_transactions
+                    .insert(id, label.clone());
+                editor.handle_host_event(HostEvent::CommandStarted { label });
+            }
+            HostCommand::AuthoringTransactionEnd { id, success } => {
+                let label = host
+                    .borrow_mut()
+                    .authoring_transactions
+                    .remove(&id)
+                    .unwrap_or_else(|| format!("authoring transaction {id}"));
+                editor.handle_host_event(HostEvent::CommandFinished {
+                    label,
+                    success,
+                    message: (!success).then(|| "authoring transaction aborted".to_string()),
+                });
+            }
             HostCommand::CompileInstrument {
                 suggested_name,
                 path,

@@ -79,7 +79,6 @@ _Atomic uint64_t g_block_event_push_fail_count = 0;
 #define AUDIOGRAPH_STALL_RECOVERY_TIMEOUT_NS 50000000ull
 #endif
 
-static _Atomic uint32_t g_watch_update_counter = 0;
 static _Atomic int g_active_job_count = 0;
 static _Atomic uint64_t g_stall_recovery_count = 0;
 static _Atomic uint64_t g_graph_trace_block_counter = 0;
@@ -2076,7 +2075,7 @@ void process_next_block(LiveGraph *lg, float *output_buffer, int nframes) {
 #if AUDIOGRAPH_WATCH_UPDATE_INTERVAL <= 1
   update_watched_node_states(lg);
 #else
-  uint32_t watch_tick = atomic_fetch_add_explicit(&g_watch_update_counter, 1,
+  uint32_t watch_tick = atomic_fetch_add_explicit(&lg->watch.update_counter, 1,
                                                   memory_order_relaxed);
   if ((watch_tick % AUDIOGRAPH_WATCH_UPDATE_INTERVAL) == 0) {
     update_watched_node_states(lg);

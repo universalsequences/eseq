@@ -952,7 +952,7 @@
 
         let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let source_dir = manifest_dir.join("src");
-        let state_file = source_dir.join("sequencer").join("state.rs");
+        let state_dir = source_dir.join("sequencer").join("state");
         let mut files = Vec::new();
         collect_rs_files(&source_dir, &mut files);
 
@@ -967,7 +967,10 @@
         ];
         let mut violations = Vec::new();
         for file in files {
-            if file == state_file {
+            // SequencerState's facade and repository implementation now live
+            // across this directory; the ownership boundary is the state
+            // module, not one monolithic state.rs file.
+            if file.starts_with(&state_dir) {
                 continue;
             }
             let source = std::fs::read_to_string(&file).expect("read Rust source");
@@ -1686,6 +1689,10 @@
         initial.slots[0].mute = true;
         initial.slots[0].solo = false;
         initial.slots[0].max_polyphony = 6;
+        let rack_fx = EffectDescriptor::builtin_ott();
+        initial.slots[0].effect_descriptors[0] = rack_fx.clone();
+        initial.slots[0].effect_slots[0] = EffectSlotSnapshot::new_default(&rack_fx, 701);
+        initial.slots[0].custom_effect_names[0] = Some("builtin:OTT".to_string());
         assert!(initial.slots[0]
             .param_plocks
             .set(4, RackSlotParam::Gain, 0.25));

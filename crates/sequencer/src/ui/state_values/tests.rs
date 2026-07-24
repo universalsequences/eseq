@@ -12573,6 +12573,23 @@
     fn register_full_grid_test_natives(editor: &mut eseqlisp::Editor) {
         editor
             .runtime_mut()
+            .eval_str(
+                r#"
+                (def seq-step-selected? (step)
+                  (nth SEQ.selected-steps step))
+
+                (def seq-selected-step-indexes-native ()
+                  (filter
+                    (lambda (step) (nth SEQ.selected-steps step))
+                    (range 0 (len SEQ.selected-steps))))
+
+                (def seq-selected-step-count-native ()
+                  (len (seq-selected-step-indexes-native)))
+                "#,
+            )
+            .expect("install selection-query test natives");
+        editor
+            .runtime_mut()
             .register_native("seq-filter-sample-tree", |_args, _ctx| {
                 Ok(test_list(vec![]))
             });
@@ -12649,6 +12666,9 @@
             });
         editor
             .runtime_mut()
+            .register_native("seq-toggle-step", |_args, _ctx| Ok(Value::Bool(true)));
+        editor
+            .runtime_mut()
             .register_native("seq-set-step-param", |_args, _ctx| Ok(Value::Bool(true)));
         editor
             .runtime_mut()
@@ -12701,6 +12721,24 @@
             .register_native("seq-toggle-master-recording", |_args, _ctx| {
                 Ok(Value::Bool(true))
             });
+    }
+
+    fn register_standalone_sequencer_helpers(runtime: &mut Runtime) {
+        runtime
+            .eval_str(
+                r#"
+                (def seqv-track-drum-rack? (track)
+                  (if (< track (len SEQ.track-drum-racks))
+                    (nth SEQ.track-drum-racks track)
+                    false))
+
+                (def seqv-track-drum-sounds (track)
+                  (if (< track (len SEQ.track-drum-sounds))
+                    (nth SEQ.track-drum-sounds track)
+                    '()))
+                "#,
+            )
+            .expect("install helpers normally supplied by the full authoring lisp");
     }
 
     fn full_grid_editor_for_scroll_tests() -> eseqlisp::Editor {
@@ -13519,6 +13557,22 @@
             "track-collapsed",
             test_repeated_bool_list(false, track_count),
         );
+        rt.set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_list(
+                (0..track_count)
+                    .map(|_| Value::String("sampler".to_string()))
+                    .collect(),
+            ),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-mod-output-available",
+            test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive("SEQ", "mod-routes", test_list(vec![]));
+        rt.set_reactive("SEQ", "selected-mod-routes", test_list(vec![]));
         rt.set_reactive("SEQ", "current-track", Value::Number(0.0));
         rt.set_reactive(
             "SEQ",
@@ -13721,6 +13775,22 @@
                 );
                 rt.set_reactive(
                     "SEQ",
+                    &track_step_plock_kind_field(track, step),
+                    Value::Number(if plocked { 2.0 } else { 0.0 }),
+                );
+                for (channel, value) in [
+                    ('r', 0.270_588_25),
+                    ('g', 0.784_313_74),
+                    ('b', 0.862_745_1),
+                ] {
+                    rt.set_reactive(
+                        "SEQ",
+                        &track_step_variant_color_field(track, step, channel),
+                        Value::Number(if plocked { value } else { 0.0 }),
+                    );
+                }
+                rt.set_reactive(
+                    "SEQ",
                     &track_step_selected_field(track, step),
                     Value::Bool(false),
                 );
@@ -13761,6 +13831,7 @@
         editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
         editor.runtime_mut().register_reactive("SEQ", vec![], true);
         editor.runtime_mut().register_reactive("SEQV", vec![], true);
+        register_standalone_sequencer_helpers(editor.runtime_mut());
         editor
             .runtime_mut()
             .eval_str("(do (defstate selected-bus -1) (defstate cursor-step 0) (def page-size 16))")
@@ -13779,7 +13850,8 @@
             .expect("load sequencer lisp");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
-            if status.to_ascii_lowercase().contains("error") {
+            let normalized = status.to_ascii_lowercase();
+            if normalized.contains("error") || normalized.contains("unknown") {
                 panic!("sequencer perf fixture setup status: {status}");
             }
         }
@@ -13795,8 +13867,15 @@
         let layout = editor
             .widget_layout()
             .expect("sequencer perf fixture layout should build");
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            let normalized = status.to_ascii_lowercase();
+            if normalized.contains("error") || normalized.contains("unknown") {
+                panic!("sequencer perf fixture layout status: {status}");
+            }
+        }
+        let step_cell_count = count_stable_key_prefix(&layout, "seqv-step-cell-");
         assert_eq!(
-            count_stable_key_prefix(&layout, "seqv-step-cell-"),
+            step_cell_count,
             track_count * step_count,
             "sequencer perf fixture should render every track step"
         );
@@ -17163,10 +17242,10 @@
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(fx-step-selected-count)")
+                .eval_str("(seq-selected-step-count-native)")
                 .expect("evaluate selected step count"),
             Some(Value::Number(2.0)),
-            "step panel selection helper should see the synthetic selected steps"
+            "selection-query test native should see the synthetic selected steps"
         );
 
         let step_id = editor
@@ -18407,6 +18486,7 @@
         let ui_epoch = AtomicUsize::new(0);
 
         state.pattern.patterns[0].set_step_active(0, true);
+        let mut app = test_app_for_track_visual_state(Arc::clone(&state));
         editor
             .runtime_mut()
             .eval_str(
@@ -18417,6 +18497,7 @@
             )
             .expect("switch to fx buffer and set cursor");
         editor.refresh_runtime_side_effects();
+        editor.drain_host_commands();
 
         assert!(handle_metal_command_shortcut_with_ui_epoch(
             &mut editor,
@@ -18447,11 +18528,30 @@
             &step_clipboard,
             &ui_epoch,
         ));
+        assert!(
+            !state.pattern.patterns[0].is_active(1),
+            "the input layer should defer paste mutation to the history-aware host command"
+        );
+        assert_eq!(
+            ui_epoch.load(Ordering::Relaxed),
+            0,
+            "the host-command dispatcher owns paste invalidation"
+        );
+        let commands = editor.drain_host_commands();
+        let [eseqlisp::host::HostCommand::Custom { name, payload }] = commands.as_slice() else {
+            panic!("paste shortcut should enqueue one custom host command: {commands:?}");
+        };
+        assert_eq!(name, "paste-steps");
+        let (outcome, track) =
+            apply_step_paste_host_command(&mut app, &step_clipboard, payload)
+                .expect("apply queued paste through the history-aware command path");
+        assert!(matches!(outcome, app::edit::EditOutcome::Applied(_)));
+        assert_eq!(track, 0);
         assert!(state.pattern.patterns[0].is_active(1));
         assert_eq!(
             ui_epoch.load(Ordering::Relaxed),
-            1,
-            "paste must invalidate sequencer UI state so expanded tracks repaint"
+            0,
+            "the shortcut helper must not duplicate the dispatcher-owned invalidation"
         );
 
         editor
@@ -19880,7 +19980,6 @@
             "seqv-track-name-label-0",
             "seqv-track-volume-control-0",
             "seqv-expand-0",
-            "seqv-step-cell-0-0",
         ] {
             let node = find_layout_node_by_stable_key(&layout, key)
                 .unwrap_or_else(|| panic!("expected sequencer node {key}"));
@@ -19889,6 +19988,29 @@
                 "{key} should not open the piano roll on double-click"
             );
         }
+        let step_cell = find_layout_node_by_stable_key(&layout, "seqv-step-cell-0-0")
+            .expect("first step cell should exist");
+        let step_double_click = step_cell
+            .props
+            .get("on-double-click")
+            .cloned()
+            .expect("step cells should retain their independent double-click edit gesture");
+        editor
+            .runtime_mut()
+            .invoke(
+                step_double_click,
+                vec![map_value([(
+                    "phase",
+                    Value::String("double-click".to_string()),
+                )])],
+            )
+            .expect("invoke step-cell double-click");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*fx*".to_string())),
+            "step-cell double-click should edit the step without opening the piano roll"
+        );
 
         editor
             .runtime_mut()
@@ -20140,6 +20262,7 @@
             true,
         );
         editor.runtime_mut().register_reactive("SEQV", vec![], true);
+        register_standalone_sequencer_helpers(editor.runtime_mut());
         {
             let rt = editor.runtime_mut();
             for track in 0..3 {
@@ -20181,6 +20304,18 @@
                     );
                     rt.set_reactive(
                         "SEQ",
+                        &track_step_plock_kind_field(track, step),
+                        Value::Number(0.0),
+                    );
+                    for channel in ['r', 'g', 'b'] {
+                        rt.set_reactive(
+                            "SEQ",
+                            &track_step_variant_color_field(track, step, channel),
+                            Value::Number(0.0),
+                        );
+                    }
+                    rt.set_reactive(
+                        "SEQ",
                         &track_step_selected_field(track, step),
                         Value::Bool(false),
                     );
@@ -20206,6 +20341,12 @@
             )
             .expect("load mixer and sequencer lisp");
         editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            let normalized = status.to_ascii_lowercase();
+            if normalized.contains("error") || normalized.contains("unknown") {
+                panic!("collapsed mixer/sequencer fixture status after load: {status}");
+            }
+        }
 
         let mixer_id = editor
             .buffers
@@ -20271,6 +20412,12 @@
         let sequencer_layout = editor
             .widget_layout()
             .expect("collapsed sequencer layout should build");
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            let normalized = status.to_ascii_lowercase();
+            if normalized.contains("error") || normalized.contains("unknown") {
+                panic!("collapsed sequencer fixture layout status: {status}");
+            }
+        }
 
         assert!(
             find_layout_node_by_stable_key(&sequencer_layout, "sequencer-track-1").is_none(),
@@ -26208,7 +26355,7 @@
         );
         assert!(value_contains_string(
             tree,
-            "Drop Audio or Midi Effect Here"
+            "Drop Audio or MIDI Effect Here"
         ));
         editor
             .runtime_mut()
@@ -28835,33 +28982,44 @@
             )
             .expect("invoke ADSR metadata on-change");
         let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 4, "commands={commands:?}");
-        for (command, (expected_idx, expected_value)) in
-            commands
+        let [eseqlisp::host::HostCommand::Custom { name, payload }] = commands.as_slice() else {
+            panic!("ADSR edit should emit one atomic batch command: {commands:?}");
+        };
+        assert_eq!(name, "set-effect-param-batch");
+        let Value::Map(payload) = payload else {
+            panic!("set-effect-param-batch payload should be a dict: {payload:?}");
+        };
+        assert_eq!(
+            payload.get("slot-idx").map(|value| value.borrow().clone()),
+            Some(Value::Number(0.0))
+        );
+        assert_eq!(
+            payload.get("commit").map(|value| value.borrow().clone()),
+            Some(Value::Bool(true))
+        );
+        let Some(updates) = payload.get("updates") else {
+            panic!("set-effect-param-batch payload should contain updates");
+        };
+        let Value::List(updates) = &*updates.borrow() else {
+            panic!("set-effect-param-batch updates should be a list");
+        };
+        assert_eq!(updates.len(), 4);
+        for (update, (expected_idx, expected_value)) in
+            updates
                 .iter()
                 .zip([(0.0, 11.0), (1.0, 220.0), (2.0, 0.42), (3.0, 330.0)])
         {
-            match command {
-                eseqlisp::host::HostCommand::Custom { name, payload } => {
-                    assert_eq!(name, "set-effect-param");
-                    let Value::Map(payload) = payload else {
-                        panic!("set-effect-param payload should be a dict: {payload:?}");
-                    };
-                    assert_eq!(
-                        payload.get("slot-idx").map(|value| value.borrow().clone()),
-                        Some(Value::Number(0.0))
-                    );
-                    assert_eq!(
-                        payload.get("param-idx").map(|value| value.borrow().clone()),
-                        Some(Value::Number(expected_idx))
-                    );
-                    assert_eq!(
-                        payload.get("value").map(|value| value.borrow().clone()),
-                        Some(Value::Number(expected_value))
-                    );
-                }
-                other => panic!("expected set-effect-param host command, got {other:?}"),
-            }
+            let Value::Map(update) = &*update.borrow() else {
+                panic!("set-effect-param-batch update should be a dict");
+            };
+            assert_eq!(
+                update.get("param-idx").map(|value| value.borrow().clone()),
+                Some(Value::Number(expected_idx))
+            );
+            assert_eq!(
+                update.get("value").map(|value| value.borrow().clone()),
+                Some(Value::Number(expected_value))
+            );
         }
     }
 
@@ -33729,6 +33887,10 @@
                 Rc::new(RefCell::new(Value::String("Filter".to_string()))),
             ),
             (
+                "track-idx".to_string(),
+                Rc::new(RefCell::new(Value::Number(0.0))),
+            ),
+            (
                 "slot-idx".to_string(),
                 Rc::new(RefCell::new(Value::Number(0.0))),
             ),
@@ -33850,7 +34012,9 @@
                 r#"(do
                   (set! effect-mods-open true)
                   (set! effect-mods-chain "audio")
+                  (set! effect-mods-track 0)
                   (set! effect-mods-slot 0)
+                  (set! effect-mods-rack-slot -1)
                   (set! effect-mods-bus -1)
                   (set! effect-selected-mod-slot 1))"#,
             )
@@ -34002,6 +34166,10 @@
                 Rc::new(RefCell::new(Value::String("custom-mod-effect".to_string()))),
             ),
             (
+                "track-idx".to_string(),
+                Rc::new(RefCell::new(Value::Number(0.0))),
+            ),
+            (
                 "slot-idx".to_string(),
                 Rc::new(RefCell::new(Value::Number(0.0))),
             ),
@@ -34123,7 +34291,9 @@
                 (do
                   (set! effect-mods-open true)
                   (set! effect-mods-chain "audio")
+                  (set! effect-mods-track 0)
                   (set! effect-mods-slot 0)
+                  (set! effect-mods-rack-slot -1)
                   (set! effect-mods-bus -1)
                   (set! effect-selected-mod-slot 1))
                 "#,
@@ -34500,6 +34670,10 @@
                 Rc::new(RefCell::new(Value::String("DJ Mixer".to_string()))),
             ),
             (
+                "track-idx".to_string(),
+                Rc::new(RefCell::new(Value::Number(0.0))),
+            ),
+            (
                 "slot-idx".to_string(),
                 Rc::new(RefCell::new(Value::Number(0.0))),
             ),
@@ -34612,7 +34786,9 @@
                 r#"(do
                   (set! effect-mods-open true)
                   (set! effect-mods-chain "audio")
+                  (set! effect-mods-track 0)
                   (set! effect-mods-slot 0)
+                  (set! effect-mods-rack-slot -1)
                   (set! effect-mods-bus -1)
                   (set! effect-selected-mod-slot 1))"#,
             )
