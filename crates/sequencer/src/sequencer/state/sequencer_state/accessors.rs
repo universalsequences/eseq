@@ -257,6 +257,7 @@ impl SequencerState {
             quantized_launches: crate::quantized_launch::QuantizedLaunchMailbox::default(),
             song_playback: SongPlaybackMailbox::default(),
             song_manual_latch: AtomicU64::new(0),
+            song_take_lane_mask: AtomicU64::new(0),
         };
         state.publish_scheduler_snapshot();
         state

@@ -49,7 +49,10 @@ pub struct CapturedSongState {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum CaptureLaunchKind {
     /// A scene launch: sets the base scene and clears every override.
-    Scene { scene: usize },
+    /// `take_lanes` are the lanes that were playing takes at the launch
+    /// moment — a scene launch does NOT claim those (takes survive the
+    /// capture unless the performer intentionally clip-launches the lane).
+    Scene { scene: usize, take_lanes: u64 },
     /// A masked track-pattern launch: installs these per-track overrides.
     Tracks { overrides: Vec<(usize, PatternId)> },
 }
@@ -112,15 +115,23 @@ fn consolidate(initial: &CapturedSongState, events: &[CaptureLaunchEvent]) -> Ve
             .iter()
             .rev()
             .find_map(|event| match &event.kind {
-                CaptureLaunchKind::Scene { scene } => Some(*scene),
+                CaptureLaunchKind::Scene { scene, take_lanes } => {
+                    Some((*scene, *take_lanes))
+                }
                 CaptureLaunchKind::Tracks { .. } => None,
             });
         let mut touched = previous.touched.clone();
         let (scene, mut overrides) = match last_scene {
-            Some(scene) => {
-                // A scene launch latches globally (takes spec 10): every
-                // lane is the performer's from here on.
-                touched.extend(0..crate::sequencer::MAX_TRACKS);
+            Some((scene, take_lanes)) => {
+                // A scene launch latches every lane EXCEPT the ones playing
+                // takes at that moment (takes spec 10, refined): scene
+                // changes are pattern-lane gestures — a take lane is only
+                // claimed by an intentional clip launch on that track. The
+                // excluded lanes stay untouched, so the splice materializes
+                // their inherited (take) resolution.
+                touched.extend((0..crate::sequencer::MAX_TRACKS).filter(|track| {
+                    *track >= 64 || take_lanes >> *track & 1 == 0
+                }));
                 (scene, BTreeMap::new())
             }
             None => (
@@ -244,7 +255,13 @@ impl App {
         // a SceneTracks launch installs the target scene's cell patterns as
         // overrides (see `ProjectScenes::launch_scene_tracks`).
         let kind = match target {
-            PatternLaunchTarget::Scene { scene } => CaptureLaunchKind::Scene { scene: *scene },
+            PatternLaunchTarget::Scene { scene } => CaptureLaunchKind::Scene {
+                scene: *scene,
+                // The lanes playing takes when the scene was launched keep
+                // them (the audible latch skipped these lanes too, so the
+                // song is still playing their takes underneath).
+                take_lanes: self.state.song_take_lane_mask(),
+            },
             PatternLaunchTarget::SceneTracks { scene, tracks } => CaptureLaunchKind::Tracks {
                 overrides: tracks
                     .iter()
@@ -262,6 +279,31 @@ impl App {
         take.events.push(CaptureLaunchEvent {
             beat: (audible_beats - take.origin_beats).max(0.0),
             kind,
+        });
+    }
+
+    /// Observe a manual CLIP launch (the mixer clip grid's per-track
+    /// pattern launch, which does not route through `apply_pattern_launch`):
+    /// latch the lane (takes spec 10) and record the capture event. A clip
+    /// launch is the intentional way to take a lane over — it claims the
+    /// lane even when it is playing a take.
+    pub fn observe_manual_clip_launch(&mut self, track: usize, pattern_id: PatternId) {
+        if self.song_playback_authority_active() {
+            self.state.latch_song_manual_override([track]);
+        }
+        let Some(take) = self.song_capture_take.as_mut() else {
+            return;
+        };
+        let beat = self
+            .state
+            .record_beats_at_instant(std::time::Instant::now())
+            .unwrap_or_else(|| self.state.scheduler_rendered_beats())
+            .max(0.0);
+        take.events.push(CaptureLaunchEvent {
+            beat: (beat - take.origin_beats).max(0.0),
+            kind: CaptureLaunchKind::Tracks {
+                overrides: vec![(track, pattern_id)],
+            },
         });
     }
 
@@ -742,8 +784,39 @@ mod tests {
     fn scene_event(beat: f64, scene: usize) -> CaptureLaunchEvent {
         CaptureLaunchEvent {
             beat,
-            kind: CaptureLaunchKind::Scene { scene },
+            kind: CaptureLaunchKind::Scene {
+                scene,
+                take_lanes: 0,
+            },
         }
+    }
+
+    /// A scene launch performed while `take_lanes` were playing takes.
+    fn scene_event_with_take_lanes(
+        beat: f64,
+        scene: usize,
+        take_lanes: u64,
+    ) -> CaptureLaunchEvent {
+        CaptureLaunchEvent {
+            beat,
+            kind: CaptureLaunchKind::Scene { scene, take_lanes },
+        }
+    }
+
+    #[test]
+    fn scene_launch_does_not_claim_take_lanes() {
+        let initial = state(0.0, 0, vec![]);
+        let rows = consolidate(
+            &initial,
+            &[scene_event_with_take_lanes(4.0, 1, 0b10)],
+        );
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].touched.contains(&0), "pattern lane is claimed");
+        assert!(
+            !rows[1].touched.contains(&1),
+            "the lane playing a take stays untouched — its take survives the splice"
+        );
+        assert!(rows[1].touched.contains(&2));
     }
 
     fn tracks_event(beat: f64, overrides: Vec<(usize, PatternId)>) -> CaptureLaunchEvent {

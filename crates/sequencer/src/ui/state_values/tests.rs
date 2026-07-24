@@ -20837,6 +20837,106 @@
         );
     }
 
+    /// Take clips clamp to the take's true remaining length (takes spec
+    /// 11.3) and their dots render the exact step window the clip plays,
+    /// normalized to the drawn item — a row extending past the take's end
+    /// draws as empty lane, and a re-anchored clip shows its actual slice.
+    #[test]
+    fn metal_seq_arrangement_take_clips_clamp_and_window_dots() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let take_clip = |row_id: f64, start: f64, end: f64, offset: f64| {
+            map_value(vec![
+                ("row-id", Value::Number(row_id)),
+                ("start-beat", Value::Number(start)),
+                ("end-beat", Value::Number(end)),
+                ("pattern-id", Value::Nil),
+                ("take-id", Value::Number(7.0)),
+                ("offset-steps", Value::Number(offset)),
+                ("from-override", Value::Bool(true)),
+            ])
+        };
+        // 32-step take over 8 beats (0.25 beats/step); events at steps
+        // 0 / 16 / 31.
+        let take_entry = LanePatternEvents {
+            pattern_id: 0,
+            take_id: Some(7),
+            num_steps: 32,
+            length_beats: 8.0,
+            events: vec![(0.0, 0.0, 1.0), (16.0, 12.0, 1.0), (31.0, -12.0, 1.0)],
+        };
+        let rt = editor.runtime_mut();
+        rt.set_reactive(
+            "SEQ",
+            "song-lanes",
+            test_list(vec![test_list(vec![
+                // Rows [0,4) offset 0 and [4,10) offset 16 are continuous
+                // (4 steps/beat): they merge into one clip anchored at 0.
+                // The merged row span reaches 10 but the take ends at 8.
+                take_clip(0.0, 0.0, 4.0, 0.0),
+                take_clip(1.0, 4.0, 10.0, 16.0),
+                // A re-anchored clip: rows [12,16) playing from step 16.
+                take_clip(2.0, 12.0, 16.0, 16.0),
+            ])]),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "song-lane-events",
+            build_song_lane_events_value(&[vec![take_entry]]),
+        );
+        rt.run_reactive_cycle();
+
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("expr evaluates")
+                .expect("expr returns a value")
+        };
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-merged-track-clips 0))"),
+            Value::Number(2.0),
+            "continuous take rows merge; the re-anchored row is separate"
+        );
+        // Merged clip [0,10) clamps to the take end: 0 + 32 * 0.25 = 8.
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :end)"),
+            Value::Number(8.0),
+            "the item ends at the take's true end, not the row span"
+        );
+        let dots = "(get (get (nth (arrangement-track-items 0) 0) :content) :dots)";
+        assert_eq!(
+            read(&mut editor, &format!("(len {dots})")),
+            Value::Number(3.0)
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots} 1) :offset)")),
+            Value::Number(0.5),
+            "dot offsets normalize over the take window, aligning with notes"
+        );
+        // Re-anchored clip [12,16) offset 16: remaining = 16 steps = 4
+        // beats, so the row span is exactly the remainder; its dots are the
+        // slice [16,32) re-normalized.
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :end)"),
+            Value::Number(16.0)
+        );
+        let dots2 = "(get (get (nth (arrangement-track-items 0) 1) :content) :dots)";
+        assert_eq!(
+            read(&mut editor, &format!("(len {dots2})")),
+            Value::Number(2.0),
+            "only the events inside the clip's window render"
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots2} 0) :offset)")),
+            Value::Number(0.0),
+            "the window's first event sits at the clip start"
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots2} 1) :offset)")),
+            Value::Number(0.9375)
+        );
+    }
+
     /// Arrangement layout (docs/arrangement-timeline-ui-spec.md 4-6): the
     /// scene lane is the only timeline instance with a header/time ruler,
     /// track lanes are headerless and sidebar-less, both have finite nonzero

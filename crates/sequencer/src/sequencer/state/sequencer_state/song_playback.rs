@@ -433,7 +433,20 @@ impl SequencerState {
         }
         if bits != 0 {
             self.song_manual_latch.fetch_or(bits, Ordering::AcqRel);
+            // A latched lane plays the performer's launch, not the row's
+            // take — the clip grid must show the launched clip again.
+            self.song_take_lane_mask.fetch_and(!bits, Ordering::AcqRel);
         }
+    }
+
+    /// Which lanes the currently mirrored song row resolves to a take chunk
+    /// (takes spec 11.2 UX). Written by the control-side row mirror.
+    pub fn song_take_lane_mask(&self) -> u64 {
+        self.song_take_lane_mask.load(Ordering::Acquire)
+    }
+
+    pub fn set_song_take_lane_mask(&self, mask: u64) {
+        self.song_take_lane_mask.store(mask, Ordering::Release);
     }
 
     /// Latch every track (a manual scene launch latches globally, spec 10).
@@ -445,6 +458,10 @@ impl SequencerState {
     /// every lane (takes spec 10). Transient state; never serialized.
     pub fn clear_song_manual_latch(&self) {
         self.song_manual_latch.store(0, Ordering::Release);
+        // Every caller is a transport boundary (stop, cancel, punch-out) or
+        // Back to Song, which re-applies the current row immediately after
+        // (recomputing the mask) — so the take-lane bits reset here too.
+        self.song_take_lane_mask.store(0, Ordering::Release);
     }
 
     /// Per-track Back to Song (takes spec 10 UX): the song resumes launch

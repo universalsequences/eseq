@@ -5542,6 +5542,16 @@
                 "the session override slot never holds a take chunk"
             );
         }
+        // The mixer clip grid must not mark the scene's clip "playing"
+        // while the lane is actually playing the take (takes spec 11.2).
+        assert_eq!(state.song_take_lane_mask(), 1);
+        assert!(
+            state
+                .track_pattern_cells(0)
+                .iter()
+                .all(|cell| !cell.active_effective),
+            "no grid clip is active while the take plays"
+        );
 
         // The next row's save-back must not leak take content into the pool.
         state
@@ -5574,6 +5584,17 @@
         );
         assert_eq!(scenes.take_pools[0].takes.len(), 1);
         assert_eq!(scenes.take_pools[0].takes[0].id, take_id);
+        drop(scenes);
+        // The follow-up row plays the scene clip again: the grid marker
+        // returns and the take-lane bit clears.
+        assert_eq!(state.song_take_lane_mask(), 0);
+        assert!(
+            state
+                .track_pattern_cells(0)
+                .iter()
+                .any(|cell| cell.active_effective),
+            "the scene clip is active again once the take row ends"
+        );
     }
 
     #[test]

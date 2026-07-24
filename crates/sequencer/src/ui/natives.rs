@@ -5414,20 +5414,17 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(false))
     });
 
-    // seq-toggle-record — toggle recording mode (requires at least one armed track)
+    // seq-toggle-record — toggle recording mode. No armed-track gate:
+    // recording also drives arrangement capture (record + play records
+    // scene/clip changes into the song), which needs no armed track. Armed
+    // tracks only decide where live NOTES land.
     let rec = recording.clone();
-    let ra = record_armed.clone();
     let ui_ep = ui_epoch.clone();
     runtime.register_native("seq-toggle-record", move |_args, _ctx| {
-        let any_armed = ra.lock().unwrap().iter().any(|a| *a);
-        if any_armed {
-            let was = rec.load(Ordering::Relaxed);
-            rec.store(!was, Ordering::Relaxed);
-            ui_ep.fetch_add(1, Ordering::Relaxed);
-            Ok(Value::Bool(!was))
-        } else {
-            Ok(Value::Bool(false))
-        }
+        let was = rec.load(Ordering::Relaxed);
+        rec.store(!was, Ordering::Relaxed);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Bool(!was))
     });
 
     let master_rec = master_recording.clone();
@@ -5447,7 +5444,6 @@ pub(crate) fn init_runtime(
 
     // seq-toggle-record-arm — toggle record arm for a given track index
     let ra = record_armed.clone();
-    let rec = recording.clone();
     let ui_ep = ui_epoch.clone();
     runtime.register_native("seq-toggle-record-arm", move |args, _ctx| {
         let Some(Value::Number(track_idx)) = args.first() else {
@@ -5457,10 +5453,9 @@ pub(crate) fn init_runtime(
         let mut armed = ra.lock().unwrap();
         if track < armed.len() {
             armed[track] = !armed[track];
-            // If no tracks armed, turn off recording
-            if !armed.iter().any(|a| *a) {
-                rec.store(false, Ordering::Relaxed);
-            }
+            // Disarming the last track no longer stops recording: record
+            // mode stands on its own now (arrangement capture needs no
+            // armed track).
             ui_ep.fetch_add(1, Ordering::Relaxed);
             Ok(Value::Bool(armed[track]))
         } else {

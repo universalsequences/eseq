@@ -15,11 +15,24 @@ impl SequencerState {
     }
 
     pub fn track_pattern_cells(&self, track: usize) -> Vec<TrackPatternCellView> {
-        self.pattern
+        let mut cells = self
+            .pattern
             .scenes
             .lock()
             .unwrap()
-            .track_pattern_cells(track)
+            .track_pattern_cells(track);
+        // No grid clip is "playing" while the lane is silenced (an
+        // explicit-empty song row / deleted timeline clip) or while the
+        // mirrored song row is playing a take on it (takes spec 11.2) —
+        // the scene-cell fallback in `active_effective` would otherwise
+        // show the scene's clip as audible when it isn't.
+        let take_lane = track < 64 && self.song_take_lane_mask() >> track & 1 == 1;
+        if take_lane || self.is_scene_silenced(track) {
+            for cell in &mut cells {
+                cell.active_effective = false;
+            }
+        }
+        cells
     }
 
     pub fn launch_scene(
@@ -440,6 +453,17 @@ impl SequencerState {
             (launched, sample_ids)
         };
         let (launched, sample_ids) = launched;
+        // Publish which lanes this row plays a take on (takes spec 11.2 UX):
+        // the clip grid suppresses its "playing" marker for them. Latched
+        // lanes are absent from `launched` and their bits were cleared when
+        // the latch was set — the performer's launch is what plays there.
+        let mut take_mask = 0u64;
+        for (track, _, take_lane) in &launched {
+            if *take_lane && *track < 64 {
+                take_mask |= 1u64 << *track;
+            }
+        }
+        self.set_song_take_lane_mask(take_mask);
         for (track, data, take_lane) in launched {
             match data {
                 Some(data) => {

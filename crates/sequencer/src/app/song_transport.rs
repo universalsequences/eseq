@@ -1310,6 +1310,239 @@ mod tests {
     }
 
     #[test]
+    fn capture_scene_launch_preserves_take_lanes() {
+        // Takes spec 10 refined: a scene launch during arrangement capture
+        // must NOT claim lanes that are playing takes — only an intentional
+        // clip launch does. The take lane neither latches audibly nor gets
+        // spliced over at commit.
+        use crate::sequencer::{PatternSnapshot, ProjectSongTrackOverride, MAX_STEPS};
+        let mut app = test_app_two_tracks();
+        let mut chunk = PatternSnapshot::new_default(2, &[])
+            .track_pattern_data(0)
+            .expect("chunk template");
+        chunk.track_params.num_steps = MAX_STEPS;
+        chunk.track_bits[0] |= 1;
+        // 64 steps = 16 beats: the take spans the whole song, so it is
+        // still audible at the scene-launch beat.
+        let take_id = app
+            .state
+            .register_track_take(0, None, vec![chunk], 64)
+            .expect("take registers");
+        app.song_replace(
+            vec![SongRowSpec {
+                start_beat: 0.0,
+                scene: 0,
+                overrides: vec![ProjectSongTrackOverride {
+                    track: 0,
+                    pattern_id: None,
+                    take_id: Some(take_id.0),
+                    offset_steps: 0.0,
+                }],
+            }],
+            16.0,
+            false,
+        )
+        .expect("song committed");
+        start_capture(&mut app);
+        assert_eq!(
+            app.state.song_take_lane_mask(),
+            1,
+            "row zero marks track 0 as a take lane"
+        );
+        app.state.set_scheduler_rendered_beats(4.0);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("scene launch");
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            0b10,
+            "the scene launch latches the pattern lane but not the take lane"
+        );
+        app.state.set_scheduler_rendered_beats(8.0);
+        app.song_transport_stop().expect("stop commits");
+        let song = committed(&app);
+        let spliced = song
+            .rows
+            .iter()
+            .find(|row| row.start_beat == 4.0)
+            .expect("spliced row at the launch beat");
+        let track0 = spliced
+            .overrides
+            .iter()
+            .find(|over| over.track == 0)
+            .expect("take lane materialized in the spliced row");
+        assert_eq!(
+            track0.take_id,
+            Some(take_id.0),
+            "the take survives the scene-launch capture"
+        );
+        assert!(
+            song.rows
+                .iter()
+                .filter(|row| row.start_beat >= 4.0 && row.start_beat < 8.0)
+                .all(|row| row
+                    .overrides
+                    .iter()
+                    .any(|over| over.track == 0 && over.take_id == Some(take_id.0))),
+            "no spliced row replaces the take with a scene pattern"
+        );
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn clip_launch_latches_the_lane_and_splices_at_the_launch_beat() {
+        // The mixer grid clip click (`set-scene-cell` path) is a
+        // performance gesture: it must latch the lane — so later
+        // arrangement row changes stop stealing it until punch-out — and
+        // land in the capture at the beat it was performed.
+        let mut app = app_with_song();
+        start_capture(&mut app);
+        app.state.set_scheduler_rendered_beats(3.0);
+        app.observe_manual_clip_launch(0, PatternId(2));
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            1,
+            "the clip launch latches its lane"
+        );
+        assert_eq!(
+            app.song_capture_take.as_ref().map(|take| take.event_count()),
+            Some(1),
+            "the clip launch is captured"
+        );
+        // A later mirrored row transition must leave the latched lane alone.
+        let song = app.active_runtime_song.clone().expect("active song");
+        app.mirror_song_row_applied(&AudibleSongRowApplied {
+            row_id: song.rows[1].id,
+            row_ordinal: 1,
+            effective_beat: 4.0,
+            effective_sample: 44_100,
+            wrapped: false,
+        })
+        .expect("mirror succeeds");
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            1,
+            "row transitions do not clear the performer's latch"
+        );
+        app.state.set_scheduler_rendered_beats(8.0);
+        app.song_transport_stop().expect("stop commits");
+        let song = committed(&app);
+        let row = song
+            .rows
+            .iter()
+            .find(|row| (row.start_beat - 3.0).abs() < 1e-9)
+            .expect("spliced row at the launch beat, not after");
+        let over = row
+            .overrides
+            .iter()
+            .find(|over| over.track == 0)
+            .expect("clip override on the launched lane");
+        assert_eq!(over.pattern_id, Some(2));
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn clip_launch_capture_keeps_untouched_take_lane_continuous() {
+        // Two lanes playing long takes; the performer clip-launches ONLY
+        // track 0 mid-take and stops before the takes end. Track 1 must
+        // keep its take through the spliced region AND after the punch-out
+        // restore row — continuous offsets, no truncation.
+        use crate::sequencer::{PatternSnapshot, ProjectSongTrackOverride, MAX_STEPS};
+        let mut app = test_app_two_tracks();
+        let mut take_ids = Vec::new();
+        for track in 0..2 {
+            let mut chunk = PatternSnapshot::new_default(2, &[])
+                .track_pattern_data(track)
+                .expect("chunk template");
+            chunk.track_params.num_steps = MAX_STEPS;
+            chunk.track_bits[0] |= 1;
+            // 64 steps = 16 beats at the default sixteenth timebase.
+            take_ids.push(
+                app.state
+                    .register_track_take(track, None, vec![chunk], 64)
+                    .expect("take registers"),
+            );
+        }
+        app.song_replace(
+            vec![SongRowSpec {
+                start_beat: 0.0,
+                scene: 0,
+                overrides: (0..2)
+                    .map(|track| ProjectSongTrackOverride {
+                        track,
+                        pattern_id: None,
+                        take_id: Some(take_ids[track].0),
+                        offset_steps: 0.0,
+                    })
+                    .collect(),
+            }],
+            16.0,
+            false,
+        )
+        .expect("song committed");
+        start_capture(&mut app);
+        app.state.set_scheduler_rendered_beats(3.0);
+        app.observe_manual_clip_launch(0, PatternId(2));
+        app.state.set_scheduler_rendered_beats(5.5);
+        app.song_transport_stop().expect("stop commits");
+        let song = committed(&app);
+        // Track 1: every row across the whole song still references its
+        // take with the offset matching the row start (4 steps per beat).
+        for row in &song.rows {
+            let over = row
+                .overrides
+                .iter()
+                .find(|over| over.track == 1)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "track 1 lost its take override at row {}",
+                        row.start_beat
+                    )
+                });
+            assert_eq!(
+                over.take_id,
+                Some(take_ids[1].0),
+                "track 1 still plays its take at row {}",
+                row.start_beat
+            );
+            assert!(
+                (over.offset_steps - row.start_beat * 4.0).abs() < 1e-6,
+                "track 1 take offset continuous at row {}: got {}",
+                row.start_beat,
+                over.offset_steps
+            );
+        }
+        // Track 0: the clip governs [3.0, 5.5), the take resumes at 5.5.
+        let clip_row = song
+            .rows
+            .iter()
+            .find(|row| (row.start_beat - 3.0).abs() < 1e-9)
+            .expect("spliced row at the clip launch");
+        let track0 = clip_row
+            .overrides
+            .iter()
+            .find(|over| over.track == 0)
+            .expect("clip override");
+        assert_eq!(track0.pattern_id, Some(2));
+        let restore_row = song
+            .rows
+            .iter()
+            .find(|row| (row.start_beat - 5.5).abs() < 1e-9)
+            .expect("restore row at punch-out");
+        let track0 = restore_row
+            .overrides
+            .iter()
+            .find(|over| over.track == 0)
+            .expect("track 0 restored");
+        assert_eq!(
+            track0.take_id,
+            Some(take_ids[0].0),
+            "track 0's take resumes at punch-out"
+        );
+        assert!((track0.offset_steps - 22.0).abs() < 1e-6);
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
     fn capture_stop_commits_atomically_with_one_undo_entry() {
         let mut app = app_with_song();
         let song_before = app.state.committed_song();

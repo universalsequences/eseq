@@ -264,6 +264,12 @@ pub struct SequencerState {
     /// row mirror leaves the lane alone. Transient transport state; never
     /// serialized. Bit `t` = track `t` (`MAX_TRACKS <= 64`).
     pub(super) song_manual_latch: AtomicU64,
+    /// Which lanes the CURRENTLY MIRRORED song row resolves to a take chunk
+    /// (takes spec 11.2 UX). Written by the control-side row mirror; read by
+    /// `track_pattern_cells` so the mixer clip grid never marks a scene clip
+    /// "playing" while the lane is actually playing a take. Transient
+    /// transport state; never serialized. Bit `t` = track `t`.
+    pub(super) song_take_lane_mask: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -332,10 +332,14 @@
 ;; Cap dots per item at arrangement-dot-cap, densest-first: events collapse
 ;; into 1/cap-wide time buckets (one dot per bucket), so dense clusters thin
 ;; out first while isolated events always survive. Events arrive step-ordered
-;; from the read surface.
-(def arrangement-pattern-dots (entry)
-  (let ((events (get entry :events))
-        (num-steps (max 1 (get entry :num-steps))))
+;; from the read surface. Only events inside the step window
+;; [from, from + span) are shown, normalized to the window — a re-anchored
+;; take clip (nonzero offset-steps) renders the slice it actually plays.
+(def arrangement-windowed-dots (entry from span)
+  (let ((events (filter (lambda (event)
+                          (and (>= (nth event 0) from)
+                            (< (nth event 0) (+ from span))))
+                  (get entry :events))))
     (if (= (len events) 0)
       '()
       (let ((lo (reduce |acc event| (min acc (nth event 1))
@@ -344,7 +348,7 @@
                   (nth (nth events 0) 1) events)))
         (get
           (reduce |acc event|
-            (let ((offset (max 0 (min 0.999 (/ (nth event 0) num-steps)))))
+            (let ((offset (max 0 (min 0.999 (/ (- (nth event 0) from) span)))))
               (let ((bucket (floor (* offset arrangement-dot-cap))))
                 (if (= bucket (get acc :last))
                   acc
@@ -355,6 +359,34 @@
             (dict :last -1 :dots '())
             events)
           :dots)))))
+
+(def arrangement-pattern-dots (entry)
+  (arrangement-windowed-dots entry 0 (max 1 (get entry :num-steps))))
+
+;; True drawn window of a take clip (takes spec 11.3): a take is finite and
+;; never loops, so the item ends at min(row-span end, start + remaining
+;; take length at this clip's offset). A row extending past the take's end
+;; is the silent tail — it renders as empty lane, matching what plays.
+(def arrangement-take-clip-window (i clip)
+  (let ((entry (arrangement-lane-take-events i (get clip :take-id))))
+    (if (or (= entry nil)
+          (<= (get entry :length-beats) 0)
+          (<= (get entry :num-steps) 0))
+      nil
+      (let ((num-steps (get entry :num-steps))
+            (length-beats (get entry :length-beats))
+            (offset (or (get clip :offset-steps) 0)))
+        (let ((step-beats (/ length-beats num-steps)))
+          (let ((remaining-steps (max 0 (- num-steps offset))))
+            (let ((end (min (get clip :end-beat)
+                          (+ (get clip :start-beat)
+                            (* remaining-steps step-beats)))))
+              (dict
+                :offset-steps offset
+                :window-steps
+                (max 0.000001
+                  (/ (- end (get clip :start-beat)) step-beats))
+                :end-beat end))))))))
 
 ;; One repetition's fraction of the clip span (widget :cycle key): a clip
 ;; longer than the pattern tiles the preview per cycle with separator lines,
@@ -372,7 +404,18 @@
                  (arrangement-lane-take-events i (get clip :take-id)))))
     (if (= entry nil)
       nil
-      (let ((dots (arrangement-pattern-dots entry)))
+      (let ((dots
+              (if (= (get clip :take-id) nil)
+                (arrangement-pattern-dots entry)
+                ;; Take dots render the exact step window the clip plays
+                ;; (offset..offset+span), normalized to the drawn item —
+                ;; so timeline dots line up with the take's actual notes.
+                (let ((window (arrangement-take-clip-window i clip)))
+                  (if (= window nil)
+                    (arrangement-pattern-dots entry)
+                    (arrangement-windowed-dots entry
+                      (get window :offset-steps)
+                      (get window :window-steps)))))))
         (if (= (len dots) 0)
           nil
           (dict :dots dots
@@ -408,7 +451,15 @@
           :id (get clip :row-id)
           :lane 0
           :start (get clip :start-beat)
-          :end (get clip :end-beat)
+          ;; Take items clamp to the take's true remaining length (takes
+          ;; spec 11.3) — the row may extend past the take's end, but that
+          ;; tail is silent and draws as empty lane.
+          :end (if (= (get clip :take-id) nil)
+                 (get clip :end-beat)
+                 (let ((window (arrangement-take-clip-window i clip)))
+                   (if (= window nil)
+                     (get clip :end-beat)
+                     (get window :end-beat))))
           :kind :midi
           :content (arrangement-clip-content i clip)
           :color (arrangement-clip-color i (get clip :from-override)))))

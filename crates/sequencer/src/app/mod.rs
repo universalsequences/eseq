@@ -1545,7 +1545,17 @@ impl App {
         if self.song_playback_authority_active() {
             match target {
                 PatternLaunchTarget::Scene { .. } => {
-                    self.state.latch_song_manual_override_all(num_tracks);
+                    // A scene launch claims every lane EXCEPT those playing
+                    // takes right now: scene changes are pattern-lane
+                    // gestures — the song keeps playing the takes underneath
+                    // until the performer intentionally clip-launches such a
+                    // lane (takes spec 10, refined). The capture stores the
+                    // same exclusion so the commit matches what was heard.
+                    let take_lanes = self.state.song_take_lane_mask();
+                    self.state.latch_song_manual_override(
+                        (0..num_tracks.min(64))
+                            .filter(|track| take_lanes >> *track & 1 == 0),
+                    );
                 }
                 PatternLaunchTarget::SceneTracks { tracks, .. } => {
                     self.state.latch_song_manual_override(tracks.iter().copied());
