@@ -186,7 +186,13 @@ impl App {
             .enumerate()
             .filter_map(|(track, over)| over.map(|id| (track, id)))
             .collect();
-        let origin_beats = self.state.scheduler_rendered_beats();
+        // Capture always begins with the transport stopped and starting from
+        // song beat zero (spec 7.4.2/9.3), so the origin IS beat zero. The
+        // scheduler's rendered-beat clock is not sampled here: pre-start it
+        // is an asynchronously published leftover of the previous playback,
+        // and any nonzero reading would shift every captured launch and take
+        // note late by that amount.
+        let origin_beats = 0.0;
         // With a committed song, capture runs ON TOP of song playback
         // (takes spec 9.3): the song keeps launch authority until the
         // performer touches a lane, so the initial state starts untouched.

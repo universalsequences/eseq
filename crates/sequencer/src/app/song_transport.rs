@@ -123,9 +123,40 @@ impl App {
             if let Some(row) = song.rows.get(ordinal) {
                 self.apply_song_row_control(row.scene, &row.overrides, false)?;
                 self.song_mirrored_row = Some(ordinal);
+                self.song_row_mirror_epoch += 1;
             }
         }
         Ok("Back to song: manual overrides cleared".to_string())
+    }
+
+    /// Per-track Back to Song (takes spec 10 UX): clear one lane's
+    /// manual-override latch so it snaps back to whatever the song resolves
+    /// at the current beat; other latched lanes stay the performer's.
+    pub fn back_to_song_track(&mut self, track: usize) -> Result<String, String> {
+        if !self.song_playback_authority_active() {
+            return Err("Back to Song is only available during song playback".to_string());
+        }
+        if track >= self.tracks.len() {
+            return Err(format!("Track {} does not exist", track + 1));
+        }
+        if self.state.song_manual_latch_mask() >> track.min(63) & 1 == 0 {
+            return Ok(format!("Track {} is not manually overridden", track + 1));
+        }
+        self.state.clear_song_manual_latch_track(track);
+        if let Some(song) = self.active_runtime_song.clone() {
+            let ordinal = self
+                .state
+                .song_playback()
+                .shared()
+                .current_row_ordinal()
+                .min(song.rows.len().saturating_sub(1));
+            if let Some(row) = song.rows.get(ordinal) {
+                self.apply_song_row_control(row.scene, &row.overrides, false)?;
+                self.song_mirrored_row = Some(ordinal);
+                self.song_row_mirror_epoch += 1;
+            }
+        }
+        Ok(format!("Track {}: back to song", track + 1))
     }
 
     /// Set the persisted `Use Arrangement` preference (spec 7.1). Rejected
@@ -356,6 +387,7 @@ impl App {
         }
         self.apply_song_row_control(row.scene, &row.overrides, false)?;
         self.song_mirrored_row = Some(notice.row_ordinal);
+        self.song_row_mirror_epoch += 1;
         Ok(())
     }
 
@@ -673,6 +705,42 @@ mod tests {
         assert!(app.manual_launch_rejection().is_none());
         app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
             .expect("manual launch works after stop");
+    }
+
+    #[test]
+    fn per_track_back_to_song_clears_only_that_lane() {
+        let mut app = test_app_two_tracks();
+        app.song_replace(
+            vec![SongRowSpec {
+                start_beat: 0.0,
+                scene: 0,
+                overrides: Vec::new(),
+            }],
+            16.0,
+            false,
+        )
+        .expect("song committed");
+        assert!(app
+            .back_to_song_track(0)
+            .is_err(), "only valid during song playback");
+        app.set_use_arrangement(true).unwrap();
+        app.song_transport_play(false).expect("song playback");
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::SceneTracks {
+            scene: 1,
+            tracks: vec![0, 1],
+        })
+        .expect("both lanes latch");
+        assert_eq!(app.state.song_manual_latch_mask(), 0b11);
+        let status = app.back_to_song_track(0).expect("track 0 returns");
+        assert!(status.contains("back to song"), "{status}");
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            0b10,
+            "track 1 stays the performer's"
+        );
+        let status = app.back_to_song_track(0).expect("idempotent");
+        assert!(status.contains("not manually overridden"), "{status}");
+        app.song_transport_stop().expect("stop succeeds");
     }
 
     #[test]

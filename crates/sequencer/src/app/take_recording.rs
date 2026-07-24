@@ -211,6 +211,34 @@ mod tests {
     }
 
     #[test]
+    fn take_notes_stamp_at_press_time_not_release_time() {
+        // The live path resolves take positions at key RELEASE, passing the
+        // press instant — which by then predates the newest record-clock
+        // anchor (republished every audio block). The stamp must extrapolate
+        // BACKWARDS to the press beat; clamping to the anchor would land the
+        // note (and the punch-in) at the release instant, shifting the whole
+        // clip late by the first note's hold time.
+        let (mut app, anchor) = capture_app();
+        // The newest anchor sits at beat 20 (10 s after beat zero) — the
+        // audio callback kept publishing while the note was held.
+        app.state
+            .transport
+            .record_clock
+            .publish(20.0, press_at_beats(anchor, 20.0));
+        // The note was PRESSED back at beat 12.1.
+        assert!(app.take_record_note(0, press_at_beats(anchor, 12.1), 60.0, 2.0));
+        let session = app.take_recording.as_ref().expect("session active");
+        let lane = session.lanes[0].as_ref().expect("lane punched in");
+        assert!(
+            (lane.punch_in_beat - 12.0).abs() < 1e-6,
+            "punch-in must stay at the press beat, got {}",
+            lane.punch_in_beat
+        );
+        let chunk = &lane.chunks[0];
+        assert!(chunk.track_bits[0] & 1 == 1, "note lands at take step 0");
+    }
+
+    #[test]
     fn chunk_rollover_extends_pending_chunks() {
         let (mut app, anchor) = capture_app();
         assert!(app.take_record_note(0, press_at_beats(anchor, 4.0), 60.0, 1.0));

@@ -887,7 +887,13 @@ pub struct App {
     pub active_runtime_song: Option<std::sync::Arc<crate::sequencer::RuntimeSong>>,
     /// Last row ordinal mirrored control-side (skips the duplicate initial
     /// `RowApplied` notice for row zero).
-    pub(crate) song_mirrored_row: Option<usize>,
+    pub song_mirrored_row: Option<usize>,
+    /// Bumped whenever the control-side mirror repaints live state from a
+    /// song row (row transitions, Back to Song). The reactive tick treats it
+    /// like a pattern-epoch change so the Seq view follows the arrangement —
+    /// the real pattern epoch must NOT bump mid-playback (it would
+    /// invalidate the scheduler's in-flight lookahead window).
+    pub song_row_mirror_epoch: u64,
     /// The non-destructive staging take while `ArrangementCapture` is active
     /// (docs/song-mode-spec.md 7.4/10.3). Owned by the control thread;
     /// `apply_pattern_launch` appends one lightweight event per audible
@@ -2224,6 +2230,7 @@ impl App {
             song_capture_armed: false,
             active_runtime_song: None,
             song_mirrored_row: None,
+            song_row_mirror_epoch: 0,
             song_capture_take: None,
             song_capture_failed: false,
             song_capture_error: None,

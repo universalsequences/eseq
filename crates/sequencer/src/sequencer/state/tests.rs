@@ -5476,6 +5476,107 @@
     }
 
     #[test]
+    fn song_row_take_override_never_reaches_the_session_surface() {
+        // Takes spec 11.2: take chunks are invisible outside the timeline.
+        // A song row whose lane resolves to a take chunk (preflight-expanded
+        // take lanes carry the chunk's PatternId) must NOT paint the chunk
+        // into the live grid or the session override slot — otherwise the
+        // step sequencer shows the take at MAX_STEPS, and the mirror's
+        // save-back writes take content over pool patterns (or mints one
+        // for a bare track).
+        let state = make_state_with_tracks(1);
+        state.pattern.patterns[0].set_step_active(3, true);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &[String::from("track")],
+            &[InstrumentType::Sampler],
+        ));
+        let scene_steps = state.pattern.track_params[0].get_num_steps();
+
+        // Register a take whose single chunk is MAX_STEPS wide with step 0.
+        let mut chunk = PatternSnapshot::new_default(1, &[])
+            .track_pattern_data(0)
+            .expect("chunk template");
+        chunk.track_params.num_steps = MAX_STEPS;
+        chunk.track_bits[0] |= 1;
+        let take_id = state
+            .register_track_take(0, None, vec![chunk], 16)
+            .expect("take registers");
+        let chunk_id = state.track_takes(0)[0].chunks[0];
+
+        state
+            .apply_song_row(
+                0,
+                &[(0, Some(chunk_id))],
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("track")],
+                &[InstrumentType::Sampler],
+                true,
+            )
+            .expect("take row applies");
+        assert!(
+            !state.is_scene_silenced(0),
+            "a take lane is audibly playing — never silenced"
+        );
+        assert!(
+            state.pattern.patterns[0].is_active(3),
+            "the live grid keeps the scene pattern, not the chunk"
+        );
+        assert!(
+            !state.pattern.patterns[0].is_active(0),
+            "the chunk's content never paints the live grid"
+        );
+        assert_eq!(
+            state.pattern.track_params[0].get_num_steps(),
+            scene_steps,
+            "the live pattern length must not inherit the chunk's MAX_STEPS"
+        );
+        {
+            let scenes = state.pattern.scenes.lock().unwrap();
+            assert_eq!(
+                scenes.track_overrides[0], None,
+                "the session override slot never holds a take chunk"
+            );
+        }
+
+        // The next row's save-back must not leak take content into the pool.
+        state
+            .apply_song_row(
+                0,
+                &[],
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("track")],
+                &[InstrumentType::Sampler],
+                true,
+            )
+            .expect("follow-up row applies");
+        let scenes = state.pattern.scenes.lock().unwrap();
+        let cell = scenes.scenes[0].cells[0].expect("scene cell");
+        let data = scenes.track_pools[0].get(cell).expect("pool pattern");
+        assert!(
+            data.track_bits[0] & (1 << 3) != 0,
+            "the scene pattern keeps its own content"
+        );
+        assert_ne!(
+            data.track_params.num_steps as usize, MAX_STEPS,
+            "the scene pattern must not inherit the take's length"
+        );
+        let take_chunk = scenes.track_pools[0].get(chunk_id).expect("chunk survives");
+        assert!(
+            take_chunk.track_bits[0] & 1 == 1,
+            "the take chunk itself is untouched"
+        );
+        assert_eq!(scenes.take_pools[0].takes.len(), 1);
+        assert_eq!(scenes.take_pools[0].takes[0].id, take_id);
+    }
+
+    #[test]
     fn new_lane_in_captured_rows_gets_free_run_offset_stamps() {
         // An arrangement captured at unquantized beats predates a new
         // track. When the track gains its scene pattern, rows referencing

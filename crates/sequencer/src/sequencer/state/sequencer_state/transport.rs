@@ -73,7 +73,7 @@ impl SequencerState {
     /// about a 16th note at 120 BPM). `None` until the audio callback has
     /// published an anchor (transport not yet running).
     pub fn record_beats_at_instant(&self, timestamp: Instant) -> Option<f64> {
-        let (anchor_beats, elapsed) = self.transport.record_clock.sample(timestamp)?;
+        let (anchor_beats, elapsed_secs) = self.transport.record_clock.sample(timestamp)?;
         let bpm = self.transport.bpm.load(Ordering::Relaxed) as f64;
         let latency_seconds = f32::from_bits(
             self.transport
@@ -81,7 +81,10 @@ impl SequencerState {
                 .load(Ordering::Relaxed),
         )
         .max(0.0) as f64;
-        Some(anchor_beats + elapsed.as_secs_f64() * bpm / 60.0 - latency_seconds * bpm / 60.0)
+        // `elapsed_secs` is signed: a note-on instant resolved at key
+        // release predates the newest anchor, and extrapolating backwards
+        // along the same clock keeps the stamp at the PRESS beat.
+        Some(anchor_beats + elapsed_secs * bpm / 60.0 - latency_seconds * bpm / 60.0)
     }
 
     pub fn is_playing(&self) -> bool {

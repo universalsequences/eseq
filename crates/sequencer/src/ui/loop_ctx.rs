@@ -51,6 +51,10 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_playhead: u32,
     pub(crate) prev_transport_playhead: u32,
     pub(crate) prev_pattern_epoch: u64,
+    /// Diffed against `App::song_row_mirror_epoch` so mirrored song-row
+    /// transitions (which never bump the real pattern epoch) still trigger
+    /// the full pattern-switch resync.
+    pub(crate) prev_song_row_mirror_epoch: u64,
     pub(crate) prev_current_track: usize,
     pub(crate) prev_cpu_load_bits: u32,
     pub(crate) prev_peak_l_level: f64,

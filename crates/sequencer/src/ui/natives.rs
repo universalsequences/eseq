@@ -1102,6 +1102,29 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "seq-song-back-to-song-track",
+        "(seq-song-back-to-song-track track)",
+        "Per-track Back to Song (takes spec 10 UX): clear one lane's \
+         manual-override latch so it snaps back to what the song resolves \
+         at the current beat; other latched lanes stay the performer's.",
+        move |args, ctx| {
+            let Some(Value::Number(track)) = args.first() else {
+                return Err("seq-song-back-to-song-track: expected track number".into());
+            };
+            let mut payload = HashMap::new();
+            payload.insert(
+                "track".to_string(),
+                Rc::new(RefCell::new(Value::Number(*track))),
+            );
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-back-to-song-track".to_string(),
+                payload: Value::Map(payload),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "seq-song-status",
         "(seq-song-status)",
         "Report the song transport status on the status line: mode, row \
@@ -1560,6 +1583,7 @@ pub(crate) fn init_runtime(
                 ("song-capture-failed", Value::Bool(false)),
                 ("song-capture-error", Value::Nil),
                 ("song-edit-error", Value::Nil),
+                ("song-track-governed", Value::List(vec![])),
                 ("song-rows", Value::List(vec![])),
                 ("song-lanes", Value::List(vec![])),
                 ("song-lane-events", Value::List(vec![])),

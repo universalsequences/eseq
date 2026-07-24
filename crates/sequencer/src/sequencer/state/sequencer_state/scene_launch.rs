@@ -332,7 +332,7 @@ impl SequencerState {
             }
             // Resolve the complete row state before mutating anything so a
             // rejected row leaves scenes, overrides, and live state intact.
-            let mut resolved: Vec<(usize, Option<PatternId>, Option<TrackPatternData>)> =
+            let mut resolved: Vec<(usize, Option<PatternId>, Option<TrackPatternData>, bool)> =
                 Vec::with_capacity(num_tracks);
             for track in 0..num_tracks {
                 if latched(track) {
@@ -345,6 +345,22 @@ impl SequencerState {
                     .iter()
                     .find(|(over_track, _)| *over_track == track)
                     .map(|(_, id)| *id);
+                // Take-claimed chunks never reach the session surface (takes
+                // spec 11.2): the scheduler plays the take from the runtime
+                // song's own row snapshots, so the mirror must NOT paint the
+                // chunk into the live grid or the session override slot —
+                // doing so leaks the take into the step sequencer, and the
+                // next row's save-back then writes take content over pool
+                // patterns (or mints one for a bare track). A take lane's
+                // session identity stays the scene cell.
+                let take_lane = matches!(
+                    override_entry,
+                    Some(Some(id)) if scenes
+                        .take_pools
+                        .get(track)
+                        .is_some_and(|takes| takes.is_claimed(id))
+                );
+                let override_entry = if take_lane { None } else { override_entry };
                 let override_id = override_entry.flatten();
                 let effective = match override_entry {
                     Some(explicit) => explicit,
@@ -373,7 +389,7 @@ impl SequencerState {
                     ),
                     None => None,
                 };
-                resolved.push((track, override_id, data));
+                resolved.push((track, override_id, data, take_lane));
             }
             let current_scene = self.current_scene_index();
             if !scenes.save_scene_snapshot(current_scene, current_snapshot) {
@@ -385,7 +401,7 @@ impl SequencerState {
                     *slot = None;
                 }
             }
-            for (track, override_id, _) in &resolved {
+            for (track, override_id, _, _) in &resolved {
                 if override_id.is_some() {
                     if let Some(slot) = scenes.track_overrides.get_mut(*track) {
                         *slot = *override_id;
@@ -402,28 +418,39 @@ impl SequencerState {
                             .map(|data| data.sample_id.clone())
                             .unwrap_or((-1, String::new(), 44_100))
                     } else {
-                        resolved
-                            .iter()
-                            .find(|(t, _, _)| *t == track)
-                            .and_then(|(_, _, data)| data.as_ref())
-                            .map(|data| data.sample_id.clone())
-                            .unwrap_or((-1, String::new(), 44_100))
+                        let entry = resolved.iter().find(|(t, _, _, _)| *t == track);
+                        match entry {
+                            Some((_, _, Some(data), _)) => data.sample_id.clone(),
+                            // A take lane with no scene cell keeps its
+                            // current binding — the lane is audibly playing
+                            // its take, not being silenced or rebound.
+                            Some((_, _, None, true)) => scenes
+                                .effective_track_pattern(track)
+                                .map(|data| data.sample_id.clone())
+                                .unwrap_or((-1, String::new(), 44_100)),
+                            _ => (-1, String::new(), 44_100),
+                        }
                     }
                 })
                 .collect();
-            let launched: Vec<(usize, Option<TrackPatternData>)> = resolved
+            let launched: Vec<(usize, Option<TrackPatternData>, bool)> = resolved
                 .into_iter()
-                .map(|(track, _, data)| (track, data))
+                .map(|(track, _, data, take_lane)| (track, data, take_lane))
                 .collect();
             (launched, sample_ids)
         };
         let (launched, sample_ids) = launched;
-        for (track, data) in launched {
+        for (track, data, take_lane) in launched {
             match data {
                 Some(data) => {
                     data.restore_to(self, track);
                     self.set_scene_silenced(track, false);
                 }
+                // A take lane whose scene cell is bare: the lane is audibly
+                // playing its take from the runtime song, so it is neither
+                // silenced nor repainted — the live grid keeps the track's
+                // session (bare/empty) state.
+                None if take_lane => self.set_scene_silenced(track, false),
                 // Silence WITHOUT blanking the live grid. This mirror saves
                 // the live snapshot into the current scene before applying
                 // each row, so a lane silenced by an explicit-empty override

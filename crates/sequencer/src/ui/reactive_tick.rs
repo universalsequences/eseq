@@ -565,7 +565,11 @@ pub(crate) fn reactive_tick_and_render(
         ) {
             needs_reactive_cycle = true;
         }
-        if epoch != ctx.frame.prev_pattern_epoch && !app.tracks.is_empty() {
+        let mirror_epoch = app.song_row_mirror_epoch;
+        if (epoch != ctx.frame.prev_pattern_epoch
+            || mirror_epoch != ctx.frame.prev_song_row_mirror_epoch)
+            && !app.tracks.is_empty()
+        {
             let profile_switch = pattern_switch_profile_enabled();
             let profile_total_started = Instant::now();
             let sync_names_pattern_elapsed;
@@ -695,6 +699,7 @@ pub(crate) fn reactive_tick_and_render(
                 );
             }
             ctx.frame.prev_pattern_epoch = epoch;
+            ctx.frame.prev_song_row_mirror_epoch = mirror_epoch;
             ctx.frame.prev_track_button_states = track_button_state_snapshot(&ctx.shared.state);
             needs_reactive_cycle = true;
             refresh_visible_mixer_after_cycle |= mixer_visible;

@@ -108,7 +108,14 @@ impl RecordClockAnchor {
         self.sequence.fetch_add(1, Ordering::Release);
     }
 
-    pub fn sample(&self, timestamp: Instant) -> Option<(f64, Duration)> {
+    /// Sample the anchor at `timestamp`, returning the anchor beat and the
+    /// SIGNED elapsed seconds from the anchor to `timestamp`. The elapsed
+    /// term is negative when `timestamp` predates the newest anchor — the
+    /// normal case for note-on instants resolved at key RELEASE (the anchor
+    /// republishes every audio block, so a held note's press is always in
+    /// the anchor's past). Clamping that to zero would stamp the note at its
+    /// release instant instead of its press.
+    pub fn sample(&self, timestamp: Instant) -> Option<(f64, f64)> {
         for _ in 0..8 {
             let before = self.sequence.load(Ordering::Acquire);
             if before & 1 != 0 {
@@ -123,10 +130,9 @@ impl RecordClockAnchor {
                     return None;
                 }
                 let now_nanos = record_clock_nanos(timestamp);
-                return Some((
-                    beats,
-                    Duration::from_nanos(now_nanos.saturating_sub(anchor_nanos)),
-                ));
+                let elapsed_secs =
+                    (now_nanos as i128 - anchor_nanos as i128) as f64 / 1.0e9;
+                return Some((beats, elapsed_secs));
             }
         }
         None

@@ -34,6 +34,12 @@ pub(crate) struct SongBindingsSnapshot {
     /// by the next successful edit. Bound to `SEQ.song-edit-error` so the
     /// arrangement view can surface it (the step tile hides the status line).
     pub(crate) edit_error: Option<String>,
+    /// Per-track take-lane state (takes spec 10/11.2 UX): 0 = the lane is
+    /// not playing a take (pattern lanes stay fully editable — "jam with the
+    /// step sequencer"), 1 = take-governed (dimmed, non-interactive steps +
+    /// lit Back-to-Song button), 2 = a take lane the performer manually
+    /// latched away (editable again; grey button returns it to the song).
+    pub(crate) take_lane_states: Vec<u8>,
     /// True while any lane is manual-override latched during song playback
     /// (takes spec 10): the SONG indicator glows amber and the Back to Song
     /// control appears.
@@ -332,7 +338,47 @@ pub(crate) fn build_song_bindings_snapshot(
         capture_error: app.song_capture_error.clone(),
         edit_error: app.song_edit_error.clone(),
         manual_latch: app.state.song_manual_latch_mask() != 0,
+        take_lane_states: song_take_lane_states(app),
     }
+}
+
+/// Per-track take-lane state for the Seq grid (takes spec 10/11.2 UX):
+/// 0 = not a take lane, 1 = take-governed, 2 = take lane manually latched.
+/// A lane counts as a take lane when the CURRENTLY MIRRORED song row
+/// resolves it to a take-claimed chunk pattern — ordinary pattern lanes are
+/// never dimmed or blocked, even mid-song-playback.
+pub(crate) fn song_take_lane_states(app: &app::App) -> Vec<u8> {
+    let mut states = vec![0u8; app.tracks.len()];
+    if !app.song_playback_authority_active() {
+        return states;
+    }
+    let Some(song) = app.active_runtime_song.as_ref() else {
+        return states;
+    };
+    let Some(row) = app
+        .song_mirrored_row
+        .and_then(|ordinal| song.rows.get(ordinal))
+    else {
+        return states;
+    };
+    let latch = app.state.song_manual_latch_mask();
+    app.state.with_project_scenes(|scenes| {
+        for (track, id) in &row.overrides {
+            let Some(id) = *id else { continue };
+            let Some(state) = states.get_mut(*track) else {
+                continue;
+            };
+            let claimed = scenes
+                .take_pools
+                .get(*track)
+                .is_some_and(|takes| takes.is_claimed(id));
+            if claimed {
+                let latched = *track < 64 && latch >> track & 1 == 1;
+                *state = if latched { 2 } else { 1 };
+            }
+        }
+    });
+    states
 }
 
 /// Read-only `song-rows` value (spec 12): a list of
@@ -584,6 +630,28 @@ pub(crate) fn sync_song_state(
             None => Value::Nil,
         }
     );
+    let governed_changed = prev
+        .map(|prev| prev.take_lane_states != next.take_lane_states)
+        .unwrap_or(true);
+    if governed_changed {
+        let items: Vec<Rc<RefCell<Value>>> = next
+            .take_lane_states
+            .iter()
+            .map(|state| Rc::new(RefCell::new(Value::Number(*state as f64))))
+            .collect();
+        rt.set_reactive("SEQ", "song-track-governed", Value::List(items));
+        // The take-governed dim rides the step-cell color channels (the
+        // header keeps its full track color); resync them so the step
+        // shells restyle live as rows enter/leave take lanes.
+        super::track_and_mixer::sync_track_mute_visual_binding_fields(
+            rt,
+            app,
+            &app.state,
+            0..next.take_lane_states.len(),
+            false,
+        );
+        dirty = true;
+    }
     let position_changed = prev
         .map(|prev| prev.position_beats != next.position_beats)
         .unwrap_or(true);

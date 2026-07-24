@@ -447,6 +447,15 @@ impl SequencerState {
         self.song_manual_latch.store(0, Ordering::Release);
     }
 
+    /// Per-track Back to Song (takes spec 10 UX): the song resumes launch
+    /// authority for one lane while other latched lanes stay the performer's.
+    pub fn clear_song_manual_latch_track(&self, track: usize) {
+        if track < 64 {
+            self.song_manual_latch
+                .fetch_and(!(1u64 << track), Ordering::AcqRel);
+        }
+    }
+
     /// Hand a preflighted song to the scheduler thread. The initial row is
     /// found via `state_at_beat` semantics on the runtime rows; V1 callers
     /// pass `start_beat = 0.0` (spec 10.1). The scheduler installs the song

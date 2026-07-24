@@ -30,6 +30,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "song-capture-arm",
     "song-capture-cancel",
     "song-back-to-song",
+    "song-back-to-song-track",
     "song-status",
 ];
 
@@ -407,6 +408,13 @@ fn run_transport(
         // Back to Song (takes spec 10): clear the manual-override latch so
         // the song resumes launch authority with anchored phase.
         "song-back-to-song" => app.back_to_song().map(Some),
+        // Per-track Back to Song (takes spec 10 UX): one lane returns to the
+        // song's launch authority; other latched lanes stay manual.
+        "song-back-to-song-track" => {
+            let map = payload_map(payload)?;
+            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            app.back_to_song_track(track).map(Some)
+        }
         "song-status" => Ok(Some(song_status_summary(app))),
         _ => Err(format!("unknown song transport command: {name}")),
     }
@@ -448,6 +456,7 @@ const TRANSPORT_COMMANDS: &[&str] = &[
     "song-capture-arm",
     "song-capture-cancel",
     "song-back-to-song",
+    "song-back-to-song-track",
     "song-status",
 ];
 
