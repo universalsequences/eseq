@@ -71,11 +71,19 @@ impl SequencerState {
             }
         }
         let current_scene = scenes.current_scene;
+        let mut materialized = None;
         if let Some(scene) = scenes.scenes.get(current_scene) {
             if scene.cells.get(track).copied().flatten().is_none() {
                 let id = scenes.track_pools[track].insert(default_data);
                 scenes.scenes[current_scene].cells[track] = Some(id);
+                materialized = Some(id);
             }
+        }
+        drop(scenes);
+        if let Some(id) = materialized {
+            // Existing song rows referencing the current scene now resolve
+            // this lane; stamp captured free-run phase where needed.
+            self.stamp_free_run_song_offsets_for_new_lane(track, current_scene, id);
         }
     }
 

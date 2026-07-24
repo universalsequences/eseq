@@ -5368,6 +5368,119 @@
     }
 
     #[test]
+    fn song_row_explicit_empty_lane_never_destroys_the_scene_pattern() {
+        // Regression: apply_song_row saves the live snapshot into the
+        // current scene before applying each row. A lane silenced by an
+        // explicit-empty override must keep its live content — blanking it
+        // would be written back over the scene cell's real pattern by the
+        // next row application.
+        let state = make_state_with_tracks(1);
+        state.pattern.patterns[0].set_step_active(3, true);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &[String::from("track")],
+            &[InstrumentType::Sampler],
+        ));
+
+        // Row A: same scene, explicit-empty override for track 0.
+        state
+            .apply_song_row(
+                0,
+                &[(0, None)],
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("track")],
+                &[InstrumentType::Sampler],
+                true,
+            )
+            .expect("row A applies");
+        assert!(state.is_scene_silenced(0));
+
+        // Row B: same scene, no overrides — saves current state first, then
+        // restores the scene cell's pattern.
+        state
+            .apply_song_row(
+                0,
+                &[],
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("track")],
+                &[InstrumentType::Sampler],
+                true,
+            )
+            .expect("row B applies");
+        assert!(!state.is_scene_silenced(0));
+        assert!(
+            state.pattern.patterns[0].is_active(3),
+            "the scene pattern survives an explicit-empty row"
+        );
+        let scenes = state.pattern.scenes.lock().unwrap();
+        let cell = scenes.scenes[0].cells[0].expect("scene cell");
+        let data = scenes.track_pools[0].get(cell).expect("pool pattern");
+        assert!(
+            data.track_bits[0] & (1 << 3) != 0,
+            "the pool pattern keeps its step content"
+        );
+    }
+
+    #[test]
+    fn new_lane_in_captured_rows_gets_free_run_offset_stamps() {
+        // An arrangement captured at unquantized beats predates a new
+        // track. When the track gains its scene pattern, rows referencing
+        // that scene must stamp the free-run phase for the new lane
+        // (takes spec 7.2/9.4) so it plays in time; grid-aligned rows and
+        // other scenes stay untouched.
+        let state = SequencerState::new(2, vec![vec![], vec![]]);
+        state.with_scenes_mut(|scenes| {
+            let snapshots = vec![
+                PatternSnapshot::new_default(2, &[]),
+                PatternSnapshot::new_default(2, &[]),
+            ];
+            *scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        });
+        state.set_committed_song(Some(ProjectSong {
+            rows: vec![
+                song_row(0, 0.0, 0, &[]),
+                // Unquantized captured row: 4.7 beats = step 18.8 of a
+                // 16-step/4-beat pattern -> free-run offset 2.8.
+                song_row(1, 4.7, 1, &[]),
+                song_row(2, 9.3, 0, &[]),
+                // Grid-aligned row: free-run offset 0, no override needed.
+                song_row(3, 12.0, 0, &[]),
+            ],
+            end_beat: 16.0,
+            loop_enabled: false,
+            next_row_id: 4,
+        }));
+        // Adding a track while on scene 0 materializes its current-scene
+        // pattern and stamps the song rows referencing scene 0.
+        state.extend_all_pattern_snapshots_to_track(
+            3,
+            &[],
+            2,
+            CustomInstrumentRunMode::Instrument,
+            None,
+        );
+        let song = state.committed_song().expect("song");
+        let lane = |idx: usize| {
+            song.rows[idx]
+                .overrides
+                .iter()
+                .find(|over| over.track == 2)
+                .copied()
+        };
+        assert_eq!(lane(0), None, "beat 0 is grid-aligned: no override");
+        assert_eq!(lane(1), None, "scene 1 rows are untouched");
+        let stamped = lane(2).expect("off-grid scene 0 row is stamped");
+        assert!((stamped.offset_steps - (9.3 * 4.0) % 16.0).abs() < 1e-9);
+        assert_eq!(lane(3), None, "beat 12 is grid-aligned: no override");
+    }
+
+    #[test]
     fn added_track_is_bare_outside_the_current_scene() {
         // Bare tracks (takes spec 11.1, scoped): growing to a new track
         // materializes exactly one pattern in the CURRENT scene (the

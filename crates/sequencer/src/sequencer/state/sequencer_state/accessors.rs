@@ -495,7 +495,59 @@ impl SequencerState {
         // The scene now resolves a pattern for this track; the launch-time
         // silencing for the empty cell no longer applies.
         self.set_scene_silenced(track, false);
+        self.stamp_free_run_song_offsets_for_new_lane(track, current, id);
         Some(id)
+    }
+
+    /// A lane that just came into existence in `scene_idx` (a bare track
+    /// gaining its first pattern there) newly resolves in every committed
+    /// song row referencing that scene. Rows captured from a live
+    /// performance sit at unquantized beats and their other lanes carry
+    /// free-run phase stamps (takes spec 7.2/9.4); anchoring the new lane
+    /// at step 0 of each off-grid row start would play it out of time.
+    /// Stamp the same free-run phase as materialized overrides so the new
+    /// lane joins the grid like every captured lane. Rows aligned to the
+    /// pattern grid get offset 0 and are left untouched — anchored and
+    /// free-run agree there, so painted arrangements are unaffected.
+    /// Existing overrides for the track (including explicit-empty) are
+    /// always respected.
+    pub(crate) fn stamp_free_run_song_offsets_for_new_lane(
+        &self,
+        track: usize,
+        scene_idx: usize,
+        pattern: PatternId,
+    ) {
+        let mapping = self.with_project_scenes(|scenes| {
+            let data = scenes.track_pools.get(track)?.get(pattern)?;
+            let num_steps = data.track_params.num_steps.max(1);
+            let step_beats = data.track_params.timebase.step_beats(num_steps);
+            (step_beats > 0.0).then(|| (1.0 / step_beats, num_steps as f64))
+        });
+        let Some((steps_per_beat, num_steps)) = mapping else {
+            return;
+        };
+        self.with_committed_song_mut(|song| {
+            let Some(song) = song.as_mut() else {
+                return;
+            };
+            for row in &mut song.rows {
+                if row.scene != scene_idx
+                    || row.overrides.iter().any(|over| over.track == track)
+                {
+                    continue;
+                }
+                let offset = (row.start_beat * steps_per_beat).rem_euclid(num_steps);
+                if offset < 1e-9 || offset > num_steps - 1e-9 {
+                    continue;
+                }
+                row.overrides.push(ProjectSongTrackOverride {
+                    track,
+                    pattern_id: Some(pattern.0),
+                    offset_steps: offset,
+                });
+                row.overrides.sort_by_key(|over| over.track);
+            }
+        });
     }
 
     pub(crate) fn restore_project_scenes(

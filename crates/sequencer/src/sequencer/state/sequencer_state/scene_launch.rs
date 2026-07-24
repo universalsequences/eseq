@@ -375,12 +375,15 @@ impl SequencerState {
                     data.restore_to(self, track);
                     self.set_scene_silenced(track, false);
                 }
-                None => {
-                    // No pattern for this track: blank the live grid so the
-                    // step view matches the (empty) resolved pattern.
-                    self.clear_live_track_note_content(track);
-                    self.set_scene_silenced(track, true);
-                }
+                // Silence WITHOUT blanking the live grid. This mirror saves
+                // the live snapshot into the current scene before applying
+                // each row, so a lane silenced by an explicit-empty override
+                // must keep its live content — blanking here would be saved
+                // back over the scene cell's real pattern on the next row
+                // application (destroying it). The session-mode launch path
+                // blanks empty lanes safely because its save happens before
+                // the blank and a bare cell is never written back.
+                None => self.set_scene_silenced(track, true),
             }
         }
         self.pattern
