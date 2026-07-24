@@ -467,6 +467,33 @@ impl SequencerState {
         f(&mut self.pattern.scenes.lock().unwrap())
     }
 
+    /// Bare-scene lazy materialization (takes spec 11.1): insert `data` into
+    /// `track`'s pool and assign it to the CURRENT scene's empty cell.
+    /// Returns `None` when the track is out of range or the cell already
+    /// holds a pattern (callers re-resolve instead of overwriting).
+    pub(crate) fn materialize_current_scene_pattern(
+        &self,
+        track: usize,
+        data: TrackPatternData,
+    ) -> Option<PatternId> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let current = scenes.current_scene;
+        if scenes
+            .scenes
+            .get(current)?
+            .cells
+            .get(track)
+            .copied()
+            .flatten()
+            .is_some()
+        {
+            return None;
+        }
+        let id = scenes.track_pools.get_mut(track)?.insert(data);
+        *scenes.scenes.get_mut(current)?.cells.get_mut(track)? = Some(id);
+        Some(id)
+    }
+
     pub(crate) fn restore_project_scenes(
         &self,
         target: &ProjectScenes,

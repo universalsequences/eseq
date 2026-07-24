@@ -4886,13 +4886,7 @@ fn ensure_effective_track_pattern(
     for delays in &mut data.chord_snapshot.delays {
         delays.clear();
     }
-    app.state.with_scenes_mut(|scenes| {
-        let current = scenes.current_scene;
-        let id = scenes.track_pools.get_mut(track)?.insert(data);
-        let cell = scenes.scenes.get_mut(current)?.cells.get_mut(track)?;
-        *cell = Some(id);
-        Some(id)
-    })
+    app.state.materialize_current_scene_pattern(track, data)
 }
 
 fn resolve_device_value_target(
