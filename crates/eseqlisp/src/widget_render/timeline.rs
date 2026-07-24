@@ -72,6 +72,10 @@ struct TimelineDot {
     offset: f64,
     /// 0.0..1.0 vertical placement within the item rect (1.0 = top).
     value: f64,
+    /// Note length as a fraction of the item's span, in the same normalized
+    /// axis as `offset` (docs/arrangement-region-editing-spec.md 3.2). `0`
+    /// (the default) draws the legacy point dot; anything larger draws a bar.
+    width: f64,
 }
 
 /// One min/max amplitude bucket of a precomputed waveform peak cache
@@ -129,6 +133,16 @@ struct TimelineView {
     sidebar_style: SidebarStyle,
     lane_scroll: f64,
     lane_height: Option<f32>,
+    /// Corner radius of item fills, in CELLS so it scales with the UI zoom
+    /// like every other timeline dimension. `0` — the default — keeps the
+    /// square quads every host drew before; larger values round the clip
+    /// (GarageBand-style).
+    item_corner_radius: f32,
+    /// Height (cells) of the Ableton-style clip title bar
+    /// (docs/arrangement-region-editing-spec.md 3.1). `0` — the default and
+    /// what the piano roll passes — reproduces the pre-title-bar behavior
+    /// exactly: no title-bar zone, no start-edge handle, body drags move.
+    title_bar_height: f32,
     scroll_viewport_height: Option<f32>,
     snap: f64,
     resize_snap: f64,
@@ -160,6 +174,10 @@ enum HitRegion {
     Background { time: f64 },
     ItemBody { item: TimelineItem },
     ItemEdgeEnd { item: TimelineItem },
+    /// Title-bar zones, only produced when `title-bar-height > 0`
+    /// (docs/arrangement-region-editing-spec.md 3.1).
+    ItemTitleBar { item: TimelineItem },
+    ItemEdgeStart { item: TimelineItem },
 }
 
 thread_local! {
@@ -499,9 +517,10 @@ impl WidgetDefinition for TimelineWidget {
     fn cursor(&self, node: &LayoutNode, local_col: f32, local_row: f32) -> super::WidgetCursor {
         let view = TimelineView::from_props(&node.props, node.rect);
         match view.hit_test(local_col, scroll_adjusted_row(local_row)) {
-            Some(HitRegion::ItemEdgeEnd { .. }) | Some(HitRegion::ContentLengthEnd) => {
-                super::WidgetCursor::EwResize
-            }
+            Some(HitRegion::ItemEdgeEnd { .. })
+            | Some(HitRegion::ItemEdgeStart { .. })
+            | Some(HitRegion::ContentLengthEnd) => super::WidgetCursor::EwResize,
+            Some(HitRegion::ItemTitleBar { .. }) => super::WidgetCursor::Grab,
             _ => super::WidgetCursor::Default,
         }
     }
@@ -908,13 +927,118 @@ fn build_metal_primitives(
             continue;
         };
         let item_color = item.color.unwrap_or(view.item_color);
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-            x,
-            y,
+        // Ableton clip anatomy (docs/arrangement-region-editing-spec.md 3.1):
+        // title bar and body share the clip's one color and are read apart by
+        // a 1px hairline, not by a shade change. Without a title bar the item
+        // is one flat fill, as before.
+        let title_bar_height = view.item_title_bar_bottom(&Rect {
+            row: y,
+            col: x,
             width,
             height,
-            color: item_color,
-        }));
+        });
+        let title_bar_height = title_bar_height.map(|bottom| bottom - y);
+        // Selection is a fill change, not a border: the body lights up while
+        // the title bar keeps the clip color (Ableton's selected clip).
+        let selected = view.item_selected(item);
+        let body_color = if selected && title_bar_height.is_some() {
+            SELECTED_ITEM_BODY_COLOR
+        } else {
+            item_color
+        };
+        // The radius prop is in cells, so it scales with the UI zoom exactly
+        // like every other timeline dimension.
+        let radius_cells = view.item_corner_radius;
+        let radius_px = radius_cells * viewport.cell_h;
+        // Fills are built from the item's TRUE span and then clipped to the
+        // visible content, not from the view-clamped rect: an item scrolled
+        // partly off-screen must be CUT at the viewport edge, not redrawn as
+        // a shorter clip that rounds its corners there.
+        let (fill_rect, clip) = view.item_fill_rect(item, y, height);
+        // Square edge quads would poke out of a rounded clip's corners, so a
+        // rounded item is outlined by drawing the border colour at the item's
+        // own bounds and insetting the fill inside it — never by inflating,
+        // which would push the clip into the neighbouring lane. Square items
+        // keep the four edge quads (below).
+        let mut fill_rect = fill_rect;
+        if radius_px > 0.0 {
+            let thickness = item_border_thickness(
+                width,
+                height,
+                selected_border(selected, title_bar_height),
+            );
+            if thickness > 0.0 {
+                push_item_fill(
+                    &mut primitives,
+                    fill_rect,
+                    if selected_border(selected, title_bar_height) {
+                        SELECTED_ITEM_BORDER_COLOR
+                    } else {
+                        ITEM_BORDER_COLOR
+                    },
+                    viewport,
+                    radius_px,
+                    clip,
+                );
+                fill_rect = Rect {
+                    row: fill_rect.row + thickness,
+                    col: fill_rect.col + thickness,
+                    width: (fill_rect.width - thickness * 2.0).max(0.0),
+                    height: (fill_rect.height - thickness * 2.0).max(0.0),
+                };
+            }
+        }
+        push_item_fill(
+            &mut primitives,
+            fill_rect,
+            body_color,
+            viewport,
+            radius_px,
+            clip,
+        );
+        if let Some(bar_height) = title_bar_height {
+            // The bar rounds only its top corners: the arc rows are laid out
+            // over a rect that runs one radius past the bar, then the draw is
+            // cut at the bar's bottom, so no bottom arc is ever emitted.
+            let bar_rect = Rect {
+                height: bar_height - (fill_rect.row - y) + radius_cells,
+                ..fill_rect
+            };
+            let mut bar_primitives = Vec::new();
+            push_item_fill(
+                &mut bar_primitives,
+                bar_rect,
+                item_color,
+                viewport,
+                radius_px,
+                clip,
+            );
+            let bar_bottom = y + bar_height;
+            primitives.extend(bar_primitives.into_iter().filter_map(|primitive| {
+                let MetalPrimitive::Quad(mut quad) = primitive else {
+                    return Some(primitive);
+                };
+                let bottom = (quad.y + quad.height).min(bar_bottom);
+                if bottom <= quad.y {
+                    return None;
+                }
+                quad.height = bottom - quad.y;
+                Some(MetalPrimitive::Quad(quad))
+            }));
+            let hairline = (1.0 / viewport.cell_h).min(height - bar_height);
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x,
+                y: y + bar_height,
+                width,
+                height: hairline,
+                color: crate::backend::Color {
+                    r: 0.02,
+                    g: 0.025,
+                    b: 0.03,
+                    a: 0.72,
+                },
+            }));
+        }
         // Faint grid continuation inside the clip body (DAW convention): the
         // background grid stays legible through items without competing with
         // their content.
@@ -935,11 +1059,14 @@ fn build_metal_primitives(
                 },
             }));
         }
+        // Labels live in the title bar when there is one; content (notes)
+        // draws in the body below it.
+        let label_height = title_bar_height.unwrap_or(height);
         if let Some(label) = &item.label {
-            if width >= 3.0 && height >= 0.85 {
+            if width >= 3.0 && label_height >= 0.85 {
                 primitives.push(MetalPrimitive::ProportionalText(
                     MetalProportionalTextPrimitive {
-                        row: y + ((height - 0.80).max(0.0) * 0.5) - 0.02,
+                        row: y + ((label_height - 0.80).max(0.0) * 0.5) - 0.02,
                         col: x + 0.34,
                         align_width: 0.0,
                         h_align: 0.0,
@@ -952,78 +1079,94 @@ fn build_metal_primitives(
                 ));
             }
         }
-        push_item_content_primitives(&mut primitives, &view, item, (x, y, width, height), viewport);
+        let (content_rect, title_bar) = match title_bar_height {
+            Some(bar_height) => (
+                (x, y + bar_height, width, height - bar_height),
+                Some((y, bar_height)),
+            ),
+            None => ((x, y, width, height), None),
+        };
+        push_item_content_primitives(
+            &mut primitives,
+            &view,
+            item,
+            content_rect,
+            title_bar,
+            viewport,
+        );
         item_rects.push((
             x,
             y,
             width,
             height,
-            view.item_selected(item),
+            selected_border(selected, title_bar_height),
             timeline_hover_edge_matches(node.widget_id, &item.id),
         ));
     }
 
-    let item_border_color = crate::backend::Color {
-        r: 0.02,
-        g: 0.025,
-        b: 0.03,
-        a: 0.72,
-    };
-    let selected_border_color = crate::backend::Color::from_hex(0xb9, 0xee, 0xff);
+    let item_radius = view.item_corner_radius;
     for (x, y, width, height, selected, resize_hovered) in item_rects {
-        let thickness = if selected { 0.16_f32 } else { 0.08_f32 }
-            .min(width * 0.5)
-            .min(height * 0.5);
+        let thickness = item_border_thickness(width, height, selected);
         if thickness <= 0.0 {
             continue;
         }
         let border_color = if selected {
-            selected_border_color
+            SELECTED_ITEM_BORDER_COLOR
         } else {
-            item_border_color
+            ITEM_BORDER_COLOR
         };
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-            x,
-            y,
-            width,
-            height: thickness,
-            color: border_color,
-        }));
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-            x,
-            y: y + height - thickness,
-            width,
-            height: thickness,
-            color: border_color,
-        }));
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-            x,
-            y,
-            width: thickness,
-            height,
-            color: border_color,
-        }));
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-            x: x + width - thickness,
-            y,
-            width: thickness,
-            height,
-            color: border_color,
-        }));
+        // Rounded items were already outlined under their fill, in the loop
+        // above; only the square ones get edge quads here.
+        if item_radius <= 0.0 {
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x,
+                y,
+                width,
+                height: thickness,
+                color: border_color,
+            }));
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x,
+                y: y + height - thickness,
+                width,
+                height: thickness,
+                color: border_color,
+            }));
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x,
+                y,
+                width: thickness,
+                height,
+                color: border_color,
+            }));
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x: x + width - thickness,
+                y,
+                width: thickness,
+                height,
+                color: border_color,
+            }));
+        }
         if resize_hovered {
             let hover_width = 0.22_f32.min(width.max(0.0));
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-                x: x + width - hover_width,
-                y,
-                width: hover_width,
-                height,
-                color: crate::backend::Color {
+            push_item_fill(
+                &mut primitives,
+                Rect {
+                    row: y,
+                    col: x + width - hover_width,
+                    width: hover_width,
+                    height,
+                },
+                crate::backend::Color {
                     r: 0.74,
                     g: 0.94,
                     b: 1.0,
                     a: 0.95,
                 },
-            }));
+                viewport,
+                item_radius * viewport.cell_h,
+                (content.col, content.col + content.width),
+            );
         }
     }
 
@@ -1078,6 +1221,184 @@ fn build_metal_primitives(
     primitives
 }
 
+#[cfg(target_os = "macos")]
+const ITEM_BORDER_COLOR: crate::backend::Color = crate::backend::Color {
+    r: 0.02,
+    g: 0.025,
+    b: 0.03,
+    a: 0.72,
+};
+
+#[cfg(target_os = "macos")]
+const SELECTED_ITEM_BORDER_COLOR: crate::backend::Color = crate::backend::Color {
+    r: 0.725,
+    g: 0.933,
+    b: 1.0,
+    a: 1.0,
+};
+
+/// A title-barred clip shows selection through its lit body, so it keeps the
+/// ordinary dark outline; bar-less hosts (piano roll) still get the bright
+/// selected border.
+#[cfg(target_os = "macos")]
+fn selected_border(selected: bool, title_bar_height: Option<f32>) -> bool {
+    selected && title_bar_height.is_none()
+}
+
+#[cfg(target_os = "macos")]
+fn item_border_thickness(width: f32, height: f32, selected: bool) -> f32 {
+    if selected { 0.16_f32 } else { 0.08_f32 }
+        .min(width * 0.5)
+        .min(height * 0.5)
+}
+
+/// Corner arc resolution cap: one slab per device pixel of radius, bounded so
+/// a huge radius cannot flood the primitive list.
+#[cfg(target_os = "macos")]
+const ITEM_CORNER_ROWS_MAX: usize = 24;
+
+/// Fill one item rect, rounded when the host asked for a corner radius and a
+/// plain quad otherwise (`:item-corner-radius`, default 0 — every pre-existing
+/// host keeps square clips).
+///
+/// The rounding is built from plain quads rather than the rounded-rect
+/// shader: widget instances are batched into their own pass that composites
+/// either under every quad (burying the clip under its own lane background)
+/// or over every quad (burying the clip's notes, grid and hairline). One
+/// slab per device-pixel row walks the corner arc, and each row's boundary
+/// pixel is drawn at fractional alpha equal to its coverage — the same
+/// coverage an `fwidth` mask computes, resolved on the CPU, blending against
+/// whatever is already beneath the clip.
+#[cfg(target_os = "macos")]
+fn push_item_fill(
+    primitives: &mut Vec<MetalPrimitive>,
+    rect: Rect,
+    color: crate::backend::Color,
+    viewport: super::WidgetViewport,
+    radius_px: f32,
+    clip: (f32, f32),
+) {
+    let cell_w = viewport.cell_w.max(0.0001);
+    let cell_h = viewport.cell_h.max(0.0001);
+    let radius_px = radius_px
+        .min(rect.width * cell_w * 0.5)
+        .min(rect.height * cell_h * 0.5);
+    if radius_px <= 0.5 {
+        push_clipped_quad(primitives, rect, color, clip);
+        return;
+    }
+    let radius_y = radius_px / cell_h;
+
+    push_clipped_quad(
+        primitives,
+        Rect {
+            row: rect.row + radius_y,
+            col: rect.col,
+            width: rect.width,
+            height: rect.height - radius_y * 2.0,
+            
+        },
+        color,
+        clip,
+    );
+
+    let rows = (radius_px.ceil() as usize).min(ITEM_CORNER_ROWS_MAX);
+    let row_height = radius_y / rows as f32;
+    for row in 0..rows {
+        // Horizontal inset of the arc at this row's center: the corner circle
+        // is centred `radius` in from both edges.
+        let offset_px = (row as f32 + 0.5) * (radius_px / rows as f32);
+        let above_center = radius_px - offset_px;
+        let inset_px =
+            radius_px - (radius_px * radius_px - above_center * above_center).max(0.0).sqrt();
+        // Boundary pixel: partial coverage becomes partial alpha.
+        let solid_inset_px = inset_px.ceil();
+        let coverage = (solid_inset_px - inset_px).clamp(0.0, 1.0);
+        let solid_inset = solid_inset_px / cell_w;
+        let edge_pixel = 1.0 / cell_w;
+        let solid_width = rect.width - solid_inset * 2.0;
+        let offset = radius_y * (row as f32 / rows as f32);
+        for top in [
+            rect.row + offset,
+            rect.row + rect.height - offset - row_height,
+        ] {
+            if solid_width > 0.0 {
+                push_clipped_quad(
+                    primitives,
+                    Rect {
+                        row: top,
+                        col: rect.col + solid_inset,
+                        width: solid_width,
+                        height: row_height,
+                        
+                    },
+                    color,
+                    clip,
+                );
+            }
+            if coverage <= 0.004 {
+                continue;
+            }
+            let feathered = crate::backend::Color {
+                a: color.a * coverage,
+                ..color
+            };
+            for col in [
+                rect.col + solid_inset - edge_pixel,
+                rect.col + rect.width - solid_inset,
+            ] {
+                push_clipped_quad(
+                    primitives,
+                    Rect {
+                        row: top,
+                        col,
+                        width: edge_pixel,
+                        height: row_height,
+                        
+                    },
+                    feathered,
+                    clip,
+                );
+            }
+        }
+    }
+}
+
+/// Push one quad clipped to a horizontal `[min, max]` window, dropping it when
+/// nothing of it is visible. Horizontal only: lanes already clip vertically.
+#[cfg(target_os = "macos")]
+fn push_clipped_quad(
+    primitives: &mut Vec<MetalPrimitive>,
+    rect: Rect,
+    color: crate::backend::Color,
+    clip: (f32, f32),
+) {
+    let left = rect.col.max(clip.0);
+    let right = (rect.col + rect.width).min(clip.1);
+    if right <= left || rect.height <= 0.0 {
+        return;
+    }
+    primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+        x: left,
+        y: rect.row,
+        width: right - left,
+        height: rect.height,
+        color,
+    }));
+}
+
+/// Body fill of a selected clip that has a title bar
+/// (docs/arrangement-region-editing-spec.md 3.1): a fixed warm light tint,
+/// the same for every clip color, so selection reads at a glance the way
+/// Ableton's does. The bar keeps the clip's own color.
+#[cfg(target_os = "macos")]
+const SELECTED_ITEM_BODY_COLOR: crate::backend::Color = crate::backend::Color {
+    r: 0.94,
+    g: 0.87,
+    b: 0.68,
+    a: 1.0,
+};
+
 /// Minimum on-screen item width (px) below which item content is skipped
 /// entirely — narrower than this the dots/bars would only alias
 /// (docs/arrangement-timeline-ui-spec.md 7.3).
@@ -1088,13 +1409,17 @@ const ITEM_CONTENT_MIN_WIDTH_PX: f32 = 14.0;
 /// on-screen rect (docs/arrangement-timeline-ui-spec.md 7.3). `rect` is the
 /// already view-clipped rect from `metal_item_rect`; dot x positions come
 /// from the item's unclipped time span so partially visible items keep their
-/// content aligned.
+/// content aligned. `title_bar` is the `(y, height)` of the clip's title bar
+/// when it has one: repeat boundaries then read as short ticks hanging off
+/// the top of the bar (Ableton's loop marker) instead of full-height rules
+/// through the notes.
 #[cfg(target_os = "macos")]
 fn push_item_content_primitives(
     primitives: &mut Vec<MetalPrimitive>,
     view: &TimelineView,
     item: &TimelineItem,
     rect: (f32, f32, f32, f32),
+    title_bar: Option<(f32, f32)>,
     viewport: super::WidgetViewport,
 ) {
     let (x, y, width, height) = rect;
@@ -1122,6 +1447,12 @@ fn push_item_content_primitives(
                     b: 0.03,
                     a: 0.42,
                 };
+                // A tick off the top of the title bar when there is one, a
+                // full-height rule otherwise (piano roll / bar-less hosts).
+                let (separator_y, separator_height) = match title_bar {
+                    Some((bar_y, bar_height)) => (bar_y, (bar_height * 0.55).max(0.12)),
+                    None => (y, height),
+                };
                 for index in 1..cycles {
                     let time = item.start + span * cycle * index as f64;
                     if time < view.view_start || time >= view_end || time >= item.end {
@@ -1130,9 +1461,9 @@ fn push_item_content_primitives(
                     let line_x = view.x_for_time(time);
                     primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
                         x: line_x - 0.0625,
-                        y,
+                        y: separator_y,
                         width: 0.125,
-                        height,
+                        height: separator_height,
                         color: separator_color,
                     }));
                 }
@@ -1164,10 +1495,22 @@ fn push_item_content_primitives(
                         .x_for_time(time)
                         .clamp(x, (x + width - dot_width).max(x));
                     let dot_y = y + (1.0 - dot.value) as f32 * inner_height;
+                    // Real note length (spec 3.2): a bar spanning the note's
+                    // duration, never narrower than the legacy 3px dot and
+                    // never painted past the item's end.
+                    let quad_width = if dot.width > 0.0 {
+                        let end_offset = ((index as f64 + dot.offset + dot.width) * cycle).min(1.0);
+                        let end_x = view.x_for_time(item.start + end_offset * span);
+                        (end_x - dot_x)
+                            .max(dot_width)
+                            .min((x + width - dot_x).max(dot_width))
+                    } else {
+                        dot_width
+                    };
                     primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
                         x: dot_x,
                         y: dot_y,
-                        width: dot_width,
+                        width: quad_width,
                         height: dot_height,
                         color: dot_color,
                     }));
@@ -1224,6 +1567,8 @@ impl TimelineView {
                 .get("lane-height")
                 .and_then(as_number)
                 .map(|height| height.max(0.2) as f32),
+            item_corner_radius: get_num(props, "item-corner-radius", 0.0).max(0.0) as f32,
+            title_bar_height: get_num(props, "title-bar-height", 0.0).max(0.0) as f32,
             scroll_viewport_height: props
                 .get("scroll-viewport-height")
                 .and_then(as_number)
@@ -1545,6 +1890,26 @@ impl TimelineView {
         Some(self.alignment_helper_time_for_drag(raw_end, anchor_end, gesture_value))
     }
 
+    /// Start-edge mirror of `resize_end_for_drag`
+    /// (docs/arrangement-region-editing-spec.md 3.1): same snap ladder, same
+    /// alignment-helper behavior, anchored on the item's start.
+    fn resize_start_for_drag(
+        &self,
+        raw_time: f64,
+        snapped_resize_time: f64,
+        gesture_value: &Value,
+        gesture: &HashMap<String, Value>,
+        anchor_start: f64,
+    ) -> Option<f64> {
+        if !self.resize_alignment_helper {
+            return Some(snapped_resize_time);
+        }
+
+        let raw_time_offset = as_number(gesture.get("raw-time-offset")?)?;
+        let raw_start = raw_time - raw_time_offset;
+        Some(self.alignment_helper_time_for_drag(raw_start, anchor_start, gesture_value))
+    }
+
     fn effective_resize_snap(&self) -> f64 {
         if self.resize_snap_to_grid {
             self.time_viewport().grid_step(self.time_ruler.as_ref())
@@ -1632,6 +1997,42 @@ impl TimelineView {
         Some((x, y, (x_end - x).max(0.25), height))
     }
 
+    /// An item's fill geometry: the rect its TRUE `[start, end)` span would
+    /// occupy (which may run past either side of the view) plus the
+    /// horizontal window that geometry must be clipped to. Rounded corners
+    /// then only appear at the item's real edges — an item scrolled partly
+    /// off-screen is cut square at the viewport edge instead of looking like
+    /// a shorter clip that begins there.
+    #[cfg(target_os = "macos")]
+    fn item_fill_rect(&self, item: &TimelineItem, row: f32, height: f32) -> (Rect, (f32, f32)) {
+        let content = self.content_rect();
+        let left = self.unclamped_x_for_time(item.start);
+        let right = self.unclamped_x_for_time(item.end);
+        (
+            Rect {
+                row,
+                col: left,
+                width: (right - left).max(0.25),
+                height,
+            },
+            (content.col, content.col + content.width),
+        )
+    }
+
+    /// `x_for_time` clamps to the visible window; this doesn't, so off-screen
+    /// item edges keep their true position (bounded to one viewport width
+    /// either side, which is off-screen enough and keeps the math finite).
+    #[cfg(target_os = "macos")]
+    fn unclamped_x_for_time(&self, time: f64) -> f32 {
+        let content = self.content_rect();
+        if content.width == 0.0 {
+            return content.col;
+        }
+        let position = content.col as f64
+            + content.width as f64 * ((time - self.view_start) / self.view_duration.max(0.0001));
+        (position as f32).clamp(content.col - content.width, content.col + content.width * 2.0)
+    }
+
     fn item_selected(&self, item: &TimelineItem) -> bool {
         item.selected || self.selection.iter().any(|id| id == &item.id)
     }
@@ -1688,6 +2089,23 @@ impl TimelineView {
         })
     }
 
+    /// Whether items draw a title bar at all
+    /// (docs/arrangement-region-editing-spec.md 3.1).
+    fn has_title_bar(&self) -> bool {
+        self.title_bar_height > 0.0
+    }
+
+    /// Bottom row of an item's title bar, or `None` when the bar is off. The
+    /// bar never eats the whole item: a body row always remains so the clip
+    /// keeps a selection surface even in a short lane.
+    fn item_title_bar_bottom(&self, rect: &Rect) -> Option<f32> {
+        if !self.has_title_bar() {
+            return None;
+        }
+        let height = self.title_bar_height.min(rect.height * 0.5);
+        (height > 0.0).then(|| rect.row + height)
+    }
+
     fn hit_test(&self, local_col: f32, local_row: f32) -> Option<HitRegion> {
         if local_col < self.rect.col || local_row < self.rect.row {
             return None;
@@ -1724,13 +2142,36 @@ impl TimelineView {
             let handle_width = (rect.width * 0.24).clamp(1.25, 4.0);
             let outside_slop = 0.75;
 
-            if rect.width > 1.0
+            // With a title bar the drag handles live on the bar only, so the
+            // body stays a pure selection surface
+            // (docs/arrangement-region-editing-spec.md 3.1). Without one
+            // (piano roll) the end handle spans the item's full height, as
+            // it always has.
+            let title_bar_bottom = self.item_title_bar_bottom(&rect);
+            let in_title_bar = match title_bar_bottom {
+                Some(bottom) => local_row < bottom,
+                None => true,
+            };
+
+            if in_title_bar
+                && rect.width > 1.0
                 && local_col >= right - handle_width
                 && local_col <= right + outside_slop
             {
                 return Some(HitRegion::ItemEdgeEnd { item: item.clone() });
             }
+            if title_bar_bottom.is_some()
+                && in_title_bar
+                && rect.width > 1.0
+                && local_col >= left - outside_slop
+                && local_col <= left + handle_width
+            {
+                return Some(HitRegion::ItemEdgeStart { item: item.clone() });
+            }
             if local_col >= left && local_col < right {
+                if in_title_bar && title_bar_bottom.is_some() {
+                    return Some(HitRegion::ItemTitleBar { item: item.clone() });
+                }
                 return Some(HitRegion::ItemBody { item: item.clone() });
             }
         }
@@ -1746,7 +2187,20 @@ impl TimelineView {
         let current_lane = self.lane_at_row(local_row);
         match self.tool {
             TimelineTool::Pointer => match hit {
-                HitRegion::ItemBody { item } => {
+                // With a title bar the body is a region-selection surface,
+                // not a move surface (docs/arrangement-region-editing-spec.md
+                // 3.1); moves start from the bar instead.
+                HitRegion::ItemBody { .. } if self.has_title_bar() => Some(map_value(vec![
+                    ("kind", keyword(":marquee")),
+                    ("time", Value::Number(current_marquee_time)),
+                    ("lane", Value::Number(current_lane as f64)),
+                    // A body marquee starts on a clip the pointer-down
+                    // already selected; a zero-movement release must not
+                    // then clear that selection the way a background click
+                    // does.
+                    ("origin", keyword(":item-body")),
+                ])),
+                HitRegion::ItemBody { item } | HitRegion::ItemTitleBar { item } => {
                     let ids = if self.item_selected(&item) {
                         self.selected_ids_for(item.id.clone())
                     } else {
@@ -1780,6 +2234,23 @@ impl TimelineView {
                         ("ids", list_value(ids)),
                         ("anchor-end", Value::Number(item.end)),
                         ("raw-time-offset", Value::Number(raw_time - item.end)),
+                        ("alignment-helper-snapped", Value::Bool(false)),
+                    ]))
+                }
+                HitRegion::ItemEdgeStart { item } => {
+                    let ids = if self.item_selected(&item) {
+                        self.selected_ids_for(item.id.clone())
+                    } else {
+                        vec![item.id.clone()]
+                    };
+                    let raw_time = self.time_at_col(local_col);
+                    Some(map_value(vec![
+                        ("kind", keyword(":resize-start")),
+                        ("id", item.id),
+                        ("ids", list_value(ids)),
+                        ("anchor-start", Value::Number(item.start)),
+                        ("anchor-end", Value::Number(item.end)),
+                        ("raw-time-offset", Value::Number(raw_time - item.start)),
                         ("alignment-helper-snapped", Value::Bool(false)),
                     ]))
                 }
@@ -1821,7 +2292,10 @@ impl TimelineView {
         let hit = self.hit_test(local_col, local_row)?;
         match self.tool {
             TimelineTool::Pointer => match hit {
-                HitRegion::ItemBody { item } | HitRegion::ItemEdgeEnd { item } => {
+                HitRegion::ItemBody { item }
+                | HitRegion::ItemEdgeEnd { item }
+                | HitRegion::ItemTitleBar { item }
+                | HitRegion::ItemEdgeStart { item } => {
                     Some(action_map(vec![
                         ("type", keyword(":select")),
                         ("ids", list_value(vec![item.id])),
@@ -1850,7 +2324,10 @@ impl TimelineView {
                 ])),
             },
             TimelineTool::Erase => match hit {
-                HitRegion::ItemBody { item } | HitRegion::ItemEdgeEnd { item } => {
+                HitRegion::ItemBody { item }
+                | HitRegion::ItemEdgeEnd { item }
+                | HitRegion::ItemTitleBar { item }
+                | HitRegion::ItemEdgeStart { item } => {
                     Some(action_map(vec![
                         ("type", keyword(":delete-items")),
                         ("ids", list_value(vec![item.id])),
@@ -1976,6 +2453,33 @@ impl TimelineView {
                     ("duration-delta", Value::Number(next_time - item.end)),
                 ]))
             }
+            Some(Value::Keyword(kind)) if kind == "resize-start" => {
+                let id = gesture.get("id")?.clone();
+                let item = self.items.iter().find(|item| item.id == id)?;
+                let anchor_start = gesture
+                    .get("anchor-start")
+                    .and_then(as_number)
+                    .unwrap_or(item.start);
+                let next_time = self
+                    .resize_start_for_drag(
+                        raw_time,
+                        current_resize_time,
+                        gesture_value,
+                        &gesture,
+                        anchor_start,
+                    )?
+                    .max(0.0)
+                    .min(item.end - self.minimum_duration());
+                Some(action_map(vec![
+                    ("type", keyword(":resize-item-absolute")),
+                    ("id", id.clone()),
+                    ("ids", gesture.get("ids")?.clone()),
+                    ("edge", keyword(":start")),
+                    ("time", Value::Number(next_time)),
+                    ("duration", Value::Number(item.end - next_time)),
+                    ("duration-delta", Value::Number(item.start - next_time)),
+                ]))
+            }
             Some(Value::Keyword(kind)) if kind == "resize-content-length" => {
                 let length = current_resize_time
                     .round()
@@ -1991,6 +2495,9 @@ impl TimelineView {
                 if (start_time - current_marquee_time).abs() < f64::EPSILON
                     && start_lane == current_lane
                 {
+                    if marquee_from_item_body(&gesture) {
+                        return None;
+                    }
                     return Some(action_map(vec![("type", keyword(":clear-selection"))]));
                 }
                 let lane_a = start_lane.min(current_lane);
@@ -2046,12 +2553,13 @@ impl TimelineView {
                 ("time", Value::Number(current_time)),
             ])),
             _ => match current_hit {
-                HitRegion::ItemBody { item } | HitRegion::ItemEdgeEnd { item } => {
-                    Some(action_map(vec![
-                        ("type", keyword(":delete-items")),
-                        ("ids", list_value(vec![item.id])),
-                    ]))
-                }
+                HitRegion::ItemBody { item }
+                | HitRegion::ItemEdgeEnd { item }
+                | HitRegion::ItemTitleBar { item }
+                | HitRegion::ItemEdgeStart { item } => Some(action_map(vec![
+                    ("type", keyword(":delete-items")),
+                    ("ids", list_value(vec![item.id])),
+                ])),
                 _ => None,
             },
         }
@@ -2268,6 +2776,9 @@ impl TimelineView {
                 if (start_time - current_marquee_time).abs() < f64::EPSILON
                     && start_lane == current_lane
                 {
+                    if marquee_from_item_body(&gesture) {
+                        return None;
+                    }
                     return Some(action_map(vec![("type", keyword(":clear-selection"))]));
                 }
                 let lane_a = start_lane.min(current_lane);
@@ -2292,11 +2803,13 @@ impl TimelineView {
                 ("ids", gesture.get("ids")?.clone()),
                 ("anchor-id", gesture.get("anchor-id")?.clone()),
             ])),
-            Some(Value::Keyword(kind)) if kind == "resize-end" => Some(action_map(vec![
-                ("type", keyword(":finish-resize-items")),
-                ("ids", gesture.get("ids")?.clone()),
-                ("id", gesture.get("id")?.clone()),
-            ])),
+            Some(Value::Keyword(kind)) if kind == "resize-end" || kind == "resize-start" => {
+                Some(action_map(vec![
+                    ("type", keyword(":finish-resize-items")),
+                    ("ids", gesture.get("ids")?.clone()),
+                    ("id", gesture.get("id")?.clone()),
+                ]))
+            }
             // Terminal pair for the content-length drag, mirroring the other
             // paired gestures: hosts that must not commit per drag-frame
             // (arrangement song-end -> one undoable primitive) listen for
@@ -2490,6 +3003,12 @@ impl TimelineView {
     }
 }
 
+/// Whether a `:marquee` gesture began on a clip body rather than empty lane
+/// background (docs/arrangement-region-editing-spec.md 3.1).
+fn marquee_from_item_body(gesture: &HashMap<String, Value>) -> bool {
+    matches!(gesture.get("origin"), Some(Value::Keyword(origin)) if origin == "item-body")
+}
+
 fn vertical_scroll_passthrough(props: &HashMap<String, Value>) -> bool {
     matches!(
         props.get("scroll-passthrough"),
@@ -2609,6 +3128,13 @@ fn parse_item_content(value: &Value) -> Option<TimelineItemContent> {
                 Some(TimelineDot {
                     offset: entry.get("offset").and_then(as_number)?.clamp(0.0, 1.0),
                     value: entry.get("value").and_then(as_number)?.clamp(0.0, 1.0),
+                    // Optional (spec 3.2): a missing or malformed :width
+                    // degrades to the point dot, never a parse failure.
+                    width: entry
+                        .get("width")
+                        .and_then(as_number)
+                        .map(|width| width.clamp(0.0, 1.0))
+                        .unwrap_or(0.0),
                 })
             })
             .collect();
@@ -5371,5 +5897,198 @@ mod tests {
         let item = view.items.first().expect("item");
         let rect = view.item_rect(item).expect("item rect");
         assert_eq!(rect.col.round() as u16, grid_col);
+    }
+    // ── Clip anatomy (docs/arrangement-region-editing-spec.md 3.1) ─────────
+
+    /// One 8-beat item over a 16-beat view in a 20-row-tall lane, optionally
+    /// with a title bar.
+    fn title_bar_view(title_bar_height: Option<f64>) -> TimelineView {
+        let mut props = HashMap::from([
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(1.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(12.0)),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(0.0)),
+        ]);
+        if let Some(height) = title_bar_height {
+            props.insert("title-bar-height".to_string(), number_value(height));
+        }
+        TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 16.0,
+                height: 8.0,
+            },
+        )
+    }
+
+    fn hit_name(view: &TimelineView, col: f32, row: f32) -> &'static str {
+        match view.hit_test(col, row) {
+            Some(HitRegion::ItemTitleBar { .. }) => "title-bar",
+            Some(HitRegion::ItemEdgeStart { .. }) => "edge-start",
+            Some(HitRegion::ItemEdgeEnd { .. }) => "edge-end",
+            Some(HitRegion::ItemBody { .. }) => "body",
+            Some(HitRegion::Background { .. }) => "background",
+            Some(HitRegion::Header) => "header",
+            Some(HitRegion::Sidebar { .. }) => "sidebar",
+            Some(HitRegion::ContentLengthEnd) => "content-length-end",
+            None => "none",
+        }
+    }
+
+    /// With no title bar (the piano-roll default) the item is exactly what it
+    /// has always been: an end handle spanning the full height and body
+    /// everywhere else, with no start handle anywhere.
+    #[test]
+    fn hit_test_without_a_title_bar_is_unchanged() {
+        let view = title_bar_view(None);
+        // Item spans cols 4..12 (1 cell per beat).
+        for row in [0.1_f32, 4.0, 7.9] {
+            assert_eq!(hit_name(&view, 4.2, row), "body", "row {row}");
+            assert_eq!(hit_name(&view, 8.0, row), "body", "row {row}");
+            assert_eq!(hit_name(&view, 11.8, row), "edge-end", "row {row}");
+            // The start edge is a title-bar-only affordance.
+            assert_eq!(hit_name(&view, 3.5, row), "background", "row {row}");
+        }
+    }
+
+    /// With a title bar the handles and the move zone live on the bar only;
+    /// everything below it is body (the region-selection surface).
+    #[test]
+    fn hit_test_splits_the_item_at_the_title_bar() {
+        let view = title_bar_view(Some(2.0));
+        // Bar rows [0, 2): start handle, middle, end handle.
+        for row in [0.1_f32, 1.9] {
+            assert_eq!(hit_name(&view, 3.5, row), "edge-start", "row {row}");
+            assert_eq!(hit_name(&view, 4.2, row), "edge-start", "row {row}");
+            assert_eq!(hit_name(&view, 8.0, row), "title-bar", "row {row}");
+            assert_eq!(hit_name(&view, 11.8, row), "edge-end", "row {row}");
+        }
+        // Body rows [2, 8): no handles at all, including at both edges.
+        for row in [2.1_f32, 5.0, 7.9] {
+            assert_eq!(hit_name(&view, 4.2, row), "body", "row {row}");
+            assert_eq!(hit_name(&view, 8.0, row), "body", "row {row}");
+            assert_eq!(hit_name(&view, 11.8, row), "body", "row {row}");
+            assert_eq!(hit_name(&view, 3.5, row), "background", "row {row}");
+        }
+    }
+
+    /// The bar never swallows the whole clip: a title bar taller than the
+    /// lane still leaves a body row to select in.
+    #[test]
+    fn title_bar_never_consumes_the_whole_item() {
+        let view = title_bar_view(Some(64.0));
+        assert_eq!(hit_name(&view, 8.0, 0.5), "title-bar");
+        assert_eq!(hit_name(&view, 8.0, 7.5), "body");
+    }
+
+    /// Cursors: move over the bar, resize over both handles, default in the
+    /// body — and nothing but default anywhere without a title bar.
+    #[test]
+    fn title_bar_zones_report_their_cursors() {
+        let with_bar = title_bar_view(Some(2.0));
+        assert_eq!(
+            cursor_for_hit(with_bar.hit_test(8.0, 1.0)),
+            super::super::WidgetCursor::Grab
+        );
+        assert_eq!(
+            cursor_for_hit(with_bar.hit_test(4.2, 1.0)),
+            super::super::WidgetCursor::EwResize
+        );
+        assert_eq!(
+            cursor_for_hit(with_bar.hit_test(11.8, 1.0)),
+            super::super::WidgetCursor::EwResize
+        );
+        assert_eq!(
+            cursor_for_hit(with_bar.hit_test(8.0, 5.0)),
+            super::super::WidgetCursor::Default
+        );
+    }
+
+    /// Mirror of `TimelineWidget::cursor`'s mapping, driven straight off a
+    /// hit region so the test needs no `LayoutNode`.
+    fn cursor_for_hit(hit: Option<HitRegion>) -> super::super::WidgetCursor {
+        match hit {
+            Some(HitRegion::ItemEdgeEnd { .. })
+            | Some(HitRegion::ItemEdgeStart { .. })
+            | Some(HitRegion::ContentLengthEnd) => super::super::WidgetCursor::EwResize,
+            Some(HitRegion::ItemTitleBar { .. }) => super::super::WidgetCursor::Grab,
+            _ => super::super::WidgetCursor::Default,
+        }
+    }
+
+    /// Gestures follow the zones: the bar moves, the body marquees (tagged
+    /// so a zero-movement release does not clear the selection), and the
+    /// start handle opens a `:resize-start`.
+    #[test]
+    fn title_bar_zones_begin_their_gestures() {
+        let gesture_kind = |value: &Value| {
+            let map = get_map(value).expect("gesture map");
+            match map.get("kind") {
+                Some(Value::Keyword(kind)) => kind.clone(),
+                other => panic!("expected a gesture kind, got {other:?}"),
+            }
+        };
+        let with_bar = title_bar_view(Some(2.0));
+        assert_eq!(
+            gesture_kind(&with_bar.begin_gesture(8.0, 1.0).expect("bar gesture")),
+            "move"
+        );
+        assert_eq!(
+            gesture_kind(&with_bar.begin_gesture(4.2, 1.0).expect("start gesture")),
+            "resize-start"
+        );
+        assert_eq!(
+            gesture_kind(&with_bar.begin_gesture(11.8, 1.0).expect("end gesture")),
+            "resize-end"
+        );
+        let body = with_bar.begin_gesture(8.0, 5.0).expect("body gesture");
+        assert_eq!(gesture_kind(&body), "marquee");
+        assert!(marquee_from_item_body(&get_map(&body).expect("gesture map")));
+
+        // Without a title bar the body still starts a move, as it always has.
+        let without_bar = title_bar_view(None);
+        assert_eq!(
+            gesture_kind(&without_bar.begin_gesture(8.0, 5.0).expect("body gesture")),
+            "move"
+        );
+    }
+
+    /// docs/arrangement-region-editing-spec.md 3.2: `:width` on a dot is
+    /// optional and lenient — absent/malformed means the legacy point dot.
+    #[test]
+    fn dots_parse_optional_width_leniently() {
+        let content = |width: Option<Value>| {
+            let mut dot = vec![
+                ("offset", number_value(0.25)),
+                ("value", number_value(0.5)),
+            ];
+            if let Some(width) = width {
+                dot.push(("width", width));
+            }
+            map_value_raw(vec![("dots", list_value_raw(vec![map_value_raw(dot)]))])
+        };
+        let parsed_width = |width: Option<Value>| match parse_item_content(&content(width)) {
+            Some(TimelineItemContent::Dots { dots, .. }) => dots[0].width,
+            _ => panic!("expected dots content"),
+        };
+        assert_eq!(parsed_width(None), 0.0, "absent :width is a point dot");
+        assert_eq!(parsed_width(Some(number_value(0.25))), 0.25);
+        assert_eq!(parsed_width(Some(number_value(-1.0))), 0.0, "clamps low");
+        assert_eq!(parsed_width(Some(number_value(4.0))), 1.0, "clamps high");
+        assert_eq!(
+            parsed_width(Some(Value::String("junk".to_string()))),
+            0.0,
+            "malformed degrades to a point dot"
+        );
     }
 }

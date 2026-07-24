@@ -3614,6 +3614,7 @@ fragment float4 live_spectrogram_frag(
                 crate::widget_render::WidgetCursor::Default => CursorIcon::Default,
                 crate::widget_render::WidgetCursor::EwResize => CursorIcon::EwResize,
                 crate::widget_render::WidgetCursor::NsResize => CursorIcon::NsResize,
+                crate::widget_render::WidgetCursor::Grab => CursorIcon::Grab,
                 crate::widget_render::WidgetCursor::DragCopy => CursorIcon::Copy,
                 crate::widget_render::WidgetCursor::DragNotAllowed => CursorIcon::NotAllowed,
             };

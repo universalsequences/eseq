@@ -406,6 +406,10 @@ pub enum WidgetCursor {
     Default,
     EwResize,
     NsResize,
+    /// Open-hand grab affordance (clip title bars,
+    /// docs/arrangement-region-editing-spec.md 3.1 — spec'd as `Move`, drawn
+    /// as the grab hand).
+    Grab,
     DragCopy,
     DragNotAllowed,
 }

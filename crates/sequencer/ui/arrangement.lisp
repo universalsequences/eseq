@@ -34,6 +34,14 @@
 (def arrangement-header-height 1.6)
 (def arrangement-scene-lane-height 3.6)
 (def arrangement-track-lane-height 2.85)
+;; Clip title-bar height in cells (region spec 3.1): the move/resize strip
+;; above each clip's body. Fixed rather than proportional so clips read the
+;; same at any lane height; tune by eye against the Ableton reference.
+(def arrangement-clip-title-bar-height 0.9)
+;; Clip corner radius in CELLS (GarageBand-style rounded clips), so it scales
+;; with the UI zoom like the lane heights above. 0 gives the square clips
+;; every other timeline host draws.
+(def arrangement-clip-corner-radius 0.22)
 ;; Fixed width for the composed seqv-track-header column so every lane's time
 ;; axis starts at the same x; the scene lane leads with a spacer of the same
 ;; width (spec 4.2: the per-track sidebar role is played by the header).
@@ -205,13 +213,16 @@
 
 ;; Override spans are tinted brighter than scene-provided spans — the
 ;; `from-override` render hint from the lane projection (song-mode-spec 5.5).
+;; The lift is multiplicative, not a lerp toward white: mixing in white
+;; desaturated the track color into pastel, so arrangement clips no longer
+;; read as the same color the session grid and piano roll use for the track.
 (def arrangement-clip-color (i from-override)
   (let ((color (arrangement-track-color i)))
     (if from-override
       (list
-        (+ 0.4 (* 0.6 (nth color 0)))
-        (+ 0.4 (* 0.6 (nth color 1)))
-        (+ 0.4 (* 0.6 (nth color 2))))
+        (min 1 (* 1.15 (nth color 0)))
+        (min 1 (* 1.15 (nth color 1)))
+        (min 1 (* 1.15 (nth color 2))))
       color)))
 
 (def arrangement-track-clips (i)
@@ -329,6 +340,14 @@
     0.5
     (+ 0.15 (* 0.7 (/ (- note lo) (- hi lo))))))
 
+;; Note length in steps (4th event element, region spec 3.2). Older/short
+;; event rows degrade to a point dot rather than erroring.
+(def arrangement-event-duration (event)
+  (if (< (len event) 4)
+    0
+    (let ((duration (nth event 3)))
+      (if (= duration nil) 0 (max 0 duration)))))
+
 ;; Cap dots per item at arrangement-dot-cap, densest-first: events collapse
 ;; into 1/cap-wide time buckets (one dot per bucket), so dense clusters thin
 ;; out first while isolated events always survive. Events arrive step-ordered
@@ -355,7 +374,14 @@
                   (dict :last bucket
                     :dots (append (get acc :dots)
                             (list (dict :offset offset
-                                    :value (arrangement-dot-value (nth event 1) lo hi))))))))
+                                    :value (arrangement-dot-value (nth event 1) lo hi)
+                                    ;; Real note length normalized to the
+                                    ;; drawn window, clamped so a note never
+                                    ;; paints past the item's end.
+                                    :width (max 0
+                                             (min (- 1 offset)
+                                               (/ (arrangement-event-duration event)
+                                                 span))))))))))
             (dict :last -1 :dots '())
             events)
           :dots)))))
@@ -701,6 +727,8 @@
     :sidebar-width 0
     :header-height arrangement-header-height
     :time-ruler (dict :mode :bars-beats :beats-per-bar arrangement-beats-per-bar)
+    :title-bar-height arrangement-clip-title-bar-height
+    :item-corner-radius arrangement-clip-corner-radius
     :item-color (list 0.52 0.56 0.62)
     :loop-color (list 0.92 0.72 0.25)
     :playhead-time (bind-seq "song-position-beats")
@@ -738,6 +766,8 @@
     ;; Vertical scrolling belongs to the enclosing track scroll container;
     ;; horizontal deltas still pan the shared time axis.
     :scroll-passthrough :vertical
+    :title-bar-height arrangement-clip-title-bar-height
+    :item-corner-radius arrangement-clip-corner-radius
     :sidebar-width 0
     :header-height 0
     :focusable true

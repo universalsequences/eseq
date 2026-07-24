@@ -20630,9 +20630,11 @@
 
         // Hovering the clip's end edge at its RENDERED position must show
         // the resize cursor (the hover path needs the same scroll-offset
-        // adjustment as the click path).
+        // adjustment as the click path). The edge handles live on the clip's
+        // title bar (docs/arrangement-region-editing-spec.md 3.1), so hover
+        // the top of the clip, not its middle.
         let hover_col = lane5.rect.col + lane5.rect.width * (16.0 / 64.0) - 0.2;
-        let hover_row = lane5.rect.row - offset + lane5.rect.height * 0.5;
+        let hover_row = lane5.rect.row - offset + 0.4;
         editor.handle_mouse_precise(
             mouse(crossterm::event::MouseEventKind::Moved, hover_col, hover_row),
             0,
@@ -20682,10 +20684,11 @@
         let _ = editor.widget_layout();
 
         // End-edge resize on the scrolled clip: press on the clip's right
-        // edge, drag left past the snap threshold, release.
+        // edge (on its title bar, where the handles live), drag left past
+        // the snap threshold, release.
         let edge_col = lane5.rect.col + lane5.rect.width * (16.0 / 64.0) - 0.2;
         let target_col = lane5.rect.col + lane5.rect.width * (8.0 / 64.0);
-        let row = lane5.rect.row - offset + lane5.rect.height * 0.5;
+        let row = lane5.rect.row - offset + 0.4;
         editor.handle_mouse_precise(
             mouse(
                 crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -20768,7 +20771,13 @@
             num_steps: 16,
             // 16 sixteenth steps = one 4-beat cycle.
             length_beats: 4.0,
-            events: vec![(0.0, 0.0, 1.0), (4.0, 12.0, 1.0), (8.0, -12.0, 1.0)],
+            // Durations (region spec 3.2): one step, two steps, and a
+            // note running well past the pattern's end.
+            events: vec![
+                (0.0, 0.0, 1.0, 1.0),
+                (4.0, 12.0, 1.0, 2.0),
+                (8.0, -12.0, 1.0, 20.0),
+            ],
         };
         let dense = LanePatternEvents {
             pattern_id: 2,
@@ -20776,7 +20785,7 @@
             num_steps: 64,
             length_beats: 16.0,
             events: (0..600)
-                .map(|index| (index as f64 * 0.1, 0.0, 1.0))
+                .map(|index| (index as f64 * 0.1, 0.0, 1.0, 1.0))
                 .collect(),
         };
         let rt = editor.runtime_mut();
@@ -20842,6 +20851,24 @@
             Value::Number(0.15)
         );
 
+        // Note lengths normalize over the same window as offsets, and a
+        // note never paints past the item's end
+        // (docs/arrangement-region-editing-spec.md 3.2).
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots} 0) :width)")),
+            Value::Number(1.0 / 16.0),
+            "duration normalizes over the pattern length"
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots} 1) :width)")),
+            Value::Number(2.0 / 16.0)
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots} 2) :width)")),
+            Value::Number(0.5),
+            "an overlong note clamps at the window end"
+        );
+
         // 600 events collapse into <= 256 time buckets.
         let Value::Number(capped) = read(
             &mut editor,
@@ -20880,7 +20907,11 @@
             take_id: Some(7),
             num_steps: 32,
             length_beats: 8.0,
-            events: vec![(0.0, 0.0, 1.0), (16.0, 12.0, 1.0), (31.0, -12.0, 1.0)],
+            events: vec![
+                (0.0, 0.0, 1.0, 1.0),
+                (16.0, 12.0, 1.0, 1.0),
+                (31.0, -12.0, 1.0, 1.0),
+            ],
         };
         let rt = editor.runtime_mut();
         rt.set_reactive(

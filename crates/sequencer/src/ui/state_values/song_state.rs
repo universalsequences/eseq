@@ -71,9 +71,9 @@ pub(crate) struct SongFrameState {
 
 /// Flattened preview events for one pool pattern referenced by a track's
 /// lane clips (docs/arrangement-timeline-ui-spec.md 7.1): raw musical events
-/// `(time-in-steps, transpose, velocity)` plus the pattern length. The Lisp
-/// view owns turning these into normalized dot payloads; the widget never
-/// sees steps or timebases.
+/// `(time-in-steps, transpose, velocity, duration-in-steps)` plus the pattern
+/// length. The Lisp view owns turning these into normalized dot payloads; the
+/// widget never sees steps or timebases.
 #[derive(Clone, PartialEq)]
 pub(crate) struct LanePatternEvents {
     pub(crate) pattern_id: u64,
@@ -87,23 +87,30 @@ pub(crate) struct LanePatternEvents {
     /// pattern's timebase) — what the view needs to tile a looping clip.
     /// For a take entry: the take's full length in beats (takes never tile).
     pub(crate) length_beats: f64,
-    pub(crate) events: Vec<(f64, f64, f64)>,
+    pub(crate) events: Vec<(f64, f64, f64, f64)>,
 }
 
+/// Smallest published note length in steps, mirroring the piano roll's floor
+/// (`ui/piano_roll.rs`) so a zero-length step still reads as a note.
+const LANE_MIN_NOTE_DURATION: f64 = 0.03125;
+
 /// Flatten one pattern's step/chord content into `(time, transpose,
-/// velocity)` events, with times based at `base_step` and truncated at
-/// `step_limit` steps of the pattern.
+/// velocity, duration)` events, with times based at `base_step` and truncated
+/// at `step_limit` steps of the pattern. Durations are in the same step units
+/// as `time` (docs/arrangement-region-editing-spec.md 3.2).
 fn flatten_pattern_events(
     data: &sequencer::sequencer::TrackPatternData,
     base_step: f64,
     step_limit: usize,
-    events: &mut Vec<(f64, f64, f64)>,
+    events: &mut Vec<(f64, f64, f64, f64)>,
 ) {
     for step in 0..step_limit.min(data.step_data.len()) {
         if events.len() >= LANE_PATTERN_EVENT_CAP {
             break;
         }
         let velocity = f64::from(data.step_data[step][StepParam::Velocity as usize]);
+        let step_duration = f64::from(data.step_data[step][StepParam::Duration as usize])
+            .max(LANE_MIN_NOTE_DURATION);
         let chord = data.chord_snapshot.steps.get(step);
         match chord {
             Some(notes) if !notes.is_empty() => {
@@ -115,10 +122,22 @@ fn flatten_pattern_events(
                         .and_then(|delays| delays.get(voice))
                         .copied()
                         .unwrap_or(0.0);
+                    // A voice with no recorded duration inherits the step's
+                    // (piano-roll precedent, `piano_roll.rs`).
+                    let duration = data
+                        .chord_snapshot
+                        .durations
+                        .get(step)
+                        .and_then(|durations| durations.get(voice))
+                        .map(|duration| f64::from(*duration))
+                        .filter(|duration| *duration > 0.0)
+                        .unwrap_or(step_duration)
+                        .max(LANE_MIN_NOTE_DURATION);
                     events.push((
                         base_step + step as f64 + f64::from(delay),
                         f64::from(*transpose),
                         velocity,
+                        duration,
                     ));
                 }
             }
@@ -128,7 +147,12 @@ fn flatten_pattern_events(
                     let delay = f64::from(data.step_data[step][StepParam::Delay as usize]);
                     let transpose =
                         f64::from(data.step_data[step][StepParam::Transpose as usize]);
-                    events.push((base_step + step as f64 + delay, transpose, velocity));
+                    events.push((
+                        base_step + step as f64 + delay,
+                        transpose,
+                        velocity,
+                        step_duration,
+                    ));
                 }
             }
         }
@@ -245,11 +269,12 @@ pub(crate) fn build_song_lane_events_value(events: &[Vec<LanePatternEvents>]) ->
                     let events = pattern
                         .events
                         .iter()
-                        .map(|(time, transpose, velocity)| {
+                        .map(|(time, transpose, velocity, duration)| {
                             Rc::new(RefCell::new(Value::List(vec![
                                 Rc::new(RefCell::new(Value::Number(*time))),
                                 Rc::new(RefCell::new(Value::Number(*transpose))),
                                 Rc::new(RefCell::new(Value::Number(*velocity))),
+                                Rc::new(RefCell::new(Value::Number(*duration))),
                             ])))
                         })
                         .collect();
