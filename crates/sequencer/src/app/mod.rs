@@ -1524,7 +1524,19 @@ impl App {
         // Slice C capture observation (spec 8.1/10.3): record the audible
         // launch after it successfully applied. Cheap control-thread Vec
         // push; no-op unless an arrangement-capture take is active.
-        let beat = audible_beats.unwrap_or_else(|| self.state.scheduler_rendered_beats());
+        // Immediate launches stamp the latency-compensated audible beat
+        // from the audio-anchored record clock — the same clock live note
+        // recording resolves against — so the captured row lands where the
+        // performer HEARD the launch, not at the scheduler's rendered
+        // frontier (that gap is the audio output latency, ~a 16th at
+        // 120 BPM). Quantized launches keep their scheduler-stamped grid
+        // deadline via `audible_beats`.
+        let beat = audible_beats.unwrap_or_else(|| {
+            self.state
+                .record_beats_at_instant(std::time::Instant::now())
+                .unwrap_or_else(|| self.state.scheduler_rendered_beats())
+                .max(0.0)
+        });
         self.record_song_capture_launch(target, beat);
         Ok(PatternLaunchOutcome {
             token: None,

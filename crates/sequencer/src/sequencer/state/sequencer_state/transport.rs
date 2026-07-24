@@ -59,6 +59,20 @@ impl SequencerState {
         track: usize,
         timestamp: Instant,
     ) -> Option<RecordPosition> {
+        let beats = self.record_beats_at_instant(timestamp)?;
+        self.record_position_at_beat(track, beats)
+    }
+
+    /// Audible-timeline beat at `timestamp`: the audio-anchored record clock
+    /// interpolated to the given wall-clock instant, minus the configured
+    /// record latency — i.e. the beat the performer was HEARING when they
+    /// acted. This is the clock live note recording resolves against;
+    /// arrangement capture stamps immediate launches with it too, so a
+    /// captured scene launch lands where it was heard rather than at the
+    /// scheduler's rendered frontier (the gap is the audio output latency —
+    /// about a 16th note at 120 BPM). `None` until the audio callback has
+    /// published an anchor (transport not yet running).
+    pub fn record_beats_at_instant(&self, timestamp: Instant) -> Option<f64> {
         let (anchor_beats, elapsed) = self.transport.record_clock.sample(timestamp)?;
         let bpm = self.transport.bpm.load(Ordering::Relaxed) as f64;
         let latency_seconds = f32::from_bits(
@@ -67,9 +81,7 @@ impl SequencerState {
                 .load(Ordering::Relaxed),
         )
         .max(0.0) as f64;
-        let beats =
-            anchor_beats + elapsed.as_secs_f64() * bpm / 60.0 - latency_seconds * bpm / 60.0;
-        self.record_position_at_beat(track, beats)
+        Some(anchor_beats + elapsed.as_secs_f64() * bpm / 60.0 - latency_seconds * bpm / 60.0)
     }
 
     pub fn is_playing(&self) -> bool {
