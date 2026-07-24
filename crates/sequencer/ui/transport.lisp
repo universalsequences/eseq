@@ -612,7 +612,7 @@
         ;; SEQ.use-arrangement reactive directly (ReactiveRef, not a literal).
         (subtree :key "transport-use-arrangement-toggle"
           (box :debug-name "transport-use-arrangement-toggle"
-            :width 5.4 :height 1.1
+            :width 6.2 :height 1.1
             :background "pattern-pill-bg"
             :active (bind-seq "use-arrangement")
             :style transport-icon-style
