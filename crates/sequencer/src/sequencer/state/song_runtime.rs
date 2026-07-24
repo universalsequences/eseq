@@ -35,8 +35,14 @@ pub struct RuntimeSongRow {
     /// explicit-empty: the track is silenced for the row).
     pub overrides: Vec<(usize, Option<PatternId>)>,
     /// Effective pattern per track: override, else scene cell, else `None`
-    /// (the track is scene-silenced for this row).
+    /// (the track is scene-silenced for this row). For a take lane this is
+    /// the CURRENT CHUNK's pool pattern (the row content), which changes at
+    /// chunk boundaries — identity comparisons must use `resolved_sources`.
     pub resolved_pattern_ids: Vec<Option<PatternId>>,
+    /// Source identity per track (takes spec 7.3): the `TakeId` for take
+    /// lanes — never the current chunk's pattern id, so crossing a chunk
+    /// boundary is not a source change (no accumulator reset, no retrig).
+    pub resolved_sources: Vec<LaneSource>,
     /// Per-track clip start offset in fractional pattern steps (takes spec
     /// 7.1): the override's stored `offset_steps`, `0.0` for scene-resolved
     /// lanes. Consumed with the row's `start_beat` as the per-lane phase

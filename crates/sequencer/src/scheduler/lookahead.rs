@@ -46,18 +46,21 @@ impl SchedulerLookaheadState {
     }
 }
 
-/// Flag accumulator resets for exactly the tracks whose resolved pattern
-/// changed across a song row boundary. Tracks playing the same pattern
+/// Flag accumulator resets for exactly the tracks whose resolved SOURCE
+/// changed across a song row boundary. Tracks playing the same source
 /// through the boundary keep their accumulator state, so a row split made to
 /// edit one track's clip is audibly transparent to every other track.
-/// Existing pending flags are preserved (marking is additive).
+/// Source identity is take-aware (takes spec 7.3): a take lane's identity is
+/// its `TakeId`, so the synthetic rows a chunk boundary introduces are NOT a
+/// source change — no reset, a take is one continuous clip. Existing pending
+/// flags are preserved (marking is additive).
 pub(super) fn mark_song_row_accum_resets(
     prev: &crate::sequencer::RuntimeSongRow,
     next: &crate::sequencer::RuntimeSongRow,
     resets: &mut [bool; MAX_TRACKS],
 ) {
     for (track, reset) in resets.iter_mut().enumerate() {
-        if prev.resolved_pattern_ids.get(track) != next.resolved_pattern_ids.get(track) {
+        if prev.resolved_sources.get(track) != next.resolved_sources.get(track) {
             *reset = true;
         }
     }

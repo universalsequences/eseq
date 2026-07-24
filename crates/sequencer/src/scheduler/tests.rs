@@ -5573,6 +5573,132 @@
         });
     }
 
+    /// Install a two-chunk take (256 + 40 = 296 steps, transposes 5/6) on
+    /// track 0 and return its id. Chunks are MAX_STEPS-long 16th-timebase
+    /// patterns, so one chunk spans 64 beats.
+    fn song_mode_install_take(state: &SequencerState) -> crate::sequencer::TakeId {
+        state.with_scenes_mut(|scenes| {
+            let mut chunk = scenes.track_pools[0]
+                .get(crate::sequencer::PatternId(1))
+                .expect("source pattern")
+                .clone();
+            chunk.track_params.num_steps = crate::sequencer::MAX_STEPS;
+            for step in 0..crate::sequencer::MAX_STEPS {
+                chunk.track_bits[step / 64] |= 1 << (step % 64);
+                chunk.step_data[step][StepParam::Transpose.index()] = 5.0;
+            }
+            let mut chunk_b = chunk.clone();
+            for step in 0..crate::sequencer::MAX_STEPS {
+                chunk_b.step_data[step][StepParam::Transpose.index()] = 6.0;
+            }
+            let chunk_a = scenes.track_pools[0].insert(chunk);
+            let chunk_b = scenes.track_pools[0].insert(chunk_b);
+            scenes.take_pools[0].insert(None, vec![chunk_a, chunk_b], 296)
+        })
+    }
+
+    #[test]
+    fn preflight_expands_take_rows_at_chunk_boundaries_and_take_end() {
+        let (state, _) = song_mode_fixture();
+        let take = song_mode_install_take(&state);
+        let (chunk_a, chunk_b) = state.with_scenes_mut(|scenes| {
+            let take = scenes.take_pools[0].get(take).expect("take");
+            (take.chunks[0], take.chunks[1])
+        });
+        let mut row = song_mode_row(0, 0.0, 0, Vec::new());
+        row.overrides = vec![crate::sequencer::ProjectSongTrackOverride::new_take(
+            0,
+            take.0,
+            0.0,
+        )];
+        song_mode_commit(&state, vec![row], 100.0, false);
+        let runtime = state.preflight_runtime_song().expect("preflight");
+
+        // One project row expands to three runtime rows: chunk 0 at beat 0,
+        // chunk 1 at beat 64 (256 steps of a 16th timebase), and the silent
+        // tail at beat 74 (296 steps). All share the project row's id.
+        assert_eq!(runtime.rows.len(), 3);
+        assert!(runtime
+            .rows
+            .iter()
+            .all(|row| row.id == crate::sequencer::SongRowId(0)));
+        let starts: Vec<f64> = runtime.rows.iter().map(|row| row.start_beat).collect();
+        assert!((starts[0] - 0.0).abs() < 1e-9, "{starts:?}");
+        assert!((starts[1] - 64.0).abs() < 1e-9, "{starts:?}");
+        assert!((starts[2] - 74.0).abs() < 1e-9, "{starts:?}");
+
+        // Take lane: content is the governing chunk, identity is the TakeId,
+        // chunk-local offsets restart at 0, and the tail is silent (no wrap).
+        assert_eq!(runtime.rows[0].resolved_pattern_ids[0], Some(chunk_a));
+        assert_eq!(runtime.rows[1].resolved_pattern_ids[0], Some(chunk_b));
+        assert_eq!(runtime.rows[2].resolved_pattern_ids[0], None);
+        assert_eq!(
+            runtime.rows[0].resolved_sources[0],
+            crate::sequencer::LaneSource::Take(take)
+        );
+        assert_eq!(
+            runtime.rows[1].resolved_sources[0],
+            crate::sequencer::LaneSource::Take(take)
+        );
+        assert_eq!(
+            runtime.rows[2].resolved_sources[0],
+            crate::sequencer::LaneSource::Empty
+        );
+        assert!((runtime.rows[0].lane_offsets[0] - 0.0).abs() < 1e-6);
+        assert!((runtime.rows[1].lane_offsets[0] - 0.0).abs() < 1e-6);
+
+        // The scene-resolved lane on track 1 stays phase-continuous across
+        // the synthetic splits: 64 beats = 256 steps ≡ 0 (mod 16), 74 beats
+        // = 296 steps ≡ 8 (mod 16).
+        assert!((runtime.rows[1].lane_offsets[1] - 0.0).abs() < 1e-6);
+        assert!((runtime.rows[2].lane_offsets[1] - 8.0).abs() < 1e-6);
+        assert_eq!(
+            runtime.rows[1].resolved_sources[1],
+            crate::sequencer::LaneSource::Pattern(crate::sequencer::PatternId(1))
+        );
+
+        // Chunk boundaries are NOT a source change: no accumulator reset for
+        // the take lane (or anyone else). The take end IS one for the lane.
+        let mut resets = [false; MAX_TRACKS];
+        crate::scheduler::mark_song_row_accum_resets(&runtime.rows[0], &runtime.rows[1], &mut resets);
+        assert!(resets.iter().all(|reset| !reset), "{resets:?}");
+        crate::scheduler::mark_song_row_accum_resets(&runtime.rows[1], &runtime.rows[2], &mut resets);
+        assert!(resets[0], "take end silences the lane -> reset");
+        assert!(!resets[1], "unrelated lane keeps its accumulator");
+    }
+
+    #[test]
+    fn preflight_take_offset_resolves_mid_chunk_and_clips_short_spans() {
+        let (state, _) = song_mode_fixture();
+        let take = song_mode_install_take(&state);
+        // Row 0 plays scenes; row 1 at beat 10 re-enters the take at step
+        // 12.5; row 2 at beat 20 returns to the scene — the take span never
+        // reaches a chunk boundary, so no synthetic split is inserted.
+        let mut take_row = song_mode_row(1, 10.0, 0, Vec::new());
+        take_row.overrides = vec![crate::sequencer::ProjectSongTrackOverride::new_take(
+            0,
+            take.0,
+            12.5,
+        )];
+        song_mode_commit(
+            &state,
+            vec![
+                song_mode_row(0, 0.0, 0, Vec::new()),
+                take_row,
+                song_mode_row(2, 20.0, 1, Vec::new()),
+            ],
+            32.0,
+            false,
+        );
+        let runtime = state.preflight_runtime_song().expect("preflight");
+        assert_eq!(runtime.rows.len(), 3, "no synthetic splits");
+        assert_eq!(
+            runtime.rows[1].resolved_sources[0],
+            crate::sequencer::LaneSource::Take(take)
+        );
+        assert!((runtime.rows[1].lane_offsets[0] - 12.5).abs() < 1e-6);
+    }
+
     #[test]
     fn song_unquantized_row_boundary_keeps_sample_offset() {
         run_with_scheduler_stack(|| {
