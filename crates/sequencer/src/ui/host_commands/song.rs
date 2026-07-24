@@ -81,7 +81,7 @@ fn parse_override(value: &Value) -> Result<ProjectSongTrackOverride, String> {
                     )
                 }
             };
-            override_from_numbers(track, pattern_id)
+            override_from_numbers(track, pattern_id, 0.0)
         }
         Value::Map(map) => {
             let track = map_number(map, "track")
@@ -92,7 +92,9 @@ fn parse_override(value: &Value) -> Result<ProjectSongTrackOverride, String> {
             if pattern_id.is_none() && !has_key {
                 return Err("override entry is missing :pattern-id".to_string());
             }
-            override_from_numbers(track, pattern_id)
+            // Optional clip start offset in pattern steps (takes spec 6.2).
+            let offset_steps = map_number(map, "offset-steps").unwrap_or(0.0);
+            override_from_numbers(track, pattern_id, offset_steps)
         }
         _ => Err("override entries must be (track pattern-id) pairs or maps".to_string()),
     }
@@ -101,6 +103,7 @@ fn parse_override(value: &Value) -> Result<ProjectSongTrackOverride, String> {
 fn override_from_numbers(
     track: f64,
     pattern_id: Option<f64>,
+    offset_steps: f64,
 ) -> Result<ProjectSongTrackOverride, String> {
     if !track.is_finite() || track < 0.0 || track.fract() != 0.0 {
         return Err("override track must be a non-negative integer".to_string());
@@ -119,9 +122,13 @@ fn override_from_numbers(
             Some(id as u64)
         }
     };
+    if !offset_steps.is_finite() || offset_steps < 0.0 {
+        return Err("override offset-steps must be a finite, non-negative number".to_string());
+    }
     Ok(ProjectSongTrackOverride {
         track: track as usize,
         pattern_id,
+        offset_steps,
     })
 }
 
@@ -227,7 +234,19 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
                     )
                 }
             };
-            app.song_track_paint(track as usize, start_beat, end_beat, pattern_id)?;
+            // Optional clip anchor (takes spec 7.4): the grow gesture passes
+            // the existing clip's anchor so the extension continues the loop
+            // instead of re-starting it at the paint start.
+            let anchor_beat = map_number(map, "anchor-beat").unwrap_or(start_beat);
+            let anchor_offset_steps = map_number(map, "anchor-offset-steps").unwrap_or(0.0);
+            app.song_track_paint_anchored(
+                track as usize,
+                start_beat,
+                end_beat,
+                pattern_id,
+                anchor_beat,
+                anchor_offset_steps,
+            )?;
             Ok(match pattern_id {
                 Some(id) => format!(
                     "Painted pattern {id} on track {} over beats {start_beat}-{end_beat}",
@@ -425,7 +444,7 @@ mod tests {
     fn override_entries_parse_from_pairs_and_maps() {
         assert_eq!(
             parse_override(&pair(1.0, 3.0)).unwrap(),
-            ProjectSongTrackOverride { track: 1, pattern_id: Some(3) }
+            ProjectSongTrackOverride::new(1, Some(3))
         );
         assert_eq!(
             parse_override(&value_map(vec![
@@ -433,14 +452,14 @@ mod tests {
                 ("pattern-id", Value::Number(5.0)),
             ]))
             .unwrap(),
-            ProjectSongTrackOverride { track: 2, pattern_id: Some(5) }
+            ProjectSongTrackOverride::new(2, Some(5))
         );
         assert!(parse_override(&pair(-1.0, 3.0)).is_err());
         // Pattern id 0 and nil both mean explicit-empty (the track plays
         // nothing for the row).
         assert_eq!(
             parse_override(&pair(1.0, 0.0)).unwrap(),
-            ProjectSongTrackOverride { track: 1, pattern_id: None }
+            ProjectSongTrackOverride::new(1, None)
         );
         assert_eq!(
             parse_override(&Value::List(vec![
@@ -448,7 +467,7 @@ mod tests {
                 Rc::new(RefCell::new(Value::Nil)),
             ]))
             .unwrap(),
-            ProjectSongTrackOverride { track: 1, pattern_id: None }
+            ProjectSongTrackOverride::new(1, None)
         );
         assert!(parse_override(&pair(1.0, -2.0)).is_err());
         assert!(parse_override(&pair(1.0, 1.5)).is_err());
@@ -470,7 +489,7 @@ mod tests {
         assert_eq!(spec.scene, 2);
         assert_eq!(
             spec.overrides,
-            vec![ProjectSongTrackOverride { track: 0, pattern_id: Some(3) }]
+            vec![ProjectSongTrackOverride::new(0, Some(3))]
         );
 
         let missing_scene = value_map(vec![("start-beat", Value::Number(0.0))]);

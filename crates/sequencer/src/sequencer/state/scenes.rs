@@ -279,6 +279,19 @@ impl ProjectScenes {
                 .or_else(|| scene.cells.get(track).copied().flatten())
                 .filter(|id| self.track_pools[track].contains(*id))
             else {
+                // Bare track (takes spec 11.1): no pattern exists anywhere
+                // for this lane — the pool is EMPTY, which distinguishes a
+                // bare track from a deliberately cleared cell (cleared
+                // cells must stay cleared). Materialize one lazily on the
+                // first real content (any active step) so live edits
+                // persist; an untouched bare track keeps its empty pool
+                // and None cell.
+                if self.track_pools[track].patterns.is_empty()
+                    && data.track_bits.iter().any(|bits| *bits != 0)
+                {
+                    let id = self.track_pools[track].insert(data);
+                    scene.cells[track] = Some(id);
+                }
                 continue;
             };
             if let Some(slot) = self.track_pools[track].get_mut(id) {

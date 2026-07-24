@@ -37,6 +37,11 @@ pub struct RuntimeSongRow {
     /// Effective pattern per track: override, else scene cell, else `None`
     /// (the track is scene-silenced for this row).
     pub resolved_pattern_ids: Vec<Option<PatternId>>,
+    /// Per-track clip start offset in fractional pattern steps (takes spec
+    /// 7.1): the override's stored `offset_steps`, `0.0` for scene-resolved
+    /// lanes. Consumed with the row's `start_beat` as the per-lane phase
+    /// anchor by the scheduler clock.
+    pub lane_offsets: Vec<f64>,
     /// Complete scheduler snapshot for this row, materialized outside the
     /// audio callback. Swapping to it at a boundary is allocation-free.
     pub scheduler_snapshot: Arc<SequencerSnapshot>,
@@ -401,6 +406,16 @@ impl SongPlaybackRuntime {
 
     pub fn row_snapshot(&self, row: usize) -> Arc<SequencerSnapshot> {
         Arc::clone(&self.song.rows[row].scheduler_snapshot)
+    }
+
+    /// The row's per-lane phase anchor in the scheduler clock's beat domain
+    /// (takes spec 7.3): the beat at which every lane clip of this row
+    /// starts (`row.start_beat` translated by the clock offset, so it stays
+    /// correct after a mid-song start or a loop wrap), plus the per-track
+    /// clip step offsets.
+    pub fn row_clock_anchor(&self, row: usize) -> (f64, &[f64]) {
+        let row = &self.song.rows[row];
+        (row.start_beat - self.clock_beat_offset, &row.lane_offsets)
     }
 
     fn publish_position(&self, mailbox: &SongPlaybackMailbox, anchor_sample: u64, anchor_beat: f64) {

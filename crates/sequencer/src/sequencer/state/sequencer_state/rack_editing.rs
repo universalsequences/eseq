@@ -24,6 +24,22 @@ impl SequencerState {
         snapshot.track_pattern_data(track)
     }
 
+    /// Grow the scene/pool bookkeeping to cover a newly added track.
+    ///
+    /// Bare tracks (takes spec 11.1, scoped): a new track materializes
+    /// exactly ONE pattern — into the CURRENT scene's cell — and gets a
+    /// `None` cell in every other scene, instead of the historical
+    /// one-pattern-per-scene seeding. The timeline therefore shows the new
+    /// lane empty everywhere the current scene doesn't play, and other
+    /// scenes stay bare until the user puts content there.
+    ///
+    /// The single current-scene pattern is deliberate, not an oversight:
+    /// device-value edits, track-creation history capture
+    /// (`capture_track_instrument_pattern_state`), and the rack rebuild
+    /// machinery all key on the track's effective pattern, so a track with
+    /// an empty pool cannot be edited or even committed to history. Fully
+    /// bare tracks (empty pool) need that machinery decoupled from pattern
+    /// data first — deferred alongside the take-pool work (spec Phase C).
     pub fn extend_all_pattern_snapshots_to_track(
         &self,
         track_count: usize,
@@ -45,9 +61,6 @@ impl SequencerState {
         while scenes.track_pools.len() < track_count {
             scenes.track_pools.push(TrackPatternPool::default());
             scenes.track_overrides.push(None);
-            for scene in &mut scenes.scenes {
-                scene.cells.push(None);
-            }
         }
         if track >= scenes.track_pools.len() {
             return;
@@ -56,9 +69,12 @@ impl SequencerState {
             while scenes.scenes[scene_idx].cells.len() < track_count {
                 scenes.scenes[scene_idx].cells.push(None);
             }
-            if scenes.scenes[scene_idx].cells[track].is_none() {
-                let id = scenes.track_pools[track].insert(default_data.clone());
-                scenes.scenes[scene_idx].cells[track] = Some(id);
+        }
+        let current_scene = scenes.current_scene;
+        if let Some(scene) = scenes.scenes.get(current_scene) {
+            if scene.cells.get(track).copied().flatten().is_none() {
+                let id = scenes.track_pools[track].insert(default_data);
+                scenes.scenes[current_scene].cells[track] = Some(id);
             }
         }
     }

@@ -251,38 +251,114 @@ impl App {
             );
         }
         let end_beat = (end_raw_beats - take.origin_beats).max(0.0);
-        let rows = consolidate(&take.initial, &take.events);
-        let specs: Vec<SongRowSpec> = rows
-            .into_iter()
-            // A launch audible at or after the Stop boundary was never part
-            // of the audible performance: drop it (the beat-zero row stays).
-            .filter(|row| row.start_beat == 0.0 || row.start_beat < end_beat)
-            .map(|row| SongRowSpec {
-                start_beat: row.start_beat,
-                scene: row.scene,
-                overrides: row
-                    .overrides
-                    .into_iter()
-                    .map(|(track, id)| crate::sequencer::ProjectSongTrackOverride {
-                        track,
-                        pattern_id: Some(id.0),
-                    })
-                    .collect(),
-            })
-            .collect();
-        let row_count = specs.len();
+        let captured = consolidate(&take.initial, &take.events);
+        let previous = self.state.committed_song();
         // Keep the previous song's loop preference; a fresh project captures
         // a non-looping song.
-        let loop_enabled = self
-            .state
-            .committed_song()
+        let loop_enabled = previous
+            .as_ref()
             .map(|song| song.loop_enabled)
             .unwrap_or(false);
-        self.song_replace(specs, end_beat, loop_enabled)
+
+        // Splice stopgap (takes spec 9.5): with an existing committed song,
+        // the commit replaces it only from the FIRST captured launch event's
+        // beat onward — hitting record and listening before the first launch
+        // must not erase the head of the song. Recording over an empty
+        // project keeps the whole-song commit (spec 9.3: "record from an
+        // empty song").
+        let punch_in = take
+            .events
+            .iter()
+            .map(|event| event.beat)
+            .min_by(|a, b| a.partial_cmp(b).expect("capture beats are finite"));
+
+        let mut specs: Vec<SongRowSpec> = Vec::new();
+        let final_end_beat;
+        match (&previous, punch_in) {
+            (Some(_), None) => {
+                // No launches performed: nothing to splice; the committed
+                // song is untouched and no undo entry is created (spec 9.1).
+                return Ok(
+                    "Arrangement capture ended: no launches captured; the committed song \
+                     is unchanged"
+                        .to_string(),
+                );
+            }
+            (Some(previous), Some(punch_in)) => {
+                // Existing rows before the punch-in survive verbatim
+                // (offsets and explicit-empty overrides included).
+                specs.extend(
+                    previous
+                        .rows
+                        .iter()
+                        .filter(|row| row.start_beat < punch_in)
+                        .map(|row| SongRowSpec {
+                            start_beat: row.start_beat,
+                            scene: row.scene,
+                            overrides: row.overrides.clone(),
+                        }),
+                );
+                // Captured state from the punch-in on: the captured row
+                // governing `punch_in` (re-based to start exactly there),
+                // then every later captured row. Row zero of `captured`
+                // always exists, so a governing row is guaranteed.
+                let governing = captured
+                    .iter()
+                    .rposition(|row| row.start_beat <= punch_in)
+                    .expect("captured rows always include a beat-zero row");
+                for (idx, row) in captured.iter().enumerate().skip(governing) {
+                    let start_beat = if idx == governing {
+                        punch_in
+                    } else {
+                        row.start_beat
+                    };
+                    if start_beat > 0.0 && start_beat >= end_beat {
+                        // A launch audible at or after the Stop boundary was
+                        // never part of the audible performance: drop it.
+                        continue;
+                    }
+                    specs.push(captured_row_spec(start_beat, row));
+                }
+                final_end_beat = previous.end_beat.max(end_beat);
+            }
+            (None, _) => {
+                // Whole-song commit, exactly as before this stopgap.
+                specs.extend(
+                    captured
+                        .iter()
+                        .filter(|row| row.start_beat == 0.0 || row.start_beat < end_beat)
+                        .map(|row| captured_row_spec(row.start_beat, row)),
+                );
+                final_end_beat = end_beat;
+            }
+        }
+        // The seam between the preserved head and the spliced tail may leave
+        // adjacent identical states; drop the later one (the same canonical
+        // form `ProjectSong::normalize` enforces) so validation accepts it.
+        specs.dedup_by(|later, earlier| {
+            earlier.scene == later.scene && earlier.overrides == later.overrides
+        });
+
+        let row_count = specs.len();
+        self.song_replace(specs, final_end_beat, loop_enabled)
             .map_err(|error| format!("the captured take could not be committed: {error}"))?;
         Ok(format!(
-            "Arrangement capture committed: {row_count} row(s), end beat {end_beat:.3}"
+            "Arrangement capture committed: {row_count} row(s), end beat {final_end_beat:.3}"
         ))
+    }
+}
+
+fn captured_row_spec(start_beat: f64, row: &CapturedSongState) -> SongRowSpec {
+    SongRowSpec {
+        start_beat,
+        scene: row.scene,
+        overrides: row
+            .overrides
+            .iter()
+            .map(|(track, id)| {
+                crate::sequencer::ProjectSongTrackOverride::new(*track, Some(id.0))
+            })
+            .collect(),
     }
 }
 

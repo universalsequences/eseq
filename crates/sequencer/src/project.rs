@@ -2963,10 +2963,7 @@ mod tests {
                     id: SongRowId(0),
                     start_beat: 0.0,
                     scene: 0,
-                    overrides: vec![ProjectSongTrackOverride {
-                        track: 1,
-                        pattern_id: Some(1),
-                    }],
+                    overrides: vec![ProjectSongTrackOverride::new(1, Some(1))],
                 },
                 ProjectSongRow {
                     id: SongRowId(3),

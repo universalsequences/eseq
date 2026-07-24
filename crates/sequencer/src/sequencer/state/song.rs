@@ -26,10 +26,32 @@ pub struct SongRowId(pub u64);
 /// override: the track plays nothing for the row even when the base scene's
 /// cell holds a pattern (the arrangement's sparsity primitive). Serde reads
 /// a legacy bare number as `Some`, so old project files load unchanged.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectSongTrackOverride {
     pub track: usize,
     pub pattern_id: Option<u64>,
+    /// Start offset into the source in fractional pattern steps of this
+    /// track's timebase (takes spec 6.2): the anchored phase formula plays
+    /// source step `steps(beat - start_beat) + offset_steps` (mod pattern
+    /// length). `0.0` — the serde default, so existing files load
+    /// unchanged — means the clip begins at source step 0 at its row start.
+    #[serde(default, skip_serializing_if = "offset_steps_is_zero")]
+    pub offset_steps: f64,
+}
+
+impl ProjectSongTrackOverride {
+    /// Override with the default offset (clip starts at source step 0).
+    pub fn new(track: usize, pattern_id: Option<u64>) -> Self {
+        Self {
+            track,
+            pattern_id,
+            offset_steps: 0.0,
+        }
+    }
+}
+
+fn offset_steps_is_zero(offset: &f64) -> bool {
+    *offset == 0.0
 }
 
 /// A complete session launch state beginning at `start_beat`: a base scene
@@ -67,6 +89,9 @@ pub struct LaneClip {
     pub end_beat: f64,
     /// Resolved pattern: override, else scene cell, else `None`.
     pub pattern: Option<PatternId>,
+    /// Start offset into the pattern in fractional steps (takes spec 6.2):
+    /// the override's stored offset, or `0.0` for scene-resolved spans.
+    pub offset_steps: f64,
     /// Render hint: `true` when the pattern came from a row override.
     pub from_override: bool,
 }
@@ -203,6 +228,15 @@ impl ProjectSong {
                         ));
                     }
                 }
+                if !over.offset_steps.is_finite() || over.offset_steps < 0.0 {
+                    return Err(format!(
+                        "Song row {} track {} offset {} must be a finite, non-negative \
+                         step count",
+                        idx + 1,
+                        over.track + 1,
+                        over.offset_steps
+                    ));
+                }
             }
         }
         for (idx, pair) in self.rows.windows(2).enumerate() {
@@ -300,10 +334,10 @@ pub fn project_lanes(song: &ProjectSong, scenes: &ProjectScenes) -> Vec<Vec<Lane
                         .overrides
                         .iter()
                         .find(|over| over.track == track);
-                    let (pattern, from_override) = match override_entry {
+                    let (pattern, offset_steps, from_override) = match override_entry {
                         // Explicit-empty (`pattern_id: None`) resolves to no
                         // pattern WITHOUT falling back to the scene cell.
-                        Some(over) => (over.pattern_id.map(PatternId), true),
+                        Some(over) => (over.pattern_id.map(PatternId), over.offset_steps, true),
                         None => (
                             scenes
                                 .scenes
@@ -311,6 +345,7 @@ pub fn project_lanes(song: &ProjectSong, scenes: &ProjectScenes) -> Vec<Vec<Lane
                                 .and_then(|scene| scene.cells.get(track))
                                 .copied()
                                 .flatten(),
+                            0.0,
                             false,
                         ),
                     };
@@ -319,6 +354,7 @@ pub fn project_lanes(song: &ProjectSong, scenes: &ProjectScenes) -> Vec<Vec<Lane
                         start_beat: row.start_beat,
                         end_beat,
                         pattern,
+                        offset_steps,
                         from_override,
                     }
                 })
@@ -421,17 +457,11 @@ mod tests {
     use super::*;
 
     fn over(track: usize, pattern_id: u64) -> ProjectSongTrackOverride {
-        ProjectSongTrackOverride {
-            track,
-            pattern_id: Some(pattern_id),
-        }
+        ProjectSongTrackOverride::new(track, Some(pattern_id))
     }
 
     fn empty_over(track: usize) -> ProjectSongTrackOverride {
-        ProjectSongTrackOverride {
-            track,
-            pattern_id: None,
-        }
+        ProjectSongTrackOverride::new(track, None)
     }
 
     fn row(id: u64, start_beat: f64, scene: usize, overrides: Vec<ProjectSongTrackOverride>) -> ProjectSongRow {
@@ -732,6 +762,59 @@ mod tests {
         let restored: ProjectSongTrackOverride =
             serde_json::from_str(json).expect("deserialize legacy override");
         assert_eq!(restored, over(1, 3));
+    }
+
+    #[test]
+    fn offset_steps_round_trips_and_defaults_to_zero_on_legacy_json() {
+        // A nonzero offset survives serialization exactly.
+        let mut song = valid_song();
+        song.rows[0].overrides = vec![ProjectSongTrackOverride {
+            track: 1,
+            pattern_id: Some(2),
+            offset_steps: 7.25,
+        }];
+        song.validate(&ctx()).expect("offset override validates");
+        let json = serde_json::to_string(&song).expect("serialize song");
+        let restored: ProjectSong = serde_json::from_str(&json).expect("deserialize song");
+        assert_eq!(restored, song);
+
+        // Legacy override JSON (no offset field) loads with offset 0.0.
+        let json = r#"{"track":1,"pattern_id":3}"#;
+        let restored: ProjectSongTrackOverride =
+            serde_json::from_str(json).expect("deserialize legacy override");
+        assert_eq!(restored.offset_steps, 0.0);
+        assert_eq!(restored, over(1, 3));
+
+        // A zero offset is skipped on write, keeping files byte-identical
+        // to the pre-offset format.
+        let json = serde_json::to_string(&over(0, 5)).expect("serialize override");
+        assert!(!json.contains("offset_steps"), "{json}");
+
+        // Validation rejects negative and non-finite offsets.
+        let mut song = valid_song();
+        song.rows[0].overrides = vec![ProjectSongTrackOverride {
+            track: 1,
+            pattern_id: Some(2),
+            offset_steps: -1.0,
+        }];
+        let err = song.validate(&ctx()).unwrap_err();
+        assert!(err.contains("offset"), "{err}");
+    }
+
+    #[test]
+    fn project_lanes_carries_override_offsets() {
+        let scenes = test_scenes();
+        let mut song = valid_song();
+        song.rows[2].overrides = vec![ProjectSongTrackOverride {
+            track: 0,
+            pattern_id: Some(1),
+            offset_steps: 3.5,
+        }];
+        let lanes = project_lanes(&song, &scenes);
+        assert_eq!(lanes[0][2].offset_steps, 3.5);
+        // Scene-resolved spans anchor at offset 0.
+        assert_eq!(lanes[0][0].offset_steps, 0.0);
+        assert_eq!(lanes[0][1].offset_steps, 0.0);
     }
 
     #[test]

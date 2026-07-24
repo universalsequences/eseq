@@ -298,7 +298,8 @@ pub(crate) fn build_song_rows_value(song: Option<&ProjectSong>) -> Value {
 
 /// Read-only `song-lanes` value (docs/arrangement-timeline-ui-spec.md 5.5/6):
 /// the per-track lane projection as a list (one entry per track) of clip-span
-/// lists. Each clip is `{row-id, start-beat, end-beat, pattern-id, from-override}`
+/// lists. Each clip is `{row-id, start-beat, end-beat, pattern-id,
+/// offset-steps, from-override}`
 /// with `pattern-id` `Nil` for spans where the row resolves no pattern for the
 /// track (sparse lanes render nothing for those spans).
 pub(crate) fn build_song_lanes_value(lanes: Option<&Vec<Vec<LaneClip>>>) -> Value {
@@ -330,6 +331,10 @@ pub(crate) fn build_song_lanes_value(lanes: Option<&Vec<Vec<LaneClip>>>) -> Valu
                             Some(id) => Value::Number(id.0 as f64),
                             None => Value::Nil,
                         })),
+                    );
+                    map.insert(
+                        "offset-steps".to_string(),
+                        Rc::new(RefCell::new(Value::Number(clip.offset_steps))),
                     );
                     map.insert(
                         "from-override".to_string(),

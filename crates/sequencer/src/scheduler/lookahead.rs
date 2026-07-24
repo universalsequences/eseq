@@ -230,6 +230,11 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         // cloning, no asset loading on this path (spec 9).
         let mut chunk_frames = scheduler_block_size;
         let mut song_row_snapshot: Option<Arc<SequencerSnapshot>> = None;
+        if song_playback.is_none() {
+            // A song that just stopped must not leave stale per-lane phase
+            // anchors behind: session playback free-runs (anchor 0/0).
+            clock.clear_track_anchors();
+        }
         if let Some(song) = song_playback.as_mut() {
             let prev_row = song.current_row();
             match song.next_chunk(
@@ -280,6 +285,14 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             graph.reset(0.0);
                         }
                     }
+                    // Anchored per-lane phase (takes spec 7.3): every chunk
+                    // schedules with the governing row's clip anchors, so
+                    // each track's step position is projected from its own
+                    // clip (`start_beat` + offset) instead of the shared
+                    // free-running clock. Installed after any wrap reset so
+                    // the anchors survive it.
+                    let (anchor_beat, lane_offsets) = song.row_clock_anchor(row);
+                    clock.set_song_row_anchors(anchor_beat, lane_offsets);
                 }
             }
         }

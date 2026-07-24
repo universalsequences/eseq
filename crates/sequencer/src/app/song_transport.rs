@@ -488,20 +488,23 @@ mod tests {
             "the committed song is untouched while capture runs"
         );
 
-        // Stop at rendered beat 8 commits the take: with no launches it is
-        // the single beat-zero row holding the initial session state.
+        // Stop at rendered beat 8: with no launches performed there is no
+        // splice — the committed song is untouched and no undo entry is
+        // created (takes spec 9.1/9.5).
         app.state.set_scheduler_rendered_beats(8.0);
-        let status = app.song_transport_stop().expect("stop commits the take");
-        assert!(status.unwrap().contains("committed"), "stop reports the commit");
+        let status = app.song_transport_stop().expect("stop resolves the take");
+        assert!(
+            status.unwrap().contains("unchanged"),
+            "stop reports the launch-free no-op"
+        );
         assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
         assert!(!app.state.is_playing());
         assert!(app.song_capture_take.is_none());
-        let song = app.state.committed_song().expect("captured song committed");
-        assert_eq!(song.rows.len(), 1);
-        assert_eq!(song.rows[0].start_beat, 0.0);
-        assert_eq!(song.rows[0].scene, 0);
-        assert!(song.rows[0].overrides.is_empty());
-        assert_eq!(song.end_beat, 8.0);
+        assert_eq!(
+            app.state.committed_song(),
+            song_before,
+            "a launch-free capture never rewrites the committed song"
+        );
         app.state.set_scheduler_rendered_beats(0.0);
     }
 
@@ -785,6 +788,9 @@ mod tests {
 
     #[test]
     fn capture_creates_beat_zero_row_from_the_resolved_initial_state() {
+        // Whole-song capture ("record from an empty song", takes spec 9.3):
+        // with no committed song, a capture with a launch commits from the
+        // resolved beat-zero state.
         let mut app = app_with_song();
         // Resolved session state before capture: scene 2 with an override on
         // track 0 pointing at scene 1's cell (pool id 2).
@@ -795,13 +801,51 @@ mod tests {
             tracks: vec![0],
         })
         .expect("track launch");
+        app.song_clear().expect("start from an empty song");
 
         start_capture(&mut app);
+        // A launch at the capture origin replaces the beat-zero row's state.
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::SceneTracks {
+            scene: 1,
+            tracks: vec![0],
+        })
+        .expect("captured launch");
         app.state.set_scheduler_rendered_beats(8.0);
         app.song_transport_stop().expect("stop commits");
         let song = committed(&app);
         assert_eq!(row_tuples(&song), vec![(0.0, 2, vec![(0, Some(2))])]);
         assert_eq!(song.end_beat, 8.0);
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn capture_splices_from_first_launch_preserving_the_head() {
+        // Splice stopgap (takes spec 9.5): with an existing committed song,
+        // the commit replaces it only from the FIRST captured launch's beat
+        // onward — content before the punch-in survives verbatim.
+        let mut app = app_with_song(); // rows at 0/4/8, end 16
+        let depth = app.history.undo_len();
+        start_capture(&mut app);
+        // Listen for 6 beats before the first (and only) launch.
+        app.state.set_scheduler_rendered_beats(6.0);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 2 })
+            .expect("captured launch");
+        app.state.set_scheduler_rendered_beats(10.0);
+        app.song_transport_stop().expect("stop commits the splice");
+        let song = committed(&app);
+        assert_eq!(
+            row_tuples(&song),
+            vec![
+                // The head of the song is preserved, not nuked to beat 0.
+                (0.0, 0, Vec::new()),
+                (4.0, 1, Vec::new()),
+                // From the punch-in on, the capture is the authority (the
+                // old row at 8 is inside the replaced region).
+                (6.0, 2, Vec::new()),
+            ]
+        );
+        assert_eq!(song.end_beat, 16.0, "the existing song end survives");
+        assert_eq!(app.history.undo_len(), depth + 1, "one commit, one entry");
         app.state.set_scheduler_rendered_beats(0.0);
     }
 
@@ -1013,8 +1057,14 @@ mod tests {
     #[test]
     fn capture_commit_validation_failure_preserves_previous_song() {
         let mut app = app_with_song();
+        // Start from an empty song so the commit takes the whole-song path
+        // (with a committed song and no launches, stop is a documented
+        // no-op instead of a failure — takes spec 9.5).
+        app.song_clear().expect("clear song");
         let song_before = app.state.committed_song();
         start_capture(&mut app);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("captured launch");
         // Stop with the rendered clock still at the capture origin: the
         // zero-length take fails `end_beat > last start` validation.
         let error = app

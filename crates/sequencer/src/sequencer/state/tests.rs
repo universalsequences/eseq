@@ -5256,7 +5256,7 @@
             scene,
             overrides: overrides
                 .iter()
-                .map(|&(track, pattern_id)| ProjectSongTrackOverride { track, pattern_id: Some(pattern_id) })
+                .map(|&(track, pattern_id)| ProjectSongTrackOverride::new(track, Some(pattern_id)))
                 .collect(),
         }
     }
@@ -5276,13 +5276,13 @@
         assert_eq!(
             song.rows[0].overrides,
             vec![
-                ProjectSongTrackOverride { track: 0, pattern_id: Some(1) },
-                ProjectSongTrackOverride { track: 1, pattern_id: Some(3) },
+                ProjectSongTrackOverride::new(0, Some(1)),
+                ProjectSongTrackOverride::new(1, Some(3)),
             ]
         );
         assert_eq!(
             song.rows[1].overrides,
-            vec![ProjectSongTrackOverride { track: 1, pattern_id: Some(1) }]
+            vec![ProjectSongTrackOverride::new(1, Some(1))]
         );
     }
 
@@ -5319,9 +5319,9 @@
         assert_eq!(
             song.rows[0].overrides,
             vec![
-                ProjectSongTrackOverride { track: 0, pattern_id: Some(1) },
-                ProjectSongTrackOverride { track: 1, pattern_id: Some(4) },
-                ProjectSongTrackOverride { track: 3, pattern_id: Some(3) },
+                ProjectSongTrackOverride::new(0, Some(1)),
+                ProjectSongTrackOverride::new(1, Some(4)),
+                ProjectSongTrackOverride::new(3, Some(3)),
             ]
         );
         // Moving it back restores the original assignment.
@@ -5329,9 +5329,9 @@
         assert_eq!(
             song.rows[0].overrides,
             vec![
-                ProjectSongTrackOverride { track: 0, pattern_id: Some(1) },
-                ProjectSongTrackOverride { track: 2, pattern_id: Some(3) },
-                ProjectSongTrackOverride { track: 3, pattern_id: Some(4) },
+                ProjectSongTrackOverride::new(0, Some(1)),
+                ProjectSongTrackOverride::new(2, Some(3)),
+                ProjectSongTrackOverride::new(3, Some(4)),
             ]
         );
     }
@@ -5358,10 +5358,96 @@
         assert_eq!(
             song.rows[0].overrides,
             vec![
-                ProjectSongTrackOverride { track: 0, pattern_id: Some(1) },
-                ProjectSongTrackOverride { track: 1, pattern_id: Some(1) },
+                ProjectSongTrackOverride::new(0, Some(1)),
+                ProjectSongTrackOverride::new(1, Some(1)),
             ]
         );
+    }
+
+    #[test]
+    fn added_track_is_bare_outside_the_current_scene() {
+        // Bare tracks (takes spec 11.1, scoped): growing to a new track
+        // materializes exactly one pattern in the CURRENT scene (the
+        // effective-pattern anchor device edits and history need) and a
+        // None cell in every other scene.
+        let state = SequencerState::new(2, vec![vec![], vec![]]);
+        state.with_scenes_mut(|scenes| {
+            let snapshots = vec![
+                PatternSnapshot::new_default(2, &[]),
+                PatternSnapshot::new_default(2, &[]),
+            ];
+            *scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        });
+        state.extend_all_pattern_snapshots_to_track(
+            3,
+            &[],
+            2,
+            CustomInstrumentRunMode::Instrument,
+            None,
+        );
+        state.with_project_scenes(|scenes| {
+            assert_eq!(
+                scenes.track_pools[2].patterns.len(),
+                1,
+                "one pattern for the current scene only"
+            );
+            assert!(scenes.scenes[0].cells[2].is_some(), "current scene cell");
+            assert_eq!(scenes.scenes[1].cells[2], None, "other scenes stay bare");
+        });
+
+        // The timeline lane projection resolves the bare scenes to nothing:
+        // an empty span, never a synthesized placeholder clip.
+        let song = ProjectSong {
+            rows: vec![song_row(0, 0.0, 0, &[]), song_row(1, 8.0, 1, &[])],
+            end_beat: 16.0,
+            loop_enabled: false,
+            next_row_id: 2,
+        };
+        state.with_project_scenes(|scenes| {
+            let lanes = project_lanes(&song, scenes);
+            assert!(lanes[2][0].pattern.is_some(), "current scene's span resolves");
+            assert!(lanes[2][1].pattern.is_none(), "bare scene's span is empty");
+        });
+
+        // Saving an all-empty snapshot into a bare scene keeps it bare
+        // (lazy materialization requires real content AND an empty pool, so
+        // it can never resurrect a deliberately cleared cell).
+        state.with_scenes_mut(|scenes| {
+            assert!(scenes.save_scene_snapshot(1, PatternSnapshot::new_default(3, &[])));
+            assert_eq!(scenes.scenes[1].cells[2], None);
+            assert_eq!(scenes.track_pools[2].patterns.len(), 1);
+        });
+    }
+
+    #[test]
+    fn lazy_materialization_covers_fully_bare_tracks_only() {
+        // A track with an EMPTY pool (fully bare) materializes a pattern on
+        // the first saved content; a track whose pool has patterns but whose
+        // cell was cleared stays cleared.
+        let state = SequencerState::new(2, vec![vec![], vec![]]);
+        state.with_scenes_mut(|scenes| {
+            let snapshots = vec![PatternSnapshot::new_default(2, &[])];
+            *scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+            // Track 1: fully bare (simulated) — empty pool, None cell.
+            scenes.scenes[0].cells[1] = None;
+            scenes.track_pools[1] = TrackPatternPool::default();
+        });
+        state.with_scenes_mut(|scenes| {
+            let mut snapshot = PatternSnapshot::new_default(2, &[]);
+            snapshot.track_bits[1][0] |= 1;
+            assert!(scenes.save_scene_snapshot(0, snapshot));
+            assert_eq!(scenes.track_pools[1].patterns.len(), 1);
+            assert!(scenes.scenes[0].cells[1].is_some(), "bare track materializes");
+        });
+        // Cleared cell with a non-empty pool: content in the live snapshot
+        // must NOT resurrect the cell.
+        state.with_scenes_mut(|scenes| {
+            scenes.scenes[0].cells[0] = None;
+            let mut snapshot = PatternSnapshot::new_default(2, &[]);
+            snapshot.track_bits[0][0] |= 1;
+            assert!(scenes.save_scene_snapshot(0, snapshot));
+            assert_eq!(scenes.scenes[0].cells[0], None, "cleared cells stay cleared");
+        });
     }
 
     #[test]

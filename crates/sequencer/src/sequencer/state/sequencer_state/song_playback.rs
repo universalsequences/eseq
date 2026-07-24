@@ -10,6 +10,7 @@ use super::super::*;
 /// run after the lock is dropped (snapshot capture takes other state locks).
 struct RowStaging {
     resolved_pattern_ids: Vec<Option<PatternId>>,
+    lane_offsets: Vec<f64>,
     track_data: Vec<TrackPatternData>,
     silenced: Vec<bool>,
     mod_connections: Vec<ModConnection>,
@@ -54,20 +55,26 @@ impl SequencerState {
                         )
                     })?;
                     let mut resolved_pattern_ids = Vec::with_capacity(track_count);
+                    let mut lane_offsets = Vec::with_capacity(track_count);
                     let mut track_data = Vec::with_capacity(track_count);
                     let mut silenced = Vec::with_capacity(track_count);
                     for track in 0..track_count {
                         // An explicit-empty override (`pattern_id: None`)
                         // silences the track for the row; only an ABSENT
                         // override falls back to the scene cell.
-                        let effective = match row
+                        let override_entry = row
                             .overrides
                             .iter()
-                            .find(|over| over.track == track)
-                        {
+                            .find(|over| over.track == track);
+                        let effective = match override_entry {
                             Some(over) => over.pattern_id.map(PatternId),
                             None => scene.cells.get(track).copied().flatten(),
                         };
+                        // Clip start offset (takes spec 7.1): stored on the
+                        // override only; scene-resolved lanes anchor at 0.
+                        lane_offsets.push(
+                            override_entry.map(|over| over.offset_steps).unwrap_or(0.0),
+                        );
                         match effective {
                             Some(id) => {
                                 let data = scenes
@@ -98,6 +105,7 @@ impl SequencerState {
                     }
                     Ok(RowStaging {
                         resolved_pattern_ids,
+                        lane_offsets,
                         track_data,
                         silenced,
                         mod_connections: scene.mod_connections.clone(),
@@ -141,6 +149,7 @@ impl SequencerState {
                     .map(|over| (over.track, over.pattern_id.map(PatternId)))
                     .collect(),
                 resolved_pattern_ids: staging.resolved_pattern_ids,
+                lane_offsets: staging.lane_offsets,
                 scheduler_snapshot: Arc::new(snapshot),
             });
         }
