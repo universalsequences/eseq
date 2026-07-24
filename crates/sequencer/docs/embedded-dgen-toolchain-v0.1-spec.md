@@ -190,7 +190,11 @@ from Xcode:
   build mode.
 - LLD Mach-O linker.
 - Clang builtin headers required by generated arm64 code.
-- ESeq-owned DGen runtime headers.
+- The Clang compiler-rt builtins archive (`libclang_rt.builtins`) for arm64,
+  because Clang emits implicit calls to `memcpy`, `memset`, and compiler-rt
+  helper routines even for freestanding-looking C.
+- ESeq-owned DGen runtime headers and the DGen-owned libSystem link stub
+  described below.
 
 The build disables unused targets, examples, tests, documentation, static
 analysis tools, debugger support, and unrelated LLVM command-line utilities.
@@ -219,21 +223,62 @@ This file is part of the cache identity and release diagnostics.
 ## No Runtime Apple SDK Dependency
 
 Simply bundling `clang` is insufficient if generated C includes arbitrary
-Apple SDK headers or the linker expects SDK text-based stubs. The v0.1
-toolchain must therefore compile against a deliberately small DGen environment.
+Apple SDK headers or the linker expects the full SDK's text-based stubs. The
+v0.1 toolchain must therefore compile against a deliberately small DGen
+environment.
 
-Current generated C includes headers such as `Accelerate/Accelerate.h` and
-`mach/mach_time.h`. That development-oriented output must be changed for the
-release compiler contract.
+The constraint is link-time, not runtime. `libSystem` is present and loaded in
+every macOS process, so **generated dylibs may — and do — depend on
+`libSystem`**. What the toolchain must not require is an installed SDK,
+Xcode, or Command Line Tools to *produce* that link. v0.1 therefore treats
+libSystem as a deliberate, validated load dependency rather than engineering
+it away.
+
+This keeps hot-path DSP fast: allowlisted libm calls (`sinf`, `expf`, ...)
+at genuinely scalar call sites remain direct calls that Clang can inline,
+vectorize, or lower to builtins. Routing per-sample scalar math through a
+host function-pointer table is explicitly rejected — the indirection defeats
+vectorization on exactly the code that matters most.
+
+Phase 1 inventory confirmed that current generated C uses Accelerate two
+ways, with different call-site shapes that demand different treatment:
+
+1. **Block-level FFT/vDSP operations** (`vDSP_create_fftsetup`,
+   `vDSP_fft_zip`, `vDSP_zvma`): one call per buffer. These move behind the
+   host service table; one indirect call per block is negligible.
+2. **Legacy vecLib 4-lane vector math** (`vsinf`, `vcosf`, `vtanhf`, ...:
+   `float32x4_t -> float32x4_t`): one external call per 4 samples, emitted
+   inside the fused per-sample SIMD loop. These must NOT go through the host
+   table — a per-4-lane indirect call is the per-sample indirection this
+   spec rejects. Phase 2 must choose their permanent lowering in the
+   DGen-owned runtime header. The candidates, gated on measurement, are:
+   inline SLEEF-class polynomial vector implementations (also the future x86
+   path); restructuring emission so transcendental math is batched into
+   array-level calls that CAN use the table (only if loop fusion permits);
+   or lane-wise scalar libm calls where measurement shows the cost is
+   acceptable.
+
+The current driver also always links `-framework Accelerate`, so every dylib
+acquires an Accelerate load command regardless of source content; dropping
+that unconditional flag is part of Phase 2.
+
+The Phase 1 lane-wise libm shim over the 4-lane entry points is a link proof
+only; it is not the Phase 2 contract, and its performance difference must be
+measured and reported, not silently accepted.
+
+Headers such as `Accelerate/Accelerate.h` and `mach/mach_time.h` disappear
+from release-generated C under this contract.
 
 ### DGen Runtime Header
 
 `dgen_runtime.h` owns all types, intrinsics wrappers, ABI structures, and host
 service declarations visible to generated code. Generated source includes
-only DGen-owned headers plus explicitly selected Clang builtin headers.
+only DGen-owned headers plus explicitly selected Clang builtin headers. The
+DGen headers declare exact prototypes for the allowlisted libm symbols; no
+SDK header is included.
 
 The header must not expose filesystem, process, networking, Objective-C,
-dynamic loading, or general libc APIs.
+dynamic loading, or general libc APIs beyond the declared math allowlist.
 
 Representative shape:
 
@@ -241,15 +286,18 @@ Representative shape:
 typedef struct DGenHostServicesV1 DGenHostServicesV1;
 typedef struct DGenProcessContextV1 DGenProcessContextV1;
 
+/* Narrow table for block-level operations that would otherwise pull in
+   Accelerate. Every entry is array-in/array-out over a whole buffer; the
+   table never carries per-sample scalar math. */
 typedef struct {
     unsigned int abi_version;
     unsigned int struct_size;
-    /* Explicit host functions needed by generated DSP. */
-    float (*sinf_fn)(float);
-    float (*cosf_fn)(float);
-    float (*expf_fn)(float);
-    float (*logf_fn)(float);
-    void (*accelerate_operation_fn)(/* fixed ABI arguments */);
+    void (*fft_forward_fn)(/* fixed ABI arguments */);
+    void (*fft_inverse_fn)(/* fixed ABI arguments */);
+    /* Additional block-level (array-in/array-out, once-per-buffer) entries
+       only as the Phase 1 symbol inventory demands. 4-lane vecLib-style
+       vector math is explicitly excluded — its lowering is decided in the
+       DGen runtime header, not this table. */
 } DGenHostServicesV1;
 
 void dgen_process_v1(
@@ -262,18 +310,34 @@ void dgen_process_v1(
 ```
 
 The exact function table is derived from measured DGen requirements. It must
-remain narrow; it is not a generic native extension API.
+remain narrow — block-level FFT/Accelerate-class services only; it is not a
+generic native extension API and it never carries per-sample math.
 
-Scalar operations may lower to compiler builtins or inline generated code.
-Operations that would otherwise create unresolved system symbols use the host
-service table. SIMD behavior is wrapped behind DGen-owned functions so a later
-x86_64 backend does not leak into DSL semantics.
+Scalar and SIMD operations lower to compiler builtins, inline generated code,
+or direct allowlisted libm calls. SIMD behavior is wrapped behind DGen-owned
+inline functions so a later x86_64 backend does not leak into DSL semantics.
 
 Profiling support belongs in the host or a separate compiler-instrumented
 build. Release-generated DSP does not include `stdio`, Mach timing, logging,
 or debug file APIs.
 
 ### Link Contract
+
+Generated dylibs link against exactly one system library: `libSystem`. The
+link is satisfied without an installed SDK by one of two mechanisms, decided
+by the Phase 1 prototype:
+
+1. A DGen-owned minimal text-based stub (`libSystem` `.tbd`) authored from the
+   versioned symbol allowlist — written by ESeq, not copied from the SDK.
+2. `-undefined dynamic_lookup` at link time, with the undefined-symbol audit
+   below enforcing the same allowlist after linking.
+
+Either way, the allowlist — allowlisted libm functions, the compiler-inserted
+symbols Clang emits implicitly (`memcpy`, `memset`, `bzero`), and any
+compiler-rt helpers not statically satisfied by the bundled
+`libclang_rt.builtins` — is explicit, versioned, and enforced by post-link
+inspection. "No undefined symbols at all" is not a goal; an *audited* symbol
+surface is.
 
 The generated dylib must not acquire undeclared framework or SDK dependencies.
 After linking, ESeq inspects it before loading:
@@ -282,20 +346,17 @@ After linking, ESeq inspects it before loading:
 - CPU type is arm64.
 - Deployment target is supported by the running app.
 - Exported symbols exactly match the DGen ABI allowlist for the artifact kind.
-- Undefined symbols are empty or match an explicit, versioned allowlist.
+- Load commands reference no library other than `libSystem` (in particular,
+  no Accelerate or other framework).
+- Undefined symbols match the explicit, versioned allowlist.
 - Load commands contain no absolute developer, workspace, Xcode, temporary,
   or user paths.
 - No `LC_RPATH` points outside the controlled runtime contract.
 - File size and declared state sizes are within configured limits.
 - The manifest ABI version matches the host ABI.
 
-The preferred v0.1 result is a dylib whose DSP interaction with ESeq occurs
-entirely through exported DGen entry points and the passed host function table.
-That avoids linking each generated artifact against Accelerate or libSystem.
-
-If the prototype demonstrates that one unavoidable system load dependency is
-needed, it must be documented and validated explicitly. Falling back to an
-installed SDK or developer directory is not permitted.
+Falling back to an installed SDK or developer directory to satisfy the link is
+not permitted.
 
 ## Compiler Invocation Contract
 
@@ -616,15 +677,41 @@ Toolchain size is measured and reported for every release. Size optimization
 is desirable, but correctness and a hermetic runtime take priority over an
 arbitrary initial download-size target.
 
+## Repository Ownership
+
+The work splits across two repositories:
+
+- **dgen repository** (`dgen-audio`, the Swift package that becomes the
+  bundled `DGenLisp` helper) owns Phases 1 and 2 entirely: the pinned LLVM
+  toolchain build, the C codegen contract, `dgen_runtime.h`, the
+  `DGenHostServicesV1` definition, the libm symbol allowlist, the libSystem
+  link stub, the link/flag policy, and the binary audit tooling.
+- **ESeq repository** owns Phases 3 through 5: `AppPaths`, bundling, signing,
+  notarization, entitlements, cache integration, hot swap, and the agent/UI
+  lifecycle. ESeq consumes the ABI headers and audit tooling that dgen
+  publishes; it does not redefine them.
+
+The no-Accelerate constraint applies only to generated dylibs, not to dgen's
+own test code. The dgen repository therefore ships a **reference host
+harness**: a small test program that implements `DGenHostServicesV1` with its
+own Accelerate-backed FFT wrappers, loads a compiled artifact, and drives
+`dgen_process_v1`. This closes the full loop — compile, link, audit, load,
+run, verify output — standalone, and doubles as executable documentation of
+what ESeq must implement. Phases 1 and 2 are provable in the dgen repository
+with no ESeq involvement.
+
 ## Implementation Phases
 
 ### Phase 1: Toolchain contract prototype
+
+Owned by the dgen repository.
 
 - Build pinned upstream Clang/LLVM/LLD for arm64.
 - Compile a minimal DGen-generated C file without invoking Apple Clang.
 - Inventory every header and external symbol required by representative
   instruments and effects.
-- Prove Mach-O linking without an installed Apple SDK at runtime.
+- Prove Mach-O linking without an installed Apple SDK at runtime, and decide
+  between the DGen-owned libSystem stub and `-undefined dynamic_lookup`.
 - Record compressed and installed size.
 
 Exit criterion: a prototype bundle of tools compiles and loads representative
@@ -632,17 +719,33 @@ DGen artifacts on a clean Mac without Command Line Tools.
 
 ### Phase 2: Closed DGen host ABI
 
-- Introduce versioned runtime headers and host service table.
-- Remove SDK and diagnostic headers from generated release C.
-- Route necessary math/Accelerate services through inline code or the explicit
-  host table.
-- Add export, undefined-symbol, load-command, and architecture auditing.
-- Add ABI mismatch diagnostics.
+Owned by the dgen repository.
 
-Exit criterion: representative generated dylibs pass the binary allowlist and
-have no undeclared runtime dependencies.
+- Introduce versioned runtime headers, the libm symbol allowlist, and the
+  narrow FFT/Accelerate-class host service table.
+- Remove SDK and diagnostic headers from generated release C; libm prototypes
+  come from DGen-owned headers and remain direct calls.
+- Author the DGen-owned libSystem link stub, or validate the
+  `-undefined dynamic_lookup` alternative chosen in Phase 1.
+- Route FFT/vDSP block operations through the host table, choose and
+  implement the measured lowering for the 4-lane vecLib vector-math calls
+  (inline vector implementations, batched array-level emission, or lane-wise
+  libm), and stop passing `-framework Accelerate` at link time, so
+  Accelerate is no longer a link dependency of generated code.
+- Add export, undefined-symbol, load-command, and architecture auditing,
+  including the implicit `memcpy`/`memset`/compiler-rt symbol surface.
+- Add ABI mismatch diagnostics.
+- Build the reference host harness (Accelerate-backed `DGenHostServicesV1`
+  implementation) and validate representative artifacts end to end through it.
+
+Exit criterion: representative generated dylibs depend only on `libSystem`,
+pass the binary allowlist, have no undeclared runtime dependencies, and
+produce correct audio through the reference harness with `DEVELOPER_DIR` and
+Xcode paths unavailable.
 
 ### Phase 3: Production paths and cache
+
+Owned by the ESeq repository (as are Phases 4 and 5).
 
 - Add production `AppPaths` locations for helpers, toolchain resources, and
   cache data.
