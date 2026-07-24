@@ -345,7 +345,13 @@ impl App {
     /// pattern's step domain, normalized into `[0, num_steps)`. Offsets
     /// within stamping epsilon of a pattern boundary collapse to 0 so
     /// scene-resolved lanes stay implicit whenever they can.
-    fn advanced_offset(&self, track: usize, pattern_id: u64, offset_steps: f64, delta_beats: f64) -> f64 {
+    pub(crate) fn advanced_offset(
+        &self,
+        track: usize,
+        pattern_id: u64,
+        offset_steps: f64,
+        delta_beats: f64,
+    ) -> f64 {
         let Some((steps_per_beat, num_steps)) = self.pattern_step_mapping(track, pattern_id) else {
             return offset_steps;
         };

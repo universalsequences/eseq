@@ -840,10 +840,13 @@ mod tests {
                 (0.0, 0, Vec::new()),
                 (4.0, 1, Vec::new()),
                 // From the punch-in on, the capture is the authority (the
-                // old row at 8 is inside the replaced region).
-                (6.0, 2, Vec::new()),
+                // old row at 8 is inside the replaced region). The lane is
+                // materialized with the free-run phase stamp (spec 9.4).
+                (6.0, 2, vec![(0, Some(3))]),
             ]
         );
+        // 6 beats into a 4-beat/16-step free-run = 24 steps mod 16 = 8.
+        assert_eq!(song.rows[2].overrides[0].offset_steps, 8.0);
         assert_eq!(song.end_beat, 16.0, "the existing song end survives");
         assert_eq!(app.history.undo_len(), depth + 1, "one commit, one entry");
         app.state.set_scheduler_rendered_beats(0.0);
@@ -863,9 +866,13 @@ mod tests {
         let song = committed(&app);
         assert_eq!(
             row_tuples(&song),
-            vec![(0.0, 0, Vec::new()), (2.375, 1, Vec::new())],
+            vec![(0.0, 0, Vec::new()), (2.375, 1, vec![(0, Some(2))])],
             "the fractional beat must survive to the committed row exactly"
         );
+        // Free-run phase stamping (spec 9.4): committed playback re-enters
+        // the pattern mid-phase ON the grid, exactly as performed. 2.375
+        // beats at 4 steps/beat = offset 9.5 steps.
+        assert_eq!(song.rows[1].overrides[0].offset_steps, 9.5);
         app.state.set_scheduler_rendered_beats(0.0);
     }
 
@@ -961,9 +968,12 @@ mod tests {
         let song = committed(&app);
         assert_eq!(
             row_tuples(&song),
-            vec![(0.0, 0, Vec::new()), (2.0, 1, Vec::new())],
+            // The lane carries the free-run phase stamp (spec 9.4): 2 beats
+            // at 4 steps/beat = offset 8.
+            vec![(0.0, 0, Vec::new()), (2.0, 1, vec![(0, Some(2))])],
             "the identical relaunch must not create a second row"
         );
+        assert_eq!(song.rows[1].overrides[0].offset_steps, 8.0);
         app.state.set_scheduler_rendered_beats(0.0);
     }
 

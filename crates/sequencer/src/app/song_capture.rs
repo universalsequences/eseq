@@ -317,7 +317,7 @@ impl App {
                         // never part of the audible performance: drop it.
                         continue;
                     }
-                    specs.push(captured_row_spec(start_beat, row));
+                    specs.push(self.stamped_captured_row_spec(start_beat, row));
                 }
                 final_end_beat = previous.end_beat.max(end_beat);
             }
@@ -327,7 +327,7 @@ impl App {
                     captured
                         .iter()
                         .filter(|row| row.start_beat == 0.0 || row.start_beat < end_beat)
-                        .map(|row| captured_row_spec(row.start_beat, row)),
+                        .map(|row| self.stamped_captured_row_spec(row.start_beat, row)),
                 );
                 final_end_beat = end_beat;
             }
@@ -348,17 +348,54 @@ impl App {
     }
 }
 
-fn captured_row_spec(start_beat: f64, row: &CapturedSongState) -> SongRowSpec {
-    SongRowSpec {
-        start_beat,
-        scene: row.scene,
-        overrides: row
-            .overrides
-            .iter()
-            .map(|(track, id)| {
-                crate::sequencer::ProjectSongTrackOverride::new(*track, Some(id.0))
-            })
-            .collect(),
+impl App {
+    /// Turn one consolidated captured state into a row spec with free-run
+    /// phase stamped (takes spec 7.2/9.4): during capture every audible
+    /// pattern free-runs against the global clock, so its position at any
+    /// row start is `steps(start_beat) mod L`. Stamping that as the lane's
+    /// offset makes committed playback reproduce the performance — an
+    /// unquantized scene launch mid-bar re-enters its patterns mid-pattern
+    /// ON the grid, instead of re-anchoring step 0 at an off-beat. Lanes
+    /// resolved through the scene cell get a materialized override whenever
+    /// their offset is nonzero (locked decision: phase lives on overrides
+    /// only).
+    fn stamped_captured_row_spec(&self, start_beat: f64, row: &CapturedSongState) -> SongRowSpec {
+        let scene_cells: Vec<Option<PatternId>> = self.state.with_project_scenes(|scenes| {
+            (0..scenes.track_pools.len())
+                .map(|track| {
+                    scenes
+                        .scenes
+                        .get(row.scene)
+                        .and_then(|scene| scene.cells.get(track))
+                        .copied()
+                        .flatten()
+                })
+                .collect()
+        });
+        let mut overrides = Vec::new();
+        for (track, cell) in scene_cells.iter().enumerate() {
+            let explicit = row
+                .overrides
+                .iter()
+                .find(|(over_track, _)| *over_track == track)
+                .map(|(_, id)| *id);
+            let Some(pattern) = explicit.or(*cell) else {
+                continue;
+            };
+            let offset_steps = self.advanced_offset(track, pattern.0, 0.0, start_beat);
+            if explicit.is_some() || offset_steps != 0.0 {
+                overrides.push(crate::sequencer::ProjectSongTrackOverride {
+                    track,
+                    pattern_id: Some(pattern.0),
+                    offset_steps,
+                });
+            }
+        }
+        SongRowSpec {
+            start_beat,
+            scene: row.scene,
+            overrides,
+        }
     }
 }
 
