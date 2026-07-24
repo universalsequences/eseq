@@ -222,15 +222,26 @@ pub(crate) fn arrangement_action_song_commands(
                     ));
                 }
             };
-            Ok(vec![(
-                "song-track-paint",
-                payload(vec![
-                    ("track", Value::Number(track as f64)),
-                    ("start-beat", Value::Number(start_beat)),
-                    ("end-beat", Value::Number(end_beat)),
-                    ("pattern-id", pattern_id),
-                ]),
-            )])
+            let mut fields = vec![
+                ("track", Value::Number(track as f64)),
+                ("start-beat", Value::Number(start_beat)),
+                ("end-beat", Value::Number(end_beat)),
+                ("pattern-id", pattern_id),
+            ];
+            // Optional clip anchor (takes spec 7.4): the grow gesture
+            // forwards the existing clip's anchor so the extension
+            // continues the loop instead of re-anchoring at the paint start.
+            if let Some(Value::Number(anchor)) = map_field(map, "anchor-beat") {
+                if anchor.is_finite() {
+                    fields.push(("anchor-beat", Value::Number(anchor)));
+                }
+            }
+            if let Some(Value::Number(offset)) = map_field(map, "anchor-offset-steps") {
+                if offset.is_finite() && offset >= 0.0 {
+                    fields.push(("anchor-offset-steps", Value::Number(offset)));
+                }
+            }
+            Ok(vec![("song-track-paint", payload(fields))])
         }
         // Content-length handle release: one song-set-end (spec 9.3).
         "finish-resize-content-length" => {

@@ -5426,10 +5426,7 @@
             scene,
             overrides: overrides
                 .into_iter()
-                .map(|(track, pattern_id)| crate::sequencer::ProjectSongTrackOverride {
-                    track,
-                    pattern_id: Some(pattern_id),
-                })
+                .map(|(track, pattern_id)| crate::sequencer::ProjectSongTrackOverride::new(track, Some(pattern_id)))
                 .collect(),
         }
     }
@@ -5607,7 +5604,9 @@
             assert_ne!(row1.effective_sample % 6_000, 0, "must not snap to the step grid");
             let boundary = row1.effective_sample;
             // The step just before the boundary still comes from the old
-            // row; the next step is scheduled from the new row.
+            // row. The new row anchors its lanes at its own start beat
+            // (takes spec 7.2: rows re-anchor, free-run is gone), so its
+            // step 0 fires exactly at the unquantized boundary sample.
             let track0: Vec<_> = events.iter().filter(|event| event.track == 0).collect();
             let before = track0
                 .iter()
@@ -5621,8 +5620,74 @@
                 .filter(|event| event.sample_time >= boundary)
                 .min_by_key(|event| event.sample_time)
                 .expect("step after the boundary");
-            assert!((41_999..=42_000).contains(&after.sample_time), "{after:?}");
+            assert!(
+                (36_008..=36_009).contains(&after.sample_time),
+                "the anchored row's step 0 must fire at the boundary: {after:?}"
+            );
             assert_eq!(after.transpose, 2.0);
+        });
+    }
+
+    /// Anchored clip phase (takes spec 7.1/7.2): a clip whose row starts at
+    /// a beat that is NOT a multiple of the pattern length plays step 0 at
+    /// its start beat (free-run would land mid-pattern), and a stored
+    /// `offset_steps` shifts the start point into the pattern.
+    #[test]
+    fn song_row_clip_anchors_step_zero_at_its_start_beat() {
+        run_with_scheduler_stack(|| {
+            let (state, override_id) = song_mode_fixture();
+            // Step-indexed transposes on the override pattern so a trigger
+            // identifies its step: transpose = 100 + step.
+            state.with_scenes_mut(|scenes| {
+                let data = scenes.track_pools[0].get_mut(override_id).expect("pool");
+                for step in 0..16 {
+                    data.step_data[step][StepParam::Transpose.index()] = 100.0 + step as f32;
+                }
+            });
+            // Row 1 starts at beat 5.0 — not a multiple of the 4-beat
+            // pattern cycle. Free-run would start at step 4.
+            song_mode_commit(
+                &state,
+                vec![
+                    song_mode_row(0, 0.0, 0, Vec::new()),
+                    song_mode_row(1, 5.0, 1, vec![(0, override_id.0)]),
+                ],
+                8.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            let (events, _) = drive_song_lookahead(&state, runtime, 16_000, 240_000);
+            let clip: Vec<_> = events
+                .iter()
+                .filter(|event| event.track == 0 && event.transpose >= 100.0)
+                .collect();
+            let first = clip.first().expect("clip triggers");
+            assert_eq!(first.sample_time, 120_000, "step 0 fires at the row start");
+            assert_eq!(first.transpose, 100.0, "clip starts at step 0, not free-run");
+            assert_eq!(clip[1].sample_time, 126_000);
+            assert_eq!(clip[1].transpose, 101.0);
+
+            // A stored offset starts the clip that many steps in.
+            let mut offset_row = song_mode_row(1, 5.0, 1, vec![(0, override_id.0)]);
+            offset_row.overrides[0].offset_steps = 4.0;
+            song_mode_commit(
+                &state,
+                vec![song_mode_row(0, 0.0, 0, Vec::new()), offset_row],
+                8.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            assert_eq!(runtime.rows[1].lane_offsets[0], 4.0);
+            let (events, _) = drive_song_lookahead(&state, runtime, 16_000, 240_000);
+            let first = events
+                .iter()
+                .find(|event| event.track == 0 && event.transpose >= 100.0)
+                .expect("clip triggers");
+            assert_eq!(first.sample_time, 120_000);
+            assert_eq!(
+                first.transpose, 104.0,
+                "offset 4 steps: the clip starts at step 4 at its start beat"
+            );
         });
     }
 
@@ -5681,10 +5746,7 @@
         run_with_scheduler_stack(|| {
             let (state, override_id) = song_mode_fixture();
             let mut silence_row = song_mode_row(2, 2.0, 0, Vec::new());
-            silence_row.overrides = vec![crate::sequencer::ProjectSongTrackOverride {
-                track: 1,
-                pattern_id: None,
-            }];
+            silence_row.overrides = vec![crate::sequencer::ProjectSongTrackOverride::new(1, None)];
             song_mode_commit(
                 &state,
                 vec![
@@ -5741,10 +5803,7 @@
         run_with_scheduler_stack(|| {
             let (state, _override_id) = song_mode_fixture();
             let mut silence_row = song_mode_row(1, 1.0, 0, Vec::new());
-            silence_row.overrides = vec![crate::sequencer::ProjectSongTrackOverride {
-                track: 0,
-                pattern_id: None,
-            }];
+            silence_row.overrides = vec![crate::sequencer::ProjectSongTrackOverride::new(0, None)];
             song_mode_commit(
                 &state,
                 vec![song_mode_row(0, 0.0, 0, Vec::new()), silence_row],

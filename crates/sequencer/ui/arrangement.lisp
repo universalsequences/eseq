@@ -219,28 +219,56 @@
     (nth SEQ.song-lanes i)
     '()))
 
-;; Merge adjacent same-pattern spans into one clip (the spec's "merging is a
-;; view concern"): a row split made to edit ANOTHER track must not visually
-;; fragment this track's clip. Empty spans never merge — they are the gaps.
-;; The merged clip keeps the FIRST row's id as its stable gesture identity.
-(def arrangement-merge-clip-fold (acc clip)
+;; Steps-per-beat of a pattern from the lane-events read surface; nil when
+;; the entry is missing (merge falls back to pattern identity alone).
+(def arrangement-pattern-steps-per-beat (track pattern-id)
+  (let ((entry (arrangement-lane-pattern-events track pattern-id)))
+    (if (or (= entry nil) (<= (get entry :length-beats) 0))
+      nil
+      (/ (get entry :num-steps) (get entry :length-beats)))))
+
+;; Phase continuity between two adjacent same-pattern spans (takes spec 7):
+;; the later span continues the earlier clip iff its stored offset equals the
+;; earlier anchor's offset advanced by the elapsed beats, modulo the pattern
+;; length. Discontinuous spans are separate clips (the later one re-anchors).
+(def arrangement-offsets-continuous? (track cur clip)
+  (let ((spb (arrangement-pattern-steps-per-beat track (get cur :pattern-id)))
+        (entry (arrangement-lane-pattern-events track (get cur :pattern-id))))
+    (if (or (= spb nil) (= entry nil))
+      true
+      (let ((num-steps (max 1 (get entry :num-steps)))
+            (expected (+ (or (get cur :offset-steps) 0)
+                        (* spb (- (get clip :start-beat) (get cur :start-beat))))))
+        (let ((cycles (/ (- expected (or (get clip :offset-steps) 0)) num-steps)))
+          (let ((wrap-error (- cycles (floor (+ cycles 0.5)))))
+            (< (max wrap-error (- 0 wrap-error)) 0.0001)))))))
+
+;; Merge adjacent same-pattern, phase-continuous spans into one clip (the
+;; spec's "merging is a view concern"): a row split made to edit ANOTHER
+;; track must not visually fragment this track's clip. Empty spans never
+;; merge — they are the gaps — and a re-anchored span (offset discontinuity)
+;; starts a new clip. The merged clip keeps the FIRST row's id as its stable
+;; gesture identity and the first span's start/offset as its phase anchor.
+(def arrangement-merge-clip-fold (i acc clip)
   (let ((cur (get acc :cur)))
     (if (= cur nil)
       (dict :done (get acc :done) :cur clip)
       (if (and (= (get cur :pattern-id) (get clip :pattern-id))
-            (= (get cur :end-beat) (get clip :start-beat)))
+            (= (get cur :end-beat) (get clip :start-beat))
+            (arrangement-offsets-continuous? i cur clip))
         (dict :done (get acc :done)
           :cur (dict
                  :row-id (get cur :row-id)
                  :start-beat (get cur :start-beat)
                  :end-beat (get clip :end-beat)
                  :pattern-id (get cur :pattern-id)
+                 :offset-steps (get cur :offset-steps)
                  :from-override (or (get cur :from-override)
                                   (get clip :from-override))))
         (dict :done (append (get acc :done) (list cur)) :cur clip)))))
 
 (def arrangement-merged-track-clips (i)
-  (let ((folded (reduce |acc clip| (arrangement-merge-clip-fold acc clip)
+  (let ((folded (reduce |acc clip| (arrangement-merge-clip-fold i acc clip)
                   (dict :done '() :cur nil)
                   (filter (lambda (clip) (not (= (get clip :pattern-id) nil)))
                     (arrangement-track-clips i)))))
@@ -452,6 +480,16 @@
     (dict :type :track-paint
       :track i :start start :end end :pattern-id pattern-id)))
 
+;; Paint continuing an existing clip's phase (takes spec 7.4): the anchor is
+;; the clip's start beat + stored offset, so a grown region carries the loop
+;; forward instead of re-starting it at the paint start.
+(def arrangement-paint-track-anchored (i start end pattern-id anchor anchor-offset)
+  (arrangement-edit-finish
+    (dict :type :track-paint
+      :track i :start start :end end :pattern-id pattern-id
+      :anchor-beat anchor
+      :anchor-offset-steps (or anchor-offset 0))))
+
 (def arrangement-track-resize-finish (i)
   (let ((row-id (get arrangement-ghost :row-id))
         (new-end (max 0 (min SEQ.song-end-beat (get arrangement-ghost :end)))))
@@ -467,9 +505,11 @@
               (arrangement-paint-track i
                 (max (get clip :start-beat) new-end) old-end nil)
               (if (> new-end old-end)
-                ;; Grow: the clip's pattern eats into whatever follows.
-                (arrangement-paint-track i old-end new-end
-                  (get clip :pattern-id))
+                ;; Grow: the clip's pattern eats into whatever follows,
+                ;; continuing the clip's own loop phase (takes spec 7.4).
+                (arrangement-paint-track-anchored i old-end new-end
+                  (get clip :pattern-id)
+                  (get clip :start-beat) (get clip :offset-steps))
                 nil))))))))
 
 (def arrangement-track-delete (i ids)

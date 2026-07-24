@@ -4854,6 +4854,47 @@ fn device_value_command_track(cmd: &AppCommand) -> Option<usize> {
     }
 }
 
+/// Effective pattern id for `track`, lazily materializing one when the
+/// current scene is bare for the track (takes spec 11.1): device edits are
+/// keyed per-pattern, so the first edit in a bare scene creates the pattern
+/// from the live track state — with the step content blanked, because the
+/// live step grid still holds the previous scene's notes, which the bare
+/// scene must not inherit.
+fn ensure_effective_track_pattern(
+    app: &mut App,
+    track: usize,
+) -> Option<crate::sequencer::PatternId> {
+    if let Some(id) = app.state.effective_track_pattern_id(track) {
+        return Some(id);
+    }
+    let snapshot = app.state.capture_current_pattern_snapshot(
+        app.tracks.len(),
+        &app.graph.track_buffer_ids,
+        &app.graph.track_sample_rates,
+        &app.tracks,
+        &app.graph.track_instrument_types,
+    );
+    let mut data = snapshot.track_pattern_data(track)?;
+    data.track_bits = Default::default();
+    data.neural_reset_bits = Default::default();
+    for chord in &mut data.chord_snapshot.steps {
+        chord.clear();
+    }
+    for durations in &mut data.chord_snapshot.durations {
+        durations.clear();
+    }
+    for delays in &mut data.chord_snapshot.delays {
+        delays.clear();
+    }
+    app.state.with_scenes_mut(|scenes| {
+        let current = scenes.current_scene;
+        let id = scenes.track_pools.get_mut(track)?.insert(data);
+        let cell = scenes.scenes.get_mut(current)?.cells.get_mut(track)?;
+        *cell = Some(id);
+        Some(id)
+    })
+}
+
 fn resolve_device_value_target(
     app: &mut App,
     cmd: &AppCommand,
@@ -4863,10 +4904,8 @@ fn resolve_device_value_target(
         .track_registry
         .id_at(track)
         .ok_or(EditError::TrackOutOfRange { track })?;
-    let pattern = app
-        .state
-        .effective_track_pattern_id(track)
-        .ok_or(EditError::MissingTrackPattern)?;
+    let pattern =
+        ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?;
     let (id, slot_idx) = match cmd {
         AppCommand::SetEffectParam { slot_idx, .. }
         | AppCommand::SetEffectTensorCell { slot_idx, .. } => (

@@ -571,7 +571,10 @@
             expected_modulator_node_id,
         );
         assert_eq!(slot.defaults.get(enabled_param), 1.0);
-        assert_eq!(sample_ids[track].0, app.graph.track_buffer_ids[track]);
+        // The other scene is bare for the new track (takes spec 11.1): its
+        // sample id is the -1 placeholder, which `apply_sample_ids` ignores,
+        // leaving the track's loaded sample bound.
+        assert_eq!(sample_ids[track].0, -1);
         assert!(matches!(
             try_apply_command(
                 &mut app,

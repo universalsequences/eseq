@@ -10,7 +10,7 @@
 //! arrangement capture is active — see `App::song_edits_locked`.
 
 use crate::sequencer::{
-    state_at_beat, ProjectSong, ProjectSongRow, ProjectSongTrackOverride, SongRowId,
+    state_at_beat, PatternId, ProjectSong, ProjectSongRow, ProjectSongTrackOverride, SongRowId,
 };
 
 use super::edit::finish_active_gesture;
@@ -327,17 +327,101 @@ impl App {
         self.commit_song_edit("Set song row state", before, Some(song))
     }
 
+    /// Steps-per-beat and step count of `pattern_id` in `track`'s pool under
+    /// the pattern's base timebase — the `steps()` mapping used for offset
+    /// stamping (takes spec 7.2/7.4). Per-step timebase plocks deliberately
+    /// do not participate in stamping (spec 15); the runtime resolves the
+    /// stamped step offset through the track's live boundaries.
+    fn pattern_step_mapping(&self, track: usize, pattern_id: u64) -> Option<(f64, f64)> {
+        self.state.with_project_scenes(|scenes| {
+            let data = scenes.track_pools.get(track)?.get(PatternId(pattern_id))?;
+            let num_steps = data.track_params.num_steps.max(1);
+            let step_beats = data.track_params.timebase.step_beats(num_steps);
+            (step_beats > 0.0).then(|| (1.0 / step_beats, num_steps as f64))
+        })
+    }
+
+    /// Advance `offset_steps` by `delta_beats` of playback in the given
+    /// pattern's step domain, normalized into `[0, num_steps)`. Offsets
+    /// within stamping epsilon of a pattern boundary collapse to 0 so
+    /// scene-resolved lanes stay implicit whenever they can.
+    fn advanced_offset(&self, track: usize, pattern_id: u64, offset_steps: f64, delta_beats: f64) -> f64 {
+        let Some((steps_per_beat, num_steps)) = self.pattern_step_mapping(track, pattern_id) else {
+            return offset_steps;
+        };
+        let advanced = (offset_steps + delta_beats * steps_per_beat).rem_euclid(num_steps);
+        if advanced < 1e-9 || advanced > num_steps - 1e-9 {
+            0.0
+        } else {
+            advanced
+        }
+    }
+
+    /// Launch state for a row split at `split_beat` inside `governing`'s span
+    /// (takes spec 7.4): the same resolved sources with every pattern lane's
+    /// offset advanced by `steps(split_beat - governing.start_beat)`, so a
+    /// split made to edit one track is phase-transparent to every other
+    /// track. Scene-resolved lanes whose advanced offset is nonzero get a
+    /// materialized override (locked decision: phase lives on overrides
+    /// only; rows and scenes carry none).
+    fn split_row_state(
+        &self,
+        governing: &ProjectSongRow,
+        split_beat: f64,
+    ) -> Vec<ProjectSongTrackOverride> {
+        let delta_beats = split_beat - governing.start_beat;
+        let scene_cells: Vec<Option<PatternId>> = self.state.with_project_scenes(|scenes| {
+            (0..scenes.track_pools.len())
+                .map(|track| {
+                    scenes
+                        .scenes
+                        .get(governing.scene)
+                        .and_then(|scene| scene.cells.get(track))
+                        .copied()
+                        .flatten()
+                })
+                .collect()
+        });
+        let mut overrides = Vec::new();
+        for (track, cell) in scene_cells.iter().enumerate() {
+            let existing = governing.overrides.iter().find(|over| over.track == track);
+            match existing {
+                Some(over) => {
+                    let mut over = *over;
+                    if let Some(pattern_id) = over.pattern_id {
+                        over.offset_steps = self.advanced_offset(
+                            track,
+                            pattern_id,
+                            over.offset_steps,
+                            delta_beats,
+                        );
+                    }
+                    overrides.push(over);
+                }
+                None => {
+                    // Scene-resolved lane: materialize only when continuity
+                    // needs a nonzero offset at the split beat.
+                    if let Some(pattern) = cell {
+                        let offset =
+                            self.advanced_offset(track, pattern.0, 0.0, delta_beats);
+                        if offset != 0.0 {
+                            overrides.push(ProjectSongTrackOverride {
+                                track,
+                                pattern_id: Some(pattern.0),
+                                offset_steps: offset,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        overrides
+    }
+
     /// Paint one track's resolved pattern over `[start_beat, end_beat)`
-    /// (the arrangement's track-clip surgery, one atomic primitive):
-    /// `pattern_id` is a pool id, or `None` for explicit-empty (silence).
-    ///
-    /// Row mechanics: the affected region is split out of the surrounding
-    /// rows — a restore row at `end_beat` preserving the state that was in
-    /// effect there, a row at `start_beat` when none exists, then every row
-    /// starting inside `[start_beat, end_beat)` gets its override for
-    /// `track` set to the painted value. The result is normalized (adjacent
-    /// identical rows collapse), validated, and committed as ONE undo
-    /// entry. A paint that changes nothing is a no-op with no history entry.
+    /// with the clip anchored at the region start (`offset 0`, takes spec
+    /// 7.2): `pattern_id` is a pool id, or `None` for explicit-empty
+    /// (silence).
     pub fn song_track_paint(
         &mut self,
         track: usize,
@@ -345,9 +429,49 @@ impl App {
         end_beat: f64,
         pattern_id: Option<u64>,
     ) -> Result<(), String> {
+        self.song_track_paint_anchored(track, start_beat, end_beat, pattern_id, start_beat, 0.0)
+    }
+
+    /// Paint one track's resolved pattern over `[start_beat, end_beat)`
+    /// (the arrangement's track-clip surgery, one atomic primitive):
+    /// `pattern_id` is a pool id, or `None` for explicit-empty (silence).
+    ///
+    /// Phase (takes spec 7): the painted content anchors at `anchor_beat`
+    /// with `anchor_offset_steps` — each painted row is stamped
+    /// `offset = anchor_offset + steps(row.start_beat - anchor_beat)` so
+    /// the region plays as one continuous clip. A fresh paint passes
+    /// `anchor = start_beat, offset = 0` (clip starts at step 0); the
+    /// resize-right grow gesture passes the existing clip's anchor so the
+    /// extension continues the loop instead of re-starting it.
+    ///
+    /// Row mechanics: the affected region is split out of the surrounding
+    /// rows — a restore row at `end_beat` preserving the state that was in
+    /// effect there (offsets advanced per spec 7.4, so the split is
+    /// phase-transparent to every other lane), a row at `start_beat` when
+    /// none exists, then every row starting inside `[start_beat, end_beat)`
+    /// gets its override for `track` set to the painted value. The result
+    /// is normalized (adjacent identical rows collapse), validated, and
+    /// committed as ONE undo entry. A paint that changes nothing is a
+    /// no-op with no history entry.
+    pub fn song_track_paint_anchored(
+        &mut self,
+        track: usize,
+        start_beat: f64,
+        end_beat: f64,
+        pattern_id: Option<u64>,
+        anchor_beat: f64,
+        anchor_offset_steps: f64,
+    ) -> Result<(), String> {
         self.require_song_edit_unlocked()?;
         let start_beat = finite_beat("Paint start beat", start_beat)?;
         let end_beat = finite_beat("Paint end beat", end_beat)?;
+        if !anchor_beat.is_finite() || !anchor_offset_steps.is_finite() || anchor_offset_steps < 0.0
+        {
+            return Err(format!(
+                "Paint anchor must be finite with a non-negative offset \
+                 (got anchor {anchor_beat}, offset {anchor_offset_steps})"
+            ));
+        }
         if end_beat <= start_beat {
             return Err(format!(
                 "Paint region must have a positive span (got [{start_beat}, {end_beat}))"
@@ -367,13 +491,15 @@ impl App {
         let end_beat = end_beat.min(existing.end_beat);
         let mut song = existing.clone();
 
-        // Restore row: the state in effect at `end_beat` must resume there.
+        // Restore row: the state in effect at `end_beat` must resume there,
+        // with lane offsets advanced so the split itself is inaudible.
         if end_beat < song.end_beat
             && !song.rows.iter().any(|row| row.start_beat == end_beat)
         {
             let governing = state_at_beat(&song, end_beat)
                 .ok_or_else(|| format!("no song row governs beat {end_beat}"))?;
-            let (scene, overrides) = (governing.scene, governing.overrides.clone());
+            let (scene, overrides) =
+                (governing.scene, self.split_row_state(governing, end_beat));
             let row_id = song.allocate_row_id()?;
             let position = song
                 .rows
@@ -396,7 +522,8 @@ impl App {
         if !song.rows.iter().any(|row| row.start_beat == start_beat) {
             let governing = state_at_beat(&song, start_beat)
                 .ok_or_else(|| format!("no song row governs beat {start_beat}"))?;
-            let (scene, overrides) = (governing.scene, governing.overrides.clone());
+            let (scene, overrides) =
+                (governing.scene, self.split_row_state(governing, start_beat));
             let row_id = song.allocate_row_id()?;
             let position = song
                 .rows
@@ -414,20 +541,54 @@ impl App {
             );
         }
 
-        // Set the painted override on every row inside the region.
-        for row in song
-            .rows
-            .iter_mut()
-            .filter(|row| row.start_beat >= start_beat && row.start_beat < end_beat)
-        {
+        // Set the painted override on every row inside the region. Each row
+        // re-anchors into the painted clip: offset = anchor offset plus the
+        // steps elapsed from the anchor to the row start (spec 7.1), so the
+        // region plays as one continuous clip across its internal splits.
+        for idx in 0..song.rows.len() {
+            let row_start = song.rows[idx].start_beat;
+            if row_start < start_beat || row_start >= end_beat {
+                continue;
+            }
+            let offset_steps = match pattern_id {
+                Some(pattern_id) => self.advanced_offset(
+                    track,
+                    pattern_id,
+                    anchor_offset_steps,
+                    row_start - anchor_beat,
+                ),
+                None => 0.0,
+            };
+            let row = &mut song.rows[idx];
             row.overrides.retain(|over| over.track != track);
-            row.overrides.push(ProjectSongTrackOverride { track, pattern_id });
+            row.overrides.push(ProjectSongTrackOverride {
+                track,
+                pattern_id,
+                offset_steps,
+            });
             row.overrides.sort_by_key(|over| over.track);
         }
 
         // Painting a value a row already had can leave adjacent identical
         // rows; canonical form removes them (spec 5.3).
         song.normalize();
+        // Collapse rows that are pure phase-continuations of their
+        // predecessor (audible no-ops): the row surgery above leaves them
+        // behind when a paint re-covers part of an existing clip with its
+        // own anchor. `normalize` cannot see these — offsets differ
+        // textually but describe the same uninterrupted playback.
+        let mut idx = 1;
+        while idx < song.rows.len() {
+            let expected =
+                self.split_row_state(&song.rows[idx - 1], song.rows[idx].start_beat);
+            if song.rows[idx].scene == song.rows[idx - 1].scene
+                && song.rows[idx].overrides == expected
+            {
+                song.rows.remove(idx);
+            } else {
+                idx += 1;
+            }
+        }
         // Complete no-op: compare rows only — split rows inserted then
         // normalized away may have bumped the allocator, and committing an
         // allocator-only diff would be an empty undo entry.
@@ -578,10 +739,7 @@ mod tests {
     }
 
     fn ov(track: usize, pattern_id: u64) -> ProjectSongTrackOverride {
-        ProjectSongTrackOverride {
-            track,
-            pattern_id: Some(pattern_id),
-        }
+        ProjectSongTrackOverride::new(track, Some(pattern_id))
     }
 
     fn spec(start_beat: f64, scene: usize, overrides: Vec<ProjectSongTrackOverride>) -> SongRowSpec {
@@ -832,10 +990,7 @@ mod tests {
     }
 
     fn empty_ov(track: usize) -> ProjectSongTrackOverride {
-        ProjectSongTrackOverride {
-            track,
-            pattern_id: None,
-        }
+        ProjectSongTrackOverride::new(track, None)
     }
 
     fn row_shapes(app: &App) -> Vec<(f64, usize, Vec<ProjectSongTrackOverride>)> {
@@ -846,12 +1001,24 @@ mod tests {
             .collect()
     }
 
+    fn ov_off(track: usize, pattern_id: u64, offset_steps: f64) -> ProjectSongTrackOverride {
+        ProjectSongTrackOverride {
+            track,
+            pattern_id: Some(pattern_id),
+            offset_steps,
+        }
+    }
+
     #[test]
     fn track_paint_splits_and_restores_around_the_region() {
         let mut app = app_with_song();
         let depth = app.history.undo_len();
         // Silence track 0 over [6, 10): splits row 1's span at 6 and row 2's
-        // at 10, restoring scene 2's original state from beat 10 on.
+        // at 10, restoring scene 2's state from beat 10 on. The restore row
+        // materializes the scene lane with its offset advanced 2 beats
+        // (8 steps of the default 16th timebase) past row 2's start —
+        // occlusion semantics: the underlying clip resumes as if it had
+        // played through the silenced region (takes spec 7.4).
         app.song_track_paint(0, 6.0, 10.0, None)
             .expect("paint succeeds");
         assert_eq!(
@@ -861,7 +1028,7 @@ mod tests {
                 (4.0, 1, Vec::new()),
                 (6.0, 1, vec![empty_ov(0)]),
                 (8.0, 2, vec![empty_ov(0)]),
-                (10.0, 2, Vec::new()),
+                (10.0, 2, vec![ov_off(0, 3, 8.0)]),
             ]
         );
         assert_eq!(app.history.undo_len(), depth + 1, "one paint = one undo entry");
@@ -898,11 +1065,14 @@ mod tests {
     #[test]
     fn track_paint_noop_and_rejections() {
         let mut app = app_with_song();
-        // Painting the value already in effect is a no-op with no entry.
+        // Re-painting part of an existing clip with the clip's own anchor
+        // describes the identical playback and is a no-op with no entry:
+        // the continuity rows the surgery inserts collapse away.
         app.song_track_paint(0, 4.0, 8.0, Some(2)).expect("first paint");
         let depth = app.history.undo_len();
         let song_before = app.state.committed_song();
-        app.song_track_paint(0, 5.0, 7.0, Some(2)).expect("no-op paint");
+        app.song_track_paint_anchored(0, 5.0, 7.0, Some(2), 4.0, 0.0)
+            .expect("no-op paint");
         assert_eq!(app.history.undo_len(), depth);
         assert_eq!(app.state.committed_song(), song_before);
 
@@ -935,6 +1105,71 @@ mod tests {
             |app| app.song_track_paint(0, 0.0, 4.0, None),
             "no song",
         );
+    }
+
+    #[test]
+    fn resize_left_trim_reveals_later_content_via_offset() {
+        // Trim-head semantics (takes spec 7.4): silencing the head of a clip
+        // makes the survivor start later IN THE PATTERN (`start_beat += d`,
+        // `offset += steps(d)`), not restart at step 0.
+        let mut app = app_with_song();
+        app.song_track_paint(0, 4.0, 12.0, Some(2)).expect("paint clip");
+        let depth = app.history.undo_len();
+        // Resize-left: +2 beats = 8 steps of the default 16th timebase.
+        app.song_track_paint(0, 4.0, 6.0, None).expect("trim head");
+        assert_eq!(app.history.undo_len(), depth + 1, "one gesture, one entry");
+        let song = committed(&app);
+        let trimmed = song
+            .rows
+            .iter()
+            .find(|row| row.start_beat == 6.0)
+            .expect("trimmed clip row");
+        assert_eq!(trimmed.overrides, vec![ov_off(0, 2, 8.0)]);
+        // The silenced head is explicit-empty.
+        let head = song
+            .rows
+            .iter()
+            .find(|row| row.start_beat == 4.0)
+            .expect("silenced head row");
+        assert_eq!(head.overrides, vec![empty_ov(0)]);
+    }
+
+    #[test]
+    fn anchored_grow_continues_the_loop_phase() {
+        // Resize-right grow forwards the clip's anchor (takes spec 7.4): the
+        // extension is stamped with the offset the loop reaches at its
+        // start, so playback continues instead of re-anchoring.
+        let mut app = app_with_song();
+        app.song_track_paint(0, 4.0, 8.0, Some(2)).expect("paint clip");
+        app.song_track_paint_anchored(0, 8.0, 12.0, Some(2), 4.0, 0.0)
+            .expect("grow clip");
+        let song = committed(&app);
+        let grown = song
+            .rows
+            .iter()
+            .find(|row| row.start_beat == 8.0)
+            .expect("grown region row");
+        // 4 beats past the anchor = 16 steps = exactly one 16-step cycle:
+        // the offset normalizes back to 0, and phase is continuous.
+        assert_eq!(grown.overrides, vec![ov(0, 2)]);
+        // Growing again: 8 beats past the anchor is two full cycles, so the
+        // extension's state is a pure phase-continuation of the row at 8 and
+        // merges into it — one continuous clip, no redundant row at 12.
+        app.song_track_paint_anchored(0, 12.0, 14.0, Some(2), 4.0, 0.0)
+            .expect("grow clip");
+        let song = committed(&app);
+        assert!(
+            song.rows.iter().all(|row| row.start_beat != 12.0),
+            "the continuation row collapses into the clip"
+        );
+        let restore = song
+            .rows
+            .iter()
+            .find(|row| row.start_beat == 14.0)
+            .expect("restore row after the grown clip");
+        // Occlusion semantics: scene 2's lane resumes at 14 as if it had
+        // played through — 2 beats past the split's governing row = 8 steps.
+        assert_eq!(restore.overrides, vec![ov_off(0, 3, 8.0)]);
     }
 
     #[test]

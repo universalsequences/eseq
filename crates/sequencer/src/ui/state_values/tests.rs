@@ -20305,10 +20305,7 @@
         // on track 0, and row zero's state restored at 6.
         assert!(song.rows.iter().any(|row| row.start_beat == 2.0
             && row.overrides
-                == vec![sequencer::sequencer::ProjectSongTrackOverride {
-                    track: 0,
-                    pattern_id: None,
-                }]));
+                == vec![sequencer::sequencer::ProjectSongTrackOverride::new(0, None)]));
         assert!(song
             .rows
             .iter()
