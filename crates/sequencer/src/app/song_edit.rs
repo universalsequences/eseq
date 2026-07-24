@@ -291,6 +291,15 @@ impl App {
             ));
         }
         let mut song = existing.clone();
+        // In-time move (takes spec 7.1): sliding a row boundary must never
+        // pull the music off the grid. Every lane's offset advances by
+        // `steps(delta)` — the state the row would have had if it had been
+        // split at the new beat — so the phase at any absolute beat is
+        // unchanged and only the switch point moves. Scene-resolved lanes
+        // materialize an override when the advanced offset is nonzero;
+        // whole-pattern-multiple moves leave everything untouched.
+        song.rows[index].overrides =
+            self.split_row_state(&song.rows[index], new_start_beat);
         song.rows[index].start_beat = new_start_beat;
         song.rows.sort_by(|a, b| {
             a.start_beat
@@ -933,6 +942,42 @@ mod tests {
         assert_eq!(rows, vec![(0, 0.0, 0), (2, 8.0, 2), (1, 12.0, 1)]);
         assert_eq!(song.next_row_id, 3, "move preserves ids");
         assert_eq!(app.history.undo_len(), depth + 1);
+    }
+
+    #[test]
+    fn move_keeps_lanes_in_time_via_offset_advance() {
+        let mut app = app_with_song();
+        let moved = committed(&app).rows[1].id; // scene 1 @ 4.0
+        // Move by a quarter note (+1 beat = 4 steps of the 16-step/4-beat
+        // pattern): the scene-resolved lane materializes an override whose
+        // offset keeps the music on the grid.
+        app.song_row_move(moved, 5.0).expect("move succeeds");
+        let song = committed(&app);
+        assert_eq!(song.rows[1].start_beat, 5.0);
+        assert_eq!(song.rows[1].overrides, vec![ov_off(0, 2, 4.0)]);
+
+        // Moving back to a whole-pattern-aligned position folds the offset
+        // back to zero; the materialized override keeps the lane explicit.
+        app.song_row_move(moved, 4.0).expect("move back succeeds");
+        let song = committed(&app);
+        assert_eq!(song.rows[1].overrides, vec![ov(0, 2)]);
+
+        // A painted override's stored offset advances with the move too.
+        app.song_track_paint(0, 8.0, 12.0, Some(3)).expect("paint clip");
+        let painted_row = committed(&app)
+            .rows
+            .iter()
+            .find(|row| row.start_beat == 8.0)
+            .expect("painted row")
+            .id;
+        app.song_row_move(painted_row, 8.5).expect("move painted row");
+        let song = committed(&app);
+        let row = song
+            .rows
+            .iter()
+            .find(|row| row.id == painted_row)
+            .expect("moved painted row");
+        assert_eq!(row.overrides, vec![ov_off(0, 3, 2.0)], "0.5 beats = 2 steps");
     }
 
     #[test]
