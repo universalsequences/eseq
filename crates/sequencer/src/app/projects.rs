@@ -1929,6 +1929,11 @@ impl App {
                 .collect(),
             next_macro_id: self.macro_engine.next_id(),
             use_arrangement: self.use_arrangement,
+            record_armed: if self.graph.record_armed.iter().any(|armed| *armed) {
+                self.graph.record_armed.clone()
+            } else {
+                Vec::new()
+            },
             scene_cell_presence,
             take_pools,
         })
@@ -2897,6 +2902,7 @@ impl App {
             macros,
             next_macro_id,
             use_arrangement,
+            record_armed,
             scene_cell_presence,
             take_pools,
         } = pending.project;
@@ -2951,6 +2957,13 @@ impl App {
         }
         self.state
             .install_project_arrangement(&scene_cell_presence, loaded_take_pools);
+        // Per-track record-arm flags (takes spec 8.1), persisted like
+        // mute/solo. The UI-shared arm vector syncs FROM `graph.record_armed`
+        // on the next tick via `record_arm_sync_pending`.
+        let mut loaded_armed = record_armed;
+        loaded_armed.resize(self.tracks.len(), false);
+        self.graph.record_armed = loaded_armed;
+        self.record_arm_sync_pending = true;
         // The serialized song was validated at deserialize time against the
         // deterministic rebuilt-pool id domain, which is exactly what
         // `replace_pattern_repository` just installed; re-check against the
@@ -4306,6 +4319,7 @@ mod tests {
             macros: Vec::new(),
             next_macro_id: 1,
             use_arrangement: false,
+            record_armed: Vec::new(),
             scene_cell_presence: Vec::new(),
             take_pools: Vec::new(),
         }

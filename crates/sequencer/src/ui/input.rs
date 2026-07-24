@@ -1342,6 +1342,10 @@ pub(crate) enum RecordingKeyOutcome {
     Ignored,
     Consumed,
     Recorded,
+    /// Notes were written into a pending take (takes spec 8.4): the live
+    /// pattern is untouched, so no step-grid rebuild and no live-recording
+    /// history transaction.
+    RecordedTake,
 }
 
 impl RecordingKeyOutcome {
@@ -1351,6 +1355,10 @@ impl RecordingKeyOutcome {
 
     pub(crate) fn recorded(self) -> bool {
         matches!(self, Self::Recorded)
+    }
+
+    pub(crate) fn recorded_take(self) -> bool {
+        matches!(self, Self::RecordedTake)
     }
 }
 
@@ -1386,6 +1394,7 @@ fn quantized_record_position(
 /// Intercept keyboard events for live recording.
 pub(crate) fn handle_recording_key(
     key: &crossterm::event::KeyEvent,
+    app: &mut sequencer::app::App,
     state: &Arc<SequencerState>,
     record_armed: &Arc<Mutex<Vec<bool>>>,
     recording: &Arc<AtomicBool>,
@@ -1490,10 +1499,26 @@ pub(crate) fn handle_recording_key(
                     let duration_steps = (hold_secs / secs_per_step).max(0.15).min(64.0) as f32;
                     let mut recorded = false;
 
+                    let mut recorded_take = false;
                     let quantize = sequencer::record_quantize::RecordQuantize::from_atomic(
                         state.transport.record_quantize.load(Ordering::Relaxed) as u8,
                     );
                     for (track, position) in &note.positions {
+                        // Song-mode take recording (takes spec 8.4): while
+                        // arrangement capture is active, an armed track's
+                        // notes retarget into its pending take at
+                        // clip-relative positions stamped on the
+                        // latency-compensated record clock — the live
+                        // pattern is NOT written.
+                        if app.take_record_note(
+                            *track,
+                            note.press_time,
+                            note.transpose,
+                            duration_steps,
+                        ) {
+                            recorded_take = true;
+                            continue;
+                        }
                         let num_steps = state.pattern.track_params[*track].get_num_steps();
                         let (local_step, delay) = quantized_record_position(
                             position.step,
@@ -1529,6 +1554,9 @@ pub(crate) fn handle_recording_key(
                         state.publish_scheduler_snapshot();
                         ui_epoch.fetch_add(1, Ordering::Relaxed);
                         return RecordingKeyOutcome::Recorded;
+                    }
+                    if recorded_take {
+                        return RecordingKeyOutcome::RecordedTake;
                     }
                 }
             }

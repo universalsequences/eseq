@@ -45,6 +45,7 @@ mod projects;
 pub mod song_capture;
 pub mod song_edit;
 pub mod take_edit;
+pub mod take_recording;
 pub mod song_transport;
 mod synth;
 
@@ -904,6 +905,14 @@ pub struct App {
     /// step tile hides the global status line). Cleared by the next
     /// successful song edit.
     pub song_edit_error: Option<String>,
+    /// In-flight take recording while `ArrangementCapture` is active (takes
+    /// spec 8): armed-track note input retargets into detached pending
+    /// chunks here; the capture stop-commit registers them as takes.
+    pub(crate) take_recording: Option<take_recording::TakeRecordingSession>,
+    /// Set after project load: the loaded per-track record-arm flags in
+    /// `graph.record_armed` must be pushed INTO the UI-shared arm vector
+    /// (the per-tick sync runs the other way).
+    pub record_arm_sync_pending: bool,
 }
 
 struct RecordingHistoryTransaction {
@@ -2204,6 +2213,8 @@ impl App {
             song_capture_failed: false,
             song_capture_error: None,
             song_edit_error: None,
+            take_recording: None,
+            record_arm_sync_pending: false,
             graph: GraphState {
                 lg,
                 track_node_ids: Vec::new(),

@@ -822,6 +822,15 @@ pub(crate) fn reactive_tick_and_render(
                 &ctx.shared.state,
                 ctx.shared.active_delete_target.lock().unwrap().as_ref(),
             );
+            if app.record_arm_sync_pending {
+                // Project load restored per-track arm flags (takes spec
+                // 8.1): push them INTO the shared vector once — the per-tick
+                // sync below runs the other way (shared -> app).
+                app.record_arm_sync_pending = false;
+                let mut armed = ctx.shared.record_armed.lock().unwrap();
+                armed.clear();
+                armed.extend(app.graph.record_armed.iter().copied());
+            }
             let armed = ctx.shared.record_armed.lock().unwrap();
             let record_armed_changed = armed.len() != app.graph.record_armed.len()
                 || armed

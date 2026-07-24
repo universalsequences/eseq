@@ -519,7 +519,7 @@ impl App {
     /// take override on every row inside, re-anchoring each with
     /// `offset = steps(row.start - start_beat)` so mid-region rows continue
     /// the take instead of restarting it (takes spec 8.5 semantics).
-    fn paint_take_region(
+    pub(super) fn paint_take_region(
         &self,
         existing: &ProjectSong,
         track: usize,

@@ -688,6 +688,7 @@ pub(crate) fn run_event_loop(
                     {
                         handle_recording_key(
                             &key,
+                            &mut app,
                             &shared.state,
                             &shared.record_armed,
                             &shared.recording,
@@ -700,6 +701,12 @@ pub(crate) fn run_event_loop(
                         RecordingKeyOutcome::Ignored
                     };
                     let intercepted = recording_key_outcome.consumed();
+                    if recording_key_outcome.recorded_take() {
+                        // Take-retargeted notes touch neither the live
+                        // pattern nor the step grid; the timeline preview
+                        // updates at commit.
+                        editor.mark_needs_redraw();
+                    }
                     if recording_key_outcome.recorded() {
                         app.mark_recording_take_changed();
                         let ct = shared.current_track.load(Ordering::Relaxed);

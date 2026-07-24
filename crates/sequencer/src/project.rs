@@ -88,6 +88,10 @@ pub struct ProjectFile {
     /// 7.1): selects session vs song behavior for the next Play.
     #[serde(default)]
     pub use_arrangement: bool,
+    /// Per-track record-arm flags (takes spec 8.1), persisted like
+    /// mute/solo. Empty (legacy files, or nothing armed) loads as all-off.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub record_armed: Vec<bool>,
     /// Per-scene, per-track cell presence (takes spec 11.1): `false` marks a
     /// scene cell that held no pattern, so bare tracks survive save/reload
     /// (`patterns` is dense and cannot encode absence). Outer index = scene,
@@ -153,6 +157,8 @@ struct ProjectFileWire {
     #[serde(default)]
     use_arrangement: bool,
     #[serde(default)]
+    record_armed: Vec<bool>,
+    #[serde(default)]
     scene_cell_presence: Vec<Vec<bool>>,
     #[serde(default)]
     take_pools: Vec<ProjectTrackTakePool>,
@@ -184,6 +190,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
             next_macro_id: wire.next_macro_id,
             song: wire.song,
             use_arrangement: wire.use_arrangement,
+            record_armed: wire.record_armed,
             scene_cell_presence: wire.scene_cell_presence,
             take_pools: wire.take_pools,
         };
@@ -3001,6 +3008,7 @@ mod tests {
             next_macro_id: 1,
             song: None,
             use_arrangement: false,
+            record_armed: Vec::new(),
             scene_cell_presence: Vec::new(),
             take_pools: Vec::new(),
         }
@@ -3114,6 +3122,29 @@ mod tests {
         let json = serde_json::to_string(&bare).expect("serialize project");
         assert!(!json.contains("take_pools"), "empty take pools are skipped");
         assert!(!json.contains("scene_cell_presence"), "full presence is skipped");
+    }
+
+    #[test]
+    fn record_armed_round_trips_and_defaults_off() {
+        let mut project = sample_project();
+        project.record_armed = vec![true, false];
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+        assert_eq!(restored.record_armed, vec![true, false]);
+
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        value
+            .as_object_mut()
+            .expect("project is a json object")
+            .remove("record_armed");
+        let restored: ProjectFile =
+            serde_json::from_value(value).expect("deserialize pre-arm project");
+        assert!(restored.record_armed.is_empty());
+
+        // Nothing armed writes no field at all.
+        let bare = sample_project();
+        let json = serde_json::to_string(&bare).expect("serialize project");
+        assert!(!json.contains("record_armed"), "all-off arm flags are skipped");
     }
 
     #[test]

@@ -166,8 +166,9 @@ impl App {
             .enumerate()
             .filter_map(|(track, over)| over.map(|id| (track, id)))
             .collect();
+        let origin_beats = self.state.scheduler_rendered_beats();
         self.song_capture_take = Some(SongCaptureTake {
-            origin_beats: self.state.scheduler_rendered_beats(),
+            origin_beats,
             initial: CapturedSongState {
                 start_beat: 0.0,
                 scene: scenes.current_scene,
@@ -175,12 +176,21 @@ impl App {
             },
             events: Vec::new(),
         });
+        // Take recording rides the same capture pass (takes spec 8.2): one
+        // transport gesture, two streams, one commit. Same beat origin.
+        self.take_recording = Some(super::take_recording::TakeRecordingSession::new(
+            origin_beats,
+            self.tracks.len(),
+        ));
     }
 
     /// Discard the staging take (Cancel, spec 7.4.8). The committed song is
     /// preserved by construction: the take never touched it.
     pub(crate) fn discard_song_capture_take(&mut self) {
         self.song_capture_take = None;
+        // Pending take content lives in detached buffers (takes spec 8.5
+        // Cancel): dropping it touches neither the pattern pool nor the song.
+        self.take_recording = None;
     }
 
     /// Record one successful audible launch. Called from
@@ -230,6 +240,7 @@ impl App {
     ) -> Result<String, String> {
         let result = self.try_finish_song_capture_take(end_raw_beats);
         self.song_capture_take = None;
+        self.take_recording = None;
         if let Err(error) = &result {
             self.song_capture_failed = true;
             self.song_capture_error = Some(error.clone());
@@ -241,6 +252,13 @@ impl App {
         let Some(take) = self.song_capture_take.take() else {
             return Err("no arrangement-capture take is active".to_string());
         };
+        // Pending take-recording lanes commit together with the launch
+        // splice as one undo entry (takes spec 8.2/8.5).
+        let pending = self
+            .take_recording
+            .take()
+            .map(|session| session.into_pending())
+            .unwrap_or_default();
         // Spec 10.3: a lost notice means the take may be incomplete; it must
         // never be committed.
         if self.state.song_playback().take_notice_overflow() {
@@ -275,14 +293,23 @@ impl App {
         let mut specs: Vec<SongRowSpec> = Vec::new();
         let final_end_beat;
         match (&previous, punch_in) {
-            (Some(_), None) => {
+            (Some(previous), None) => {
                 // No launches performed: nothing to splice; the committed
-                // song is untouched and no undo entry is created (spec 9.1).
-                return Ok(
-                    "Arrangement capture ended: no launches captured; the committed song \
-                     is unchanged"
-                        .to_string(),
-                );
+                // song is untouched (spec 9.1) — unless takes were recorded,
+                // in which case they commit onto the unchanged rows.
+                if pending.is_empty() {
+                    return Ok(
+                        "Arrangement capture ended: no launches captured; the committed \
+                         song is unchanged"
+                            .to_string(),
+                    );
+                }
+                specs.extend(previous.rows.iter().map(|row| SongRowSpec {
+                    start_beat: row.start_beat,
+                    scene: row.scene,
+                    overrides: row.overrides.clone(),
+                }));
+                final_end_beat = previous.end_beat;
             }
             (Some(previous), Some(punch_in)) => {
                 // Existing rows before the punch-in survive verbatim
@@ -339,11 +366,147 @@ impl App {
             earlier.scene == later.scene && earlier.overrides == later.overrides
         });
 
-        let row_count = specs.len();
-        self.song_replace(specs, final_end_beat, loop_enabled)
-            .map_err(|error| format!("the captured take could not be committed: {error}"))?;
+        // No takes and (by the arm above) no launches ⇒ nothing to commit
+        // for a fresh project either: the transport ran and nothing was
+        // performed.
+        if pending.is_empty() {
+            let row_count = specs.len();
+            self.song_replace(specs, final_end_beat, loop_enabled)
+                .map_err(|error| {
+                    format!("the captured take could not be committed: {error}")
+                })?;
+            return Ok(format!(
+                "Arrangement capture committed: {row_count} row(s), end beat \
+                 {final_end_beat:.3}"
+            ));
+        }
+        self.commit_capture_with_takes(specs, final_end_beat, loop_enabled, pending)
+    }
+
+    /// Atomic commit of the launch splice PLUS the recorded takes (takes
+    /// spec 8.5): register every pending take, rebuild the song from the
+    /// splice specs, repoint each recorded region `[P, Q)` at its take (rows
+    /// re-anchored with `offset = steps(row.start - P)`), extend the song
+    /// end when a take runs past it, and commit ONE composite undo entry
+    /// (scenes + song). Any failure rolls both back.
+    fn commit_capture_with_takes(
+        &mut self,
+        specs: Vec<SongRowSpec>,
+        end_beat: f64,
+        loop_enabled: bool,
+        pending: Vec<(usize, super::take_recording::PendingTakeLane)>,
+    ) -> Result<String, String> {
+        use super::history::{EditPatch, SceneStructurePatch, SongStructurePatch};
+
+        let scenes_before = self.capture_synchronized_scene_structure_state()?;
+        let song_before = self.state.committed_song();
+        let lanes = match self.register_pending_takes(pending) {
+            Ok(lanes) => lanes,
+            Err(error) => {
+                self.restore_scene_structure_state(&scenes_before)?;
+                return Err(format!("recorded takes could not be registered: {error}"));
+            }
+        };
+        let rollback = |app: &mut App,
+                        lanes: &[super::take_recording::CommittedTakeLane]|
+         -> Result<(), String> {
+            for lane in lanes {
+                app.state.remove_track_take(lane.track, lane.take_id)?;
+            }
+            app.restore_scene_structure_state(&scenes_before)
+        };
+
+        // Build the spliced song (mirrors `song_replace`: sorted rows, fresh
+        // ids continuing the previous allocator).
+        let mut song = crate::sequencer::ProjectSong {
+            rows: Vec::with_capacity(specs.len()),
+            end_beat,
+            loop_enabled,
+            next_row_id: song_before
+                .as_ref()
+                .map(|song| song.next_row_id)
+                .unwrap_or(0),
+        };
+        let mut sorted = specs;
+        sorted.sort_by(|a, b| {
+            a.start_beat
+                .partial_cmp(&b.start_beat)
+                .expect("song row start beats are finite")
+        });
+        let build = (|| -> Result<crate::sequencer::ProjectSong, String> {
+            for spec in sorted {
+                let row_id = song.allocate_row_id()?;
+                let mut overrides = spec.overrides;
+                overrides.sort_by_key(|over| over.track);
+                song.rows.push(crate::sequencer::ProjectSongRow {
+                    id: row_id,
+                    start_beat: spec.start_beat,
+                    scene: spec.scene,
+                    overrides,
+                });
+            }
+            // A take running past the song end extends it (spec 8.5).
+            for lane in &lanes {
+                song.end_beat = song.end_beat.max(lane.punch_out_beat);
+            }
+            let mut song = song.clone();
+            for lane in &lanes {
+                song = self.paint_take_region(
+                    &song,
+                    lane.track,
+                    lane.punch_in_beat,
+                    lane.punch_out_beat.min(song.end_beat),
+                    lane.take_id,
+                    lane.step_beats,
+                )?;
+            }
+            song.normalize();
+            Ok(song)
+        })();
+        let song_after = match build {
+            Ok(song) => song,
+            Err(error) => {
+                rollback(self, &lanes)?;
+                return Err(format!("recorded takes could not be committed: {error}"));
+            }
+        };
+        {
+            let scenes = self.state.capture_project_scenes();
+            if let Err(error) = song_after.validate(&scenes) {
+                rollback(self, &lanes)?;
+                return Err(format!(
+                    "the captured take could not be committed: {error}"
+                ));
+            }
+        }
+        self.state.set_committed_song(Some(song_after.clone()));
+        let scenes_after = self.state.capture_project_scenes();
+        let scene_patch = SceneStructurePatch {
+            before: scenes_before,
+            after: scenes_after,
+        };
+        let song_patch = SongStructurePatch {
+            before: song_before,
+            after: Some(song_after.clone()),
+        };
+        let retained_bytes = scene_patch.retained_bytes() + song_patch.retained_bytes();
+        // Scenes first: redo restores the takes before the song referencing
+        // them; undo removes the references before the takes (see
+        // take_edit.rs for the same ordering rationale).
+        self.history.commit(
+            "Record arrangement takes",
+            None,
+            EditPatch::Composite(vec![
+                EditPatch::SceneStructure(scene_patch),
+                EditPatch::Song(song_patch),
+            ]),
+            retained_bytes,
+        );
         Ok(format!(
-            "Arrangement capture committed: {row_count} row(s), end beat {final_end_beat:.3}"
+            "Arrangement capture committed: {} row(s), {} take(s), end beat {:.3}",
+            song_after.rows.len(),
+            lanes.len(),
+            song_after.end_beat
         ))
     }
 }
