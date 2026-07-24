@@ -4619,10 +4619,11 @@ fn apply_coalesced_device_plock_commands(
         .track_registry
         .id_at(track)
         .ok_or(EditError::TrackOutOfRange { track })?;
-    let pattern_id = app
-        .state
-        .effective_track_pattern_id(track)
-        .ok_or(EditError::MissingTrackPattern)?;
+    // Lazily materialize the pattern when the current scene is bare for the
+    // track (takes spec 11.1): the first edit in a bare scene creates the
+    // pattern and lifts the empty-cell silencing.
+    let pattern_id =
+        ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?;
     let target = TrackPatternId {
         track: track_id,
         pattern: pattern_id,
@@ -6234,10 +6235,11 @@ fn apply_recorded_pattern_geometry_command(
         .track_registry
         .id_at(track)
         .ok_or(EditError::TrackOutOfRange { track })?;
-    let pattern_id = app
-        .state
-        .effective_track_pattern_id(track)
-        .ok_or(EditError::MissingTrackPattern)?;
+    // Lazily materialize the pattern when the current scene is bare for the
+    // track (takes spec 11.1): the first edit in a bare scene creates the
+    // pattern and lifts the empty-cell silencing.
+    let pattern_id =
+        ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?;
     let target = TrackPatternId {
         track: track_id,
         pattern: pattern_id,
@@ -6323,10 +6325,11 @@ pub fn apply_recorded_step_mutation(
         .track_registry
         .id_at(track)
         .ok_or(EditError::TrackOutOfRange { track })?;
-    let pattern_id = app
-        .state
-        .effective_track_pattern_id(track)
-        .ok_or(EditError::MissingTrackPattern)?;
+    // Lazily materialize the pattern when the current scene is bare for the
+    // track (takes spec 11.1): the first edit in a bare scene creates the
+    // pattern and lifts the empty-cell silencing.
+    let pattern_id =
+        ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?;
     let target = TrackPatternId {
         track: track_id,
         pattern: pattern_id,
@@ -7736,6 +7739,91 @@ mod tests {
         app.tracks = vec!["Track 1".to_string()];
         app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app
+    }
+
+    /// Regression: a newly added track has a pattern only in the scene it
+    /// was born in (takes spec 11.1). Switching to another scene must show
+    /// an EMPTY step grid (not the previous scene's notes), and the first
+    /// step edit there must materialize the scene's pattern, lift the
+    /// empty-cell silencing, and leave the original scene untouched.
+    #[test]
+    fn bare_scene_presents_empty_grid_and_first_edit_materializes() {
+        let state = SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(2, &[]),
+                PatternSnapshot::new_default(2, &[]),
+            ],
+            0,
+        );
+        // Shape of a track added while on scene 0: scene 1's cell is bare.
+        state.with_scenes_mut(|scenes| {
+            if let Some(id) = scenes.scenes[1].cells[1].take() {
+                scenes.track_pools[1].remove(id);
+            }
+        });
+        let mut app = test_app(state);
+        app.tracks = vec!["Track 1".to_string(), "Track 2".to_string()];
+        app.track_registry =
+            crate::sequencer::TrackRegistry::for_legacy_track_count(2).unwrap();
+        app.graph.track_buffer_ids = vec![-1, -1];
+        app.graph.track_sample_rates = vec![44_100, 44_100];
+        app.graph.track_instrument_types = vec![InstrumentType::Sampler, InstrumentType::Sampler];
+
+        // Author a step on track 1 while on scene 0.
+        try_apply_command(&mut app, AppCommand::ToggleStep { track: 1, step: 0 })
+            .expect("edit in the born scene");
+        assert!(app.state.capture_step_snapshot(1, 0).active);
+
+        // Switch to scene 1 (bare for track 1): empty grid, silenced lane,
+        // no effective pattern — scene 0's notes must not leak through.
+        app.state
+            .launch_scene(
+                1,
+                2,
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            )
+            .expect("launch scene 1");
+        assert!(!app.state.capture_step_snapshot(1, 0).active, "no leaked notes");
+        assert!(app.state.is_scene_silenced(1));
+        assert!(app.state.effective_track_pattern_id(1).is_none());
+
+        // First step edit in the bare scene materializes the pattern into
+        // scene 1's cell and lifts the silencing.
+        try_apply_command(&mut app, AppCommand::ToggleStep { track: 1, step: 4 })
+            .expect("first edit in the bare scene");
+        let materialized = app
+            .state
+            .effective_track_pattern_id(1)
+            .expect("pattern materialized");
+        app.state.with_scenes_mut(|scenes| {
+            assert_eq!(scenes.scenes[1].cells[1], Some(materialized));
+            assert_ne!(scenes.scenes[0].cells[1], Some(materialized));
+        });
+        assert!(!app.state.is_scene_silenced(1));
+        assert!(app.state.capture_step_snapshot(1, 4).active);
+        assert!(!app.state.capture_step_snapshot(1, 0).active);
+
+        // Back to scene 0: the original pattern is intact and scene 1's
+        // edit stayed in scene 1.
+        app.state
+            .launch_scene(
+                0,
+                2,
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            )
+            .expect("launch scene 0");
+        assert!(app.state.capture_step_snapshot(1, 0).active);
+        assert!(!app.state.capture_step_snapshot(1, 4).active);
     }
 
     fn configure_test_sampler_project(app: &mut App, sample_path: &str) {

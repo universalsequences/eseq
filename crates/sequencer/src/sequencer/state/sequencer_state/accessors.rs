@@ -491,6 +491,10 @@ impl SequencerState {
         }
         let id = scenes.track_pools.get_mut(track)?.insert(data);
         *scenes.scenes.get_mut(current)?.cells.get_mut(track)? = Some(id);
+        drop(scenes);
+        // The scene now resolves a pattern for this track; the launch-time
+        // silencing for the empty cell no longer applies.
+        self.set_scene_silenced(track, false);
         Some(id)
     }
 

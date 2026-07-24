@@ -3794,7 +3794,7 @@
     }
 
     #[test]
-    fn launch_scene_with_empty_cell_silences_track_without_mutating_live_lane() {
+    fn launch_scene_with_empty_cell_silences_track_and_blanks_the_live_lane() {
         let state = make_state_with_tracks(1);
         state.clone_pattern(
             1,
@@ -3823,7 +3823,10 @@
         assert!(sample_ids.is_some());
         assert!(state.is_scene_silenced(0));
         assert!(state.latest_scheduler_snapshot().tracks[0].scene_silenced);
-        assert!(state.pattern.patterns[0].is_active(3));
+        // An empty cell presents an EMPTY step grid (takes spec 11.1): the
+        // previous scene's live notes must not show through. Track params
+        // (length, timebase) stay — only note content is blanked.
+        assert!(!state.pattern.patterns[0].is_active(3));
         assert_eq!(state.pattern.track_params[0].get_num_steps(), 7);
         assert_eq!(state.current_scene_index(), 0);
     }

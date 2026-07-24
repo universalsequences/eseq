@@ -88,6 +88,9 @@ impl SequencerState {
                     data.restore_to(self, track);
                     self.set_scene_silenced(track, false);
                 } else {
+                    // No pattern in this scene (bare/cleared cell): present
+                    // an empty step grid, not the previous scene's notes.
+                    self.clear_live_track_note_content(track);
                     self.set_scene_silenced(track, true);
                 }
             }
@@ -372,7 +375,12 @@ impl SequencerState {
                     data.restore_to(self, track);
                     self.set_scene_silenced(track, false);
                 }
-                None => self.set_scene_silenced(track, true),
+                None => {
+                    // No pattern for this track: blank the live grid so the
+                    // step view matches the (empty) resolved pattern.
+                    self.clear_live_track_note_content(track);
+                    self.set_scene_silenced(track, true);
+                }
             }
         }
         self.pattern

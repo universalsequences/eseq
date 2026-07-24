@@ -1656,6 +1656,17 @@ impl SequencerState {
         Ok(())
     }
 
+    /// Blank a track's live note content (active steps, chords, per-step
+    /// plocks) without touching its instrument/effect/mixer state. Used when
+    /// a launched scene resolves no pattern for the track (takes spec 11.1):
+    /// the step grid must present an empty pattern, not the previous
+    /// scene's notes left behind in the live buffers.
+    pub(crate) fn clear_live_track_note_content(&self, track: usize) {
+        for step in 0..MAX_STEPS {
+            self.clear_step_payload_inner(track, step);
+        }
+    }
+
     pub(crate) fn clear_step_payload_inner(&self, track: usize, step: usize) {
         for param in StepParam::ALL {
             self.pattern.step_data[track].set(step, param, param.default_value());
