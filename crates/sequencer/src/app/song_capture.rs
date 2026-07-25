@@ -573,7 +573,6 @@ impl App {
                     lane.punch_in_beat,
                     lane.punch_out_beat.min(song.end_beat),
                     lane.take_id,
-                    lane.step_beats,
                 )?;
             }
             song.normalize();

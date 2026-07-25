@@ -133,6 +133,10 @@ pub(crate) struct SharedHandles {
     pub(crate) keyboard_tx: std::sync::mpsc::Sender<KeyboardTrigger>,
     pub(crate) accumulator_names: Arc<Mutex<Vec<String>>>,
     pub(crate) piano_roll_clipboard: PianoRollClipboard,
+    /// Arrangement region clipboard (region spec 5.1). Lives beside the
+    /// piano-roll clipboard for the same reason: copy/paste are host commands
+    /// applied where the loop context is in scope, not `App` state.
+    pub(crate) arrangement_clipboard: app::song_region::ArrangementClipboardHandle,
     pub(crate) selected_drum_lane_steps: Arc<Mutex<HashSet<DrumLaneStepSelection>>>,
 }
 

@@ -938,6 +938,96 @@ pub(crate) fn handle_metal_soft_step_param_key(
     }
 }
 
+/// Arrangement (Arr tab) region clipboard seam (region spec 5.3).
+///
+/// The region and the edit cursor are Rust-owned but published as
+/// `SEQ.song-region` / `SEQ.song-bound-clip`, which is the single source of
+/// truth this reads — no second mirror to drift. The actual work happens in
+/// the region host commands, where the clipboard handle is in scope.
+fn arrangement_view_is_active(editor: &Editor) -> bool {
+    editor.active_buffer().name == "*arrangement*"
+}
+
+/// Whether a published `SEQ.*` value is set (non-nil).
+fn published_value_is_set(editor: &mut Editor, expr: &str) -> bool {
+    editor
+        .runtime_mut()
+        .eval_str(expr)
+        .ok()
+        .flatten()
+        .is_some_and(|value| !matches!(value, eseqlisp::vm::Value::Nil))
+}
+
+fn enqueue_region_command(editor: &mut Editor, name: &str) {
+    editor
+        .runtime_mut()
+        .enqueue_host_command(HostCommand::Custom {
+            name: name.to_string(),
+            payload: Value::Nil,
+        });
+}
+
+/// Cmd-C / Cmd-V / Cmd-D / Backspace over the arrangement. Returns true when
+/// the key was consumed.
+///
+/// Backspace only takes the key for a MARQUEE region (region set, no clip
+/// selected). A clip click also sets a one-clip region (spec 4.1 as amended),
+/// and that case must keep falling through to the existing clip-delete path.
+fn handle_arrangement_region_shortcut(
+    editor: &mut Editor,
+    key: &crossterm::event::KeyEvent,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    if !arrangement_view_is_active(editor)
+        || editor.minibuffer_prompt().is_some()
+        || editor.prompt_text().is_some()
+        || focused_widget_captures_text_input(editor)
+    {
+        return false;
+    }
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('c') | KeyCode::Char('C'), modifiers)
+            if modifiers.contains(KeyModifiers::SUPER) =>
+        {
+            if !published_value_is_set(editor, "SEQ.song-region") {
+                return false;
+            }
+            enqueue_region_command(editor, "song-region-copy");
+            true
+        }
+        (KeyCode::Char('v') | KeyCode::Char('V'), modifiers)
+            if modifiers.contains(KeyModifiers::SUPER) =>
+        {
+            // No payload: the command pastes at the mirrored arrangement
+            // cursor, floored to the clipboard's own grid. An empty clipboard
+            // reports on the status line rather than falling through to a
+            // shortcut that means nothing here.
+            enqueue_region_command(editor, "song-region-paste");
+            true
+        }
+        (KeyCode::Char('d') | KeyCode::Char('D'), modifiers)
+            if modifiers.contains(KeyModifiers::SUPER) =>
+        {
+            if !published_value_is_set(editor, "SEQ.song-region") {
+                return false;
+            }
+            enqueue_region_command(editor, "song-region-duplicate");
+            true
+        }
+        (KeyCode::Backspace | KeyCode::Delete, KeyModifiers::NONE) => {
+            if !published_value_is_set(editor, "SEQ.song-region")
+                || published_value_is_set(editor, "SEQ.song-bound-clip")
+            {
+                return false;
+            }
+            enqueue_region_command(editor, "song-region-delete");
+            true
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn handle_metal_command_shortcut(
     editor: &mut Editor,
@@ -1045,6 +1135,12 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         } else if refocus_search {
             let _ = editor.focus_widget_by_stable_key("sbrowser-search-input", Some("text-input"));
         }
+        editor.mark_needs_redraw();
+        return true;
+    }
+
+    if handle_arrangement_region_shortcut(editor, key) {
+        editor.refresh_runtime_side_effects();
         editor.mark_needs_redraw();
         return true;
     }

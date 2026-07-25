@@ -932,6 +932,13 @@ pub struct App {
     /// primitives read it directly. Mutually exclusive with the clip and
     /// scene-row selections.
     pub song_region_selection: Option<song_region::SongRegionSelection>,
+    /// Mirror of the arrangement edit cursor (region spec 5.3). The Lisp view
+    /// owns the click gesture, but the Cmd-V seam lives in Rust and needs a
+    /// paste target, so `seq-song-set-arr-cursor` reflects the cursor here
+    /// alongside the region.
+    pub arrangement_cursor_beat: f64,
+    /// Track the cursor is parked on; -1 is the scene lane.
+    pub arrangement_cursor_track: isize,
     /// Whether the arrangement view is on screen. The clip selection is
     /// DORMANT while it is not (takes spec 16.6): a take selected in the
     /// timeline must not keep owning the device panel after the user has
@@ -2285,6 +2292,8 @@ impl App {
             record_arm_sync_pending: false,
             song_clip_selection: None,
             song_region_selection: None,
+            arrangement_cursor_beat: 0.0,
+            arrangement_cursor_track: -1,
             arrangement_view_visible: false,
             loaded_sound_binding: Vec::new(),
             sound_binding_monitored: Vec::new(),

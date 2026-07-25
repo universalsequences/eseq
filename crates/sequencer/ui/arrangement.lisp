@@ -104,7 +104,10 @@
     nil
     (do
       (set! arrangement-cursor-time (max 0 time))
-      (set! arrangement-cursor-track track))))
+      (set! arrangement-cursor-track track)
+      ;; Mirror into Rust (region spec 5.3): Cmd-V is handled Rust-side and
+      ;; pastes at the cursor, so the paste target cannot live only here.
+      (seq-song-set-arr-cursor (max 0 time) track))))
 
 ;; The lane that owns the cursor shows it; every other lane passes nil.
 (def arrangement-lane-cursor-time (track)
@@ -727,7 +730,13 @@
         (set! arrangement-selection '())
         (arrangement-region-clear)
         (arrangement-edit-finish
-          (dict :type :delete-items :ids (get event :ids)))))))
+          (dict :type :delete-items :ids (get event :ids))))
+      ;; A scene-lane marquee selects the span across every track, so its
+      ;; clipboard keys drive the same region commands (region spec 5.3).
+      :copy-items
+      (seq-song-region-copy)
+      :paste-items
+      (seq-song-region-paste (get event :time)))))
 
 ;; Track-lane clip editing (Ableton-style): select a clip, Backspace deletes
 ;; it, dragging its end edge resizes it — fewer loops leaves silence, more
@@ -838,6 +847,14 @@
         (set! arrangement-ghost nil))
       :delete-items
       (arrangement-track-delete i (get event :ids))
+      ;; Clipboard (region spec 5.3): the widget emits these when a lane has
+      ;; keyboard focus; the ui/input.rs seam emits the same commands when it
+      ;; does not. Both converge on the region primitives, which read the
+      ;; Rust-owned region — a clip click already made that a one-clip region.
+      :copy-items
+      (seq-song-region-copy)
+      :paste-items
+      (seq-song-region-paste (get event :time))
       ;; Whole-clip moves are not lowered yet: never leave a stale ghost.
       :finish-move-items
       (set! arrangement-ghost nil))))

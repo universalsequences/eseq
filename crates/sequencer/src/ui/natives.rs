@@ -1231,6 +1231,111 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "seq-song-set-arr-cursor",
+        "(seq-song-set-arr-cursor time [track])",
+        "Mirror the arrangement edit cursor into Rust (region spec 5.3). The \
+         Lisp view owns the click gesture; the Cmd-V paste seam lives in Rust \
+         and pastes at this beat. `track` is the model track index, -1 for \
+         the scene lane.",
+        move |args, ctx| {
+            let Some(Value::Number(time)) = args.first() else {
+                return Err("seq-song-set-arr-cursor: expected a time".into());
+            };
+            let track = match args.get(1) {
+                Some(Value::Number(track)) => *track,
+                _ => -1.0,
+            };
+            let mut payload = HashMap::new();
+            payload.insert(
+                "time".to_string(),
+                Rc::new(RefCell::new(Value::Number(*time))),
+            );
+            payload.insert(
+                "track".to_string(),
+                Rc::new(RefCell::new(Value::Number(track))),
+            );
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-set-arr-cursor".to_string(),
+                payload: Value::Map(payload),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-region-copy",
+        "(seq-song-region-copy)",
+        "Copy the selected arrangement region to the arrangement clipboard \
+         (region spec 5.1): the whole time x track rectangle, gaps included. \
+         Read-only — no undo entry. A clip selection is a one-clip region, so \
+         this copies a selected clip too.",
+        move |_args, ctx| {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-region-copy".to_string(),
+                payload: Value::Nil,
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-region-paste",
+        "(seq-song-region-paste [time])",
+        "Paste the arrangement clipboard at `time` — or at the mirrored edit \
+         cursor when omitted — floored to the copied rectangle's grid (region \
+         spec 5.2). Same-track, time-shift only. Pattern clips paste as \
+         references; take clips paste as fresh copies. ONE undo entry.",
+        move |args, ctx| {
+            let payload = match args.first() {
+                Some(Value::Number(time)) => {
+                    let mut map = HashMap::new();
+                    map.insert(
+                        "time".to_string(),
+                        Rc::new(RefCell::new(Value::Number(*time))),
+                    );
+                    Value::Map(map)
+                }
+                _ => Value::Nil,
+            };
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-region-paste".to_string(),
+                payload,
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-region-delete",
+        "(seq-song-region-delete)",
+        "Silence the selected arrangement region on every track it covers \
+         (region spec 5.2): explicit-empty overrides, ONE undo entry.",
+        move |_args, ctx| {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-region-delete".to_string(),
+                payload: Value::Nil,
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-region-duplicate",
+        "(seq-song-region-duplicate)",
+        "Duplicate the selected region immediately after itself, pushing the \
+         rest of the song right by its length (Ableton's Duplicate Time). \
+         Take clips duplicate as fresh copies; the selection follows the new \
+         copy so repeated calls chain. ONE undo entry.",
+        move |_args, ctx| {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-region-duplicate".to_string(),
+                payload: Value::Nil,
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "seq-sound-push-to-pattern",
         "(seq-sound-push-to-pattern track)",
         "Push to pattern (takes spec 16.5): copy the track's bound sound \

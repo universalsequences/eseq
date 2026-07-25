@@ -10,7 +10,8 @@
 //! arrangement capture is active — see `App::song_edits_locked`.
 
 use crate::sequencer::{
-    state_at_beat, PatternId, ProjectSong, ProjectSongRow, ProjectSongTrackOverride, SongRowId,
+    state_at_beat, LaneSource, PatternId, ProjectSong, ProjectSongRow, ProjectSongTrackOverride,
+    SongRowId,
 };
 
 use super::edit::finish_active_gesture;
@@ -102,7 +103,7 @@ impl App {
     /// Shared primitive tail: validate the candidate, install it atomically,
     /// and commit exactly one history entry. On any error the committed song
     /// is untouched and no history entry is created.
-    fn commit_song_edit(
+    pub(super) fn commit_song_edit(
         &mut self,
         label: &'static str,
         before: Option<ProjectSong>,
@@ -121,7 +122,7 @@ impl App {
         Ok(())
     }
 
-    fn require_song_edit_unlocked(&self) -> Result<(), String> {
+    pub(super) fn require_song_edit_unlocked(&self) -> Result<(), String> {
         if self.song_edits_locked() {
             return Err(SONG_EDITS_LOCKED_ERROR.to_string());
         }
@@ -504,6 +505,150 @@ impl App {
     /// is normalized (adjacent identical rows collapse), validated, and
     /// committed as ONE undo entry. A paint that changes nothing is a
     /// no-op with no history entry.
+    /// Split the song at `beat` so a row starts exactly there, preserving what
+    /// was playing (offsets advanced per `split_row_state`, so the split is
+    /// inaudible). A no-op when a row already starts there.
+    ///
+    /// Shared by the paint helper's two edge splits and by the ripple insert
+    /// in `song_region_duplicate`, which needs the suffix to begin on a real
+    /// row before it slides right.
+    pub(super) fn split_song_row_at(
+        &self,
+        song: &mut ProjectSong,
+        beat: f64,
+    ) -> Result<(), String> {
+        if song.rows.iter().any(|row| row.start_beat == beat) {
+            return Ok(());
+        }
+        let governing = state_at_beat(song, beat)
+            .ok_or_else(|| format!("no song row governs beat {beat}"))?;
+        let (scene, overrides) = (governing.scene, self.split_row_state(governing, beat));
+        let row_id = song.allocate_row_id()?;
+        let position = song
+            .rows
+            .iter()
+            .position(|row| row.start_beat > beat)
+            .unwrap_or(song.rows.len());
+        song.rows.insert(
+            position,
+            ProjectSongRow {
+                id: row_id,
+                start_beat: beat,
+                scene,
+                overrides,
+            },
+        );
+        Ok(())
+    }
+
+    /// The row surgery every arrangement paint shares (region spec 5.2): split
+    /// the song at both region edges (phase-transparently, `split_row_state`)
+    /// and set `track`'s override on every row inside `[start_beat, end_beat)`,
+    /// re-anchoring each row into the painted clip.
+    ///
+    /// Operates on a caller-owned `&mut ProjectSong` and does NOT normalize,
+    /// validate or commit: the region primitives call it once per painted span
+    /// on ONE clone and commit the result as a single undo entry. The two
+    /// single-span entry points (`song_track_paint_anchored`,
+    /// `paint_take_region`) are thin wrappers that add their own validation and
+    /// normalization.
+    ///
+    /// Anchoring (takes spec 7.1): each painted row is stamped
+    /// `offset = anchor_offset + steps(row.start_beat - anchor_beat)` in the
+    /// source's own step domain, so the span plays as one continuous clip
+    /// across its internal row splits. Pattern sources wrap at the pattern
+    /// length; take sources advance linearly and never wrap (takes spec 6.1).
+    pub(super) fn paint_source_region(
+        &self,
+        song: &mut ProjectSong,
+        track: usize,
+        start_beat: f64,
+        end_beat: f64,
+        source: LaneSource,
+        anchor_beat: f64,
+        anchor_offset_steps: f64,
+    ) -> Result<(), String> {
+        // Steps-per-beat of a take source, resolved once: takes advance
+        // linearly, so the per-row offset is a plain multiplication.
+        let take_steps_per_beat = match source {
+            LaneSource::Take(take_id) => Some(
+                self.take_step_mapping(track, take_id.0)
+                    .map(|(steps_per_beat, _)| steps_per_beat)
+                    .ok_or_else(|| {
+                        format!(
+                            "take {} on track {} has no step mapping to paint with",
+                            take_id.0,
+                            track + 1
+                        )
+                    })?,
+            ),
+            _ => None,
+        };
+
+        // Restore row: the state in effect at `end_beat` must resume there,
+        // with lane offsets advanced so the split itself is inaudible.
+        if end_beat < song.end_beat {
+            self.split_song_row_at(song, end_beat)?;
+        }
+        // Split row at the paint start (row zero always exists at 0.0, so a
+        // governing row is guaranteed).
+        self.split_song_row_at(song, start_beat)?;
+
+        // Set the painted override on every row inside the region.
+        for idx in 0..song.rows.len() {
+            let row_start = song.rows[idx].start_beat;
+            if row_start < start_beat || row_start >= end_beat {
+                continue;
+            }
+            let over = match source {
+                LaneSource::Empty => ProjectSongTrackOverride::new(track, None),
+                LaneSource::Pattern(pattern_id) => ProjectSongTrackOverride {
+                    track,
+                    pattern_id: Some(pattern_id.0),
+                    take_id: None,
+                    offset_steps: self.advanced_offset(
+                        track,
+                        pattern_id.0,
+                        anchor_offset_steps,
+                        row_start - anchor_beat,
+                    ),
+                },
+                LaneSource::Take(take_id) => {
+                    let steps_per_beat = take_steps_per_beat.expect("resolved for take sources");
+                    ProjectSongTrackOverride::new_take(
+                        track,
+                        take_id.0,
+                        (anchor_offset_steps + (row_start - anchor_beat) * steps_per_beat).max(0.0),
+                    )
+                }
+            };
+            let row = &mut song.rows[idx];
+            row.overrides.retain(|existing| existing.track != track);
+            row.overrides.push(over);
+            row.overrides.sort_by_key(|over| over.track);
+        }
+        Ok(())
+    }
+
+    /// Collapse rows that are pure phase-continuations of their predecessor
+    /// (audible no-ops): the row surgery in `paint_source_region` leaves them
+    /// behind when a paint re-covers part of an existing clip with its own
+    /// anchor. `ProjectSong::normalize` cannot see these — the offsets differ
+    /// textually but describe the same uninterrupted playback.
+    pub(super) fn collapse_phase_continuation_rows(&self, song: &mut ProjectSong) {
+        let mut idx = 1;
+        while idx < song.rows.len() {
+            let expected = self.split_row_state(&song.rows[idx - 1], song.rows[idx].start_beat);
+            if song.rows[idx].scene == song.rows[idx - 1].scene
+                && song.rows[idx].overrides == expected
+            {
+                song.rows.remove(idx);
+            } else {
+                idx += 1;
+            }
+        }
+    }
+
     pub fn song_track_paint_anchored(
         &mut self,
         track: usize,
@@ -542,105 +687,24 @@ impl App {
         let end_beat = end_beat.min(existing.end_beat);
         let mut song = existing.clone();
 
-        // Restore row: the state in effect at `end_beat` must resume there,
-        // with lane offsets advanced so the split itself is inaudible.
-        if end_beat < song.end_beat
-            && !song.rows.iter().any(|row| row.start_beat == end_beat)
-        {
-            let governing = state_at_beat(&song, end_beat)
-                .ok_or_else(|| format!("no song row governs beat {end_beat}"))?;
-            let (scene, overrides) =
-                (governing.scene, self.split_row_state(governing, end_beat));
-            let row_id = song.allocate_row_id()?;
-            let position = song
-                .rows
-                .iter()
-                .position(|row| row.start_beat > end_beat)
-                .unwrap_or(song.rows.len());
-            song.rows.insert(
-                position,
-                ProjectSongRow {
-                    id: row_id,
-                    start_beat: end_beat,
-                    scene,
-                    overrides,
-                },
-            );
-        }
-
-        // Split row at the paint start when none exists (row zero always
-        // exists at 0.0, so a governing row is guaranteed).
-        if !song.rows.iter().any(|row| row.start_beat == start_beat) {
-            let governing = state_at_beat(&song, start_beat)
-                .ok_or_else(|| format!("no song row governs beat {start_beat}"))?;
-            let (scene, overrides) =
-                (governing.scene, self.split_row_state(governing, start_beat));
-            let row_id = song.allocate_row_id()?;
-            let position = song
-                .rows
-                .iter()
-                .position(|row| row.start_beat > start_beat)
-                .unwrap_or(song.rows.len());
-            song.rows.insert(
-                position,
-                ProjectSongRow {
-                    id: row_id,
-                    start_beat,
-                    scene,
-                    overrides,
-                },
-            );
-        }
-
-        // Set the painted override on every row inside the region. Each row
-        // re-anchors into the painted clip: offset = anchor offset plus the
-        // steps elapsed from the anchor to the row start (spec 7.1), so the
-        // region plays as one continuous clip across its internal splits.
-        for idx in 0..song.rows.len() {
-            let row_start = song.rows[idx].start_beat;
-            if row_start < start_beat || row_start >= end_beat {
-                continue;
-            }
-            let offset_steps = match pattern_id {
-                Some(pattern_id) => self.advanced_offset(
-                    track,
-                    pattern_id,
-                    anchor_offset_steps,
-                    row_start - anchor_beat,
-                ),
-                None => 0.0,
-            };
-            let row = &mut song.rows[idx];
-            row.overrides.retain(|over| over.track != track);
-            row.overrides.push(ProjectSongTrackOverride {
-                track,
-                pattern_id,
-                take_id: None,
-                offset_steps,
-            });
-            row.overrides.sort_by_key(|over| over.track);
-        }
+        let source = match pattern_id {
+            Some(pattern_id) => LaneSource::Pattern(PatternId(pattern_id)),
+            None => LaneSource::Empty,
+        };
+        self.paint_source_region(
+            &mut song,
+            track,
+            start_beat,
+            end_beat,
+            source,
+            anchor_beat,
+            anchor_offset_steps,
+        )?;
 
         // Painting a value a row already had can leave adjacent identical
         // rows; canonical form removes them (spec 5.3).
         song.normalize();
-        // Collapse rows that are pure phase-continuations of their
-        // predecessor (audible no-ops): the row surgery above leaves them
-        // behind when a paint re-covers part of an existing clip with its
-        // own anchor. `normalize` cannot see these — offsets differ
-        // textually but describe the same uninterrupted playback.
-        let mut idx = 1;
-        while idx < song.rows.len() {
-            let expected =
-                self.split_row_state(&song.rows[idx - 1], song.rows[idx].start_beat);
-            if song.rows[idx].scene == song.rows[idx - 1].scene
-                && song.rows[idx].overrides == expected
-            {
-                song.rows.remove(idx);
-            } else {
-                idx += 1;
-            }
-        }
+        self.collapse_phase_continuation_rows(&mut song);
         // Complete no-op: compare rows only — split rows inserted then
         // normalized away may have bumped the allocator, and committing an
         // allocator-only diff would be an empty undo entry.

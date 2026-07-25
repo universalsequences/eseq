@@ -11,8 +11,7 @@
 //! references it (undo replays a composite in reverse).
 
 use crate::sequencer::{
-    state_at_beat, LaneSource, ProjectSong, ProjectSongRow, ProjectSongTrackOverride, TakeId,
-    TrackPatternData, MAX_STEPS,
+    LaneSource, ProjectSong, TakeId, TrackPatternData, MAX_STEPS,
 };
 
 use super::edit::finish_active_gesture;
@@ -344,7 +343,7 @@ impl App {
         }
 
         // Build the chunk contents from the region's resolved lane clips.
-        let (chunks, total_len_steps, step_beats) =
+        let (chunks, total_len_steps) =
             self.render_region_chunks(track, &song, start_beat, end_beat)?;
 
         let scenes_before = self.capture_synchronized_scene_structure_state()?;
@@ -354,8 +353,7 @@ impl App {
             .register_track_take(track, None, chunks, total_len_steps)?;
 
         let song_after =
-            match self.paint_take_region(&song, track, start_beat, end_beat, take_id, step_beats)
-            {
+            match self.paint_take_region(&song, track, start_beat, end_beat, take_id) {
                 Ok(song) => song,
                 Err(error) => {
                     self.state.remove_track_take(track, take_id)?;
@@ -409,7 +407,7 @@ impl App {
         song: &ProjectSong,
         start_beat: f64,
         end_beat: f64,
-    ) -> Result<(Vec<TrackPatternData>, u32, f64), String> {
+    ) -> Result<(Vec<TrackPatternData>, u32), String> {
         let scenes = self.state.capture_project_scenes();
         if track >= scenes.track_pools.len() {
             return Err(format!("track {} does not exist", track + 1));
@@ -511,7 +509,7 @@ impl App {
             };
             chunks[dst / MAX_STEPS].copy_step_content_from(dst % MAX_STEPS, src_data, src_step);
         }
-        Ok((chunks, total_len_steps, step_beats))
+        Ok((chunks, total_len_steps))
     }
 
     /// Row surgery pointing the region's lane at the take: split rows at the
@@ -526,61 +524,17 @@ impl App {
         start_beat: f64,
         end_beat: f64,
         take_id: TakeId,
-        step_beats: f64,
     ) -> Result<ProjectSong, String> {
         let mut song = existing.clone();
-        if end_beat < song.end_beat && !song.rows.iter().any(|row| row.start_beat == end_beat) {
-            let governing = state_at_beat(&song, end_beat)
-                .ok_or_else(|| format!("no song row governs beat {end_beat}"))?;
-            let (scene, overrides) =
-                (governing.scene, self.split_row_state(governing, end_beat));
-            let row_id = song.allocate_row_id()?;
-            let position = song
-                .rows
-                .iter()
-                .position(|row| row.start_beat > end_beat)
-                .unwrap_or(song.rows.len());
-            song.rows.insert(
-                position,
-                ProjectSongRow {
-                    id: row_id,
-                    start_beat: end_beat,
-                    scene,
-                    overrides,
-                },
-            );
-        }
-        if !song.rows.iter().any(|row| row.start_beat == start_beat) {
-            let governing = state_at_beat(&song, start_beat)
-                .ok_or_else(|| format!("no song row governs beat {start_beat}"))?;
-            let (scene, overrides) =
-                (governing.scene, self.split_row_state(governing, start_beat));
-            let row_id = song.allocate_row_id()?;
-            let position = song
-                .rows
-                .iter()
-                .position(|row| row.start_beat > start_beat)
-                .unwrap_or(song.rows.len());
-            song.rows.insert(
-                position,
-                ProjectSongRow {
-                    id: row_id,
-                    start_beat,
-                    scene,
-                    overrides,
-                },
-            );
-        }
-        for row in &mut song.rows {
-            if row.start_beat < start_beat || row.start_beat >= end_beat {
-                continue;
-            }
-            let offset_steps = (row.start_beat - start_beat) / step_beats;
-            row.overrides.retain(|over| over.track != track);
-            row.overrides
-                .push(ProjectSongTrackOverride::new_take(track, take_id.0, offset_steps));
-            row.overrides.sort_by_key(|over| over.track);
-        }
+        self.paint_source_region(
+            &mut song,
+            track,
+            start_beat,
+            end_beat,
+            LaneSource::Take(take_id),
+            start_beat,
+            0.0,
+        )?;
         song.normalize();
         Ok(song)
     }

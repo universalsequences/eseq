@@ -12714,6 +12714,12 @@
             // Region selection (region spec 4.1).
             "seq-song-set-region",
             "seq-song-clear-region",
+            // Region clipboard + edit-cursor mirror (region spec 5.1-5.3).
+            "seq-song-set-arr-cursor",
+            "seq-song-region-copy",
+            "seq-song-region-paste",
+            "seq-song-region-delete",
+            "seq-song-region-duplicate",
             "seq-sound-push-to-pattern",
             "seq-sound-apply-to-all-takes",
         ] {
@@ -21707,6 +21713,72 @@
     /// track's sound to the clip and selects the clip's merged span as a
     /// one-track region, so the body lights up exactly like a swept region
     /// and copy/delete have a target (Ableton). The span travels with the
+    /// Region spec 5.3: the widget's clipboard actions on ANY arrangement
+    /// lane lower to the region commands, and the edit cursor mirrors into
+    /// Rust so the Cmd-V seam has a paste target. Both lanes converge on the
+    /// same three natives — the ui/input.rs seam emits the same commands when
+    /// no lane holds focus.
+    #[test]
+    fn metal_seq_arrangement_clipboard_actions_lower_to_region_commands() {
+        let mut editor = arrangement_region_editor(3, &[]);
+        let copies: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let pastes: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cursors: Arc<Mutex<Vec<Vec<f64>>>> = Arc::new(Mutex::new(Vec::new()));
+        let copy_sink = copies.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-song-region-copy", move |_args, _ctx| {
+                *copy_sink.lock().unwrap() += 1;
+                Ok(Value::Bool(true))
+            });
+        let paste_sink = pastes.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-song-region-paste", move |args, _ctx| {
+                paste_sink
+                    .lock()
+                    .unwrap()
+                    .push(args.first().cloned().unwrap_or(Value::Nil));
+                Ok(Value::Bool(true))
+            });
+        let cursor_sink = cursors.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-song-set-arr-cursor", move |args, _ctx| {
+                cursor_sink.lock().unwrap().push(
+                    args.iter()
+                        .map(|arg| match arg {
+                            Value::Number(value) => *value,
+                            other => panic!("cursor args must be numbers, got {other:?}"),
+                        })
+                        .collect(),
+                );
+                Ok(Value::Bool(true))
+            });
+
+        for expr in [
+            "(arrangement-track-action 1 (dict :type :copy-items :ids (list 0)))",
+            "(arrangement-track-action 1 (dict :type :paste-items :time 12))",
+            "(arrangement-scene-action (dict :type :copy-items :ids (list 0)))",
+            "(arrangement-scene-action (dict :type :paste-items :time 20))",
+            "(arrangement-track-action 2 (dict :type :set-cursor :time 8))",
+        ] {
+            editor.runtime_mut().eval_str(expr).expect(expr);
+        }
+
+        assert_eq!(*copies.lock().unwrap(), 2, "both lanes copy the region");
+        assert_eq!(
+            *pastes.lock().unwrap(),
+            vec![Value::Number(12.0), Value::Number(20.0)],
+            "paste carries the widget's own time"
+        );
+        assert_eq!(
+            *cursors.lock().unwrap(),
+            vec![vec![8.0, 2.0]],
+            "the edit cursor mirrors beat and track into Rust"
+        );
+    }
+
     /// select because only the lane projection knows how rows merge into one
     /// clip.
     #[test]

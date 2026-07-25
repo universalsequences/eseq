@@ -41,6 +41,14 @@ pub(super) const COMMANDS: &[&str] = &[
     // song editing is locked.
     "song-set-region",
     "song-clear-region",
+    "song-set-arr-cursor",
+    // Region copy/paste/delete (region spec 5.2). Copy and paste need the
+    // clipboard handle, so all three are applied in `handle` below where the
+    // loop context is in scope, not in `run`/`run_transport`.
+    "song-region-copy",
+    "song-region-paste",
+    "song-region-delete",
+    "song-region-duplicate",
     "sound-push-to-pattern",
     "sound-apply-to-all-takes",
 ];
@@ -472,6 +480,15 @@ fn run_transport(
             app.clear_song_region();
             Ok(None)
         }
+        // Arrangement edit-cursor mirror (region spec 5.3): the paste target
+        // for the Rust-side Cmd-V seam. Pure state, no undo entry.
+        "song-set-arr-cursor" => {
+            let map = payload_map(payload)?;
+            let beat = require_number(map, "time")?;
+            let track = map_number(map, "track").unwrap_or(-1.0);
+            app.set_arrangement_cursor(beat, track as isize);
+            Ok(None)
+        }
         "sound-push-to-pattern" => {
             let map = payload_map(payload)?;
             let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
@@ -509,7 +526,12 @@ pub(crate) fn apply_song_edit_command(
     payload: &Value,
     app: &mut app::App,
 ) -> Option<Result<String, String>> {
-    if !COMMANDS.contains(&name) || TRANSPORT_COMMANDS.contains(&name) {
+    // Region clipboard commands need the loop context's clipboard handle and
+    // are unavailable headlessly, like the transport commands.
+    if !COMMANDS.contains(&name)
+        || TRANSPORT_COMMANDS.contains(&name)
+        || REGION_CLIPBOARD_COMMANDS.contains(&name)
+    {
         return None;
     }
     Some(run(name, payload, app))
@@ -528,8 +550,61 @@ const TRANSPORT_COMMANDS: &[&str] = &[
     "song-deselect-clip",
     "song-set-region",
     "song-clear-region",
+    "song-set-arr-cursor",
     "sound-push-to-pattern",
     "sound-apply-to-all-takes",
+];
+
+/// Region clipboard commands (region spec 5.2/5.3). They live here rather
+/// than in `run` because copy and paste need the shared clipboard handle —
+/// the same reason the piano-roll clipboard commands sit in the loop-context
+/// layer. Each mutating one is a single primitive call, so one undo entry.
+fn run_region_clipboard(
+    name: &str,
+    payload: &Value,
+    app: &mut app::App,
+    ctx: &mut LoopCtx<'_>,
+) -> Result<Option<String>, String> {
+    let clipboard = ctx.shared.arrangement_clipboard.clone();
+    match name {
+        "song-region-copy" => {
+            let copied = app.song_region_copy()?;
+            let spans = copied.span_count();
+            let tracks = copied.tracks.len();
+            *clipboard.lock().unwrap() = Some(copied);
+            Ok(Some(format!(
+                "Copied {spans} clip{} across {tracks} track{}",
+                if spans == 1 { "" } else { "s" },
+                if tracks == 1 { "" } else { "s" },
+            )))
+        }
+        "song-region-paste" => {
+            let stored = clipboard.lock().unwrap().clone();
+            let Some(stored) = stored else {
+                return Err("The arrangement clipboard is empty".to_string());
+            };
+            // The widget's :paste-items carries its own time; the keyboard
+            // seam falls back to the mirrored arrangement cursor.
+            let dest = match payload {
+                Value::Map(map) => map_number(map, "time"),
+                _ => None,
+            }
+            .unwrap_or(app.arrangement_cursor_beat);
+            app.song_region_paste(&stored, dest).map(Some)
+        }
+        "song-region-delete" => app.song_region_delete().map(Some),
+        // Duplicate = copy + ripple insert after the region (Ableton's
+        // Duplicate Time). It reads the region itself, so no clipboard.
+        "song-region-duplicate" => app.song_region_duplicate().map(Some),
+        _ => Err(format!("unknown region clipboard command: {name}")),
+    }
+}
+
+const REGION_CLIPBOARD_COMMANDS: &[&str] = &[
+    "song-region-copy",
+    "song-region-paste",
+    "song-region-delete",
+    "song-region-duplicate",
 ];
 
 pub(super) fn handle(
@@ -539,6 +614,20 @@ pub(super) fn handle(
     editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) {
+    if REGION_CLIPBOARD_COMMANDS.contains(&name) {
+        match run_region_clipboard(name, &payload, app, ctx) {
+            Ok(Some(status)) => {
+                app.song_edit_error = None;
+                editor.handle_host_event(HostEvent::Status(status));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                app.song_edit_error = Some(error.clone());
+                editor.handle_host_event(HostEvent::Error(format!("{name} failed: {error}")));
+            }
+        }
+        return;
+    }
     if TRANSPORT_COMMANDS.contains(&name) {
         match run_transport(name, &payload, app, ctx) {
             Ok(Some(status)) => editor.handle_host_event(HostEvent::Status(status)),
