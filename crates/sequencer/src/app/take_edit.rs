@@ -108,13 +108,17 @@ mod tests {
         app
     }
 
+    /// The rows whose `track` lane plays a TAKE. Every lane carries an
+    /// override on every compiled row now (a covered lane its clip's, an
+    /// uncovered one an explicit empty), so the take rows are selected by
+    /// source rather than by the presence of an override.
     fn take_lane_overrides(song: &ProjectSong, track: usize) -> Vec<(f64, Option<u64>, f64)> {
         song.rows
             .iter()
             .filter_map(|row| {
                 row.overrides
                     .iter()
-                    .find(|over| over.track == track)
+                    .find(|over| over.track == track && over.take_id.is_some())
                     .map(|over| (row.start_beat, over.take_id, over.offset_steps))
             })
             .collect()
@@ -167,8 +171,16 @@ mod tests {
             take_lane_overrides(&song, 0),
             vec![(4.0, Some(take_id.0), 0.0), (8.0, Some(take_id.0), 16.0)]
         );
-        // Content outside the region is untouched (row 0 stays scene-resolved).
-        assert!(song.rows[0].overrides.is_empty());
+        // Content outside the region is untouched: row 0 still plays the clip
+        // scene 0 stamped there (P1 at step 0).
+        assert_eq!(
+            song.rows[0]
+                .overrides
+                .iter()
+                .find(|over| over.track == 0)
+                .map(|over| (over.pattern_id, over.take_id, over.offset_steps)),
+            Some((Some(1), None, 0.0))
+        );
         assert_eq!(app.history.undo_len(), depth + 1, "exactly one undo entry");
 
         // The chunk is hidden from the clip grid.
@@ -216,8 +228,8 @@ mod tests {
                 assert_eq!(scene.cells[0], Some(PatternId(idx as u64 + 1)));
             }
         });
-        // Overrides referencing the take are gone; the lanes fall back to
-        // scene-cell resolution.
+        // Overrides referencing the take are gone; the clips that played it
+        // were removed, so those spans are silent.
         let song = app.state.committed_song().expect("song");
         assert!(take_lane_overrides(&song, 0).is_empty());
         assert_eq!(app.history.undo_len(), depth + 1, "exactly one undo entry");
@@ -235,10 +247,20 @@ mod tests {
     #[test]
     fn region_to_take_rejects_empty_regions() {
         let mut app = app_with_song();
-        // Silence the whole region first: nothing to convert. An
-        // explicit-empty CLIP is the lane model's deliberate silence.
-        app.arr_clip_create(0, 4.0, 12.0, crate::sequencer::LaneSource::Empty, 0.0)
-            .expect("explicit-empty clip");
+        // Silence the whole region first: nothing to convert. Silence is the
+        // absence of clips, so delete everything the region touches.
+        loop {
+            let doomed = app
+                .state
+                .committed_arrangement()
+                .expect("arrangement")
+                .track_lanes[0]
+                .iter()
+                .find(|clip| clip.start_beat < 12.0 && clip.end_beat > 4.0)
+                .map(|clip| clip.id);
+            let Some(id) = doomed else { break };
+            app.arr_clip_delete(id).expect("clip deletes");
+        }
         let depth = app.history.undo_len();
         let error = app
             .song_region_to_take(0, 4.0, 12.0)
@@ -250,9 +272,8 @@ mod tests {
 
 impl App {
     /// Delete a take (takes spec 6.4): its chunk patterns leave the pattern
-    /// pool and every arrangement clip playing it is removed (those lanes fall
-    /// back to the scene backdrop over the clip's span). One undo entry
-    /// restores both.
+    /// pool and every arrangement clip playing it is removed, so those spans
+    /// go silent. One undo entry restores both.
     pub fn song_take_delete(&mut self, track: usize, take_id: u64) -> Result<(), String> {
         if self.song_edits_locked() {
             return Err(super::song_edit::SONG_EDITS_LOCKED_ERROR.to_string());

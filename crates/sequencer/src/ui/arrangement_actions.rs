@@ -257,8 +257,8 @@ pub(crate) fn arrangement_action_song_commands(
                 ]),
             )])
         }
-        // Track-lane Backspace: one clip delete. The lane rejoins the scene
-        // backdrop over the deleted span (lane spec 6.2).
+        // Track-lane Backspace: one clip delete. The span goes silent — the
+        // clip is gone from the timeline (lane spec 6.2).
         "clip-delete" => {
             let track = require_id(map, "track")?;
             let clip_id = require_id(map, "clip-id")?;

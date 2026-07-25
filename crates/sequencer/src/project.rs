@@ -38,7 +38,12 @@ const RACK_PRESETS_DIR: &str = "presets/racks";
 //       lane-model-spec.md 10). The row-model `song` field is gone: files
 //       carrying one still parse, but its content is discarded, so projects
 //       saved before this version open with no arrangement.
-const PROJECT_FILE_VERSION: u32 = 5;
+//   6 — the scene "backdrop" is gone (lane spec 6.2): a lane gap is silence,
+//       not the governing scene's cell. Version-5 arrangements are migrated
+//       on load (`migrate_legacy_backdrops`, applied in `finish_project_load`
+//       against the live scenes) so a v5 project keeps sounding exactly as it
+//       did, and are then saved as version 6.
+const PROJECT_FILE_VERSION: u32 = 6;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectSoundPreset {
@@ -218,6 +223,19 @@ impl<'de> Deserialize<'de> for ProjectFile {
         // arrangement is compiled later against the live scenes, which is the
         // only context that can see scene cells and timebases.
         if let Some(arrangement) = &project.arrangement {
+            // Version-5 arrangements may carry explicit-empty clips, which
+            // this version's validation rejects. They are dropped by the
+            // load-time migration (which needs the live scenes, so it cannot
+            // run here); the structural pre-check therefore looks past them.
+            let checked = if project.version < 6 {
+                let mut checked = arrangement.clone();
+                for lane in &mut checked.track_lanes {
+                    lane.retain(|clip| clip.pattern_id.is_some() || clip.take_id.is_some());
+                }
+                std::borrow::Cow::Owned(checked)
+            } else {
+                std::borrow::Cow::Borrowed(arrangement)
+            };
             let context = SerializedSongContext {
                 scene_count: project.patterns.len().max(1),
                 track_count: project.tracks.len(),
@@ -232,7 +250,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
                     })
                     .collect(),
             };
-            arrangement.validate(&context).map_err(|error| {
+            checked.validate(&context).map_err(|error| {
                 D::Error::custom(format!("invalid project arrangement: {error}"))
             })?;
         }
@@ -3117,6 +3135,120 @@ mod tests {
         // Save never writes it.
         let json = serde_json::to_string(&sample_project()).expect("serialize project");
         assert!(!json.contains("\"song\""), "{json}");
+    }
+
+    /// Spec 10, v5 -> v6: a version-5 arrangement may carry explicit-empty
+    /// clips, which this version's validation rejects. The file must still
+    /// LOAD — the load-time migration drops them, and a project the user
+    /// already saved may not become unopenable — while the same content at
+    /// version 6 is rejected, since nothing may write one any more.
+    #[test]
+    fn version_five_arrangements_tolerate_explicit_empty_clips_and_version_six_does_not() {
+        use crate::sequencer::{ArrClip, ClipId};
+
+        let mut arrangement = sample_arrangement();
+        // A deliberate silence written under the backdrop rule, plus a gap.
+        arrangement.track_lanes[1].push(ArrClip::new(ClipId(1), 12.0, 16.0, None));
+        arrangement.next_clip_id = 2;
+        let mut project = sample_project();
+        project.arrangement = Some(arrangement);
+        let json = serde_json::to_string(&project).expect("serialize project");
+
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        value
+            .as_object_mut()
+            .expect("project is a json object")
+            .insert("version".to_string(), serde_json::json!(5));
+        let restored: ProjectFile =
+            serde_json::from_value(value).expect("a version-5 project must still load");
+        let lanes = restored.arrangement.expect("arrangement survives").track_lanes;
+        assert_eq!(
+            lanes[1].len(),
+            2,
+            "the raw clips reach the load path, which migrates them"
+        );
+
+        // The same file claiming version 6 is refused: silence is a gap now.
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        value
+            .as_object_mut()
+            .expect("project is a json object")
+            .insert("version".to_string(), serde_json::json!(6));
+        let error = match serde_json::from_value::<ProjectFile>(value) {
+            Ok(_) => panic!("a version-6 file may not carry a sourceless clip"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("carries no source"), "{error}");
+    }
+
+    /// The migration itself, on a fixture shaped like a real v5 project: a
+    /// lane GAP that used to play the governing scene's cell must load into
+    /// clips that compile to the *same* song, phase offsets included.
+    #[test]
+    fn version_five_arrangement_migrates_to_an_audibly_identical_song() {
+        use crate::sequencer::{
+            compile_arrangement, migrate_legacy_backdrops, ArrClip, ClipId, PatternSnapshot,
+            ProjectArrangement, ProjectScenes, SceneEvent,
+        };
+
+        // The rebuilt-on-load shape: scene j's cell is PatternId(j + 1), two
+        // tracks, default 16-step sixteenth patterns (4 beats per cycle).
+        let scenes = ProjectScenes::from_pattern_snapshots(
+            &[
+                PatternSnapshot::new_default(2, &[]),
+                PatternSnapshot::new_default(2, &[]),
+            ],
+            0,
+        );
+        // Scene 1 launches at beat 6 — deliberately off the 4-beat pattern
+        // grid, so the gap after the clip carries a nonzero phase.
+        let v5 = ProjectArrangement {
+            scene_lane: vec![
+                SceneEvent { start_beat: 0.0, scene: 0 },
+                SceneEvent { start_beat: 6.0, scene: 1 },
+            ],
+            track_lanes: vec![
+                vec![ArrClip::new(ClipId(0), 3.0, 9.0, Some(2))],
+                Vec::new(),
+            ],
+            end_beat: 16.0,
+            loop_enabled: false,
+            next_clip_id: 1,
+        };
+
+        let migrated = migrate_legacy_backdrops(&v5, &scenes).expect("migrates");
+        migrated.validate(&scenes).expect("valid under the new rules");
+        let song = compile_arrangement(&migrated, &scenes).expect("compiles");
+
+        // Track 1 rode the backdrop end to end: scene 0's cell for [0, 6),
+        // then scene 1's from beat 6. Track 0's gaps are [0, 3) under scene 0
+        // and [9, 16) under scene 1 — the latter 3 beats (12 steps) into the
+        // scene, which is exactly the phase the retired `backdrop_override`
+        // materialized.
+        let at = |beat: f64, track: usize| {
+            let row = song
+                .rows
+                .iter()
+                .rev()
+                .find(|row| row.start_beat <= beat)
+                .expect("a row governs every beat");
+            row.overrides
+                .iter()
+                .find(|over| over.track == track)
+                .map(|over| (over.pattern_id, over.offset_steps))
+                .expect("every lane states its resolution")
+        };
+        assert_eq!(at(0.0, 1), (Some(1), 0.0));
+        assert_eq!(at(6.0, 1), (Some(2), 0.0));
+        assert_eq!(at(0.0, 0), (Some(1), 0.0));
+        assert_eq!(at(3.0, 0), (Some(2), 0.0), "the clip itself");
+        assert_eq!(at(9.0, 0), (Some(2), 12.0), "the gap keeps the scene phase");
+        // And nothing is silent, because nothing was silent under v5.
+        for row in &song.rows {
+            for over in &row.overrides {
+                assert!(over.pattern_id.is_some(), "beat {}", row.start_beat);
+            }
+        }
     }
 
     /// `use_arrangement` is a persisted project preference

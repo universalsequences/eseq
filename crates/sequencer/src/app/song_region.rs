@@ -74,18 +74,17 @@ impl SongRegionSelection {
 
 /// One copied clip span, in beats RELATIVE to the copied region's start
 /// (region spec 5.1). One entry per CLIP the region intersects: a lane with
-/// no clip over part of the region contributes nothing there, because in the
-/// lane model that gap is not silence — it is the scene backdrop showing
-/// through (arrangement-lane-model-spec 6.2), and pasting the rectangle
-/// somewhere else must reproduce the gap, not freeze the backdrop into clips.
+/// no clip over part of the region contributes nothing there, because a gap
+/// is silence (arrangement-lane-model-spec 6.2) and pasting the rectangle
+/// somewhere else must reproduce that silence.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ClipboardSpan {
     pub rel_start: f64,
     pub rel_end: f64,
     /// `Pattern` pastes as a reference; `Take` pastes as a fresh clone
-    /// (region spec 5.1 locked decision). `Empty` is an explicit-empty CLIP —
-    /// deliberate silence that occludes the backdrop — and travels like any
-    /// other source.
+    /// (region spec 5.1 locked decision). `Empty` cannot arise from a stored
+    /// clip any more (clips always have a source); a paste that meets one
+    /// stores nothing, leaving the cleared span silent.
     pub source: LaneSource,
     /// The source offset AT `rel_start` — already advanced past the cut when
     /// the copy boundary sliced into the middle of a clip, so the pasted
@@ -198,7 +197,7 @@ impl App {
     /// the compiler's own split rule (`restamped_clip`), so the fragment plays
     /// the identical slice wherever it is re-anchored — the property copy
     /// (region spec 5.1) and the duplicate ripple both depend on. Lane gaps
-    /// produce nothing: they are the scene backdrop, not content.
+    /// produce nothing: they are silence, and silence has no content.
     fn arrangement_clip_spans_in(
         &self,
         arrangement: &ProjectArrangement,
@@ -217,7 +216,8 @@ impl App {
                 if span_end - span_start <= 1e-9 {
                     return None;
                 }
-                let cut = restamped_clip(scenes, track, clip, span_start);
+                // A slice with nothing left to play carries no content.
+                let cut = restamped_clip(scenes, track, clip, span_start)?;
                 Some((span_start, span_end, cut.source(), cut.offset_steps))
             })
             .collect()
@@ -268,9 +268,8 @@ impl App {
         }
         let len_beats = end_beat - start_beat;
         // Scene-lane regions carry the scene lane too (lane spec 8). The
-        // leading entry restates the governing scene at the region's start,
-        // so a paste re-establishes the backdrop rather than inheriting the
-        // destination's.
+        // leading entry restates the scene marked at the region's start, so
+        // the pasted rectangle carries the scene markers it was copied with.
         let scene_events = if region.scene_lane {
             let mut events: Vec<(f64, usize)> = arrangement
                 .scene_at_beat(start_beat)
@@ -515,10 +514,14 @@ impl App {
             .position(|clip| clip.start_beat < insert_beat && clip.end_beat > insert_beat);
         if let Some(index) = straddling {
             let clip = arrangement.track_lanes[track][index];
-            let mut tail = restamped_clip(scenes, track, &clip, insert_beat);
-            tail.id = arrangement.allocate_clip_id()?;
+            // A tail with nothing left to play (a take past its end) is
+            // dropped: silence is a gap, never an empty clip.
+            let tail = restamped_clip(scenes, track, &clip, insert_beat);
             arrangement.track_lanes[track][index].end_beat = insert_beat;
-            arrangement.track_lanes[track].insert(index + 1, tail);
+            if let Some(mut tail) = tail {
+                tail.id = arrangement.allocate_clip_id()?;
+                arrangement.track_lanes[track].insert(index + 1, tail);
+            }
         }
         for clip in &mut arrangement.track_lanes[track] {
             if clip.start_beat >= insert_beat {
@@ -563,7 +566,9 @@ impl App {
                 let id = arrangement.allocate_clip_id()?;
                 let mut clip = ArrClip::new(id, dest_beat + span.rel_start, dest_beat + span.rel_end, None);
                 match source {
-                    LaneSource::Empty => {}
+                    // A sourceless span is silence, and the destination was
+                    // already cleared: store nothing (spec 6.1).
+                    LaneSource::Empty => continue,
                     LaneSource::Pattern(pattern) => clip.pattern_id = Some(pattern.0),
                     LaneSource::Take(take) => clip.take_id = Some(take.0),
                 }
@@ -746,10 +751,8 @@ impl App {
     /// partially covers (spec 8), in one undo entry. This is what multi-track
     /// Backspace lowers to.
     ///
-    /// The lanes fall back to the scene backdrop over the cleared span — in
-    /// the lane model a gap is not silence, it is "whatever the scene says"
-    /// (spec 6.2). Deliberate silence is an explicit-empty CLIP, which the
-    /// clip primitives create and which this removes like any other.
+    /// The cleared span goes SILENT (spec 6.2): the clips are gone from the
+    /// timeline and nothing plays there — which is the point of deleting.
     pub fn song_region_delete(&mut self) -> Result<String, String> {
         self.require_song_edit_unlocked()?;
         let region = self
@@ -932,15 +935,10 @@ mod tests {
         app_with_song_tracks(2)
     }
 
-    /// Scene 0 governs the whole timeline (so every uncovered gap plays
-    /// pattern 1 — the backdrop), and every track carries three clips:
-    /// `[0,4)` P1, `[4,8)` P2, `[8,16)` P3, end 16.
-    ///
-    /// The projected lanes are byte-identical to the row fixture this
-    /// replaced (three scene rows resolving each track to its own pattern),
-    /// so every window assertion below still measures the same music — but
-    /// now the content is CLIPS, which is what the region primitives edit,
-    /// and a deleted clip reveals a visibly different backdrop.
+    /// Scene 0 is marked over the whole timeline and every track carries
+    /// three clips: `[0,4)` P1, `[4,8)` P2, `[8,16)` P3, end 16. The lanes
+    /// are fully covered, so every beat sounds; a deleted clip leaves an
+    /// audibly SILENT gap (spec 6.2).
     fn app_with_song_tracks(tracks: usize) -> App {
         let mut app = multi_track_app(tracks);
         let mut arrangement = crate::sequencer::ProjectArrangement::new(tracks, 16.0);
@@ -1105,46 +1103,36 @@ mod tests {
         );
     }
 
-    /// 5.1 on lanes: a LANE GAP is omitted — it is the scene backdrop
-    /// showing through, not content — while an explicit-empty CLIP is
-    /// deliberate silence and travels like any other source. The track stays
-    /// in the rectangle either way so paste clears the destination.
-    ///
-    /// (Rewritten from the row-model version, which could not tell the two
-    /// apart: there, silence was only ever an explicit-empty override.)
+    /// 5.1 on lanes: a LANE GAP carries no span — it is silence, and silence
+    /// has no content — but the track stays in the rectangle so a paste
+    /// clears the destination there. Pasting therefore reproduces the gap.
     #[test]
-    fn copy_omits_lane_gaps_but_carries_explicit_empty_clips() {
+    fn copy_omits_lane_gaps_and_pastes_them_back_as_silence() {
         let mut app = app_with_song();
-        // Track 1: delete the [4,8) clip, leaving a gap.
+        app.arr_set_end(32.0).expect("extend the song");
+        // Track 1: delete the [4,8) clip, leaving a genuine silent gap.
         let clip = clip_at(&app, 1, 4.0);
         app.arr_clip_delete(clip).expect("clip deletes");
+        assert_eq!(
+            window(&app, 1, 4.0, 8.0),
+            vec![(0.0, 4.0, LaneSource::Empty, 0.0)],
+            "deleting a clip leaves silence, not the scene's pattern"
+        );
+
         app.set_song_region(SongRegionSelection::new(0, 1, 4.0, 12.0));
         let clipboard = app.song_region_copy().expect("copy succeeds");
         assert_eq!(clipboard.tracks[1].0, 1);
         assert_eq!(
             clipboard.tracks[1].1,
             vec![span(4.0, 8.0, 3, 0.0)],
-            "the gap is not a span: the backdrop is not content"
+            "the gap is not a span: silence is not content"
         );
 
-        // Same span as an explicit-empty CLIP: deliberate silence travels.
-        let mut app = app_with_song();
-        app.arr_clip_create(1, 4.0, 8.0, LaneSource::Empty, 0.0)
-            .expect("explicit-empty clip");
-        app.set_song_region(SongRegionSelection::new(0, 1, 4.0, 12.0));
-        let clipboard = app.song_region_copy().expect("copy succeeds");
+        app.song_region_paste(&clipboard, 20.0).expect("paste succeeds");
         assert_eq!(
-            clipboard.tracks[1].1,
-            vec![
-                ClipboardSpan {
-                    rel_start: 0.0,
-                    rel_end: 4.0,
-                    source: LaneSource::Empty,
-                    offset_steps: 0.0,
-                },
-                span(4.0, 8.0, 3, 0.0),
-            ],
-            "an explicit-empty clip is a span"
+            window(&app, 1, 20.0, 24.0),
+            vec![(0.0, 4.0, LaneSource::Empty, 0.0)],
+            "and the gap pastes back as silence"
         );
     }
 
@@ -1174,8 +1162,10 @@ mod tests {
     fn paste_reproduces_the_source_rectangle_shifted() {
         let mut app = app_with_song();
         app.arr_set_end(32.0).expect("extend the song");
-        app.arr_clip_create(1, 4.0, 8.0, LaneSource::Empty, 0.0)
-            .expect("explicit-empty clip");
+        // A silent stretch inside the rectangle: a deleted clip, which is the
+        // only way the model expresses silence (spec 6.1).
+        let clip = clip_at(&app, 1, 4.0);
+        app.arr_clip_delete(clip).expect("clip deletes");
         app.set_song_region(SongRegionSelection::new(0, 1, 4.0, 12.0));
         let clipboard = app.song_region_copy().expect("copy succeeds");
         let source: Vec<_> = (0..2).map(|track| window(&app, track, 4.0, 12.0)).collect();
@@ -1308,10 +1298,8 @@ mod tests {
 
     /// 5.1: the clipboard holds a take id, not the take. If it was deleted
     /// since the copy, that span pastes as nothing — the paste still applies
-    /// and the destination lane is simply left clip-free, so it plays the
-    /// scene backdrop (lane spec 6.2). The row-model version asserted
-    /// explicit-empty silence there; that was the only silence the model
-    /// could express, not an intended promise.
+    /// and the destination lane is simply left clip-free, i.e. silent (lane
+    /// spec 6.2).
     #[test]
     fn paste_skips_a_take_deleted_since_the_copy() {
         let mut app = app_with_song();
@@ -1333,8 +1321,8 @@ mod tests {
         );
         assert_eq!(
             window(&app, 0, 20.0, 28.0),
-            vec![(0.0, 8.0, LaneSource::Pattern(PatternId(1)), 0.0)],
-            "so the lane falls back to the scene backdrop there"
+            vec![(0.0, 8.0, LaneSource::Empty, 0.0)],
+            "so the lane is silent there"
         );
     }
 
@@ -1342,12 +1330,9 @@ mod tests {
     /// the ones it only partly covers) in one entry — the multi-track
     /// Backspace path.
     ///
-    /// Rewritten from the row-model version, which asserted explicit-empty
-    /// overrides across the rectangle. That was row mechanics: an override
-    /// was the only way to express "this lane stops playing the clip". In the
-    /// lane model the clip is an object, so deleting it is a removal, and the
-    /// lane rejoins the scene backdrop (spec 6.2) — deliberate silence is now
-    /// an explicit-empty CLIP, which this removes like any other.
+    /// The clip is an object, so deleting it is a removal — and the span it
+    /// covered goes SILENT (spec 6.2). This is the headline behavior: select
+    /// clips, delete, and the timeline is genuinely empty there.
     #[test]
     fn delete_removes_the_clips_in_the_rectangle_in_one_entry() {
         let mut app = app_with_song();
@@ -1370,8 +1355,8 @@ mod tests {
             );
             assert_eq!(
                 window(&app, track, 4.0, 12.0),
-                vec![(0.0, 8.0, LaneSource::Pattern(PatternId(1)), 0.0)],
-                "track {track} plays the scene backdrop across the cleared region"
+                vec![(0.0, 8.0, LaneSource::Empty, 0.0)],
+                "track {track} is SILENT across the cleared region"
             );
             assert_eq!(
                 window(&app, track, 0.0, 4.0),
@@ -1390,27 +1375,32 @@ mod tests {
         );
     }
 
-    /// The other half of the delete contract: an explicit-empty clip is real
-    /// content, so deleting a region containing one removes it too and the
-    /// backdrop comes back.
+    /// The other half of the delete contract: deleting an ALREADY-silent
+    /// region is a no-op — there is nothing underneath to reveal, because a
+    /// gap is not backed by anything (spec 6.2).
     #[test]
-    fn delete_removes_explicit_empty_clips_too() {
+    fn delete_over_an_already_silent_region_changes_nothing() {
         let mut app = app_with_song();
         let clip = clip_at(&app, 0, 4.0);
-        app.arr_clip_set_source(clip, LaneSource::Empty)
-            .expect("clip goes explicitly silent");
+        app.arr_clip_delete(clip).expect("clip deletes");
         assert_eq!(
             window(&app, 0, 4.0, 8.0),
             vec![(0.0, 4.0, LaneSource::Empty, 0.0)],
-            "an explicit-empty clip silences the lane"
+            "the deleted clip's span is silent"
         );
+        let before = app.state.committed_arrangement();
 
         app.set_song_region(SongRegionSelection::new(0, 0, 4.0, 8.0));
-        app.song_region_delete().expect("delete succeeds");
+        let _ = app.song_region_delete();
+        assert_eq!(
+            app.state.committed_arrangement(),
+            before,
+            "there is nothing left to delete there"
+        );
         assert_eq!(
             window(&app, 0, 4.0, 8.0),
-            vec![(0.0, 4.0, LaneSource::Pattern(PatternId(1)), 0.0)],
-            "removing the silence hands the span back to the scene backdrop"
+            vec![(0.0, 4.0, LaneSource::Empty, 0.0)],
+            "and the span stays silent"
         );
     }
 
@@ -1681,7 +1671,7 @@ mod tests {
     // --- scene-lane regions (lane spec 8) --------------------------------
 
     /// A SCENE-LANE marquee copies the scene events inside it, led by the
-    /// scene governing its start so a paste re-establishes the backdrop
+    /// scene marked at its start so a paste carries the scene markers
     /// rather than inheriting the destination's.
     #[test]
     fn scene_lane_region_copy_carries_the_scene_events() {

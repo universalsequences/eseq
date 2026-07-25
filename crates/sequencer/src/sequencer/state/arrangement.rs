@@ -18,9 +18,11 @@ use super::*;
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ClipId(pub u64);
 
-/// A scene *change* on the scene lane: from `start_beat` onward, every track
-/// without a clip covering the beat plays this scene's cell. Spans are
-/// derived (event to next event, last event to `end_beat`).
+/// A scene *change* on the scene lane: inserting or repointing one STAMPS the
+/// scene's cells as real clips across its span (spec 6.2/8). The event itself
+/// governs nothing at playback — it is a marker plus the gesture that stamped
+/// the clips. Spans are derived (event to next event, last event to
+/// `end_beat`).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SceneEvent {
     pub start_beat: f64,
@@ -29,8 +31,10 @@ pub struct SceneEvent {
 
 /// One clip on a track lane: a half-open span `[start_beat, end_beat)` with a
 /// source and a phase anchor. The source encoding matches
-/// `ProjectSongTrackOverride`: a take excludes a pattern, and both `None` is
-/// an explicit-empty clip (silence that still occludes the scene backdrop).
+/// `ProjectSongTrackOverride`: a take excludes a pattern. Unlike an override,
+/// a clip may NOT be sourceless (spec 6.1): silence is the *absence* of a
+/// clip, never a stored object, so `LaneSource::Empty` survives only as a
+/// compiled override.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArrClip {
     pub id: ClipId,
@@ -89,7 +93,9 @@ impl ArrClip {
 
     /// The clip's resolved source (takes spec 6.2), identical in shape to
     /// `ProjectSongTrackOverride::source()`: a take wins over `pattern_id`
-    /// (validation forbids carrying both).
+    /// (validation forbids carrying both). `Empty` is unreachable for a
+    /// *stored* clip — validation rejects it — but the arm stays so the
+    /// mapping to `LaneSource` remains total.
     pub fn source(&self) -> LaneSource {
         match (self.take_id, self.pattern_id) {
             (Some(take), _) => LaneSource::Take(TakeId(take)),
@@ -146,17 +152,18 @@ impl ProjectArrangement {
         Ok(id)
     }
 
-    /// Spec 6.2 step 2: the scene governing `beat` — the last scene event at
-    /// or before it. `None` only for a beat before the first event (which
-    /// validation forbids) or an empty lane.
+    /// The scene *marked* at `beat` — the last scene event at or before it.
+    /// This is the scene the transport and session UI call "current"; it does
+    /// NOT decide what any lane plays (spec 6.2: only clips do). `None` only
+    /// for a beat before the first event (which validation forbids) or an
+    /// empty lane.
     pub fn scene_at_beat(&self, beat: f64) -> Option<usize> {
         self.scene_event_at_beat(beat).map(|event| event.scene)
     }
 
     /// The governing scene *event* at `beat` — the last event at or before
-    /// it. Compile needs the event itself, not just its scene index: the
-    /// event's `start_beat` is the phase anchor for every lane riding the
-    /// scene backdrop.
+    /// it. Stamping needs the event itself, not just its scene index: the
+    /// event's `start_beat` is the phase anchor of every clip it stamps.
     pub fn scene_event_at_beat(&self, beat: f64) -> Option<&SceneEvent> {
         self.scene_lane
             .iter()
@@ -284,6 +291,18 @@ impl ProjectArrangement {
                         track + 1,
                         idx + 1,
                         clip.offset_steps
+                    ));
+                }
+                if clip.pattern_id.is_none() && clip.take_id.is_none() {
+                    // Spec 6.1/6.2: a span with no clip is silent, so silence
+                    // never needs — and never gets — an object of its own. A
+                    // sourceless clip would be an invisible "empty clip" the
+                    // user cannot see but can collide with.
+                    return Err(format!(
+                        "Track {} clip {} carries no source; silence is the absence of a clip, \
+                         not an empty one — delete it instead",
+                        track + 1,
+                        idx + 1
                     ));
                 }
                 if let Some(pattern_id) = clip.pattern_id {
@@ -530,10 +549,10 @@ pub fn stamped_clip_override(
 ///
 /// The arithmetic is not re-derived: the new source and offset are exactly
 /// what `stamped_clip_override` — the compiler's own split rule — produces at
-/// `beat`. A take clip trimmed past its end therefore becomes an
-/// explicit-empty clip, which is what that span already sounded like (the
-/// silent tail) and what validation demands (take offsets never reach
-/// `total_len_steps`).
+/// `beat`. `None` means the re-anchored clip would have no source at all (a
+/// take trimmed past its own end): that span is silent, and silence is the
+/// absence of a clip, so the caller DROPS it rather than storing an empty one
+/// (spec 6.1).
 ///
 /// `beat` may be *before* `clip.start_beat` (a left-edge grow): pattern
 /// offsets wrap backwards through `rem_euclid` and take offsets clamp at 0.
@@ -542,16 +561,19 @@ pub fn restamped_clip(
     track: usize,
     clip: &ArrClip,
     beat: f64,
-) -> ArrClip {
+) -> Option<ArrClip> {
     let stamped = stamped_clip_override(ctx, track, clip, beat);
-    ArrClip {
+    if stamped.pattern_id.is_none() && stamped.take_id.is_none() {
+        return None;
+    }
+    Some(ArrClip {
         id: clip.id,
         start_beat: beat,
         end_beat: clip.end_beat,
         pattern_id: stamped.pattern_id,
         take_id: stamped.take_id,
         offset_steps: stamped.offset_steps,
-    }
+    })
 }
 
 /// Ableton-style truncation (spec 14, locked): clear `[start, end)` on
@@ -566,7 +588,8 @@ pub fn restamped_clip(
 ///    *right* trim (`c` starts before `start`) only shortens the span, so the
 ///    phase anchor is untouched; a *left* trim (`c` ends after `end`)
 ///    re-stamps `offset_steps` through `restamped_clip`, so the surviving
-///    tail keeps playing exactly what it played there.
+///    tail keeps playing exactly what it played there (and is dropped
+///    outright when nothing is left to play).
 /// 4. **Strictly containing** (`c.start < start` and `end < c.end`) — split
 ///    around the incoming span: the left fragment keeps `c`'s identity and
 ///    anchor, the right fragment gets a fresh `ClipId` and a re-stamped
@@ -603,9 +626,12 @@ pub fn occlude_span(
             let mut left = clip;
             left.end_beat = start;
             kept.push(left);
-            let mut right = restamped_clip(ctx, track, &clip, end);
-            right.id = ClipId(0); // reassigned below, after the borrow ends
-            split_tails.push(right);
+            // A tail with nothing left to play (a take past its end) is
+            // dropped, not stored as an empty clip.
+            if let Some(mut right) = restamped_clip(ctx, track, &clip, end) {
+                right.id = ClipId(0); // reassigned below, after the borrow ends
+                split_tails.push(right);
+            }
             continue;
         }
         // 3a. Right trim: the clip starts before the span and ends inside it.
@@ -616,7 +642,7 @@ pub fn occlude_span(
             continue;
         }
         // 3b. Left trim: the clip starts inside the span and ends after it.
-        kept.push(restamped_clip(ctx, track, &clip, end));
+        kept.extend(restamped_clip(ctx, track, &clip, end));
     }
     for mut tail in split_tails {
         tail.id = arr.allocate_clip_id()?;
@@ -642,36 +668,73 @@ pub fn insert_clip_sorted(arr: &mut ProjectArrangement, track: usize, clip: ArrC
     lane.insert(position, clip);
 }
 
-/// The override a lane riding the *scene backdrop* contributes at boundary
-/// `beat`, or `None` when it needs none.
+/// Stamp the scene lane's cells as real clips over `[from_beat, to_beat)`
+/// (spec 6.2/8).
 ///
-/// This is the row path's scene-resolved arm, and it is not optional: the row
-/// model gives scene-resolved lanes no phase memory (`RuntimeSongRow::
-/// lane_offsets` is `0.0` for them and `song_playback` advances only from the
-/// row's own `start_beat`), so without a materialized offset a backdrop lane
-/// would restart its pattern at step 0 on every boundary row — i.e. any clip
-/// edge on any *other* track would retrigger it mid-cycle.
+/// This is the operation that makes "everything audible is a visible clip"
+/// true. For every scene span intersecting the window, every track whose cell
+/// in that scene holds a pattern gets one clip covering the intersection; a
+/// track whose cell is empty gets nothing and is silent there. Stamping
+/// TRUNCATES: `occlude_span` clears the window first, so re-stamping a span
+/// replaces whatever was there, exactly like any other clip write (spec 14,
+/// locked).
 ///
-/// The anchor is the governing scene *event*'s `start_beat`: the scene
-/// launches at its event and runs continuously until the next one. As in
-/// the row path, an override is materialized only when the advanced
-/// offset is nonzero, so lanes stay implicit whenever they can and `normalize`
-/// still collapses no-op boundaries.
-fn backdrop_override(
+/// **The phase anchor is the global timeline, not the scene event.** A
+/// stamped clip carries the free-run offset `steps(start) mod L` (takes spec
+/// 7.2), so it plays as though its pattern had been running since beat 0:
+/// source step 0 always lands on the same absolute beats no matter where the
+/// scene boundary sits. Dragging a boundary therefore changes how MUCH of the
+/// pattern you hear, never WHEN its steps fall — "modifying scenes should
+/// never change the flow of rhythm of the underlying track pattern clips".
+///
+/// Anchoring on the event's own `start_beat` instead (rev 2's first attempt)
+/// restarted the pattern at step 0 at the boundary, so moving a boundary onto
+/// a beat that is not a whole number of pattern cycles shifted every
+/// downstream hit off the grid. It also disagreed with capture, which has
+/// always stamped performed launches free-run; this is one rule for both.
+pub fn stamp_scene_clips(
+    arr: &mut ProjectArrangement,
     ctx: &dyn SongCompileContext,
-    track: usize,
-    scene: usize,
-    scene_start_beat: f64,
-    beat: f64,
-) -> Option<ProjectSongTrackOverride> {
-    let pattern_id = ctx.song_scene_cell(scene, track)?;
-    let offset = advanced_pattern_offset(ctx, track, pattern_id, 0.0, beat - scene_start_beat);
-    (offset != 0.0).then_some(ProjectSongTrackOverride {
-        track,
-        pattern_id: Some(pattern_id),
-        take_id: None,
-        offset_steps: offset,
-    })
+    from_beat: f64,
+    to_beat: f64,
+) -> Result<(), String> {
+    if !(to_beat > from_beat) {
+        return Ok(());
+    }
+    let spans = arrangement_scene_spans(arr);
+    let track_count = arr.track_lanes.len();
+    for span in spans {
+        let start = span.start_beat.max(from_beat);
+        let end = span.end_beat.min(to_beat);
+        if end <= start {
+            continue;
+        }
+        for track in 0..track_count {
+            occlude_span(arr, ctx, track, start, end)?;
+            let Some(pattern_id) = ctx.song_scene_cell(span.scene, track) else {
+                // No cell: the scene says nothing for this track, so the span
+                // stays an honest silent gap.
+                continue;
+            };
+            // Free-run against the global clock (takes spec 7.2), NOT against
+            // `span.start_beat`: the grid must not move when the boundary does.
+            let offset_steps = advanced_pattern_offset(ctx, track, pattern_id, 0.0, start);
+            let id = arr.allocate_clip_id()?;
+            insert_clip_sorted(
+                arr,
+                track,
+                ArrClip {
+                    id,
+                    start_beat: start,
+                    end_beat: end,
+                    pattern_id: Some(pattern_id),
+                    take_id: None,
+                    offset_steps,
+                },
+            );
+        }
+    }
+    Ok(())
 }
 
 /// One derived scene span for the UI read surface (spec 12): a scene EVENT
@@ -685,18 +748,20 @@ pub struct SceneSpan {
     pub scene: usize,
 }
 
-/// One derived backdrop ghost span (spec 12): a stretch of a track lane with
-/// NO clip over it, where the governing scene's cell shows through. The UI
-/// renders these dimmer than clips — the dim/solid distinction is structural
-/// (clip vs. gap) rather than a `from_override` flag on a merged projection.
+/// One span of the retired **backdrop** model: a stretch of a track lane with
+/// NO clip over it, where the governing scene's cell used to show through.
+///
+/// The backdrop was removed (spec 6.2, "rejected models"): a gap is silence
+/// now. This type survives for exactly one purpose — migrating project files
+/// written under the old rule, where those gaps really did sound.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BackdropSpan {
+pub struct LegacyBackdropSpan {
     pub start_beat: f64,
     pub end_beat: f64,
     pub scene: usize,
     pub pattern_id: u64,
-    /// The pattern phase at `start_beat`, anchored on the scene event exactly
-    /// as `backdrop_override` anchors the compiled row's.
+    /// The pattern phase at `start_beat`, anchored on the scene event — what
+    /// the old compiler materialized for a lane riding the backdrop.
     pub offset_steps: f64,
 }
 
@@ -725,16 +790,17 @@ pub fn arrangement_scene_spans(arr: &ProjectArrangement) -> Vec<SceneSpan> {
     spans
 }
 
-/// Derive the backdrop ghost spans (spec 12), one list per track lane.
+/// Derive what the retired backdrop model made a lane's GAPS sound like, one
+/// list per track lane. Migration input only (`migrate_legacy_backdrops`).
 ///
 /// Every gap in a lane — before the first clip, between clips, after the last
 /// — is intersected with the scene spans, and each intersection where the
-/// governing scene has a cell for the track yields one ghost. A scene cell
-/// that is empty contributes nothing: the lane really is silent there.
-pub fn arrangement_backdrop_spans(
+/// governing scene has a cell for the track yields one span. A scene cell
+/// that is empty contributes nothing: the lane really was silent there too.
+pub fn legacy_backdrop_spans(
     arr: &ProjectArrangement,
     ctx: &dyn SongCompileContext,
-) -> Vec<Vec<BackdropSpan>> {
+) -> Vec<Vec<LegacyBackdropSpan>> {
     let scene_spans = arrangement_scene_spans(arr);
     arr.track_lanes
         .iter()
@@ -766,7 +832,7 @@ pub fn arrangement_backdrop_spans(
                     let Some(pattern_id) = ctx.song_scene_cell(scene_span.scene, track) else {
                         continue;
                     };
-                    spans.push(BackdropSpan {
+                    spans.push(LegacyBackdropSpan {
                         start_beat: start,
                         end_beat: end,
                         scene: scene_span.scene,
@@ -786,16 +852,58 @@ pub fn arrangement_backdrop_spans(
         .collect()
 }
 
+/// Migrate an arrangement authored under the retired **backdrop** model so it
+/// sounds identical under the current one (spec 10, v5 → v6).
+///
+/// Under v5 a lane gap played the governing scene's cell; it is silence now.
+/// So: freeze what every gap sounded like into real clips, and drop the old
+/// explicit-empty clips — those spans were deliberate silence, which the new
+/// model spells as a gap. The result compiles to the same audible song, phase
+/// offsets included, and contains nothing but ordinary clips the user can see
+/// and delete.
+pub fn migrate_legacy_backdrops(
+    arr: &ProjectArrangement,
+    ctx: &dyn SongCompileContext,
+) -> Result<ProjectArrangement, String> {
+    // Computed BEFORE the empty clips are dropped: an explicit-empty clip
+    // occluded the backdrop, so its span must stay a gap.
+    let backdrops = legacy_backdrop_spans(arr, ctx);
+    let mut migrated = arr.clone();
+    for lane in &mut migrated.track_lanes {
+        lane.retain(|clip| clip.pattern_id.is_some() || clip.take_id.is_some());
+    }
+    for (track, spans) in backdrops.iter().enumerate() {
+        for span in spans {
+            let id = migrated.allocate_clip_id()?;
+            insert_clip_sorted(
+                &mut migrated,
+                track,
+                ArrClip {
+                    id,
+                    start_beat: span.start_beat,
+                    end_beat: span.end_beat,
+                    pattern_id: Some(span.pattern_id),
+                    take_id: None,
+                    offset_steps: span.offset_steps,
+                },
+            );
+        }
+    }
+    Ok(migrated)
+}
+
 /// Spec 7: compile lanes into the playback row model.
 ///
 /// The boundary set is every scene-event start plus every clip start and end
 /// below `end_beat` (compared exactly — gestures already quantize). Each
-/// boundary becomes one row carrying the governing scene, one override per
-/// lane whose clip contains it (phase-stamped by the split rule), and one
-/// materialized backdrop override per lane that rides the scene mid-cycle
-/// (see `backdrop_override`). Adjacent identical rows collapse (`normalize`),
-/// then ids are assigned by index so equal input always compiles to an
-/// identical row layout.
+/// boundary becomes one row carrying the marked scene plus **one override per
+/// track**: the covering clip's, phase-stamped by the split rule, or an
+/// explicit-empty override for a lane no clip covers. That second case is the
+/// crux of the model: a row with no override for a track resolves to the
+/// scene cell in `preflight_runtime_song`, which is exactly the backdrop
+/// fallback the model removed, so an uncovered lane MUST say "silent" out
+/// loud. Adjacent identical rows collapse (`normalize`), then ids are assigned
+/// by index so equal input always compiles to an identical row layout.
 pub fn compile_arrangement<C: ArrangementContext>(
     arr: &ProjectArrangement,
     ctx: &C,
@@ -839,11 +947,10 @@ pub fn compile_arrangement<C: ArrangementContext>(
             }
             match lane.get(*cursor).filter(|clip| clip.contains(beat)) {
                 Some(clip) => overrides.push(stamped_clip_override(ctx, track, clip, beat)),
-                // No clip covers the beat: the lane rides the scene backdrop
-                // and may need its phase materialized.
-                None => {
-                    overrides.extend(backdrop_override(ctx, track, scene, event.start_beat, beat))
-                }
+                // No clip covers the beat: the lane is SILENT. An absent
+                // override would resolve to the row's scene cell, so silence
+                // has to be stated explicitly.
+                None => overrides.push(ProjectSongTrackOverride::new(track, None)),
             }
         }
         rows.push(ProjectSongRow {
@@ -886,9 +993,12 @@ pub fn compile_arrangement<C: ArrangementContext>(
 /// - A row's scene becomes a `SceneEvent` only when it differs from the
 ///   previous row's scene (the row model's scene column fragments at every
 ///   row; that is exactly the "jagged lane" the lane model removes).
-/// - A per-track override opens a clip that runs until the first later row
-///   that changes that lane; a row that drops the override closes the clip at
-///   its beat, and an explicit-empty override becomes an explicit-empty clip.
+/// - Each scene event STAMPS the scene's cells as clips across its span
+///   (`stamp_scene_clips`), exactly as inserting one interactively does.
+/// - A per-track override then truncates on top: it opens a clip that runs
+///   until the first later row that changes that lane; a row that drops the
+///   override closes the clip at its beat (the stamped scene clip resumes
+///   underneath), and an explicit-empty override carves a silent hole.
 /// - "Changes that lane" is decided by *compiling the open clip forward*: a
 ///   later row's override merges into the open clip only when the clip would
 ///   compile to exactly that override at that beat
@@ -899,11 +1009,11 @@ pub fn compile_arrangement<C: ArrangementContext>(
 ///
 /// The guarantee this buys, for any `rows` a row primitive produced: every
 /// row start is a boundary of the compiled arrangement, and every declared
-/// override reappears verbatim on its row. Compile may add *more* overrides
-/// than the rows had — a lane riding the scene backdrop mid-cycle gets its
-/// phase materialized (`backdrop_override`), which the row model could not
-/// express — so `compile_arrangement(lowered)` is the input song plus, per
-/// row, zero or more overrides on tracks that row did not mention.
+/// override reappears verbatim on its row. Compile always emits *more*
+/// overrides than the rows had — every unmentioned lane gets the stamped
+/// scene cell at its true phase, or an explicit-empty — so
+/// `compile_arrangement(lowered)` is the input song with every lane's
+/// resolution spelled out rather than left to the row's scene.
 ///
 /// `rows` must already be sorted by `start_beat` with canonical (track-sorted,
 /// duplicate-free) overrides — everything `ProjectSong::validate` guarantees.
@@ -951,8 +1061,13 @@ pub fn lower_rows_to_arrangement<C: ArrangementContext>(
         }
     }
 
-    // Track lanes: one clip per contiguous run of a lane's launch state.
+    // The scene events stamp their cells first — that is what a scene event
+    // DOES (spec 6.2) — and the declared overrides then truncate on top.
+    stamp_scene_clips(&mut arrangement, ctx, 0.0, end_beat)?;
+
+    // Track lanes: one run per contiguous stretch of a lane's launch state.
     for track in 0..track_count {
+        let mut runs: Vec<ArrClip> = Vec::new();
         let mut open: Option<ArrClip> = None;
         for row in rows {
             match row.overrides.iter().find(|over| over.track == track) {
@@ -965,10 +1080,10 @@ pub fn lower_rows_to_arrangement<C: ArrangementContext>(
                     }
                     if let Some(mut clip) = open.take() {
                         clip.end_beat = row.start_beat;
-                        push_lowered_clip(&mut arrangement, track, clip)?;
+                        runs.push(clip);
                     }
                     open = Some(ArrClip {
-                        id: ClipId(0), // assigned when the clip is pushed
+                        id: ClipId(0), // assigned when the run is applied
                         start_beat: row.start_beat,
                         end_beat,
                         pattern_id: declared.pattern_id,
@@ -979,32 +1094,38 @@ pub fn lower_rows_to_arrangement<C: ArrangementContext>(
                 None => {
                     if let Some(mut clip) = open.take() {
                         clip.end_beat = row.start_beat;
-                        push_lowered_clip(&mut arrangement, track, clip)?;
+                        runs.push(clip);
                     }
                 }
             }
         }
-        if let Some(clip) = open.take() {
-            push_lowered_clip(&mut arrangement, track, clip)?;
+        runs.extend(open.take());
+        for run in runs {
+            apply_lowered_run(&mut arrangement, ctx, track, run)?;
         }
     }
 
     Ok(arrangement)
 }
 
-/// Append `clip` to `track`'s lane with a freshly allocated id. Zero-length
-/// clips cannot arise from sorted rows (starts are strictly increasing), but
-/// one would be meaningless anyway, so it is dropped rather than stored.
-fn push_lowered_clip(
+/// Lay one declared run over the stamped scene clips, truncating them like
+/// any other clip write. A run with no source is a declared explicit-empty
+/// override: it carves a silent hole and stores nothing (spec 6.1).
+fn apply_lowered_run(
     arrangement: &mut ProjectArrangement,
+    ctx: &dyn SongCompileContext,
     track: usize,
     mut clip: ArrClip,
 ) -> Result<(), String> {
     if clip.end_beat <= clip.start_beat {
         return Ok(());
     }
+    occlude_span(arrangement, ctx, track, clip.start_beat, clip.end_beat)?;
+    if clip.pattern_id.is_none() && clip.take_id.is_none() {
+        return Ok(());
+    }
     clip.id = arrangement.allocate_clip_id()?;
-    arrangement.track_lanes[track].push(clip);
+    insert_clip_sorted(arrangement, track, clip);
     Ok(())
 }
 
@@ -1062,7 +1183,9 @@ mod tests {
         ArrClip::new(ClipId(id), start, end, Some(pattern_id))
     }
 
-    fn empty_clip(id: u64, start: f64, end: f64) -> ArrClip {
+    /// A clip with no source. Only validation and the migration path may see
+    /// one — the primitives refuse to make them (spec 6.1).
+    fn sourceless_clip(id: u64, start: f64, end: f64) -> ArrClip {
         ArrClip::new(ClipId(id), start, end, None)
     }
 
@@ -1313,6 +1436,18 @@ mod tests {
         assert!(err.contains("finite and non-negative"), "{err}");
     }
 
+    /// Spec 6.1: silence is the absence of a clip. A sourceless clip is an
+    /// invisible object the user cannot see but can collide with, so the
+    /// model refuses to hold one.
+    #[test]
+    fn validate_rejects_a_sourceless_clip() {
+        let mut arr = valid_arrangement();
+        arr.track_lanes[0] = vec![sourceless_clip(0, 4.0, 8.0)];
+        let err = arr.validate(&test_scenes()).unwrap_err();
+        assert!(err.contains("carries no source"), "{err}");
+        assert!(err.contains("Track 1 clip 1"), "{err}");
+    }
+
     #[test]
     fn validate_rejects_missing_pattern() {
         let mut arr = valid_arrangement();
@@ -1429,13 +1564,15 @@ mod tests {
             64.0,
         );
         let compiled = compile_ok(&arr, &scenes);
+        // No clips anywhere means SILENCE everywhere, and silence has to be
+        // stated: an absent override would resolve to the row's scene cell.
         assert_eq!(
             compiled,
             song(
                 vec![
-                    row(0, 0.0, 0, Vec::new()),
-                    row(1, 16.0, 1, Vec::new()),
-                    row(2, 48.0, 2, Vec::new()),
+                    row(0, 0.0, 0, vec![empty_over(0), empty_over(1)]),
+                    row(1, 16.0, 1, vec![empty_over(0), empty_over(1)]),
+                    row(2, 48.0, 2, vec![empty_over(0), empty_over(1)]),
                 ],
                 64.0
             )
@@ -1455,9 +1592,9 @@ mod tests {
             compiled,
             song(
                 vec![
-                    row(0, 0.0, 0, Vec::new()),
-                    row(1, 4.0, 0, vec![over(0, 2)]),
-                    row(2, 8.0, 0, Vec::new()),
+                    row(0, 0.0, 0, vec![empty_over(0), empty_over(1)]),
+                    row(1, 4.0, 0, vec![over(0, 2), empty_over(1)]),
+                    row(2, 8.0, 0, vec![empty_over(0), empty_over(1)]),
                 ],
                 16.0
             )
@@ -1477,18 +1614,17 @@ mod tests {
         let compiled = compile_ok(&arr, &scenes);
         // steps(7.0 - 4.0) = 3 beats * 4 steps/beat = 12 steps, mod 16.
         //
-        // The last row is where the clip ends and track 0 rejoins the scene 1
-        // backdrop, which has been running since beat 7: both lanes are
-        // 16 - 7 = 9 beats == 36 steps into scene 1's pattern (P2), 36 mod
-        // 16 == 4.
+        // The scene change at beat 7 does NOT interrupt the clip, and the last
+        // row is where the clip ends: nothing was stamped there, so the lane
+        // simply goes silent.
         assert_eq!(
             compiled,
             song(
                 vec![
-                    row(0, 0.0, 0, Vec::new()),
-                    row(1, 4.0, 0, vec![over(0, 2)]),
-                    row(2, 7.0, 1, vec![over_at(0, 2, 12.0)]),
-                    row(3, 16.0, 1, vec![over_at(0, 2, 4.0), over_at(1, 2, 4.0)]),
+                    row(0, 0.0, 0, vec![empty_over(0), empty_over(1)]),
+                    row(1, 4.0, 0, vec![over(0, 2), empty_over(1)]),
+                    row(2, 7.0, 1, vec![over_at(0, 2, 12.0), empty_over(1)]),
+                    row(3, 16.0, 1, vec![empty_over(0), empty_over(1)]),
                 ],
                 32.0
             )
@@ -1506,7 +1642,10 @@ mod tests {
             32.0,
         );
         let compiled = compile_ok(&arr, &scenes);
-        assert_eq!(compiled.rows[1].overrides, vec![over_at(0, 2, 6.0)]);
+        assert_eq!(
+            compiled.rows[1].overrides,
+            vec![over_at(0, 2, 6.0), empty_over(1)]
+        );
     }
 
     /// Find the compiled row starting exactly at `beat`.
@@ -1521,13 +1660,13 @@ mod tests {
         row.overrides.iter().find(|over| over.track == track)
     }
 
+    /// The crux of the model (spec 6.2/7): a lane no clip covers compiles to
+    /// an EXPLICIT-EMPTY override, never to nothing. `preflight_runtime_song`
+    /// resolves an absent override from the row's scene cell, so leaving the
+    /// lane unmentioned would resurrect the scene backdrop this model
+    /// removed — the bug where deleting a clip looked like a no-op.
     #[test]
-    fn compile_keeps_the_scene_backdrop_phase_continuous_across_a_foreign_clip_edge() {
-        // Track 1 has no clips at all: it rides scene 0's 16-step (4-beat)
-        // pattern for the whole song. Track 0's clip edges still force
-        // boundary rows, and the row model gives scene-resolved lanes no
-        // phase memory — so track 1's phase must be materialized or it would
-        // retrigger from step 0 at beats 3 and 5.
+    fn compile_states_silence_explicitly_for_every_uncovered_lane() {
         let scenes = test_scenes();
         let arr = arrangement(
             vec![ev(0.0, 0)],
@@ -1536,106 +1675,203 @@ mod tests {
         );
         let compiled = compile_ok(&arr, &scenes);
 
-        // Beat 0 is the scene's own anchor: nothing to materialize.
-        assert_eq!(override_for(row_at(&compiled, 0.0), 1), None);
-        // 3 beats * 4 steps/beat = 12 steps into scene 0's cell (P1).
-        assert_eq!(
-            override_for(row_at(&compiled, 3.0), 1),
-            Some(&over_at(1, 1, 12.0))
-        );
-        // 5 beats * 4 = 20 steps, mod 16 == 4.
-        assert_eq!(
-            override_for(row_at(&compiled, 5.0), 1),
-            Some(&over_at(1, 1, 4.0))
-        );
-        // Track 0 rejoins the backdrop at beat 5 with the same phase.
-        assert_eq!(
-            override_for(row_at(&compiled, 5.0), 0),
-            Some(&over_at(0, 1, 4.0))
-        );
-    }
-
-    #[test]
-    fn compile_omits_the_backdrop_override_when_the_boundary_lands_on_a_pattern_boundary() {
-        // Same shape, but every boundary is a whole number of 4-beat pattern
-        // loops from the scene event, so the backdrop needs no materialized
-        // phase and the rows stay lean.
-        let scenes = test_scenes();
-        let arr = arrangement(
-            vec![ev(0.0, 0)],
-            vec![vec![clip(0, 4.0, 8.0, 2)], Vec::new()],
-            16.0,
-        );
-        let compiled = compile_ok(&arr, &scenes);
-        assert_eq!(
-            compiled,
-            song(
-                vec![
-                    row(0, 0.0, 0, Vec::new()),
-                    row(1, 4.0, 0, vec![over(0, 2)]),
-                    row(2, 8.0, 0, Vec::new()),
-                ],
-                16.0
-            )
-        );
-        for r in &compiled.rows {
-            assert_eq!(override_for(r, 1), None, "no backdrop override anywhere");
-        }
-    }
-
-    #[test]
-    fn compile_anchors_backdrop_phase_to_the_scene_event_not_the_row() {
-        // Scene 1 launches at beat 6 — not a multiple of the 4-beat pattern
-        // length — and track 0 has two clips inside its span, so the row
-        // preceding the beat-9 boundary is at beat 8, not at the scene event.
-        let scenes = test_scenes();
-        let arr = arrangement(
-            vec![ev(0.0, 0), ev(6.0, 1)],
-            vec![
-                vec![clip(0, 7.0, 8.0, 3), clip(1, 9.0, 10.0, 3)],
-                Vec::new(),
-            ],
-            16.0,
-        );
-        let compiled = compile_ok(&arr, &scenes);
-        // 9 - 6 = 3 beats into scene 1's cell (P2) => 12 steps.
-        // Measured from beat 0 it would be 36 mod 16 == 4; measured from the
-        // previous row (beat 8) it would be 4 as well — 12 pins the anchor.
-        assert_eq!(
-            override_for(row_at(&compiled, 9.0), 1),
-            Some(&over_at(1, 2, 12.0))
-        );
-        // The scene event's own row needs no materialized phase.
-        assert_eq!(override_for(row_at(&compiled, 6.0), 1), None);
-        // And at beat 7, one beat in: 4 steps.
-        assert_eq!(
-            override_for(row_at(&compiled, 7.0), 1),
-            Some(&over_at(1, 2, 4.0))
-        );
-    }
-
-    #[test]
-    fn compile_emits_no_backdrop_override_for_a_scene_cell_that_is_empty() {
-        let mut scenes = test_scenes();
-        scenes.scenes[0].cells[1] = None;
-        let arr = arrangement(
-            vec![ev(0.0, 0)],
-            vec![vec![clip(0, 3.0, 5.0, 2)], Vec::new()],
-            16.0,
-        );
-        let compiled = compile_ok(&arr, &scenes);
+        // Track 1 has no clips at all and scene 0's cell for it is P1 — under
+        // the retired backdrop rule it would have played that pattern.
+        assert_eq!(scenes.song_scene_cell(0, 1), Some(1));
         for r in &compiled.rows {
             assert_eq!(
                 override_for(r, 1),
-                None,
-                "an empty scene cell has no phase to materialize"
+                Some(&empty_over(1)),
+                "an uncovered lane must say 'silent' out loud"
             );
         }
-        // Track 0's backdrop still materializes where its cell is populated.
+        // Track 0 says it too, on either side of its clip.
+        assert_eq!(override_for(row_at(&compiled, 0.0), 0), Some(&empty_over(0)));
+        assert_eq!(override_for(row_at(&compiled, 3.0), 0), Some(&over(0, 2)));
+        assert_eq!(override_for(row_at(&compiled, 5.0), 0), Some(&empty_over(0)));
+    }
+
+    /// A scene event is not a playback rule any more; it is the gesture that
+    /// STAMPS clips (spec 6.2/8). The stamped clips free-run against the
+    /// GLOBAL clock, not the event, so the grid never moves with the boundary.
+    #[test]
+    fn stamp_scene_clips_writes_the_scene_cells_as_real_clips() {
+        let scenes = test_scenes();
+        let mut arr = arrangement(vec![ev(0.0, 0), ev(6.0, 1)], vec![Vec::new(); 2], 16.0);
+        stamp_scene_clips(&mut arr, &scenes, 0.0, 16.0).expect("stamps");
+        arr.validate(&scenes).expect("stamping leaves a valid lane");
+
+        // Scene j's cell is P(j + 1) on both tracks, so both lanes get the
+        // same two clips: [0, 6) of P1 and [6, 16) of P2. Beat 6 is 24 steps
+        // into the global grid, and 24 mod 16 == 8 — the scene starts
+        // mid-cycle rather than restarting the pattern.
+        for track in 0..2 {
+            assert_eq!(
+                arr.track_lanes[track]
+                    .iter()
+                    .map(|c| (c.start_beat, c.end_beat, c.pattern_id, c.offset_steps))
+                    .collect::<Vec<_>>(),
+                vec![(0.0, 6.0, Some(1), 0.0), (6.0, 16.0, Some(2), 8.0)],
+                "track {track}"
+            );
+        }
+
+        // Everything audible is a clip, and every stamped clip's phase at any
+        // beat is just `steps(beat) mod L`: beat 6 -> 8, beat 9 -> 36 mod 16
+        // == 4, and beat 8 (32 steps) -> 0, exactly on the grid.
+        let compiled = compile_ok(&arr, &scenes);
         assert_eq!(
-            override_for(row_at(&compiled, 5.0), 0),
-            Some(&over_at(0, 1, 4.0))
+            override_for(row_at(&compiled, 6.0), 0),
+            Some(&over_at(0, 2, 8.0)),
+            "the global grid is the anchor, not the event"
         );
+        let mut probe = arr.clone();
+        probe.track_lanes[1].clear();
+        let id = probe.allocate_clip_id().unwrap();
+        probe.track_lanes[1].push(ArrClip::new(id, 9.0, 10.0, Some(3)));
+        let compiled = compile_ok(&probe, &scenes);
+        assert_eq!(
+            override_for(row_at(&compiled, 9.0), 0),
+            Some(&over_at(0, 2, 4.0))
+        );
+    }
+
+    /// The no-op case that hides the bug: a boundary sitting on a whole
+    /// number of pattern cycles stamps step 0 either way.
+    #[test]
+    fn stamping_at_an_aligned_boundary_still_anchors_at_step_zero() {
+        let scenes = test_scenes();
+        // 8 beats == 32 steps == two whole 16-step cycles.
+        let mut arr = arrangement(vec![ev(0.0, 0), ev(8.0, 1)], vec![Vec::new(); 2], 16.0);
+        stamp_scene_clips(&mut arr, &scenes, 0.0, 16.0).expect("stamps");
+        assert_eq!(
+            arr.track_lanes[0]
+                .iter()
+                .map(|c| (c.start_beat, c.pattern_id, c.offset_steps))
+                .collect::<Vec<_>>(),
+            vec![(0.0, Some(1), 0.0), (8.0, Some(2), 0.0)]
+        );
+    }
+
+    /// The defect this rule fixes: stamped clips stay GRID-LOCKED when a
+    /// scene boundary moves. Moving a boundary must change how much of a
+    /// pattern is heard, never when its steps fall.
+    #[test]
+    fn stamped_clips_stay_grid_locked_when_a_scene_boundary_moves() {
+        let scenes = test_scenes();
+        // Patterns are 16 steps at 4 steps/beat, so source step 0 lands on
+        // every multiple of 4 beats: 0, 4, 8, 12, 16, 20, ...
+        let aligned = {
+            let mut arr = arrangement(vec![ev(0.0, 0), ev(16.0, 1)], vec![Vec::new(); 2], 32.0);
+            stamp_scene_clips(&mut arr, &scenes, 0.0, 32.0).expect("stamps");
+            arr
+        };
+        // 16 beats == 64 steps == four whole cycles, so the scene-1 clip
+        // starts at step 0.
+        assert_eq!(aligned.track_lanes[0][1].offset_steps, 0.0);
+
+        // Now drag the boundary to beat 13 — deliberately NOT a multiple of
+        // the 4-beat cycle — and re-stamp from there.
+        let mut moved = arrangement(vec![ev(0.0, 0), ev(13.0, 1)], vec![Vec::new(); 2], 32.0);
+        stamp_scene_clips(&mut moved, &scenes, 0.0, 32.0).expect("stamps");
+        // 13 beats == 52 steps; 52 mod 16 == 4.
+        assert_eq!(
+            moved.track_lanes[0]
+                .iter()
+                .map(|c| (c.start_beat, c.end_beat, c.pattern_id, c.offset_steps))
+                .collect::<Vec<_>>(),
+            vec![(0.0, 13.0, Some(1), 0.0), (13.0, 32.0, Some(2), 4.0)]
+        );
+
+        // The proof: the beats where the pattern reaches source step 0 are
+        // unchanged by the move. 12 is still step 0 (in the scene-0 clip),
+        // and 16 and 20 are still step 0 in the scene-1 clip.
+        let aligned_song = compile_ok(&aligned, &scenes);
+        let moved_song = compile_ok(&moved, &scenes);
+        for beat in [12.0, 16.0, 20.0, 24.0] {
+            assert_eq!(
+                phase_at(&moved_song, &scenes, 0, beat),
+                0.0,
+                "beat {beat} must still be source step 0 after the move"
+            );
+            assert_eq!(
+                phase_at(&aligned_song, &scenes, 0, beat),
+                phase_at(&moved_song, &scenes, 0, beat),
+                "moving the boundary changed the rhythm at beat {beat}"
+            );
+        }
+        // And an off-grid beat agrees too: 14 beats == 56 steps, 56 mod 16 == 8.
+        assert_eq!(phase_at(&moved_song, &scenes, 0, 14.0), 8.0);
+    }
+
+    /// The phase a compiled song puts `track` at on `beat`: the governing
+    /// row's override advanced to the beat.
+    fn phase_at(
+        song: &ProjectSong,
+        ctx: &dyn SongCompileContext,
+        track: usize,
+        beat: f64,
+    ) -> f64 {
+        let row = song
+            .rows
+            .iter()
+            .rev()
+            .find(|row| row.start_beat <= beat)
+            .expect("a row governs every beat");
+        let over = row
+            .overrides
+            .iter()
+            .find(|over| over.track == track)
+            .expect("every lane states its resolution");
+        let pattern_id = over.pattern_id.expect("the fixture uses pattern clips");
+        advanced_pattern_offset(
+            ctx,
+            track,
+            pattern_id,
+            over.offset_steps,
+            beat - row.start_beat,
+        )
+    }
+
+    /// A scene cell that holds nothing stamps nothing: that lane is silent
+    /// under the scene, and silence is an honest gap.
+    #[test]
+    fn stamp_scene_clips_skips_a_scene_cell_that_is_empty() {
+        let mut scenes = test_scenes();
+        scenes.scenes[0].cells[1] = None;
+        let mut arr = arrangement(vec![ev(0.0, 0)], vec![Vec::new(); 2], 16.0);
+        stamp_scene_clips(&mut arr, &scenes, 0.0, 16.0).expect("stamps");
+        assert_eq!(arr.track_lanes[1], Vec::new());
+        assert_eq!(
+            arr.track_lanes[0]
+                .iter()
+                .map(|c| (c.start_beat, c.end_beat, c.pattern_id))
+                .collect::<Vec<_>>(),
+            vec![(0.0, 16.0, Some(1))]
+        );
+    }
+
+    /// Stamping TRUNCATES, like every other clip write (spec 14, locked): a
+    /// re-stamp replaces whatever is under its span.
+    #[test]
+    fn stamp_scene_clips_truncates_what_it_lands_on() {
+        let scenes = test_scenes();
+        let mut arr = arrangement(
+            vec![ev(0.0, 0), ev(8.0, 1)],
+            vec![vec![clip(0, 4.0, 12.0, 3)], Vec::new()],
+            16.0,
+        );
+        // Re-stamp only the second scene's span.
+        stamp_scene_clips(&mut arr, &scenes, 8.0, 16.0).expect("stamps");
+        assert_eq!(
+            arr.track_lanes[0]
+                .iter()
+                .map(|c| (c.start_beat, c.end_beat, c.pattern_id))
+                .collect::<Vec<_>>(),
+            vec![(4.0, 8.0, Some(3)), (8.0, 16.0, Some(2))],
+            "the clip is right-trimmed at the stamped span's edge"
+        );
+        arr.validate(&scenes).expect("still valid");
     }
 
     #[test]
@@ -1652,28 +1888,30 @@ mod tests {
             compiled,
             song(
                 vec![
-                    row(0, 0.0, 0, vec![over(0, 2)]),
+                    row(0, 0.0, 0, vec![over(0, 2), empty_over(1)]),
                     row(1, 5.0, 0, vec![over_at(0, 2, 4.0), over(1, 3)]),
-                    row(2, 8.0, 0, vec![over_at(1, 3, 12.0)]),
-                    row(3, 12.0, 0, Vec::new()),
+                    row(2, 8.0, 0, vec![empty_over(0), over_at(1, 3, 12.0)]),
+                    row(3, 12.0, 0, vec![empty_over(0), empty_over(1)]),
                 ],
                 16.0
             )
         );
     }
 
+    /// A GAP between two clips compiles to an explicit-empty override — the
+    /// only way the model spells silence now that empty clips are gone.
     #[test]
-    fn compile_emits_explicit_empty_overrides_for_empty_clips() {
+    fn compile_emits_explicit_empty_overrides_for_lane_gaps() {
         let scenes = test_scenes();
         let arr = arrangement(
             vec![ev(0.0, 0)],
-            vec![vec![empty_clip(0, 4.0, 8.0)], Vec::new()],
+            vec![vec![clip(0, 0.0, 4.0, 2), clip(1, 8.0, 12.0, 2)], Vec::new()],
             16.0,
         );
         let compiled = compile_ok(&arr, &scenes);
-        assert_eq!(compiled.rows[1].overrides, vec![empty_over(0)]);
-        assert_eq!(compiled.rows[1].overrides[0].pattern_id, None);
-        assert_eq!(compiled.rows[1].overrides[0].take_id, None);
+        let gap = override_for(row_at(&compiled, 4.0), 0).expect("the gap is stated");
+        assert_eq!(gap.pattern_id, None);
+        assert_eq!(gap.take_id, None);
     }
 
     #[test]
@@ -1697,10 +1935,14 @@ mod tests {
                         0,
                         0.0,
                         0,
-                        vec![ProjectSongTrackOverride::new_take(0, take.0, 0.0)]
+                        vec![
+                            ProjectSongTrackOverride::new_take(0, take.0, 0.0),
+                            empty_over(1)
+                        ]
                     ),
-                    row(1, 80.0, 1, vec![empty_over(0)]),
-                    row(2, 100.0, 1, Vec::new()),
+                    // The take runs dry at beat 75 -> silent; the clip's own
+                    // end at 100 changes nothing, so `normalize` drops it.
+                    row(1, 80.0, 1, vec![empty_over(0), empty_over(1)]),
                 ],
                 128.0
             )
@@ -1727,7 +1969,10 @@ mod tests {
             .expect("scene change compiles to a row");
         assert_eq!(
             scene_change.overrides,
-            vec![ProjectSongTrackOverride::new_take(0, take.0, 40.0)]
+            vec![
+                ProjectSongTrackOverride::new_take(0, take.0, 40.0),
+                empty_over(1)
+            ]
         );
     }
 
@@ -1748,7 +1993,10 @@ mod tests {
         assert_eq!(compiled.next_row_id, 2);
         assert_eq!(
             compiled.rows,
-            vec![row(0, 0.0, 0, vec![over(0, 2)]), row(1, 8.0, 0, Vec::new())]
+            vec![
+                row(0, 0.0, 0, vec![over(0, 2), empty_over(1)]),
+                row(1, 8.0, 0, vec![empty_over(0), empty_over(1)])
+            ]
         );
     }
 
@@ -1765,7 +2013,10 @@ mod tests {
         assert_eq!(
             compiled,
             song(
-                vec![row(0, 0.0, 0, Vec::new()), row(1, 8.0, 0, vec![over(0, 2)])],
+                vec![
+                    row(0, 0.0, 0, vec![empty_over(0), empty_over(1)]),
+                    row(1, 8.0, 0, vec![over(0, 2), empty_over(1)])
+                ],
                 16.0
             )
         );
@@ -1801,7 +2052,7 @@ mod tests {
                     clip(0, 0.0, 5.0, 2),
                     ArrClip::new_take(ClipId(1), 9.0, 100.0, take.0, 3.0),
                 ],
-                vec![empty_clip(2, 3.0, 7.0), clip(3, 7.0, 30.0, 3)],
+                vec![clip(2, 3.0, 7.0, 1), clip(3, 7.0, 30.0, 3)],
             ],
             128.0,
         );
@@ -1852,7 +2103,7 @@ mod tests {
             ArrClip::new_take(ClipId(0), 0.0, 4.0, 5, 0.0).source(),
             LaneSource::Take(TakeId(5))
         );
-        assert!(empty_clip(0, 0.0, 4.0).source().is_empty());
+        assert!(sourceless_clip(0, 0.0, 4.0).source().is_empty());
     }
 
     // --- serialization (spec 10) ----------------------------------------
@@ -1882,11 +2133,11 @@ mod tests {
     }
 
     #[test]
-    fn arrangement_for_serialization_passes_empty_and_take_clips_through() {
+    fn arrangement_for_serialization_passes_sourceless_and_take_clips_through() {
         let (scenes, take) = scenes_with_take();
         let mut arr = valid_arrangement();
         arr.track_lanes[0] = vec![
-            empty_clip(0, 4.0, 8.0),
+            sourceless_clip(0, 4.0, 8.0),
             ArrClip::new_take(ClipId(4), 8.0, 12.0, take.0, 2.0),
         ];
         arr.next_clip_id = 5;
@@ -1919,13 +2170,14 @@ mod tests {
     }
 
     /// The load path may not compile against `SerializedSongContext`: it
-    /// answers "unknown" for every scene cell and timebase, so compiling
-    /// against it silently drops every scene-backdrop phase override.
+    /// answers "unknown" for every timebase, so a clip crossing a boundary
+    /// another lane created keeps its start-of-clip phase instead of the
+    /// phase it actually reached — the music retriggers mid-cycle.
     #[test]
-    fn compiling_against_the_serialized_context_loses_backdrop_phase() {
+    fn compiling_against_the_serialized_context_loses_clip_phase() {
         let arr = arrangement(
             vec![ev(0.0, 0)],
-            vec![vec![clip(0, 3.0, 5.0, 2)], Vec::new()],
+            vec![vec![clip(0, 0.0, 8.0, 2)], vec![clip(1, 5.0, 12.0, 3)]],
             16.0,
         );
         let live = compile_arrangement(&arr, &test_scenes()).expect("live compile");
@@ -1940,7 +2192,7 @@ mod tests {
                 .overrides
                 .iter()
                 .any(|over| over.offset_steps != 0.0)),
-            "the live compile materializes backdrop phase"
+            "the live compile advances the clip's phase across the boundary"
         );
         assert!(
             thin.rows
@@ -1957,7 +2209,10 @@ mod tests {
         arr.validate(&test_scenes())
             .expect("empty arrangement is valid");
         let compiled = compile_ok(&arr, &test_scenes());
-        assert_eq!(compiled.rows, vec![row(0, 0.0, 0, Vec::new())]);
+        assert_eq!(
+            compiled.rows,
+            vec![row(0, 0.0, 0, vec![empty_over(0), empty_over(1)])]
+        );
     }
     // --- truncation (spec 14, locked) -----------------------------------
 
@@ -2038,11 +2293,10 @@ mod tests {
             .expect("truncation leaves a valid, non-overlapping lane");
     }
 
-    /// A take clip left-trimmed past its own end becomes an explicit-empty
-    /// clip: that span was already the silent tail, and validation forbids a
-    /// take offset at or past `total_len_steps`.
+    /// A take clip left-trimmed past its own end is dropped entirely: that
+    /// span is the silent tail, and silence is the absence of a clip.
     #[test]
-    fn occlude_span_turns_a_take_trimmed_past_its_end_into_silence() {
+    fn occlude_span_drops_a_take_trimmed_past_its_end() {
         let (scenes, take) = scenes_with_take();
         // 300 steps at four per beat == 75 beats of content.
         let mut arr = arrangement(
@@ -2054,9 +2308,12 @@ mod tests {
             128.0,
         );
         occlude_span(&mut arr, &scenes, 0, 0.0, 80.0).expect("occludes");
-        let survivor = arr.track_lanes[0][0];
-        assert_eq!(survivor.start_beat, 80.0);
-        assert_eq!(survivor.source(), LaneSource::Empty);
+        assert!(
+            arr.track_lanes[0].is_empty(),
+            "nothing is left to play, so the clip is DROPPED — silence is a \
+             gap, not an empty clip: {:?}",
+            arr.track_lanes[0]
+        );
         arr.validate(&scenes).expect("still valid");
     }
 
@@ -2067,12 +2324,14 @@ mod tests {
     fn restamped_clip_runs_backwards_for_a_left_edge_grow() {
         let scenes = test_scenes();
         let source = clip(0, 8.0, 16.0, 1);
-        let grown = restamped_clip(&scenes, 0, &source, 5.0);
+        let grown = restamped_clip(&scenes, 0, &source, 5.0).expect("still plays");
         assert_eq!(grown.start_beat, 5.0);
         // -3 beats == -12 steps; rem_euclid over 16 steps == 4.
         assert_eq!(grown.offset_steps, 4.0);
         assert_eq!(
-            restamped_clip(&scenes, 0, &grown, 8.0).offset_steps,
+            restamped_clip(&scenes, 0, &grown, 8.0)
+                .expect("still plays")
+                .offset_steps,
             source.offset_steps,
             "and the round trip lands exactly back on the original anchor"
         );
@@ -2128,11 +2387,13 @@ mod tests {
         );
     }
 
-    /// Backdrop ghosts fill every lane GAP with the governing scene's cell,
-    /// split at scene boundaries, phase-anchored on the scene event exactly
-    /// as `backdrop_override` anchors the compiled row's.
+    // --- v5 -> v6 migration (spec 10) ------------------------------------
+
+    /// The legacy backdrop derivation, which is what migration freezes into
+    /// clips: every lane GAP filled with the governing scene's cell, split at
+    /// scene boundaries, phase-anchored on the scene event.
     #[test]
-    fn backdrop_spans_fill_lane_gaps_split_by_scene() {
+    fn legacy_backdrop_spans_fill_lane_gaps_split_by_scene() {
         let scenes = test_scenes();
         // Track 0: clip over [8,16); track 1: no clips at all.
         let arr = arrangement(
@@ -2140,21 +2401,21 @@ mod tests {
             vec![vec![clip(0, 8.0, 16.0, 2)], Vec::new()],
             32.0,
         );
-        let spans = arrangement_backdrop_spans(&arr, &scenes);
+        let spans = legacy_backdrop_spans(&arr, &scenes);
 
         // Lane 0's gaps are [0,8) and [16,32); the second is split by the
         // scene change at 24. Scene j's cell is PatternId(j + 1).
         assert_eq!(
             spans[0],
             vec![
-                BackdropSpan {
+                LegacyBackdropSpan {
                     start_beat: 0.0,
                     end_beat: 8.0,
                     scene: 0,
                     pattern_id: 1,
                     offset_steps: 0.0,
                 },
-                BackdropSpan {
+                LegacyBackdropSpan {
                     start_beat: 16.0,
                     end_beat: 24.0,
                     scene: 0,
@@ -2163,7 +2424,7 @@ mod tests {
                     pattern_id: 1,
                     offset_steps: 0.0,
                 },
-                BackdropSpan {
+                LegacyBackdropSpan {
                     start_beat: 24.0,
                     end_beat: 32.0,
                     scene: 1,
@@ -2185,7 +2446,7 @@ mod tests {
     /// A gap that opens mid-pattern-cycle carries the advanced phase, and a
     /// lane fully covered by clips has no ghosts at all.
     #[test]
-    fn backdrop_spans_carry_phase_and_vanish_under_full_coverage() {
+    fn legacy_backdrop_spans_carry_phase_and_vanish_under_full_coverage() {
         let scenes = test_scenes();
         let arr = arrangement(
             vec![ev(0.0, 0)],
@@ -2194,7 +2455,7 @@ mod tests {
             vec![vec![clip(0, 0.0, 2.0, 2)], vec![clip(1, 0.0, 16.0, 3)]],
             16.0,
         );
-        let spans = arrangement_backdrop_spans(&arr, &scenes);
+        let spans = legacy_backdrop_spans(&arr, &scenes);
         assert_eq!(spans[0].len(), 1);
         assert_eq!(spans[0][0].start_beat, 2.0);
         assert_eq!(spans[0][0].offset_steps, 8.0);
@@ -2202,5 +2463,115 @@ mod tests {
             spans[1].is_empty(),
             "a lane with no gaps has no backdrop showing through"
         );
+    }
+    /// The migration contract (spec 10): a v5 arrangement — where a lane gap
+    /// played the governing scene's cell — must load into a v6 arrangement
+    /// that sounds IDENTICAL, phase offsets included.
+    ///
+    /// "Sounds identical" is checked against a reference implementation of the
+    /// old rule, probed densely across the whole song: for every track at
+    /// every probe beat, what the v5 model resolved must equal what the
+    /// migrated arrangement's compiled song resolves.
+    #[test]
+    fn migration_makes_a_v5_arrangement_sound_identical() {
+        let scenes = test_scenes();
+        // Gaps everywhere: before a clip, between clips, after the last one,
+        // across a scene change placed off the pattern grid (beat 10 is 2.5
+        // pattern cycles in), plus an explicit-empty clip that must stay
+        // silent rather than become backdrop.
+        let v5 = arrangement(
+            vec![ev(0.0, 0), ev(10.0, 1)],
+            vec![
+                vec![clip(0, 3.0, 5.0, 3), clip(1, 13.0, 17.0, 3)],
+                vec![sourceless_clip(2, 6.0, 9.0), clip(3, 20.0, 24.0, 2)],
+            ],
+            32.0,
+        );
+
+        let migrated = migrate_legacy_backdrops(&v5, &scenes).expect("migrates");
+        migrated
+            .validate(&scenes)
+            .expect("the migrated arrangement is valid under the new rules");
+        assert!(
+            migrated
+                .track_lanes
+                .iter()
+                .flatten()
+                .all(|clip| !clip.source().is_empty()),
+            "migration leaves no sourceless clips: {:?}",
+            migrated.track_lanes
+        );
+        let compiled = compile_ok(&migrated, &scenes);
+
+        for step in 0..(32 * 4) {
+            let beat = step as f64 / 4.0;
+            for track in 0..2 {
+                assert_eq!(
+                    resolve_compiled(&compiled, &scenes, track, beat),
+                    resolve_v5(&v5, &scenes, track, beat),
+                    "track {track} at beat {beat}"
+                );
+            }
+        }
+
+        // And the explicit-empty clip's span is genuinely silent on both
+        // sides of the migration (it was, and still is, a deliberate hole).
+        assert_eq!(resolve_v5(&v5, &scenes, 1, 7.0), None);
+        assert_eq!(resolve_compiled(&compiled, &scenes, 1, 7.0), None);
+    }
+
+    /// The retired v5 resolution rule, implemented independently of the
+    /// compiler: clip, else the governing scene event's cell anchored on the
+    /// event, else nothing. Pattern sources only (the fixture uses no takes).
+    fn resolve_v5(
+        arr: &ProjectArrangement,
+        ctx: &dyn SongCompileContext,
+        track: usize,
+        beat: f64,
+    ) -> Option<(u64, f64)> {
+        if let Some(clip) = arr.clip_at(track, beat) {
+            let pattern_id = clip.pattern_id?;
+            return Some((
+                pattern_id,
+                advanced_pattern_offset(
+                    ctx,
+                    track,
+                    pattern_id,
+                    clip.offset_steps,
+                    beat - clip.start_beat,
+                ),
+            ));
+        }
+        let event = arr.scene_event_at_beat(beat)?;
+        let pattern_id = ctx.song_scene_cell(event.scene, track)?;
+        Some((
+            pattern_id,
+            advanced_pattern_offset(ctx, track, pattern_id, 0.0, beat - event.start_beat),
+        ))
+    }
+
+    /// What the PLAYBACK model resolves at `beat`: the governing row's
+    /// override if it has one, else the row's scene cell (the fallback in
+    /// `preflight_runtime_song`), advanced from the row's start.
+    fn resolve_compiled(
+        song: &ProjectSong,
+        ctx: &dyn SongCompileContext,
+        track: usize,
+        beat: f64,
+    ) -> Option<(u64, f64)> {
+        let row = song
+            .rows
+            .iter()
+            .rev()
+            .find(|row| row.start_beat <= beat)
+            .expect("a row governs every beat");
+        let (pattern_id, offset) = match row.overrides.iter().find(|over| over.track == track) {
+            Some(over) => (over.pattern_id?, over.offset_steps),
+            None => (ctx.song_scene_cell(row.scene, track)?, 0.0),
+        };
+        Some((
+            pattern_id,
+            advanced_pattern_offset(ctx, track, pattern_id, offset, beat - row.start_beat),
+        ))
     }
 }

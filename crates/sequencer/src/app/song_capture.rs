@@ -504,10 +504,7 @@ impl App {
             punch_out,
         );
         for track in 0..arrangement.track_lanes.len() {
-            if !self.splice_captured_lane(&mut arrangement, scenes, track, &states, punch_out)? {
-                continue;
-            }
-            self.restore_lane_at_punch_out(&mut arrangement, previous, scenes, track, punch_out)?;
+            self.splice_captured_lane(&mut arrangement, scenes, track, &states, punch_out)?;
         }
         Ok(arrangement)
     }
@@ -580,84 +577,24 @@ impl App {
         arrangement.scene_lane = lane;
     }
 
-    /// Hand a touched lane back to the pre-existing arrangement at `Q`.
-    ///
-    /// Clips the region cut into are already restored: `occlude_span`
-    /// left-trimmed them and re-stamped their phase, so a clip covering `Q`
-    /// resumes by construction. What cannot restore itself is a lane the
-    /// pre-existing arrangement resolved from the scene *backdrop* mid-cycle:
-    /// the spliced scene lane anchors phase at its own events, so the beat the
-    /// old scene launched at is gone. That phase materializes as a clip
-    /// spanning `Q` to the next change — the same reason compile materializes
-    /// `backdrop_override`, and the only materialization the splice performs.
-    fn restore_lane_at_punch_out(
-        &self,
-        arrangement: &mut ProjectArrangement,
-        previous: &ProjectArrangement,
-        scenes: &ProjectScenes,
-        track: usize,
-        punch_out: f64,
-    ) -> Result<(), String> {
-        if punch_out >= arrangement.end_beat || arrangement.clip_at(track, punch_out).is_some() {
-            return Ok(());
-        }
-        let restored = self.backdrop_lane_resolution(previous, scenes, track, punch_out);
-        let spliced = self.backdrop_lane_resolution(arrangement, scenes, track, punch_out);
-        if lane_resolutions_equal(restored, spliced) {
-            return Ok(());
-        }
-        // The clip only has to bridge to the next thing that changes this
-        // lane; from there the arrangement speaks for itself again.
-        let next_event = arrangement
-            .scene_lane
-            .iter()
-            .find(|event| event.start_beat > punch_out)
-            .map(|event| event.start_beat);
-        let next_clip = arrangement.track_lanes[track]
-            .iter()
-            .find(|clip| clip.start_beat > punch_out)
-            .map(|clip| clip.start_beat);
-        let end_beat = [next_event, next_clip]
-            .into_iter()
-            .flatten()
-            .fold(arrangement.end_beat, f64::min);
-        if end_beat <= punch_out {
-            return Ok(());
-        }
-        let id = arrangement.allocate_clip_id()?;
-        let clip = match restored {
-            Some((pattern_id, offset_steps)) => ArrClip {
-                id,
-                start_beat: punch_out,
-                end_beat,
-                pattern_id: Some(pattern_id),
-                take_id: None,
-                offset_steps,
-            },
-            // The lane was silent there; an explicit-empty clip is how the
-            // model says "silence", and the spliced backdrop is not silent.
-            None => ArrClip::new(id, punch_out, end_beat, None),
-        };
-        insert_clip_sorted(arrangement, track, clip);
-        Ok(())
-    }
-
     /// Decompose one lane's captured launches into clips over `[T, Q)`, where
     /// `T` is the beat the performer first took the lane over (takes spec
     /// 9.2's "touched").
     ///
-    /// An **untouched** lane is not written at all — no clip, no trim — so the
-    /// pre-existing clips and the scene backdrop keep playing straight through
-    /// the region. That is the whole inheritance rule; nothing has to be
-    /// materialized to express it.
+    /// An **untouched** lane is not written at all — no clip, no trim — so its
+    /// pre-existing clips keep playing straight through the region. That is
+    /// the whole inheritance rule, and under the clip-only model it needs no
+    /// machinery at all: the clips that covered the region still cover it.
     ///
     /// A touched lane's launches become clips: each state's resolved source
-    /// (the explicit launch else the captured scene's cell) with the free-run
-    /// offset `steps(beat) mod L` stamped (takes spec 7.2), opened where it
-    /// first differs and closed where the lane changes again or at `Q`. A
-    /// state whose resolution is exactly what the scene lane already plays
-    /// there gets no clip — that is a scene launch handing the lane back to
-    /// the backdrop.
+    /// (the explicit launch else the captured scene's cell — a scene launch
+    /// stamps every lane it claims) with the free-run offset `steps(beat) mod
+    /// L` stamped (takes spec 7.2), opened where it first differs and closed
+    /// where the lane changes again or at `Q`. A state resolving to nothing
+    /// (an empty scene cell) opens no clip: the lane is genuinely silent
+    /// there. At `Q` the pre-existing clips resume — `occlude_span`
+    /// left-trimmed and re-stamped whatever the region cut into, so nothing
+    /// has to be materialized to restore them.
     fn splice_captured_lane(
         &self,
         arrangement: &mut ProjectArrangement,
@@ -693,13 +630,9 @@ impl App {
                     continue;
                 }
             }
-            let backdrop = self.backdrop_lane_resolution(arrangement, scenes, track, beat);
             if let Some(mut clip) = open.take() {
                 clip.end_beat = beat;
                 clips.push(clip);
-            }
-            if lane_resolutions_equal(desired, backdrop) {
-                continue;
             }
             let Some((pattern_id, offset_steps)) = desired else {
                 continue;
@@ -752,26 +685,6 @@ impl App {
             )?,
         };
         Some((pattern_id, self.advanced_offset(track, pattern_id, 0.0, beat)))
-    }
-
-    /// What `track` plays at `beat` from the spliced arrangement's scene lane
-    /// alone — the source and phase a lane WITHOUT a clip resolves to (spec
-    /// 6.2, the `backdrop_override` the compiler materializes). A captured
-    /// resolution equal to this needs no clip.
-    fn backdrop_lane_resolution(
-        &self,
-        arrangement: &ProjectArrangement,
-        scenes: &ProjectScenes,
-        track: usize,
-        beat: f64,
-    ) -> Option<(u64, f64)> {
-        let event = arrangement.scene_event_at_beat(beat)?;
-        let pattern_id =
-            crate::sequencer::SongCompileContext::song_scene_cell(scenes, event.scene, track)?;
-        Some((
-            pattern_id,
-            self.advanced_offset(track, pattern_id, 0.0, beat - event.start_beat),
-        ))
     }
 
     /// Paint one take clip per recorded lane over its punch region (takes spec

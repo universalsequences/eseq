@@ -1112,12 +1112,16 @@ mod tests {
         assert_eq!(
             row_tuples(&song),
             vec![
-                // The head of the song is preserved, not nuked to beat 0.
-                (0.0, 0, Vec::new()),
-                (4.0, 1, Vec::new()),
+                // The head of the song is preserved, not nuked to beat 0:
+                // these are the clips scene events 0 and 4 stamped.
+                (0.0, 0, vec![(0, Some(1))]),
+                (4.0, 1, vec![(0, Some(2))]),
                 // From the punch-in on, the capture is the authority (the
                 // old row at 8 is inside the replaced region). The lane is
-                // materialized with the free-run phase stamp (spec 9.4).
+                // materialized with the free-run phase stamp (spec 9.4), and
+                // the pre-existing clip resumes at Q playing the same pattern
+                // at the same phase — so `normalize` collapses that boundary
+                // away entirely, which IS the phase-continuity proof.
                 (6.0, 2, vec![(0, Some(3))]),
             ]
         );
@@ -1143,11 +1147,11 @@ mod tests {
         assert_eq!(
             row_tuples(&song),
             vec![
-                (0.0, 0, Vec::new()),
+                (0.0, 0, vec![(0, Some(1))]),
                 (2.375, 1, vec![(0, Some(2))]),
-                // Full splice (takes spec 9.2): the pre-existing row at the
+                // Full splice (takes spec 9.2): the pre-existing clip at the
                 // punch-out beat survives — nothing after Q is nuked.
-                (8.0, 2, Vec::new()),
+                (8.0, 2, vec![(0, Some(3))]),
             ],
             "the fractional beat must survive to the committed row exactly"
         );
@@ -1194,7 +1198,10 @@ mod tests {
         let song = committed(&app);
         assert_eq!(
             row_tuples(&song),
-            vec![(0.0, 0, Vec::new()), (4.0, 2, Vec::new())],
+            // The captured clip plays scene 2's cell from beat 4 at free-run
+            // phase 0, and the pre-existing clip from beat 8 plays the same
+            // cell at the same phase, so the two rows collapse into one.
+            vec![(0.0, 0, vec![(0, Some(1))]), (4.0, 2, vec![(0, Some(3))])],
             "the captured beat is the scheduled grid boundary"
         );
         app.state.set_scheduler_rendered_beats(0.0);
@@ -1229,10 +1236,11 @@ mod tests {
             assert_eq!(
                 row_tuples(&song),
                 vec![
-                    (0.0, 0, Vec::new()),
+                    (0.0, 0, vec![(0, Some(1))]),
                     (4.0, 2, vec![(0, Some(2))]),
-                    // The pre-existing arrangement resumes at Q (spec 9.2).
-                    (8.0, 2, Vec::new()),
+                    // The pre-existing arrangement resumes at Q (spec 9.2):
+                    // scene 2's own cell, which the capture never claimed.
+                    (8.0, 2, vec![(0, Some(3))]),
                 ],
                 "scene_first={scene_first}: one row, scene 2 plus the track override"
             );
@@ -1259,9 +1267,9 @@ mod tests {
             // at 4 steps/beat = offset 8. The pre-existing arrangement
             // resumes at the punch-out (spec 9.2).
             vec![
-                (0.0, 0, Vec::new()),
+                (0.0, 0, vec![(0, Some(1))]),
                 (2.0, 1, vec![(0, Some(2))]),
-                (8.0, 2, Vec::new()),
+                (8.0, 2, vec![(0, Some(3))]),
             ],
             "the identical relaunch must not create a second row"
         );
@@ -1323,18 +1331,20 @@ mod tests {
         assert_eq!(
             row_tuples(&song),
             vec![
-                (0.0, 0, Vec::new()),
-                // Content before P is untouched (the old row at 4 keeps its
+                (0.0, 0, vec![(0, Some(1))]),
+                // Content before P is untouched (the old clip at 4 keeps its
                 // span up to the punch-in).
-                (4.0, 1, Vec::new()),
+                (4.0, 1, vec![(0, Some(2))]),
                 // The performance owns [5.0, 6.5): free-run stamp 5 beats =
                 // 20 steps mod 16 = 4.
                 (5.0, 0, vec![(0, Some(1))]),
-                // Restore row at Q: the pre-existing arrangement resumes
-                // mid-pattern (6.5 beats = 26 steps mod 16 = 10).
+                // At Q the pre-existing clip resumes — `occlude_span`
+                // left-trimmed it and re-stamped its phase, so it re-enters
+                // mid-pattern (6.5 beats = 26 steps mod 16 = 10) with no
+                // restore machinery involved.
                 (6.5, 1, vec![(0, Some(2))]),
                 // Content after Q is untouched.
-                (8.0, 2, Vec::new()),
+                (8.0, 2, vec![(0, Some(3))]),
             ]
         );
         assert_eq!(song.rows[2].overrides[0].offset_steps, 4.0);
@@ -1388,10 +1398,11 @@ mod tests {
         // Two tracks; the performer only launches track 0. Track 1 keeps
         // playing the committed song underneath (takes spec 9.3). In the lane
         // model that inheritance needs NO representation: the lane is simply
-        // not written, so the scene backdrop plays straight through the punch
-        // region. (The row model had to materialize an override carrying the
-        // inherited pattern and its advanced phase onto every captured row,
-        // because a row's scene column would otherwise silence it.)
+        // NOT MODIFIED, so the clips that already covered the punch region
+        // keep playing straight through it. (The row model had to materialize
+        // an override carrying the inherited pattern and its advanced phase
+        // onto every captured row, because a row's scene column would
+        // otherwise silence it.)
         let mut app = test_app_two_tracks();
         app.arr_replace_rows(
             vec![
@@ -1411,6 +1422,10 @@ mod tests {
         )
         .expect("song committed");
         let before = committed(&app);
+        let before_arrangement = app
+            .state
+            .committed_arrangement()
+            .expect("the def-song lowering commits an arrangement");
 
         start_capture(&mut app);
         // 4.5 beats in, so the untouched lane sits mid-pattern (18 steps into
@@ -1433,11 +1448,11 @@ mod tests {
             .state
             .committed_arrangement()
             .expect("the capture commits an arrangement");
-        // The headline win: nothing at all is written on the untouched lane.
-        assert!(
-            arrangement.track_lanes[1].is_empty(),
-            "the untouched lane must carry no clip, got {:?}",
-            arrangement.track_lanes[1]
+        // The headline win: the untouched lane is byte-identical to what it
+        // was — not trimmed, not re-stamped, not written at all.
+        assert_eq!(
+            arrangement.track_lanes[1], before_arrangement.track_lanes[1],
+            "the untouched lane must not be modified"
         );
         // The performer's lane is one clip over the punch region, stamped
         // with the free-run phase (takes spec 7.2): 4.5 beats = 18 steps mod
@@ -1451,10 +1466,10 @@ mod tests {
         assert_eq!(clip.end_beat, 6.0, "the clip closes at the punch-out");
 
         let song = committed(&app);
-        // The compiled song may still touch the lane, but only to carry the scene
-        // backdrop's PHASE across a boundary another track's clip created
-        // (`backdrop_override`): its source is always the row scene's own
-        // cell, never a launch the performer did not make.
+        // The compiled song states the untouched lane's resolution on every
+        // boundary another track's clip created, but only ever as the clip
+        // the row's own scene stamped there — never a launch the performer
+        // did not make.
         for row in &song.rows {
             let Some(over) = row.overrides.iter().find(|over| over.track == 1) else {
                 continue;

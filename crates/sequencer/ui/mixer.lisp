@@ -396,11 +396,11 @@
           (rgba 0.1 0.95 0.38 1.0)
           (rgba 0 0 0 0))))
     (sdf/layer
-      (sdf/fill (sdf/rounded-rect width height 0.03)
+      (sdf/fill (sdf/rounded-rect width height 0.2)
         (material :color outer))
-      (sdf/fill (sdf/rounded-rect (* width 0.84) (* height 0.84) 0.02)
+      (sdf/fill (sdf/rounded-rect (* width 0.84) (* height 0.84) 0.2)
         (material :color middle))
-      (sdf/fill (sdf/rounded-rect (* width 0.66) (* height 0.68) 0.015)
+      (sdf/fill (sdf/rounded-rect (* width 0.66) (* height 0.68) 0.22)
         (material :color inner))
       (sdf/fill
         (let ((p1x -0.26) (p1y -0.36) (p2x -0.26) (p2y 0.36) (p3x 0.36) (p3y 0.0))
@@ -429,12 +429,12 @@
 (def mixer-v2-track-pattern-grid (track)
   (let ((cells (mixer-v2-track-pattern-cells track)))
     (box :width :fill :height 3.02 :align :top :bg :black :background-color :buffer-bg
-      (grid :cols 8 :col-width 1.50 :row-height 0.75 :align :center
+      (grid :cols 8 :col-width 1.5 :row-height 0.75 :align :center
         (each cells |cell cell-idx|
           (let ((pattern-id (get cell :id)))
           (box
             :key (str "mixer-v2-track-pattern-cell-" track "-" pattern-id)
-            :width 1.50 :height 0.75
+            :width 1.47 :height 0.73  
             :padding 0
             :bg :transparent
             :background "track-pattern-cell-bg"

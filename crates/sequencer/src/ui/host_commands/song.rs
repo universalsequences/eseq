@@ -198,9 +198,10 @@ fn require_track(map: &HashMap<String, Rc<RefCell<Value>>>) -> Result<usize, Str
     Ok(track as usize)
 }
 
-/// A clip source from `{pattern-id, take-id}`: a positive pool id, a take id,
-/// or nil/0/absent for an explicit-empty clip (deliberate silence that still
-/// occludes the scene backdrop, lane spec 6.2).
+/// A clip source from `{pattern-id, take-id}`: a positive pool id or a take
+/// id. nil/0/absent yields `LaneSource::Empty`, which means "silence over
+/// this span" — the callers clear or delete rather than storing a sourceless
+/// clip (lane spec 6.1/6.2).
 fn parse_source(map: &HashMap<String, Rc<RefCell<Value>>>) -> Result<LaneSource, String> {
     if let Some(take_id) = map_number(map, "take-id") {
         if !take_id.is_finite() || take_id < 0.0 || take_id.fract() != 0.0 {
@@ -312,6 +313,16 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             let start_beat = require_number(map, "start-beat")?;
             let end_beat = require_number(map, "end-beat")?;
             let source = parse_source(map)?;
+            if matches!(source, LaneSource::Empty) {
+                // "Draw an empty clip here" asks for silence over a span, and
+                // silence is an absence (lane spec 6.2): clear the span rather
+                // than refusing a gesture the user meant sensibly.
+                app.arr_clip_clear_span(track, start_beat, end_beat)?;
+                return Ok(format!(
+                    "Silenced track {} over beats {start_beat}-{end_beat}",
+                    track + 1
+                ));
+            }
             let offset_steps = map_number(map, "offset-steps").unwrap_or(0.0);
             app.arr_clip_create(track, start_beat, end_beat, source, offset_steps)?;
             Ok(format!(

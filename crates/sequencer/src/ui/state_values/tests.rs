@@ -4725,19 +4725,6 @@
         ])
     }
 
-    /// One `SEQ.song-backdrops` entry: the governing scene's cell showing
-    /// through a lane gap.
-    #[allow(dead_code)]
-    fn backdrop_span(start: f64, end: f64, pattern: f64) -> Value {
-        map_value([
-            ("start-beat", Value::Number(start)),
-            ("end-beat", Value::Number(end)),
-            ("scene", Value::Number(0.0)),
-            ("pattern-id", Value::Number(pattern)),
-            ("offset-steps", Value::Number(0.0)),
-        ])
-    }
-
     fn test_list(values: Vec<Value>) -> Value {
         Value::List(
             values
@@ -13039,7 +13026,6 @@
                 ("song-capture-failed", Value::Bool(false)),
                 ("song-capture-error", Value::Nil),
                 ("song-lanes", Value::List(vec![])),
-                ("song-backdrops", Value::List(vec![])),
                 ("scene-spans", Value::List(vec![])),
                 ("song-lane-events", Value::List(vec![])),
                 ("scene-names", Value::List(vec![])),
@@ -19914,14 +19900,23 @@
                 .expect("binding read returns a value")
         };
 
-        // Lane spec 12: `song-lanes` carries the STORED clips, and this song
-        // is three scene changes with no overrides — so every lane is empty
-        // and the whole timeline is backdrop.
+        // Lane spec 12: `song-lanes` carries the STORED clips. This song is
+        // three scene changes with no overrides, and a scene event STAMPS its
+        // cells (spec 6.2) — so the lane holds one clip per scene span.
         assert_eq!(read(&mut editor, "(len SEQ.song-lanes)"), Value::Number(1.0));
         assert_eq!(
             read(&mut editor, "(len (nth SEQ.song-lanes 0))"),
-            Value::Number(0.0),
-            "a scene-only arrangement stores no clips"
+            Value::Number(3.0),
+            "each scene event stamped its cell as a real clip"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 1) :start-beat)"),
+            Value::Number(4.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 2) :pattern-id)"),
+            Value::Number(3.0),
+            "rebuilt-on-load scene cells resolve scene j to PatternId(j + 1)"
         );
         // One scene span per scene EVENT, ending at the next.
         assert_eq!(read(&mut editor, "(len SEQ.scene-spans)"), Value::Number(3.0));
@@ -19932,20 +19927,6 @@
         assert_eq!(
             read(&mut editor, "(get (nth SEQ.scene-spans 1) :end-beat)"),
             Value::Number(8.0)
-        );
-        // The backdrop ghosts fill the (entirely empty) lane, one per scene
-        // span; rebuilt-on-load scene cells resolve scene j to PatternId(j+1).
-        assert_eq!(
-            read(&mut editor, "(len (nth SEQ.song-backdrops 0))"),
-            Value::Number(3.0)
-        );
-        assert_eq!(
-            read(&mut editor, "(get (nth (nth SEQ.song-backdrops 0) 1) :start-beat)"),
-            Value::Number(4.0)
-        );
-        assert_eq!(
-            read(&mut editor, "(get (nth (nth SEQ.song-backdrops 0) 2) :pattern-id)"),
-            Value::Number(3.0)
         );
         assert_eq!(
             read(&mut editor, "(len SEQ.scene-names)"),
@@ -19992,10 +19973,6 @@
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(
             read(&mut editor, "(get (nth SEQ.scene-spans 2) :end-beat)"),
-            Value::Number(24.0)
-        );
-        assert_eq!(
-            read(&mut editor, "(get (nth (nth SEQ.song-backdrops 0) 2) :end-beat)"),
             Value::Number(24.0)
         );
 
@@ -20176,22 +20153,21 @@
         );
 
         // ── Track-clip editing over the STORED clips (lane spec 12) ───────
-        // Lane 0: clip 0 spans [0,8) on pattern 1, clip 2 spans [8,12) on
-        // pattern 2, and clip 3 is explicit-empty (drawn as a gap).
+        // Lane 0: clip 0 spans [0,8) on pattern 1 and clip 2 spans [8,12) on
+        // pattern 2; [12,16) has no clip and is simply silent.
         editor.runtime_mut().set_reactive(
             "SEQ",
             "song-lanes",
             test_list(vec![test_list(vec![
                 lane_clip(0.0, 0.0, 8.0, Value::Number(1.0)),
                 lane_clip(2.0, 8.0, 12.0, Value::Number(2.0)),
-                lane_clip(3.0, 12.0, 16.0, Value::Nil),
             ])]),
         );
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(
             read(&mut editor, "(len (arrangement-track-clips 0))"),
             Value::Number(2.0),
-            "explicit-empty clips draw as gaps, not items"
+            "every stored clip is an item; the gap is not one"
         );
         assert_eq!(
             read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :end)"),
@@ -20347,6 +20323,87 @@
                 "drop position snaps down to the bar grid"
             );
             assert_eq!(action_field(&recorded[8], "scene"), Value::Number(1.0));
+        }
+
+        // Start-edge drag on a track clip: NOT a move and not an end resize —
+        // the left edge alone moves, and the same :clip-resize primitive
+        // re-stamps the phase anchor behind it (lane spec 8). Clip 2 still
+        // spans [8, 12) — nothing above actually mutated the song.
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :resize-item-absolute :id 2 :ids (list 2) :edge :start :time 10))",
+        );
+        assert_eq!(recorded.lock().unwrap().len(), 9, "live drags never commit");
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :start)"),
+            Value::Number(10.0),
+            "start ghost previews the clip's new start"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :end)"),
+            Value::Number(12.0),
+            "and leaves its end alone"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :finish-resize-items :id 2 :ids (list 2)))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 10);
+            assert_eq!(
+                action_field(&recorded[9], "type"),
+                Value::Keyword("clip-resize".to_string())
+            );
+            assert_eq!(action_field(&recorded[9], "clip-id"), Value::Number(2.0));
+            assert_eq!(action_field(&recorded[9], "start"), Value::Number(10.0));
+            assert_eq!(action_field(&recorded[9], "end"), Value::Number(12.0));
+        }
+
+        // Dragged past its own end: the clip is gone, same as the end edge
+        // crossing its start.
+        eval(
+            &mut editor,
+            "(do (arrangement-track-action 0 (dict :type :resize-item-absolute :id 2 :ids (list 2) :edge :start :time 12)) \
+             (arrangement-track-action 0 (dict :type :finish-resize-items :id 2 :ids (list 2))))",
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 11);
+            assert_eq!(
+                action_field(&recorded[10], "type"),
+                Value::Keyword("clip-delete".to_string())
+            );
+            assert_eq!(action_field(&recorded[10], "clip-id"), Value::Number(2.0));
+        }
+
+        // Scene lane: its spans are contiguous, so a start-edge drag IS a
+        // move of that event — the boundary the previous span's end handle
+        // owns. It must never write the start into the event's end.
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :resize-item-absolute :id 8 :ids (list 8) :edge :start :time 6))",
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :start)"),
+            Value::Number(6.0),
+            "start ghost previews the scene event's new start"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :finish-resize-items :id 8 :ids (list 8)))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 12);
+            assert_eq!(
+                action_field(&recorded[11], "type"),
+                Value::Keyword("finish-move-items".to_string())
+            );
+            assert_eq!(action_field(&recorded[11], "from-beat"), Value::Number(8.0));
+            assert_eq!(action_field(&recorded[11], "start"), Value::Number(6.0));
         }
     }
 
@@ -20523,9 +20580,14 @@
             depth + 1,
             "clip surgery is one undo entry"
         );
-        let lane = &app.state.committed_arrangement().unwrap().track_lanes[0];
-        assert_eq!(lane.len(), 1);
-        assert_eq!((lane[0].start_beat, lane[0].end_beat), (2.0, 10.0));
+        // The lane also holds the clips the scene gestures above stamped
+        // (lane spec 6.2), so the resize is checked on the clip it names.
+        let lane = app.state.committed_arrangement().unwrap().track_lanes[0].clone();
+        let resized = lane
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .expect("the resized clip survives");
+        assert_eq!((resized.start_beat, resized.end_beat), (2.0, 10.0));
 
         // And Backspace on the clip removes it outright.
         let song = app.state.committed_song().unwrap();
@@ -20544,7 +20606,12 @@
         let depth = app.history.undo_len();
         apply(&mut app, &commands);
         assert_eq!(app.history.undo_len(), depth + 1);
-        assert!(app.state.committed_arrangement().unwrap().track_lanes[0].is_empty());
+        assert!(
+            !app.state.committed_arrangement().unwrap().track_lanes[0]
+                .iter()
+                .any(|clip| clip.id == clip_id),
+            "the deleted clip is gone from the timeline"
+        );
     }
 
     /// The full keyboard-delete path for a track clip: clicking the clip
@@ -21180,10 +21247,14 @@
         rt.set_reactive(
             "SEQ",
             "song-lanes",
-            test_list(vec![test_list(vec![
-                lane_clip(0.0, 0.0, 8.0, Value::Number(1.0)),
-                lane_clip(1.0, 8.0, 16.0, Value::Nil),
-            ])]),
+            // A sparse lane: one clip over [0, 8) and NOTHING over [8, 16),
+            // which is how the model spells silence (lane spec 6.2).
+            test_list(vec![test_list(vec![lane_clip(
+                0.0,
+                0.0,
+                8.0,
+                Value::Number(1.0),
+            )])]),
         );
         rt.set_reactive(
             "SEQ",
@@ -21325,7 +21396,7 @@
             "track lanes must declare :scroll-passthrough :vertical"
         );
 
-        // Sparse lanes (spec 6): the nil-pattern span produces NO item.
+        // Sparse lanes (spec 6): the uncovered stretch produces NO item.
         let read = |editor: &mut eseqlisp::Editor, expr: &str| {
             editor
                 .runtime_mut()

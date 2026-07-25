@@ -13,14 +13,22 @@
 //! non-overlap stays an invariant the ops maintain.
 
 use crate::sequencer::{
-    insert_clip_sorted, lower_rows_to_arrangement, occlude_span, restamped_clip, ArrClip, ClipId,
-    LaneSource, ProjectArrangement, ProjectScenes, ProjectSongRow, SongRowId,
+    insert_clip_sorted, lower_rows_to_arrangement, occlude_span, restamped_clip, stamp_scene_clips,
+    ArrClip, ClipId, LaneSource, ProjectArrangement, ProjectScenes, ProjectSongRow, SongRowId,
 };
 
 use super::edit::finish_active_gesture;
 use super::history::{ArrangementStructurePatch, EditPatch};
 use super::song_edit::SongRowSpec;
 use super::App;
+
+/// Refusal for `arr_clip_create` with no source. Silence is the absence of a
+/// clip (spec 6.1/6.2), so "create a silent clip" asks for nothing at all;
+/// the ops that *can* mean something with an empty source (set-source, the
+/// clip-create host command) delete or clear instead of erroring.
+pub const EMPTY_CLIP_ERROR: &str =
+    "A clip must have a source: silence is an empty stretch of lane, not an empty clip — \
+     use delete to silence a span";
 
 /// Reject a beat that cannot address anything on the timeline.
 fn finite_beat(name: &str, beat: f64) -> Result<f64, String> {
@@ -131,7 +139,7 @@ impl App {
         let id = after.allocate_clip_id()?;
         let mut clip = ArrClip::new(id, start_beat, end_beat, None);
         match source {
-            LaneSource::Empty => {}
+            LaneSource::Empty => return Err(EMPTY_CLIP_ERROR.to_string()),
             LaneSource::Pattern(pattern) => clip.pattern_id = Some(pattern.0),
             LaneSource::Take(take) => clip.take_id = Some(take.0),
         }
@@ -142,13 +150,42 @@ impl App {
         Ok(id)
     }
 
-    /// Delete a clip. The lane rejoins the scene backdrop over its span
-    /// (spec 6.2): a gap is not silence, it is "whatever the scene says".
+    /// Delete a clip. The span becomes SILENT (spec 6.2): the clip is gone
+    /// from the timeline and nothing plays there — deleting is exactly the
+    /// clip not playing.
     pub fn arr_clip_delete(&mut self, clip_id: ClipId) -> Result<(), String> {
         self.edit_arrangement("Delete clip", |arrangement, _scenes| {
             let (track, _) = Self::locate_clip(arrangement, clip_id)?;
             Self::take_clip(arrangement, track, clip_id);
             Ok(())
+        })
+    }
+
+    /// Silence `[start_beat, end_beat)` on `track`: remove the clips it
+    /// covers and trim the ones it only overlaps, storing nothing.
+    ///
+    /// This is what "draw an empty clip here" means now (spec 6.2): the
+    /// gesture asks for silence over a span, and silence is an absence, so the
+    /// span is cleared rather than filled with a sourceless object. One undo
+    /// entry, and a span that was already silent is an exact no-op.
+    pub fn arr_clip_clear_span(
+        &mut self,
+        track: usize,
+        start_beat: f64,
+        end_beat: f64,
+    ) -> Result<(), String> {
+        let start_beat = finite_beat("Clip start beat", start_beat)?;
+        let end_beat = finite_beat("Clip end beat", end_beat)?;
+        if end_beat <= start_beat {
+            return Err(format!(
+                "A cleared span must have positive length (got [{start_beat}, {end_beat}))"
+            ));
+        }
+        self.edit_arrangement("Clear clips", move |arrangement, scenes| {
+            if track >= arrangement.track_lanes.len() {
+                return Err(format!("Track {} has no arrangement lane", track + 1));
+            }
+            occlude_span(arrangement, scenes, track, start_beat, end_beat)
         })
     }
 
@@ -200,10 +237,13 @@ impl App {
             // Re-stamp first: the playable length depends on the offset the
             // trimmed clip will actually carry.
             let scenes = self.state.capture_project_scenes();
-            let restamped = restamped_clip(&scenes, track, &clip, new_start_beat);
-            match self.take_clip_playable_end(track, &restamped) {
-                Some(limit) => new_end_beat.min(limit).max(new_start_beat),
-                None => new_end_beat,
+            match restamped_clip(&scenes, track, &clip, new_start_beat) {
+                Some(restamped) => match self.take_clip_playable_end(track, &restamped) {
+                    Some(limit) => new_end_beat.min(limit).max(new_start_beat),
+                    None => new_end_beat,
+                },
+                // The re-anchored clip would have nothing left to play.
+                None => new_start_beat,
             }
         };
         if clamped_end <= new_start_beat {
@@ -219,7 +259,8 @@ impl App {
                 return Ok(());
             }
             Self::take_clip(arrangement, track, clip_id);
-            let mut resized = restamped_clip(scenes, track, &clip, new_start_beat);
+            let mut resized = restamped_clip(scenes, track, &clip, new_start_beat)
+                .ok_or_else(|| EMPTY_CLIP_ERROR.to_string())?;
             resized.end_beat = clamped_end;
             occlude_span(arrangement, scenes, track, new_start_beat, clamped_end)?;
             insert_clip_sorted(arrangement, track, resized);
@@ -246,8 +287,12 @@ impl App {
         let mut after = before.clone();
         let scenes = self.state.capture_project_scenes();
         let right_id = after.allocate_clip_id()?;
-        let mut right = restamped_clip(&scenes, track, &clip, beat);
-        right.id = right_id;
+        // A right half with nothing left to play (a take past its end) is not
+        // stored: that span is silent, and silence is a gap.
+        let right = restamped_clip(&scenes, track, &clip, beat).map(|mut right| {
+            right.id = right_id;
+            right
+        });
         {
             let lane = &mut after.track_lanes[track];
             let index = lane
@@ -255,7 +300,9 @@ impl App {
                 .position(|candidate| candidate.id == clip_id)
                 .expect("located above");
             lane[index].end_beat = beat;
-            lane.insert(index + 1, right);
+            if let Some(right) = right {
+                lane.insert(index + 1, right);
+            }
         }
         self.commit_arrangement_edit("Split clip", Some(before), Some(after))?;
         Ok(right_id)
@@ -269,6 +316,11 @@ impl App {
         clip_id: ClipId,
         source: LaneSource,
     ) -> Result<(), String> {
+        if matches!(source, LaneSource::Empty) {
+            // "Make this span silent" and "remove this clip" are the same
+            // operation in this model (spec 6.2), so do the operation.
+            return self.arr_clip_delete(clip_id);
+        }
         self.edit_arrangement("Set clip source", move |arrangement, _scenes| {
             let (track, _) = Self::locate_clip(arrangement, clip_id)?;
             let lane = &mut arrangement.track_lanes[track];
@@ -290,12 +342,27 @@ impl App {
 
     // --- scene-lane ops (spec 8) ----------------------------------------
 
-    /// Insert a scene change at `beat`. Clips are untouched: a clip is opaque
-    /// while it spans a beat (spec 6.2), so a new scene event only changes
-    /// what the *uncovered* lanes play.
+    /// The span a scene event governs: from its own beat to the next event's,
+    /// else the arrangement end. This is the window an insert/set/move
+    /// re-stamps.
+    fn scene_event_span(arrangement: &ProjectArrangement, index: usize) -> (f64, f64) {
+        let start = arrangement.scene_lane[index].start_beat;
+        let end = arrangement
+            .scene_lane
+            .get(index + 1)
+            .map(|next| next.start_beat)
+            .unwrap_or(arrangement.end_beat)
+            .min(arrangement.end_beat);
+        (start, end)
+    }
+
+    /// Insert a scene change at `beat`: it STAMPS the scene's cells as clips
+    /// across its whole span (spec 6.2/8), truncating whatever was there —
+    /// the Ableton truncation rule, one undo entry. A track whose cell in
+    /// that scene is empty gets no clip and is silent.
     pub fn arr_scene_event_insert(&mut self, beat: f64, scene: usize) -> Result<(), String> {
         let beat = finite_beat("Scene event beat", beat)?;
-        self.edit_arrangement("Insert scene event", move |arrangement, _scenes| {
+        self.edit_arrangement("Insert scene event", move |arrangement, scenes| {
             if beat >= arrangement.end_beat {
                 return Err(format!(
                     "Cannot insert a scene change at beat {beat}: the arrangement ends at beat \
@@ -324,16 +391,18 @@ impl App {
                     scene,
                 },
             );
-            Ok(())
+            let (start, end) = Self::scene_event_span(arrangement, position);
+            stamp_scene_clips(arrangement, scenes, start, end)
         })
     }
 
-    /// Move the scene change at `from_beat` to `to_beat`. The event at 0.0
-    /// cannot move: an arrangement always starts on a governing scene.
+    /// Move the scene change at `from_beat` to `to_beat`, re-stamping both the
+    /// span it vacates (now the predecessor's) and the one it lands on. The
+    /// event at 0.0 cannot move: an arrangement always starts on a scene.
     pub fn arr_scene_event_move(&mut self, from_beat: f64, to_beat: f64) -> Result<(), String> {
         let from_beat = finite_beat("Scene event beat", from_beat)?;
         let to_beat = finite_beat("Scene event beat", to_beat)?;
-        self.edit_arrangement("Move scene event", move |arrangement, _scenes| {
+        self.edit_arrangement("Move scene event", move |arrangement, scenes| {
             let index = Self::scene_event_index(arrangement, from_beat)?;
             if from_beat == to_beat {
                 return Ok(());
@@ -369,30 +438,56 @@ impl App {
                      already starts there"
                 ));
             }
+            // The window both spans live in, resolved before the move so the
+            // vacated stretch is re-stamped with whatever now governs it.
+            let (vacated_start, vacated_end) = Self::scene_event_span(arrangement, index);
             arrangement.scene_lane[index].start_beat = to_beat;
             arrangement.scene_lane.sort_by(|a, b| {
                 a.start_beat
                     .partial_cmp(&b.start_beat)
                     .expect("scene event beats are finite")
             });
-            Ok(())
+            let moved = arrangement
+                .scene_lane
+                .iter()
+                .position(|event| event.start_beat == to_beat)
+                .expect("the moved event is in the lane");
+            let (moved_start, moved_end) = Self::scene_event_span(arrangement, moved);
+            stamp_scene_clips(
+                arrangement,
+                scenes,
+                vacated_start.min(moved_start),
+                vacated_end.max(moved_end),
+            )
         })
     }
 
-    /// Point the scene change at `beat` at a different scene.
+    /// Point the scene change at `beat` at a different scene, re-stamping its
+    /// whole span with the new scene's cells (spec 8: changing which scene an
+    /// event names replaces the clips it stamped).
     pub fn arr_scene_event_set(&mut self, beat: f64, scene: usize) -> Result<(), String> {
         let beat = finite_beat("Scene event beat", beat)?;
-        self.edit_arrangement("Set scene event", move |arrangement, _scenes| {
+        self.edit_arrangement("Set scene event", move |arrangement, scenes| {
             let index = Self::scene_event_index(arrangement, beat)?;
             arrangement.scene_lane[index].scene = scene;
-            Ok(())
+            let (start, end) = Self::scene_event_span(arrangement, index);
+            stamp_scene_clips(arrangement, scenes, start, end)
         })
     }
 
-    /// Remove the scene change at `beat`: the predecessor's scene extends over
-    /// it (spec 8/14, locked). Clips can never be touched by this — that is
-    /// the whole user-visible point of the lane model. Removing the event at
-    /// 0.0 is rejected, exactly as removing row zero was.
+    /// Remove the scene change at `beat`: the marker goes and **the clips
+    /// stay** (spec 8/14, locked).
+    ///
+    /// This is the one scene op that does NOT re-stamp, and the asymmetry is
+    /// deliberate. Insert/set/move all mean "launch this scene here", so
+    /// replacing the content under them is the intent. Remove means "clean up
+    /// this marker" — the user's original complaint was that deleting scene
+    /// changes to tidy the scene row destroyed the pattern changes riding
+    /// beneath them. Clips are the truth now, so a removal leaves the
+    /// predecessor's label spanning clips that a since-removed scene stamped.
+    /// That reads honestly: what plays is the clips.
+    ///
+    /// Removing the event at 0.0 is rejected, exactly as removing row zero was.
     pub fn arr_scene_event_remove(&mut self, beat: f64) -> Result<(), String> {
         let beat = finite_beat("Scene event beat", beat)?;
         self.edit_arrangement("Remove scene event", move |arrangement, _scenes| {
@@ -863,8 +958,14 @@ mod tests {
     }
 
     /// The `def-song` contract (spec 8): lowering the declarative rows and
-    /// compiling the result must reproduce exactly the `ProjectSong` the row
-    /// path produced — same beats, same scenes, same overrides.
+    /// compiling the result must reproduce what the row path SOUNDED like —
+    /// same beats, same scenes, same per-track resolution.
+    ///
+    /// Raw override lists are deliberately no longer comparable: the row model
+    /// left an unmentioned lane to be resolved from the row's scene cell,
+    /// while the lane model stamps that cell as a clip and compiles it to an
+    /// explicit override. Both play the same pattern at the same phase, which
+    /// is what these fixtures assert.
     /// The `ProjectSong` the declarative rows describe verbatim — what the
     /// retired row primitive built: sorted by start beat, overrides in
     /// canonical track order, ids positional.
@@ -896,6 +997,27 @@ mod tests {
         }
     }
 
+    /// What one row resolves each track to at its own start beat, under the
+    /// PLAYBACK rule in `preflight_runtime_song`: the override if there is
+    /// one, else the row's scene cell at phase 0.
+    fn row_resolution(
+        app: &App,
+        row: &ProjectSongRow,
+        track_count: usize,
+    ) -> Vec<Option<(u64, f64)>> {
+        app.state.with_project_scenes(|scenes| {
+            (0..track_count)
+                .map(|track| match row.overrides.iter().find(|over| over.track == track) {
+                    Some(over) => over.pattern_id.map(|id| (id, over.offset_steps)),
+                    None => crate::sequencer::SongCompileContext::song_scene_cell(
+                        scenes, row.scene, track,
+                    )
+                    .map(|id| (id, 0.0)),
+                })
+                .collect()
+        })
+    }
+
     #[track_caller]
     fn assert_def_song_round_trips(rows: Vec<SongRowSpec>, end_beat: f64, loop_enabled: bool) {
         let from_rows = song_from_specs(&rows, end_beat, loop_enabled);
@@ -913,14 +1035,17 @@ mod tests {
         let lanes: Vec<_> = from_lanes
             .rows
             .iter()
-            .map(|row| (row.start_beat, row.scene, row.overrides.clone()))
+            .map(|row| (row.start_beat, row.scene, row_resolution(&arr_app, row, 2)))
             .collect();
         let rows: Vec<_> = from_rows
             .rows
             .iter()
-            .map(|row| (row.start_beat, row.scene, row.overrides.clone()))
+            .map(|row| (row.start_beat, row.scene, row_resolution(&arr_app, row, 2)))
             .collect();
-        assert_eq!(lanes, rows, "def-song must compile back to the same song");
+        assert_eq!(
+            lanes, rows,
+            "def-song must compile back to the same audible song"
+        );
     }
 
     #[test]
@@ -982,14 +1107,14 @@ mod tests {
         )
         .expect("lowers");
         let arrangement = app.state.committed_arrangement().expect("arrangement");
+        // One DECLARED clip spanning both rows, then the clip the scene event
+        // at beat 8 stamped, surviving where the declared run ended.
         assert_eq!(
-            arrangement.track_lanes[0].len(),
-            1,
+            lane(&app, 0),
+            vec![(0.0, 16.0, Some(2), 0.0), (16.0, 24.0, Some(2), 0.0)],
             "phase-continuous rows merge into one clip: {:?}",
             arrangement.track_lanes[0]
         );
-        assert_eq!(arrangement.track_lanes[0][0].start_beat, 0.0);
-        assert_eq!(arrangement.track_lanes[0][0].end_beat, 16.0);
 
         // Two beats apart the pattern is mid-cycle, so re-declaring it at
         // offset 0 is a retrigger and must stay two clips. (The rows differ
@@ -1005,26 +1130,29 @@ mod tests {
             .expect("lowers");
         let arrangement = app.state.committed_arrangement().expect("arrangement");
         assert_eq!(
-            arrangement.track_lanes[0].len(),
-            2,
+            lane(&app, 0),
+            vec![
+                // the retrigger stays its own clip, re-anchored at step 0 ...
+                (0.0, 2.0, Some(2), 0.0),
+                (2.0, 16.0, Some(2), 0.0),
+                // ... and past it the scene-1 stamp shows through. It was
+                // stamped free-run at beat 2 (8 steps) and left-trimmed to
+                // beat 16, so 8 + 56 == 64 steps == step 0: beat 16 is on the
+                // global grid, and the stamp is locked to it.
+                (16.0, 24.0, Some(2), 0.0),
+            ],
             "a retrigger keeps its own clip: {:?}",
             arrangement.track_lanes[0]
         );
-        assert_eq!(arrangement.track_lanes[0][0].start_beat, 0.0);
-        assert_eq!(arrangement.track_lanes[0][0].end_beat, 2.0);
-        assert_eq!(arrangement.track_lanes[0][1].start_beat, 2.0);
-        assert_eq!(arrangement.track_lanes[0][1].offset_steps, 0.0);
         let _ = rows;
     }
 
-    /// The one intended divergence from the row path (spec 4, goal 3): a lane
-    /// riding the scene backdrop keeps its phase across a boundary instead of
-    /// retriggering from step 0. The row model gives backdrop lanes no phase
-    /// memory, so compile materializes the offset; a def-song whose rows are
-    /// not a whole number of pattern loops from the governing scene event
-    /// therefore gains overrides the row path did not emit.
+    /// A def-song whose scene changes land off the pattern grid still leaves
+    /// every stamped clip GRID-LOCKED: the phase at any beat is
+    /// `steps(beat) mod L`, so scene 1 launching at beat 2 does not shift the
+    /// rhythm of the lanes it stamps.
     #[test]
-    fn def_song_lowering_materializes_the_scene_backdrop_phase_rows_dropped() {
+    fn def_song_lowering_keeps_stamped_clips_grid_locked() {
         let rows = vec![
             spec(0.0, 0, vec![ov(0, 2)]),
             spec(2.0, 1, vec![ov(0, 2)]),
@@ -1035,14 +1163,15 @@ mod tests {
         let song = app.state.committed_song().expect("compiled song");
         let last = song.rows.last().expect("a row at beat 16");
         assert_eq!(last.start_beat, 16.0);
-        // Scene 1 launched at beat 2; 14 beats later both lanes are
-        // 56 steps == 8 steps (mod the 16-step pattern) into its cells.
+        // Beat 16 is 64 steps on the global grid, and 64 mod 16 == 0: both
+        // lanes are exactly on a pattern boundary there, regardless of the
+        // scene change having landed at beat 2.
         assert_eq!(
             last.overrides
                 .iter()
                 .map(|over| (over.track, over.pattern_id, over.offset_steps))
                 .collect::<Vec<_>>(),
-            vec![(0, Some(2), 8.0), (1, Some(2), 8.0)]
+            vec![(0, Some(2), 0.0), (1, Some(2), 0.0)]
         );
         assert_song_matches_arrangement(&app);
     }
@@ -1125,7 +1254,7 @@ mod tests {
         )
         .expect("lowers");
         let first = app.state.committed_arrangement().expect("arrangement");
-        assert_eq!(first.next_clip_id, 1);
+        assert!(first.next_clip_id > 0, "the lowering allocated ids");
         app.arr_replace_rows(
             vec![spec(0.0, 0, vec![ov(1, 2)]), spec(2.0, 0, Vec::new())],
             16.0,
@@ -1133,8 +1262,19 @@ mod tests {
         )
         .expect("lowers again");
         let second = app.state.committed_arrangement().expect("arrangement");
-        assert_eq!(second.track_lanes[1][0].id, ClipId(1), "ids never reused");
-        assert_eq!(second.next_clip_id, 2);
+        assert!(
+            second.next_clip_id > first.next_clip_id,
+            "the allocator only ever moves forward"
+        );
+        assert!(
+            second
+                .track_lanes
+                .iter()
+                .flatten()
+                .all(|clip| clip.id.0 >= first.next_clip_id),
+            "ids are never reused across lowerings: {:?}",
+            second.track_lanes
+        );
     }
     // --- clip + scene primitives (spec 8) -------------------------------
 
@@ -1173,6 +1313,26 @@ mod tests {
             .iter()
             .map(|clip| (clip.start_beat, clip.end_beat, clip.pattern_id, clip.offset_steps))
             .collect()
+    }
+
+    /// The phase (in steps) the COMMITTED SONG puts `track` at on `beat`.
+    /// The fixture's patterns are all 16 steps at four steps per beat, so the
+    /// arithmetic is spelled out rather than borrowed from the compiler.
+    fn phase_at(app: &App, track: usize, beat: f64) -> f64 {
+        let song = app.state.committed_song().expect("committed song");
+        let row = song
+            .rows
+            .iter()
+            .rev()
+            .find(|row| row.start_beat <= beat)
+            .expect("a row governs every beat");
+        let over = row
+            .overrides
+            .iter()
+            .find(|over| over.track == track)
+            .expect("every lane states its resolution");
+        assert!(over.pattern_id.is_some(), "the fixture uses pattern clips");
+        (over.offset_steps + (beat - row.start_beat) * 4.0).rem_euclid(16.0)
     }
 
     fn scene_lane(app: &App) -> Vec<(f64, usize)> {
@@ -1404,11 +1564,17 @@ mod tests {
             "the span survives, the anchor resets to the new source's step 0"
         );
 
-        // Explicit-empty is a source like any other: silence that still
-        // occludes the scene backdrop.
+        // "Make this span silent" and "remove this clip" are the same
+        // operation (spec 6.2), so setting an empty source DELETES the clip.
+        let depth = app.history.undo_len();
         app.arr_clip_set_source(id, LaneSource::Empty)
-            .expect("goes silent");
-        assert_eq!(lane(&app, 0)[1], (8.0, 10.0, None, 0.0));
+            .expect("an empty source silences the span");
+        assert_eq!(app.history.undo_len(), depth + 1, "one undo entry");
+        assert_eq!(
+            lane(&app, 0),
+            vec![(0.0, 4.0, Some(1), 0.0), (10.0, 16.0, Some(2), 8.0)],
+            "the clip is gone from the timeline, leaving silence"
+        );
     }
 
     // --- scene lane -----------------------------------------------------
@@ -1432,24 +1598,87 @@ mod tests {
         assert_song_matches_arrangement(&app);
     }
 
-    /// The user-visible point of the lane model (spec 4 goal 2): removing a
-    /// scene change merges its span into the predecessor and CANNOT touch a
-    /// clip. Removing the event at 0.0 is rejected, exactly as removing row
-    /// zero was.
+    /// The user-visible guarantee that started the lane pivot: removing a
+    /// scene change to tidy the scene row must NEVER destroy clips. Insert,
+    /// set, and move all mean "launch this scene here" and re-stamp; remove
+    /// means "clean up this marker" and touches nothing but the marker.
+    /// Removing the event at 0.0 is rejected, exactly as removing row zero was.
     #[test]
     fn scene_event_remove_merges_into_the_predecessor_and_never_touches_clips() {
         let mut app = app_with_clips();
         app.arr_scene_event_insert(8.0, 1).expect("insert");
+        // Scene 1's cell (P2) is stamped from the event to the song end,
+        // truncating the clip that was there.
+        assert_eq!(
+            lane(&app, 0),
+            vec![(0.0, 4.0, Some(1), 0.0), (8.0, 32.0, Some(2), 0.0)]
+        );
         let clips_before = lane(&app, 0);
 
         app.arr_scene_event_remove(8.0).expect("remove");
         assert_eq!(scene_lane(&app), vec![(0.0, 0)], "the span merges back");
-        assert_eq!(lane(&app, 0), clips_before, "the clips are untouched");
+        assert_eq!(
+            lane(&app, 0),
+            clips_before,
+            "the clips the removed scene stamped survive it — what plays is \
+             the clips, and only the marker was deleted"
+        );
 
         let depth = app.history.undo_len();
         let error = app.arr_scene_event_remove(0.0).expect_err("row zero rule");
         assert!(error.contains("must start on a scene"), "{error}");
         assert_eq!(app.history.undo_len(), depth, "a rejection commits nothing");
+    }
+
+    /// The user's gesture, end to end: "when i resize the end of a scene to
+    /// be shorter (and thus make the next scene launch happen sooner), the
+    /// resulting track clips it modifies ends up produces a jump in timing".
+    ///
+    /// Shortening a scene span IS moving the next scene event earlier, which
+    /// re-stamps. Because stamping free-runs against the global clock, the
+    /// clips it writes stay grid-locked: the boundary decides how much of the
+    /// pattern is heard, never when its steps fall.
+    #[test]
+    fn shortening_a_scene_span_never_moves_the_rhythm_of_the_clips_below() {
+        let mut app = test_app();
+        // Scenes at 0/8/16 over 32 beats; patterns are 16 steps at four
+        // steps per beat, so a cycle is 4 beats and source step 0 lands on
+        // every multiple of 4.
+        app.arr_replace_rows(
+            vec![spec(0.0, 0, Vec::new()), spec(8.0, 1, Vec::new()), spec(16.0, 2, Vec::new())],
+            32.0,
+            false,
+        )
+        .expect("lowers");
+        let before: Vec<f64> = (0..32).map(|q| phase_at(&app, 0, q as f64)).collect();
+
+        // Drag the scene-1 boundary from 8 back to 5 — three beats shorter,
+        // and deliberately off the 4-beat cycle.
+        app.arr_scene_event_move(8.0, 5.0).expect("boundary moves");
+        assert_eq!(scene_lane(&app), vec![(0.0, 0), (5.0, 1), (16.0, 2)]);
+        // 5 beats == 20 steps; 20 mod 16 == 4.
+        assert_eq!(
+            lane(&app, 0),
+            vec![
+                (0.0, 5.0, Some(1), 0.0),
+                (5.0, 16.0, Some(2), 4.0),
+                (16.0, 32.0, Some(3), 0.0),
+            ]
+        );
+
+        // The rhythm is untouched everywhere the SOURCE did not change: each
+        // lane still reaches step 0 on the same absolute beats.
+        for q in 0..32 {
+            let beat = q as f64;
+            assert_eq!(
+                phase_at(&app, 0, beat),
+                before[q],
+                "the scene resize moved the rhythm at beat {beat}"
+            );
+        }
+        for beat in [4.0, 8.0, 12.0, 16.0, 20.0] {
+            assert_eq!(phase_at(&app, 0, beat), 0.0, "beat {beat} is still step 0");
+        }
     }
 
     #[test]
@@ -1488,13 +1717,22 @@ mod tests {
         assert_eq!(app.history.undo_len(), depth);
         app.arr_set_end(16.0).expect("exactly the last clip end is fine");
 
-        // The last scene change is the other floor: clear the clips so only
-        // it can block, then try to shrink onto it.
-        for beat in [0.0, 8.0] {
-            let id = clip_at(&app, 0, beat);
+        // The last scene change is the other floor: insert it, then clear
+        // every clip (including the ones it stamped) so only it can block.
+        app.arr_scene_event_insert(12.0, 1).expect("insert");
+        loop {
+            let ids: Vec<ClipId> = app
+                .state
+                .committed_arrangement()
+                .expect("arrangement")
+                .track_lanes
+                .iter()
+                .flatten()
+                .map(|clip| clip.id)
+                .collect();
+            let Some(id) = ids.first().copied() else { break };
             app.arr_clip_delete(id).expect("clip deletes");
         }
-        app.arr_scene_event_insert(12.0, 1).expect("insert");
         let error = app.arr_set_end(12.0).expect_err("a scene change is there");
         assert!(error.contains("scene change starts at beat 12"), "{error}");
     }
@@ -1529,7 +1767,9 @@ mod tests {
             app.arr_clip_move(id, 20.0).unwrap_err(),
             app.arr_clip_resize(id, 8.0, 12.0).unwrap_err(),
             app.arr_clip_split(id, 10.0).map(|_| ()).unwrap_err(),
-            app.arr_clip_set_source(id, LaneSource::Empty).unwrap_err(),
+            app.arr_clip_set_source(id, LaneSource::Pattern(PatternId(1)))
+                .unwrap_err(),
+            app.arr_clip_clear_span(0, 4.0, 6.0).unwrap_err(),
             app.arr_scene_event_insert(8.0, 1).unwrap_err(),
             app.arr_scene_event_move(0.0, 4.0).unwrap_err(),
             app.arr_scene_event_set(0.0, 1).unwrap_err(),

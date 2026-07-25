@@ -2884,7 +2884,7 @@ impl App {
             pending.fallback_samples
         );
         let ProjectFile {
-            version: _,
+            version: file_version,
             name: _,
             bpm,
             master_volume,
@@ -2975,6 +2975,23 @@ impl App {
         // `set_committed_arrangement` validates, compiles, and installs the
         // arrangement together with its compiled song, and installs nothing
         // if the arrangement no longer fits the project.
+        //
+        // Version <= 5 files were authored under the retired backdrop model,
+        // where a lane GAP played the governing scene's cell. Under the
+        // current model a gap is silence, so loading such a file untouched
+        // would silently gut the arrangement. Freeze what every gap sounded
+        // like into real clips first (lane spec 10, v5 -> v6): the project
+        // sounds identical, and the file saves back as version 6.
+        let arrangement = match arrangement {
+            Some(arrangement) if file_version < 6 => {
+                let scenes = self.state.capture_project_scenes();
+                Some(
+                    crate::sequencer::migrate_legacy_backdrops(&arrangement, &scenes)
+                        .map_err(|error| format!("Project arrangement failed to load: {error}"))?,
+                )
+            }
+            other => other,
+        };
         self.state
             .set_committed_arrangement(arrangement)
             .map_err(|error| format!("Project arrangement failed to load: {error}"))?;

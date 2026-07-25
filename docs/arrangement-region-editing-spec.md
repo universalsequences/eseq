@@ -98,11 +98,19 @@ Changes:
 - `HitRegion` gains `ItemTitleBar` and `ItemEdgeStart` (`timeline.rs:155`).
   `hit_test` (`:1714-1732`): when the item has a title bar and the pointer
   row is within it, apply the existing proportional handle math to both
-  edges (start handle mirrors the end handle: `[left - outside_slop,
-  left + handle_width]`); middle → `ItemTitleBar`. Rows below the bar →
-  `ItemBody`. With `title-bar-height == 0`, behavior is exactly today's
+  edges (start handle mirrors the end handle); middle → `ItemTitleBar`.
+  Rows below the bar → `ItemBody`. With `title-bar-height == 0`, behavior is
+  exactly today's
   (no `ItemEdgeStart` — the start handle exists only on the bar, so
   piano-roll never grows one).
+- Handles are narrow (`(width * 0.24).clamp(0.5, 1.25)` cells) and
+  **containment wins**: an item that actually contains the pointer decides
+  the region; the `outside_slop` zone outside an edge is only a fallback,
+  used when no item contains the pointer at all. Back-to-back clips share
+  one boundary, and without this rule their two slop zones overlap and draw
+  order picks the winner — approaching a clip's end edge flips to resizing
+  the *next* clip's start. Left of a shared boundary is the left clip's end
+  handle, right of it the right clip's start handle.
 - `begin_gesture` (`:1742-1818`): `ItemTitleBar` → the existing `:move`
   gesture; `ItemBody` (title bar active) → `:marquee`; `ItemEdgeStart` →
   new `:resize-start` gesture `{id, ids, anchor-start, anchor-end,

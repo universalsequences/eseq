@@ -294,7 +294,12 @@ mod tests {
         assert!(app.state.track_takes(0).is_empty());
         let song = app.state.committed_song().expect("song");
         assert_eq!(song.rows.len(), 2);
-        assert!(song.rows.iter().all(|row| row.overrides.is_empty()));
+        // Every lane still states its resolution explicitly (spec 6.2/7);
+        // what undo restored is that none of them plays a take any more.
+        assert!(song
+            .rows
+            .iter()
+            .all(|row| row.overrides.iter().all(|over| over.take_id.is_none())));
     }
 
     #[test]

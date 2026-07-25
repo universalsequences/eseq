@@ -227,39 +227,24 @@
     (nth SEQ.track-colors i)
     (list 0.34 0.48 0.98)))
 
-;; Clips are tinted brighter than the scene backdrop showing through a lane
-;; GAP (lane spec 12: the dim/solid distinction is structural — a clip is a
-;; stored object, a backdrop ghost is not). The lift is multiplicative, not a
-;; lerp toward white: mixing in white desaturated the track color into pastel,
-;; so arrangement clips no longer read as the same color the session grid and
-;; piano roll use for the track.
-(def arrangement-clip-color (i clip?)
+;; Every audible span is a clip now (lane spec 6.2), so there is exactly one
+;; clip tint: the track color lifted slightly. The lift is multiplicative, not
+;; a lerp toward white: mixing in white desaturated the track color into
+;; pastel, so arrangement clips no longer read as the same color the session
+;; grid and piano roll use for the track.
+(def arrangement-clip-color (i)
   (let ((color (arrangement-track-color i)))
-    (if clip?
-      (list
-        (min 1 (* 1.15 (nth color 0)))
-        (min 1 (* 1.15 (nth color 1)))
-        (min 1 (* 1.15 (nth color 2))))
-      color)))
+    (list
+      (min 1 (* 1.15 (nth color 0)))
+      (min 1 (* 1.15 (nth color 1)))
+      (min 1 (* 1.15 (nth color 2))))))
 
 ;; The STORED clips of one track lane (lane spec 12): already merged, with
-;; real ids — the view derives nothing. Explicit-empty clips carry no source
-;; and draw as a gap, exactly like an unwritten stretch of lane.
+;; real ids — the view derives nothing, and every clip has a source. A stretch
+;; of lane with no clip is silence and draws as empty.
 (def arrangement-track-clips (i)
-  (filter (lambda (clip)
-            (not (and (= (get clip :pattern-id) nil)
-                   (= (get clip :take-id) nil))))
-    (if (< i (len SEQ.song-lanes))
-      (nth SEQ.song-lanes i)
-      '())))
-
-;; Derived backdrop ghosts for one lane's gaps (lane spec 12): the governing
-;; scene's cell showing through. Not editable — there is no stored object to
-;; edit — so they get negative ids, which never collide with a clip id and
-;; make every gesture on one a no-op/deselect.
-(def arrangement-track-backdrops (i)
-  (if (< i (len SEQ.song-backdrops))
-    (nth SEQ.song-backdrops i)
+  (if (< i (len SEQ.song-lanes))
+    (nth SEQ.song-lanes i)
     '()))
 
 (def arrangement-find-track-clip (i clip-id)
@@ -410,26 +395,54 @@
                      (arrangement-clip-cycle entry clip)
                      1)))))))
 
+;; Start-edge preview offset (spec 8): the commit re-stamps `offset-steps` so
+;; the surviving part keeps playing what it played there, so the preview must
+;; run the same arithmetic — otherwise a take's dots jump on release. Pattern
+;; clips draw their dots by cycle tiling and ignore the offset, so only takes
+;; need it.
+(def arrangement-ghost-offset-steps (i clip new-start)
+  (let ((entry (if (= (get clip :take-id) nil)
+                 nil
+                 (arrangement-lane-take-events i (get clip :take-id)))))
+    (if (or (= entry nil)
+          (<= (get entry :num-steps) 0)
+          (<= (get entry :length-beats) 0))
+      (get clip :offset-steps)
+      (let ((step-beats (/ (get entry :length-beats) (get entry :num-steps))))
+        (max 0
+          (+ (or (get clip :offset-steps) 0)
+            (/ (- new-start (get clip :start-beat)) step-beats)))))))
+
 ;; Live resize ghost for a track clip: while the edge drag is in flight the
-;; clip previews its new end; the finish action lowers to one clip resize.
+;; clip previews its new span; the finish action lowers to one clip resize.
+;; Either edge drags — the start edge moves the phase anchor with it.
 (def arrangement-track-ghost-clip (i clip)
   (if (and (= (arrangement-ghost-kind) :track-resize)
         (= (get arrangement-ghost :track) i)
         (= (get arrangement-ghost :clip-id) (get clip :clip-id)))
-    (dict
-      :clip-id (get clip :clip-id)
-      :start-beat (get clip :start-beat)
-      :end-beat (max (+ (get clip :start-beat) 1)
-                  (min SEQ.song-end-beat (get arrangement-ghost :end)))
-      :pattern-id (get clip :pattern-id)
-      :take-id (get clip :take-id)
-      :offset-steps (get clip :offset-steps))
+    (if (= (get arrangement-ghost :edge) :start)
+      (let ((new-start (max 0
+                         (min (- (get clip :end-beat) 1)
+                           (get arrangement-ghost :time)))))
+        (dict
+          :clip-id (get clip :clip-id)
+          :start-beat new-start
+          :end-beat (get clip :end-beat)
+          :pattern-id (get clip :pattern-id)
+          :take-id (get clip :take-id)
+          :offset-steps (arrangement-ghost-offset-steps i clip new-start)))
+      (dict
+        :clip-id (get clip :clip-id)
+        :start-beat (get clip :start-beat)
+        :end-beat (max (+ (get clip :start-beat) 1)
+                    (min SEQ.song-end-beat (get arrangement-ghost :time)))
+        :pattern-id (get clip :pattern-id)
+        :take-id (get clip :take-id)
+        :offset-steps (get clip :offset-steps)))
     clip))
 
-;; Track-lane items (lane spec 12): the stored clips, plus one dim ghost per
-;; lane gap for the scene backdrop showing through it. Explicit-empty clips
-;; and scene cells with no pattern produce NO item — the lane really is
-;; silent there.
+;; Track-lane items (lane spec 12): the stored clips, and nothing else. A gap
+;; between clips produces NO item — the lane really is silent there.
 (def arrangement-track-clip-items (i)
   (map
     (lambda (raw)
@@ -449,27 +462,11 @@
                      (get window :end-beat))))
           :kind :midi
           :content (arrangement-clip-content i clip)
-          :color (arrangement-clip-color i true))))
+          :color (arrangement-clip-color i))))
     (arrangement-track-clips i)))
 
-(def arrangement-track-backdrop-items (i)
-  (let ((spans (arrangement-track-backdrops i)))
-    (map
-      (lambda (index)
-        (let ((span (nth spans index)))
-          (dict
-            :id (- -1 index)
-            :lane 0
-            :start (get span :start-beat)
-            :end (get span :end-beat)
-            :kind :midi
-            :content (arrangement-clip-content i span)
-            :color (arrangement-clip-color i false))))
-      (range 0 (len spans)))))
-
 (def arrangement-track-items (i)
-  (append (arrangement-track-backdrop-items i)
-    (arrangement-track-clip-items i)))
+  (arrangement-track-clip-items i))
 
 ;; Selection prop for one track lane: only the owning track shows its ids.
 ;; The bound clip (takes spec 16.6) is Rust-side persistent timeline state,
@@ -658,11 +655,19 @@
         (dict :kind :move
           :beat (get event :anchor-id)
           :start (get event :start)))
+      ;; The scene lane is contiguous, so dragging an event's START edge IS
+      ;; moving that event: the boundary it owns is the same one the previous
+      ;; span's end handle drags. Lower it to the move ghost rather than the
+      ;; resize one, or the drag would write the event's start into its end.
       :resize-item-absolute
       (set! arrangement-ghost
-        (dict :kind :resize
-          :beat (get event :id)
-          :end (get event :time)))
+        (if (= (get event :edge) :start)
+          (dict :kind :move
+            :beat (get event :id)
+            :start (get event :time))
+          (dict :kind :resize
+            :beat (get event :id)
+            :end (get event :time))))
       :create-item
       (set! arrangement-ghost
         (dict :kind :create
@@ -686,7 +691,14 @@
           (dict :type :finish-resize-items
             :from-beat (get arrangement-ghost :beat)
             :end (get arrangement-ghost :end)))
-        (set! arrangement-ghost nil))
+        ;; Start-edge drag: the ghost is a move (see above), so it commits as
+        ;; one.
+        (if (= (arrangement-ghost-kind) :move)
+          (arrangement-edit-finish
+            (dict :type :finish-move-items
+              :from-beat (get arrangement-ghost :beat)
+              :start (get arrangement-ghost :start)))
+          (set! arrangement-ghost nil)))
       :finish-create-item
       (arrangement-edit-finish
         (dict :type :finish-create-item
@@ -727,23 +739,47 @@
       :track i
       :clip-id (get clip :clip-id))))
 
+(def arrangement-track-resize-end-finish (i clip time)
+  (let ((new-end (max 0 (min SEQ.song-end-beat time))))
+    (if (= new-end (get clip :end-beat))
+      nil
+      (if (<= new-end (get clip :start-beat))
+        ;; Dragged past its own start: the clip is gone.
+        (arrangement-clip-edit i clip (dict :type :clip-delete))
+        (arrangement-clip-edit i clip
+          (dict :type :clip-resize
+            :start (get clip :start-beat)
+            :end new-end))))))
+
+;; Start-edge resize is NOT a move: the span's left edge and the clip's phase
+;; anchor move together, so the surviving music stays where it was (lane spec
+;; 8 / takes spec 8 — `arrangement-clip-resize` re-stamps `offset-steps` by
+;; the split rule, in both directions). Same primitive as the end edge, only
+;; the other coordinate changes.
+(def arrangement-track-resize-start-finish (i clip time)
+  (let ((new-start (max 0 time)))
+    (if (= new-start (get clip :start-beat))
+      nil
+      (if (>= new-start (get clip :end-beat))
+        ;; Dragged past its own end: the clip is gone.
+        (arrangement-clip-edit i clip (dict :type :clip-delete))
+        (arrangement-clip-edit i clip
+          (dict :type :clip-resize
+            :start new-start
+            :end (get clip :end-beat)))))))
+
 (def arrangement-track-resize-finish (i)
   (let ((clip-id (get arrangement-ghost :clip-id))
-        (new-end (max 0 (min SEQ.song-end-beat (get arrangement-ghost :end)))))
+        (edge (get arrangement-ghost :edge))
+        (time (get arrangement-ghost :time)))
     (let ((clip (arrangement-find-track-clip i clip-id)))
       (do
         (set! arrangement-ghost nil)
         (if (= clip nil)
           nil
-          (if (= new-end (get clip :end-beat))
-            nil
-            (if (<= new-end (get clip :start-beat))
-              ;; Dragged past its own start: the clip is gone.
-              (arrangement-clip-edit i clip (dict :type :clip-delete))
-              (arrangement-clip-edit i clip
-                (dict :type :clip-resize
-                  :start (get clip :start-beat)
-                  :end new-end)))))))))
+          (if (= edge :start)
+            (arrangement-track-resize-start-finish i clip time)
+            (arrangement-track-resize-end-finish i clip time)))))))
 
 (def arrangement-track-delete (i ids)
   (do
@@ -799,11 +835,14 @@
       (set! arrangement-region-ghost (arrangement-region-from-event i event))
       :finish-marquee-select
       (arrangement-region-commit (arrangement-region-from-event i event))
-      ;; Live edge drag: ghost preview only (spec 9.1).
+      ;; Live edge drag: ghost preview only (spec 9.1). Either edge; the
+      ;; ghost carries which one so the preview and the commit agree.
       :resize-item-absolute
       (set! arrangement-ghost
         (dict :kind :track-resize :track i
-          :clip-id (get event :id) :end (get event :time)))
+          :clip-id (get event :id)
+          :edge (if (= (get event :edge) :start) :start :end)
+          :time (get event :time)))
       :finish-resize-items
       (if (and (= (arrangement-ghost-kind) :track-resize)
             (= (get arrangement-ghost :track) i))

@@ -937,8 +937,8 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
           [offset-steps])",
         "Create a clip on a track lane, truncating whatever it lands on \
          (Ableton-style: the incoming clip always wins). pattern-id nil or 0 \
-         creates an explicit-empty clip — deliberate silence that still \
-         occludes the scene backdrop.",
+         asks for silence over the span, which is an ABSENCE of clips: the \
+         span is cleared instead of filled.",
         move |args, ctx| {
             let track = song_track_arg("seq-arrangement-clip-create: track", args.first())?;
             let start_beat =
@@ -980,8 +980,8 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
     runtime.register_native_with_docs(
         "seq-arrangement-clip-delete",
         "(seq-arrangement-clip-delete clip-id)",
-        "Delete a clip by stable id. The lane rejoins the scene backdrop over \
-         its span.",
+        "Delete a clip by stable id. Nothing plays over its span afterwards: \
+         the clip is gone from the timeline.",
         move |args, ctx| {
             let clip_id = song_row_id_arg("seq-arrangement-clip-delete: clip-id", args.first())?;
             ctx.enqueue_command(HostCommand::Custom {
@@ -2027,11 +2027,10 @@ pub(crate) fn init_runtime(
                 // Region selection (region spec 4.1): nil, or
                 // (track-a track-b start end scene-lane?).
                 ("song-region", Value::Nil),
-                // Arrangement read surfaces (lane spec 12): the stored clips,
-                // the derived scene-event spans, and the derived backdrop
-                // ghosts filling each lane's gaps.
+                // Arrangement read surfaces (lane spec 12): the stored clips
+                // and the derived scene-event spans. There is no third
+                // surface — a lane gap is silence, so it renders as nothing.
                 ("song-lanes", Value::List(vec![])),
-                ("song-backdrops", Value::List(vec![])),
                 ("scene-spans", Value::List(vec![])),
                 ("song-lane-events", Value::List(vec![])),
                 ("scene-names", Value::List(vec![])),

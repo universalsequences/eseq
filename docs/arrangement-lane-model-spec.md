@@ -1,6 +1,6 @@
 # Arrangement Lane Model — Author in Lanes, Compile to Rows
 
-Status: draft (rev 1, 2026-07-25)
+Status: draft (rev 2, 2026-07-25 — the scene *backdrop* is removed; see 6.2)
 Supersedes: the *authoring/storage* portions of docs/song-mode-spec.md §5
 (`ProjectSong` as the stored model, §5.6 row primitives). Playback (§7-§9),
 takes phase model (takes spec §7), and capture *semantics* (§7.4, takes spec
@@ -23,8 +23,8 @@ machine are untouched.
 
 Why: the row model is a great playback representation (O(1) resolve, no
 merge rules, gapless by construction) but a poor authoring one. The thing
-the user edits — a clip with a lifetime, sitting on a scene backdrop — is
-smeared across every row it overlaps. Symptoms already shipped: the scene
+the user edits — a clip with a lifetime — is smeared across every row it
+overlaps. Symptoms already shipped: the scene
 lane fragments at every track-clip boundary ("jagged scenes"), deleting a
 scene span swallows the clips riding in that row, and a growing projection
 layer (merged lane view, `paint_source_region` multi-row surgery,
@@ -58,10 +58,13 @@ non-problem or a one-object edit.
 
 - **Arrangement** — the new stored authoring model (scene lane + track
   lanes + end/loop). Replaces stored `ProjectSong`.
-- **Scene event** — `(start_beat, scene)`: from this beat, tracks without a
-  clip play this scene's cells. Spans are derived (event → next event).
+- **Scene event** — `(start_beat, scene)`: a marker plus the gesture that
+  **stamps** the scene's cells as real clips across its span. It governs
+  nothing at playback. Spans are derived (event → next event).
 - **Clip** — a spanned object on one track lane: `[start_beat, end_beat)`,
-  a source (pattern / take / explicit-empty), and `offset_steps`.
+  a source (pattern / take — never sourceless), and `offset_steps`.
+- **Stamp** — write a scene's cells onto every track lane over a span, as
+  ordinary clips, truncating whatever was there.
 - **Compile** — the pure function `Arrangement → ProjectSong`. Compiled
   rows are cached, never stored, never edited, never serialized.
 - **Row** — unchanged meaning at playback: a complete launch state span.
@@ -108,7 +111,7 @@ pub struct ArrClip {
     pub start_beat: f64,
     pub end_beat: f64,               // exclusive; > start_beat
     pub pattern_id: Option<u64>,     // same encoding as ProjectSongTrackOverride:
-    pub take_id: Option<u64>,        //   take excludes pattern; both None = explicit-empty
+    pub take_id: Option<u64>,        //   take excludes pattern; both None is REJECTED
     pub offset_steps: f64,           // takes spec §7 anchor; 0 = starts at source step 0
 }
 
@@ -134,28 +137,72 @@ Errors, never clamps (same philosophy as `ProjectSong::validate`):
   scene event's `start_beat`.
 - Per lane: clips sorted by `start_beat`, `end_beat > start_beat`, no
   overlap (`clip[i].end_beat <= clip[i+1].start_beat`); gaps are fine.
-- Per clip: pattern exists in the track pool; take exists; take excludes
-  pattern; `offset_steps` finite, `>= 0`, and for takes
-  `< total_len_steps` (takes never wrap).
+- Per clip: **a source is mandatory** — a clip with neither a pattern nor a
+  take is rejected, because silence is the absence of a clip; pattern exists
+  in the track pool; take exists; take excludes pattern; `offset_steps`
+  finite, `>= 0`, and for takes `< total_len_steps` (takes never wrap).
 - `track_lanes.len() == track_count`; clip ids unique, `< next_clip_id`.
 - Adjacent same-source clips are legal (unlike adjacent identical rows) —
   two back-to-back clips of the same pattern are distinct objects the user
   made; only *compile* output gets normalized.
 
-### 6.2 Resolution semantics (unchanged, now stated on lanes)
+### 6.2 Resolution semantics
 
 At beat `b`, track `t` plays:
 
 1. the clip on lane `t` containing `b`, if any — pattern loops with the §7
-   phase formula, take plays until its end then silence, explicit-empty is
-   silence; otherwise
-2. the governing scene event's cell for track `t`; otherwise
-3. nothing.
+   phase formula, take plays until its end then silence; otherwise
+2. **nothing**.
 
-A clip is opaque: while it spans `b`, scene events beneath it are inert for
-that track. This is precisely the "overrides are supposed to be overrides"
-semantics; in the row model it required re-stamping overrides into every
-new row.
+That is the whole rule. **Everything audible is a visible clip** — one the
+user can select, move, or delete. A span with no clip is silent: deleting a
+clip is exactly "the clip stops playing", with nothing revealed underneath.
+
+Scene events resolve nothing. What a scene event does is **stamp**: placing
+one (or repointing or moving it) writes the scene's cells onto every track
+lane across its span as ordinary clips. A track whose cell in that scene is
+empty gets no clip and is silent there. Stamping truncates what it lands on,
+like every other clip write (§14).
+
+#### 6.2.2 Stamping is anchored on the global timeline
+
+A stamped clip carries the **free-run** offset `steps(start) mod L` (takes
+spec §7.2) — the phase the pattern would have if it had been looping since
+beat 0 — *not* a phase measured from the scene event. So source step 0 always
+falls on the same absolute beats, whatever the boundary does: **modifying
+scenes never changes the flow of rhythm of the clips below.** Dragging a
+boundary changes how *much* of a pattern you hear, never *when* its steps
+fall.
+
+Anchoring on the event instead (tried first) restarted the pattern at step 0
+at the boundary, so shortening a scene onto a beat that is not a whole number
+of pattern cycles jumped every downstream hit off the grid. It also
+disagreed with capture, which has always stamped performed launches free-run;
+one rule now covers both. The two conventions agree exactly when the boundary
+is pattern-aligned, which is why it is easy to miss.
+
+The one place that still anchors on the event is `legacy_backdrop_spans`,
+used only by the v5 → v6 migration (§10) — because that is what v5 *sounded*
+like, and the migration's job is to preserve it.
+
+#### 6.2.1 Tried and rejected: the scene backdrop
+
+Rev 1 resolved a beat as *clip, else the governing scene's cell, else
+nothing* — the "backdrop". It shipped and was removed. Two reasons:
+
+- **Delete looked like a no-op.** Deleting a clip revealed the scene cell
+  underneath, usually the same pattern the clip had been playing: the
+  timeline changed and the music did not. The core workflow — select a
+  track's clips, delete them, record a take into the empty space — was
+  impossible.
+- **Sparse arrangements were unauthorable.** Silence had to be spelled as an
+  "empty clip" occluding the backdrop: an object that renders as a gap and
+  behaves as content. You could not look at a lane and know what it played.
+
+The cost of removing it is that a scene event materializes clips instead of
+being a cheap marker, and that removing a scene event re-stamps its merged
+span rather than leaving clips alone. That is the trade: bigger on disk,
+completely legible on screen.
 
 ## 7. Compile: `Arrangement → ProjectSong`
 
@@ -167,12 +214,18 @@ pub fn compile_arrangement(arr: &ProjectArrangement, ctx: &impl SongProjectConte
 1. **Boundary set** = every `SceneEvent.start_beat` ∪ every clip
    `start_beat` and `end_beat` (dropping `>= end_beat`), sorted, deduped
    (epsilon-free: beats compare exactly; gestures already quantize).
-2. For each boundary `B`: `scene` = governing scene event; `overrides` =
-   for each lane whose clip contains `B`, one `ProjectSongTrackOverride`
-   with `offset_steps` stamped by the takes spec §7 split rule —
-   pattern: `(clip.offset + steps(B - clip.start)) mod L`;
-   take: `clip.offset + steps(B - clip.start)`, becoming explicit-empty
-   past `total_len_steps` (mirrors `split_row_state`).
+2. For each boundary `B`: `scene` = the scene *marked* at `B` (kept because
+   transport and session UI ask which scene is current; it no longer affects
+   what any lane plays); `overrides` = **one per track, always** —
+   - a lane whose clip contains `B`: `offset_steps` stamped by the takes spec
+     §7 split rule — pattern `(clip.offset + steps(B - clip.start)) mod L`;
+     take `clip.offset + steps(B - clip.start)`, becoming explicit-empty past
+     `total_len_steps` (mirrors `split_row_state`);
+   - a lane **no clip covers**: `ProjectSongTrackOverride::new(track, None)`,
+     an explicit-empty override. This is the crux of the compile and is not
+     optional: `preflight_runtime_song` resolves an *absent* override from
+     the row's scene cell, which is exactly the backdrop §6.2.1 removed, so
+     an uncovered lane has to say "silent" out loud.
 3. `normalize()` (adjacent identical rows collapse — e.g. a clip boundary
    that lands where the compiled state doesn't change).
 4. **Deterministic row ids**: `SongRowId(index)`, `next_row_id = len`.
@@ -183,6 +236,12 @@ pub fn compile_arrangement(arr: &ProjectArrangement, ctx: &impl SongProjectConte
    changes.)
 5. `validate()` in debug builds (compile output is correct by construction;
    the check guards the compiler itself).
+
+There is no `backdrop_override` step. Rev 1 had one — a materialized phase
+override keeping a scene-filled gap phase-continuous across a boundary some
+*other* track's clip created. Its entire purpose was scene-filled gaps, and
+there are none: a gap is silence, and everything else is a clip carrying its
+own anchor.
 
 The compiled song is cached on `SequencerState` next to the arrangement and
 rebuilt whenever the arrangement is set (`set_committed_arrangement`
@@ -205,7 +264,11 @@ ending with validate → recompile → `set_committed_song`.
 
 Clip ops (per track lane):
 
-- `arr_clip_create(track, start, end, source, offset_steps)` — truncates
+- `arr_clip_create(track, start, end, source, offset_steps)` — a source is
+  mandatory; `LaneSource::Empty` is refused, because creating nothing is
+  meaningless. (The *gesture* is not refused: the `arrangement-clip-create`
+  host command sees an empty source as "silence this span" and routes to
+  `arr_clip_clear_span`.) Truncates
   whatever it lands on, Ableton-style: overlapped clips are trimmed at the
   new clip's edges (left-trims re-stamp `offset_steps` by the split rule);
   a clip fully covered is removed; a clip the new span lands strictly
@@ -219,16 +282,34 @@ Clip ops (per track lane):
   for takes. Growing over a neighbor truncates it.
 - `arr_clip_split(clip_id, beat)` — right half: `start = beat`,
   `offset += steps(beat - start)`.
-- `arr_clip_set_source(clip_id, source)` — swap content in place.
+- `arr_clip_set_source(clip_id, source)` — swap content in place. `Empty`
+  **deletes the clip**: "make this span silent" and "remove this clip" are
+  the same operation in this model.
+- `arr_clip_clear_span(track, start, end)` — silence a span by removing and
+  trimming the clips it covers, storing nothing. What "draw an empty clip
+  here" lowers to.
 
 Scene ops:
 
-- `arr_scene_event_insert(beat, scene)` / `arr_scene_event_move(beat)` /
-  `arr_scene_event_set(scene)`.
-- `arr_scene_event_remove(beat)` — **merges into the predecessor's scene**
-  (removing the event at 0.0 is rejected, like row 0 today). This is the
-  user-visible fix: deleting in the scene lane removes the scene *change*
-  and cannot touch clips.
+The first three **stamp** (§6.2), each in one undo entry; remove does not:
+
+- `arr_scene_event_insert(beat, scene)` — stamps the new event's whole span.
+- `arr_scene_event_set(scene)` — re-stamps that event's span with the new
+  scene's cells.
+- `arr_scene_event_move(beat)` — re-stamps the span it vacates (now the
+  predecessor's) together with the one it lands on. Shortening a scene span
+  IS this operation, and §6.2.2 is what keeps it musically safe.
+- `arr_scene_event_remove(beat)` — **removes only the marker.** Its span
+  merges into the predecessor's label and **the clips stay** (removing the
+  event at 0.0 is rejected, like row 0 today).
+
+The asymmetry is deliberate. Insert/set/move all mean "launch this scene
+here", so replacing the content under them is the intent. Remove means "clean
+up this marker": the complaint that started the whole pivot was that deleting
+scene changes to tidy the scene row destroyed the pattern changes riding
+beneath them. Clips are the truth, so a removal leaves the predecessor's
+label spanning clips a since-removed scene stamped — which reads honestly,
+because what plays is the clips.
 
 Whole-arrangement ops: `arr_set_end`, `arr_set_loop`, `arr_replace`,
 `arr_clear` — direct ports of today's equivalents.
@@ -250,10 +331,12 @@ mandatory event at 0.0) and then **restore the scene that governed the
 span's end** by inserting an event there if the edit changed it — so a
 scene-lane region op is local to its rectangle and nothing after it moves.
 
-`def-song` keeps its surface but lowers to `arr_replace` (rows in the
-declarative form translate 1:1: each row's scene → scene event when it
-changes, each override → a clip spanning to the next row that changes that
-lane — the inverse compile, unambiguous because declarative input has no
+`def-song` keeps its surface but lowers to `arr_replace`. Each row's scene
+becomes a scene event when it changes, and those events **stamp** their cells
+across the whole arrangement (free-run anchored, §6.2.2); the per-track overrides then truncate on top
+(a row that drops an override lets the stamped scene clip resume; an
+explicit-empty override carves a silent hole). Rows translate 1:1 (each
+override → a clip spanning to the next row that changes that lane — the inverse compile, unambiguous because declarative input has no
 clip identity to preserve). "Changes that lane" is *phase-continuity
 equivalence*, not source equality: a later row's override merges into the
 open clip only when `stamped_clip_override(clip, row.start_beat) ==
@@ -281,11 +364,18 @@ consolidated states/events in order —
   `stamped_captured_row_spec` + `split_row_state` restore-row construction
   with ordinary clip trimming (offsets re-stamped by the same split rule).
 
-Free-run inheritance disappears as a special case: an *untouched* lane is
-simply not written — the scene backdrop keeps playing through the region
-because no clip covers it. Only *touched* lanes (takes spec §9.2) get
-clips. (Today this requires materializing nonzero-offset overrides on
-every captured row.)
+A scene launch during capture **stamps clips across every lane it claims**:
+a claimed lane's captured resolution is its explicit launch else the captured
+scene's cell, at the free-run phase `steps(beat) mod L` (takes spec §7.2),
+and that resolution becomes a clip. A lane resolving to nothing (an empty
+cell) gets no clip and is silent.
+
+Free-run inheritance disappears as a special case, and so does every restore
+mechanism at `Q`: an *untouched* lane is simply **not modified** — its
+existing clips already cover the punch region and keep playing through it —
+while a touched lane's pre-existing clips are left-trimmed and re-stamped by
+`occlude_span`, so they resume at `Q` by construction. Only *touched* lanes
+(takes spec §9.2) are written at all.
 
 Take recording (`register_pending_takes` → `CommittedTakeLane`) paints one
 take clip per lane at `[punch_in, punch_out)` with `offset 0` — replacing
@@ -293,6 +383,19 @@ take clip per lane at `[punch_in, punch_out)` with `offset 0` — replacing
 trim of whatever it overlaps).
 
 ## 10. Serialization v2
+
+**Version 5 → 6 migration (required).** A version-5 file's lane gaps really
+did sound: they played the governing scene's cell. Loading one untouched
+under §6.2 would silently gut the arrangement. So on load of a file at
+version < 6, `migrate_legacy_backdrops` freezes what every gap sounded like
+into real clips (`legacy_backdrop_spans` — the old derivation, kept for
+exactly this) and drops the old explicit-empty clips, whose spans were
+deliberate silence and are now spelled as gaps. The result compiles to the
+same `ProjectSong`, phase offsets included, and saves back as version 6. The
+migration runs in `finish_project_load`, after the pattern pools, scene
+cells, and take pools are rebuilt — it needs the live scenes for the cells
+and the timebases. The deserialize-time structural check looks past
+explicit-empty clips for version < 6, since validation now rejects them.
 
 - `ProjectFile` gains `arrangement: Option<SerializedArrangement>`
   (serde default). The legacy `song` field remains **as a parse-tolerated
@@ -307,12 +410,13 @@ trim of whatever it overlaps).
   to no scene cell errors on save. Takes serialize by stable take id,
   unchanged.
 - On load: build `SerializedSongContext` as today and **validate** the
-  arrangement against it (id domain, take lengths), then **compile against
-  the live `ProjectScenes`**, after `replace_pattern_repository` and the
-  take-pool install have rebuilt the pools. Not against the serialized
-  context: it answers "unknown" for every scene cell and timebase, so
-  compiling there materializes no backdrop phase overrides at all and
-  silently loses scene-backdrop phase continuity.
+  arrangement against it (id domain, take lengths), then migrate if needed
+  and **compile against the live `ProjectScenes`**, after
+  `replace_pattern_repository` and the take-pool install have rebuilt the
+  pools. Not against the serialized context: it answers "unknown" for every
+  scene cell and timebase, so a clip crossing a boundary another lane created
+  would keep its start-of-clip phase instead of the phase it had reached —
+  the music would retrigger mid-cycle.
 - `use_arrangement`, `record_armed`, `scene_cell_presence`, `take_pools`
   fields are untouched.
 
@@ -340,15 +444,11 @@ Direct ports of the row versions, simpler on lanes:
   maps) is retired from the UI; anything still reading it moves to the two
   lane surfaces. The `song-current-row` scalar family stays (it reads the
   compiled song via `state_at_beat`, still meaningful for transport).
-- **Backdrop rendering**: track lanes additionally need the scene-provided
-  content for gaps (today `project_lanes` bakes it in). Expose it as
-  derived ghost spans (per gap: governing scene's cell), rendered dimmer —
-  which the UI already does via the `from-override` tint; the distinction
-  becomes structural instead of a flag. Implemented as **`SEQ.song-backdrops`**:
-  per track, `{start-beat, end-beat, scene, pattern-id, offset-steps}`, one
-  entry per (lane gap ∩ scene span) where the scene has a cell. Ghosts have
-  no stored object, so they carry negative item ids and every gesture on one
-  is a deselect.
+- **No backdrop surface.** Rev 1 published **`SEQ.song-backdrops`** — derived
+  ghost spans per lane gap, rendered dimmer — and it is gone with the model it
+  served (§6.2.1). Track lanes render clips and nothing else; a gap renders as
+  empty lane. With no ghosts there is no dim/bright distinction either: one
+  clip tint.
 - `arrangement.lisp`: scene lane renders `SEQ.scene-spans` (one block per
   actual scene change — the jagged lane is gone without any label
   suppression tricks); `arrangement-scene-row-label`'s dedup hack dies.
@@ -379,8 +479,10 @@ scoped tests per the test-workflow rules.
 4. **Capture + take recording**: event→lane decomposition, splice as clip
    trimming, `register_pending_takes` painting clips.
 5. **UI surfaces**: `SEQ.song-lanes` from stored clips, `SEQ.scene-spans`,
-   backdrop ghost spans, `arrangement.lisp` scene lane + gesture updates,
-   retire `SEQ.song-rows`.
+   `arrangement.lisp` scene lane + gesture updates, retire `SEQ.song-rows`.
+6. **Backdrop removal** (this revision): silent gaps, scene events stamp,
+   explicit-empty overrides for uncovered lanes, v5 → v6 migration, and the
+   ghost-span surface deleted.
 
 Phases 1-2 are purely additive; the app behaves identically. The risky
 diffs are 3 (many tests to port — song_edit's 25, song_region's 22) and 4
@@ -390,11 +492,19 @@ diffs are 3 (many tests to port — song_edit's 25, song_region's 22) and 4
 
 - Rows stay as the compiled playback representation; scheduler/runtime/
   transport code is out of scope for changes.
-- Old projects' arrangements are dropped on load (no migration). The rest
-  of the project (scenes, patterns, takes pools) loads normally.
-- Clip wins over scene while it spans a beat; explicit-empty is a clip.
-- Scene-event delete merges into the predecessor; it can never remove
-  clips.
+- Pre-lane-model (version <= 4) arrangements are dropped on load. Version-5
+  arrangements — written under the backdrop rule — ARE migrated (§10).
+- A span with no clip is silent. There is no fallback of any kind.
+- A clip always has a source; `LaneSource::Empty` survives only as a
+  *compiled override*, never as a stored clip.
+- A scene event stamps clips and decides nothing at playback. Insert, set,
+  and move re-stamp their span; **remove does not** — it deletes the marker
+  and never touches a clip (rev 1's guarantee, kept).
+- Stamped clips free-run against the global clock (§6.2.2), so a scene edit
+  can never shift the rhythm of the patterns below it.
+- `LaneSource::Empty` on a *write* op means silence, and silence is an
+  absence: set-source deletes, the clip-create gesture clears the span, and
+  only the bare `arr_clip_create` primitive errors.
 - No overlapping clips per lane as an *invariant*; every write op
   (create/move/resize/paste/capture) truncates what it lands on,
   Ableton-style — the incoming/edited clip always wins. Nothing rejects on
@@ -406,8 +516,9 @@ diffs are 3 (many tests to port — song_edit's 25, song_region's 22) and 4
 
 ## 15. Open questions
 
-- Does the scene lane need explicit-empty ("no scene") spans, or is scene
-  0-at-beat-0 always live? v1: always a governing scene (matches today).
+- Does the scene lane need explicit-empty ("no scene") spans? Much less
+  pressing now that the scene lane governs nothing — an event is a marker
+  plus a stamp gesture. v1: always a marked scene (matches today).
 - Clip end past `end_beat`: validation currently rejects; the content-
   length handle may want clips to survive a shortened song. v1: reject and
   have `arr_set_end` refuse to shrink past the last clip (UI clamps).
