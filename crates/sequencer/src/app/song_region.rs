@@ -157,6 +157,46 @@ impl App {
         }
     }
 
+    /// One track's lane spans clipped to `[start_beat, end_beat)`, in ABSOLUTE
+    /// beats, as `(start, end, source, offset_at_start)`.
+    ///
+    /// A clip the window cuts into gets its offset ADVANCED to the cut, so the
+    /// span plays the identical slice wherever it is re-stamped — the property
+    /// both copy (region spec 5.1) and the per-track ripple depend on.
+    /// `keep_empty` decides whether silence travels as explicit spans (the
+    /// ripple needs it; the clipboard treats gaps as implicit).
+    fn lane_spans_in(
+        &self,
+        lanes: &[Vec<crate::sequencer::LaneClip>],
+        track: usize,
+        start_beat: f64,
+        end_beat: f64,
+        keep_empty: bool,
+    ) -> Vec<(f64, f64, LaneSource, f64)> {
+        let Some(lane) = lanes.get(track) else {
+            return Vec::new();
+        };
+        lane.iter()
+            .filter_map(|clip| {
+                let span_start = clip.start_beat.max(start_beat);
+                let span_end = clip.end_beat.min(end_beat);
+                if span_end - span_start <= 1e-9 {
+                    return None;
+                }
+                if !keep_empty && matches!(clip.source, LaneSource::Empty) {
+                    return None;
+                }
+                let cut_beats = span_start - clip.start_beat;
+                let offset_steps = if cut_beats <= 1e-9 {
+                    clip.offset_steps
+                } else {
+                    self.advanced_source_offset(track, clip.source, clip.offset_steps, cut_beats)
+                };
+                Some((span_start, span_end, clip.source, offset_steps))
+            })
+            .collect()
+    }
+
     /// Lift the selected region out of the COMMITTED song into a clipboard
     /// (region spec 5.1). Read-only: no mutation, no history entry.
     ///
@@ -181,32 +221,21 @@ impl App {
 
         let mut tracks = Vec::new();
         for track in region.track_a..=region.track_b {
-            let Some(lane) = lanes.get(track) else {
+            if track >= lanes.len() {
                 continue;
-            };
-            let mut spans = Vec::new();
-            for clip in lane {
-                let span_start = clip.start_beat.max(start_beat);
-                let span_end = clip.end_beat.min(end_beat);
-                if span_end - span_start <= 1e-9 || matches!(clip.source, LaneSource::Empty) {
-                    continue;
-                }
-                // A clip cut by the region boundary keeps playing the slice
-                // it played here: its offset advances to the cut point.
-                let cut_beats = span_start - clip.start_beat;
-                let offset_steps = if cut_beats <= 1e-9 {
-                    clip.offset_steps
-                } else {
-                    self.advanced_source_offset(track, clip.source, clip.offset_steps, cut_beats)
-                };
-                spans.push(ClipboardSpan {
+            }
+            // Silent tracks stay in the rectangle (with no spans) so paste
+            // silences them: the clipboard is the whole rectangle.
+            let spans = self
+                .lane_spans_in(&lanes, track, start_beat, end_beat, false)
+                .into_iter()
+                .map(|(span_start, span_end, source, offset_steps)| ClipboardSpan {
                     rel_start: span_start - start_beat,
                     rel_end: span_end - start_beat,
-                    source: clip.source,
+                    source,
                     offset_steps,
-                });
-            }
-            // Silent tracks stay in the rectangle so paste silences them.
+                })
+                .collect();
             tracks.push((track, spans));
         }
         if tracks.is_empty() {
@@ -272,16 +301,28 @@ impl App {
         ))
     }
 
-    /// Duplicate the selected region immediately after itself, RIPPLING the
-    /// rest of the song right by the region's length (Ableton's Duplicate
-    /// Time). One undo entry, and the region selection follows the copy so
-    /// repeated Cmd-D chains.
+    /// Duplicate the selected region immediately after itself, RIPPLING what
+    /// follows right by the region's length (Ableton's Duplicate Time). One
+    /// undo entry, and the selection follows the copy so repeated Cmd-D
+    /// chains.
     ///
-    /// Time is inserted across the WHOLE song, not just the region's tracks:
-    /// the arrangement is one shared timeline, so pushing part of it right
-    /// would desynchronize everything else. Untouched tracks simply carry
-    /// their boundary state through the inserted span; the region's tracks
-    /// get the duplicate, take sources cloned exactly as paste does.
+    /// Only the SELECTED tracks move; every other lane keeps playing at the
+    /// beats it always did. Two mechanisms, same audible contract:
+    ///
+    /// - **Region covers every track** — shift the song ROWS right. The rows
+    ///   are the shared time boundaries, so moving them moves everything at
+    ///   once and the song stays scene-resolved (no override churn). This is
+    ///   the "insert 4 bars into my song" gesture.
+    /// - **Region covers some tracks** — re-paint just those lanes' tails
+    ///   `len` beats later. The rows stay put; untouched lanes split
+    ///   phase-transparently underneath (`split_row_state`) and sound
+    ///   identical. The cost is that a rippled lane's tail becomes explicit
+    ///   overrides, so it stops following its scene cells — unavoidable,
+    ///   since its content no longer lines up with the rows' scenes.
+    ///
+    /// Either way the song grows by `len`; the appended tail is governed by
+    /// whatever each lane was playing at the boundary. Take sources duplicate
+    /// as fresh clones exactly as paste's do.
     pub fn song_region_duplicate(&mut self) -> Result<String, String> {
         self.require_song_edit_unlocked()?;
         let region = self
@@ -293,26 +334,75 @@ impl App {
             return Err("The project has no song".to_string());
         };
         let len_beats = clipboard.len_beats;
-        // The duplicate lands where the region ends; everything from there on
-        // slides right. The region end is already clamped to the song end by
-        // the copy, so this is always inside the song.
+        // The duplicate lands where the region ends; the copy already clamped
+        // that to the song end, so it is always inside the song.
         let insert_beat = region.end_beat.min(existing.end_beat);
+
+        // Whole-timeline shift only when the region really covers everything;
+        // otherwise the untouched lanes must not move.
+        let covers_every_track =
+            region.track_a == 0 && region.track_b + 1 >= self.tracks.len().max(1);
+
+        // Read the rippled lanes' tails BEFORE any mutation. Silence travels
+        // too: a gap that slides right must leave silence behind it, not the
+        // clip it used to sit next to.
+        let tails: Vec<(usize, Vec<(f64, f64, LaneSource, f64)>)> = if covers_every_track {
+            Vec::new()
+        } else {
+            let scenes = self.state.capture_project_scenes();
+            let lanes = project_lanes(&existing, &scenes);
+            clipboard
+                .tracks
+                .iter()
+                .map(|(track, _)| {
+                    (
+                        *track,
+                        self.lane_spans_in(&lanes, *track, insert_beat, existing.end_beat, true),
+                    )
+                })
+                .collect()
+        };
 
         let (scenes_before, cloned_takes) = self.clone_clipboard_takes(&clipboard)?;
         let build = (|| -> Result<crate::sequencer::ProjectSong, String> {
             let mut song = existing.clone();
-            // Split first so the shifted suffix starts on a real row whose
-            // offsets already describe the music at the boundary; the shift
-            // is then phase-rigid (takes spec 7.4) — same content, later.
-            if insert_beat < song.end_beat {
-                self.split_song_row_at(&mut song, insert_beat)?;
-            }
-            for row in &mut song.rows {
-                if row.start_beat >= insert_beat - 1e-9 {
-                    row.start_beat += len_beats;
+            if covers_every_track {
+                // Split first so the shifted suffix starts on a real row whose
+                // offsets already describe the music at the boundary; the
+                // shift is then phase-rigid (takes spec 7.4).
+                if insert_beat < song.end_beat {
+                    self.split_song_row_at(&mut song, insert_beat)?;
+                }
+                for row in &mut song.rows {
+                    if row.start_beat >= insert_beat - 1e-9 {
+                        row.start_beat += len_beats;
+                    }
+                }
+                song.end_beat += len_beats;
+            } else {
+                song.end_beat += len_beats;
+                let track_count = self.tracks.len();
+                for (track, tail) in &tails {
+                    if *track >= track_count {
+                        continue;
+                    }
+                    // Re-stamp each tail span `len` beats later with the
+                    // offset it had at its own start: same music, later.
+                    for (span_start, span_end, source, offset_steps) in tail {
+                        self.paint_source_region(
+                            &mut song,
+                            *track,
+                            span_start + len_beats,
+                            span_end + len_beats,
+                            *source,
+                            span_start + len_beats,
+                            *offset_steps,
+                        )?;
+                    }
                 }
             }
-            song.end_beat += len_beats;
+            // Both paths leave exactly [insert, insert + len) vacated on the
+            // rippled lanes; the duplicate fills it.
             self.paint_clipboard(&mut song, &clipboard, insert_beat, &cloned_takes)?;
             song.normalize();
             self.collapse_phase_continuation_rows(&mut song);
@@ -329,9 +419,14 @@ impl App {
             insert_beat,
             insert_beat + len_beats,
         ));
+        let scope = if covers_every_track {
+            "pushing the song right"
+        } else {
+            "pushing those tracks right"
+        };
         Ok(format!(
-            "Duplicated beats {}-{} to {insert_beat}, pushing the song right",
-            region.start_beat, insert_beat
+            "Duplicated beats {}-{insert_beat} to {insert_beat}, {scope}",
+            region.start_beat
         ))
     }
 
@@ -656,25 +751,25 @@ mod tests {
         StepParam,
     };
 
-    /// Two tracks, three scenes; per-track pool ids are 1..=3 with scene j's
-    /// cell holding `PatternId(j + 1)`. Every pattern is 16 sixteenth steps
-    /// (4 beats) with transpose `track * 10 + pool id`, so a pasted clip's
-    /// provenance is readable from the content.
-    fn two_track_app() -> App {
+    /// `tracks` tracks, three scenes; per-track pool ids are 1..=3 with scene
+    /// j's cell holding `PatternId(j + 1)`. Every pattern is 16 sixteenth
+    /// steps (4 beats) with transpose `track * 10 + pool id`, so a pasted
+    /// clip's provenance is readable from the content.
+    fn multi_track_app(tracks: usize) -> App {
         let state = SequencerState::new(
-            2,
-            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+            tracks,
+            (0..tracks).map(|_| default_empty_effect_chain()).collect(),
         );
         state.replace_pattern_repository(
             vec![
-                PatternSnapshot::new_default(2, &[]),
-                PatternSnapshot::new_default(2, &[]),
-                PatternSnapshot::new_default(2, &[]),
+                PatternSnapshot::new_default(tracks, &[]),
+                PatternSnapshot::new_default(tracks, &[]),
+                PatternSnapshot::new_default(tracks, &[]),
             ],
             0,
         );
         state.with_scenes_mut(|scenes| {
-            for track in 0..2usize {
+            for track in 0..tracks {
                 for id in 1..=3u64 {
                     let data = scenes.track_pools[track]
                         .get_mut(PatternId(id))
@@ -705,16 +800,21 @@ mod tests {
             Arc::new(MasterRecorder::new(44_100, 2)),
             keyboard_tx,
         );
-        app.tracks = vec!["Track 1".to_string(), "Track 2".to_string()];
-        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(2).unwrap();
+        app.tracks = (1..=tracks).map(|n| format!("Track {n}")).collect();
+        app.track_registry =
+            crate::sequencer::TrackRegistry::for_legacy_track_count(tracks).unwrap();
         app
     }
 
-    /// Three-row song over `two_track_app`: 0.0 scene 0, 4.0 scene 1,
-    /// 8.0 scene 2, end 16. Each scene resolves both tracks to its own
-    /// pattern, so every 4-beat span is one clip on each lane.
     fn app_with_song() -> App {
-        let mut app = two_track_app();
+        app_with_song_tracks(2)
+    }
+
+    /// Three-row song: 0.0 scene 0, 4.0 scene 1, 8.0 scene 2, end 16. Each
+    /// scene resolves every track to its own pattern, so every 4-beat span is
+    /// one clip on each lane.
+    fn app_with_song_tracks(tracks: usize) -> App {
+        let mut app = multi_track_app(tracks);
         app.song_replace(
             vec![
                 SongRowSpec {
@@ -1150,6 +1250,60 @@ mod tests {
             );
         }
         assert_eq!(app.state.committed_song().expect("song").end_beat, 16.0);
+    }
+
+    /// A PARTIAL region ripples only its own lanes: the selected tracks slide
+    /// right, every other track keeps playing at the beats it always did.
+    /// The untouched lanes get new row boundaries underneath them (the rows
+    /// are shared), which must be phase-transparent — same music, more rows.
+    #[test]
+    fn duplicate_of_a_partial_region_leaves_the_other_tracks_where_they_were() {
+        let mut app = app_with_song_tracks(3);
+        app.set_song_region(SongRegionSelection::new(0, 1, 4.0, 12.0));
+        let source: Vec<_> = (0..2).map(|track| window(&app, track, 4.0, 12.0)).collect();
+        let pushed: Vec<_> = (0..2).map(|track| window(&app, track, 12.0, 16.0)).collect();
+        let untouched = merged_lane(&app, 2);
+        let before: Vec<_> = (0..3).map(|track| merged_lane(&app, track)).collect();
+        let depth = app.history.undo_len();
+
+        app.song_region_duplicate().expect("duplicate succeeds");
+        assert_eq!(app.history.undo_len(), depth + 1, "exactly one undo entry");
+        assert_eq!(
+            app.state.committed_song().expect("song").end_beat,
+            24.0,
+            "the song still grows to hold the rippled tails"
+        );
+
+        for track in 0..2 {
+            assert_eq!(window(&app, track, 4.0, 12.0), source[track], "original kept");
+            assert_eq!(
+                window(&app, track, 12.0, 20.0),
+                source[track],
+                "track {track} gets the duplicate"
+            );
+            assert_eq!(
+                window(&app, track, 20.0, 24.0),
+                pushed[track],
+                "track {track}'s tail moved right unchanged"
+            );
+        }
+
+        // The whole point: track 2 is untouched over the time it already
+        // occupied. It only gains the newly created tail, governed by what it
+        // was already playing there.
+        assert_eq!(
+            window(&app, 2, 0.0, 16.0),
+            untouched
+                .iter()
+                .map(|(start, end, source, offset)| (*start, *end, *source, *offset))
+                .collect::<Vec<_>>(),
+            "the unselected track plays exactly what it did, at the same beats"
+        );
+
+        undo(&mut app);
+        for track in 0..3 {
+            assert_eq!(merged_lane(&app, track), before[track], "undo restores track {track}");
+        }
     }
 
     /// Duplicate is a copy, so take sources clone exactly as paste's do — the
