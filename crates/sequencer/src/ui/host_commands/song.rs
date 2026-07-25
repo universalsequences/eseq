@@ -6,17 +6,29 @@
 
 use crate::*;
 
-use sequencer::sequencer::{ProjectSongTrackOverride, SongRowId};
+use sequencer::sequencer::{
+    ClipId, LaneSource, PatternId, ProjectSongTrackOverride, SongRowId, TakeId,
+};
 use sequencer::app::song_edit::SongRowSpec;
 
 pub(super) const COMMANDS: &[&str] = &[
-    "song-row-insert",
-    "song-row-remove",
-    "song-row-move",
-    "song-row-set-state",
-    "song-track-paint",
+    // Arrangement editing primitives (lane spec 8). Scene-lane ops address
+    // scene changes by beat; clip ops address a clip by id, or by the
+    // (track, beat) a timeline gesture drew on.
+    "arrangement-scene-insert",
+    "arrangement-scene-move",
+    "arrangement-scene-set",
+    "arrangement-scene-remove",
+    "arrangement-clip-create",
+    "arrangement-clip-delete",
+    "arrangement-clip-move",
+    "arrangement-clip-resize",
+    "arrangement-clip-split",
+    "arrangement-clip-set-source",
     "song-set-end",
     "song-set-loop",
+    // Row path: the declarative/capture commit surface only (lane spec 9 —
+    // capture still stages rows).
     "song-replace",
     "song-clear",
     // Declarative authoring: `def-song` lowers to the arrangement (lane
@@ -186,6 +198,52 @@ fn override_from_numbers(
     })
 }
 
+fn require_track(map: &HashMap<String, Rc<RefCell<Value>>>) -> Result<usize, String> {
+    let track = require_number(map, "track")?;
+    if !track.is_finite() || track < 0.0 || track.fract() != 0.0 {
+        return Err("track must be a non-negative integer".to_string());
+    }
+    Ok(track as usize)
+}
+
+/// A clip source from `{pattern-id, take-id}`: a positive pool id, a take id,
+/// or nil/0/absent for an explicit-empty clip (deliberate silence that still
+/// occludes the scene backdrop, lane spec 6.2).
+fn parse_source(map: &HashMap<String, Rc<RefCell<Value>>>) -> Result<LaneSource, String> {
+    if let Some(take_id) = map_number(map, "take-id") {
+        if !take_id.is_finite() || take_id < 0.0 || take_id.fract() != 0.0 {
+            return Err("take-id must be a non-negative integer".to_string());
+        }
+        return Ok(LaneSource::Take(TakeId(take_id as u64)));
+    }
+    match map.get("pattern-id").map(|cell| cell.borrow().clone()) {
+        None | Some(Value::Nil) => Ok(LaneSource::Empty),
+        Some(Value::Number(id)) if id == 0.0 => Ok(LaneSource::Empty),
+        Some(Value::Number(id)) if id.is_finite() && id >= 1.0 && id.fract() == 0.0 => {
+            Ok(LaneSource::Pattern(PatternId(id as u64)))
+        }
+        _ => Err("pattern-id must be a positive integer, or 0/nil for silence".to_string()),
+    }
+}
+
+/// Address a clip by stable id (`:clip-id`) or, for a timeline gesture that
+/// only knows where it drew, by `(:track, :at-beat[, :at-end])`.
+fn resolve_clip(
+    map: &HashMap<String, Rc<RefCell<Value>>>,
+    app: &app::App,
+) -> Result<ClipId, String> {
+    if let Some(clip_id) = map_number(map, "clip-id") {
+        if !clip_id.is_finite() || clip_id < 0.0 || clip_id.fract() != 0.0 {
+            return Err("clip-id must be a non-negative integer".to_string());
+        }
+        return Ok(ClipId(clip_id as u64));
+    }
+    let track = require_track(map)?;
+    let at_beat = require_number(map, "at-beat")?;
+    let at_end = map_number(map, "at-end").unwrap_or(at_beat);
+    app.arrangement_clip_at(track, at_beat, at_end.max(at_beat))
+}
+
 fn parse_overrides(
     map: &HashMap<String, Rc<RefCell<Value>>>,
 ) -> Result<Vec<ProjectSongTrackOverride>, String> {
@@ -228,100 +286,105 @@ fn parse_rows(map: &HashMap<String, Rc<RefCell<Value>>>) -> Result<Vec<SongRowSp
 
 fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String> {
     match name {
-        "song-row-insert" => {
+        // --- scene lane (lane spec 8) --------------------------------
+        "arrangement-scene-insert" => {
             let map = payload_map(payload)?;
-            let start_beat = require_number(map, "start-beat")?;
+            let beat = require_number(map, "beat")?;
             let scene = require_scene(map)?;
-            let overrides = parse_overrides(map)?;
-            let outcome = app.song_row_insert(start_beat, scene, overrides)?;
-            Ok(match outcome.created_with_end_beat {
-                Some(end_beat) => format!(
-                    "Created song: row {} at beat {start_beat} (default end beat {end_beat}; \
-                     adjust with song-set-end)",
-                    outcome.row_id.0
-                ),
-                None => format!("Inserted song row {} at beat {start_beat}", outcome.row_id.0),
-            })
+            app.arr_scene_event_insert(beat, scene)?;
+            Ok(format!(
+                "Inserted scene {} at beat {beat}",
+                scene + 1
+            ))
         }
-        "song-row-remove" => {
+        "arrangement-scene-move" => {
             let map = payload_map(payload)?;
-            let row_id = require_row_id(map)?;
-            app.song_row_remove(row_id)?;
-            Ok(format!("Removed song row {}", row_id.0))
+            let from_beat = require_number(map, "from-beat")?;
+            let to_beat = require_number(map, "to-beat")?;
+            app.arr_scene_event_move(from_beat, to_beat)?;
+            Ok(format!("Moved the scene change to beat {to_beat}"))
         }
-        "song-row-move" => {
+        "arrangement-scene-set" => {
             let map = payload_map(payload)?;
-            let row_id = require_row_id(map)?;
-            let start_beat = require_number(map, "start-beat")?;
-            app.song_row_move(row_id, start_beat)?;
-            Ok(format!("Moved song row {} to beat {start_beat}", row_id.0))
-        }
-        "song-row-set-state" => {
-            let map = payload_map(payload)?;
-            let row_id = require_row_id(map)?;
+            let beat = require_number(map, "beat")?;
             let scene = require_scene(map)?;
-            let overrides = parse_overrides(map)?;
-            app.song_row_set_state(row_id, scene, overrides)?;
-            Ok(format!("Set song row {} state", row_id.0))
+            app.arr_scene_event_set(beat, scene)?;
+            Ok(format!(
+                "Set the scene change at beat {beat} to scene {}",
+                scene + 1
+            ))
         }
-        "song-track-paint" => {
+        "arrangement-scene-remove" => {
             let map = payload_map(payload)?;
-            let track = require_number(map, "track")?;
-            if !track.is_finite() || track < 0.0 || track.fract() != 0.0 {
-                return Err("track must be a non-negative integer".to_string());
-            }
+            let beat = require_number(map, "beat")?;
+            app.arr_scene_event_remove(beat)?;
+            Ok(format!("Removed the scene change at beat {beat}"))
+        }
+        // --- track lanes (lane spec 8) -------------------------------
+        "arrangement-clip-create" => {
+            let map = payload_map(payload)?;
+            let track = require_track(map)?;
             let start_beat = require_number(map, "start-beat")?;
             let end_beat = require_number(map, "end-beat")?;
-            // pattern-id nil/absent/0 = explicit-empty (silence the track).
-            let pattern_id = match map.get("pattern-id").map(|cell| cell.borrow().clone()) {
-                None | Some(Value::Nil) => None,
-                Some(Value::Number(id)) if id == 0.0 => None,
-                Some(Value::Number(id))
-                    if id.is_finite() && id >= 1.0 && id.fract() == 0.0 =>
-                {
-                    Some(id as u64)
-                }
-                _ => {
-                    return Err(
-                        "pattern-id must be a positive integer, or 0/nil for silence"
-                            .to_string(),
-                    )
-                }
-            };
-            // Optional clip anchor (takes spec 7.4): the grow gesture passes
-            // the existing clip's anchor so the extension continues the loop
-            // instead of re-starting it at the paint start.
-            let anchor_beat = map_number(map, "anchor-beat").unwrap_or(start_beat);
-            let anchor_offset_steps = map_number(map, "anchor-offset-steps").unwrap_or(0.0);
-            app.song_track_paint_anchored(
-                track as usize,
-                start_beat,
-                end_beat,
-                pattern_id,
-                anchor_beat,
-                anchor_offset_steps,
-            )?;
-            Ok(match pattern_id {
-                Some(id) => format!(
-                    "Painted pattern {id} on track {} over beats {start_beat}-{end_beat}",
-                    track as usize + 1
-                ),
-                None => format!(
-                    "Silenced track {} over beats {start_beat}-{end_beat}",
-                    track as usize + 1
-                ),
-            })
+            let source = parse_source(map)?;
+            let offset_steps = map_number(map, "offset-steps").unwrap_or(0.0);
+            app.arr_clip_create(track, start_beat, end_beat, source, offset_steps)?;
+            Ok(format!(
+                "Created a clip on track {} over beats {start_beat}-{end_beat}",
+                track + 1
+            ))
+        }
+        "arrangement-clip-delete" => {
+            let map = payload_map(payload)?;
+            let clip_id = resolve_clip(map, app)?;
+            app.arr_clip_delete(clip_id)?;
+            Ok(format!("Deleted clip {}", clip_id.0))
+        }
+        "arrangement-clip-move" => {
+            let map = payload_map(payload)?;
+            let clip_id = resolve_clip(map, app)?;
+            let start_beat = require_number(map, "start-beat")?;
+            app.arr_clip_move(clip_id, start_beat)?;
+            Ok(format!("Moved clip {} to beat {start_beat}", clip_id.0))
+        }
+        "arrangement-clip-resize" => {
+            let map = payload_map(payload)?;
+            let clip_id = resolve_clip(map, app)?;
+            let start_beat = require_number(map, "start-beat")?;
+            let end_beat = require_number(map, "end-beat")?;
+            app.arr_clip_resize(clip_id, start_beat, end_beat)?;
+            Ok(format!(
+                "Resized clip {} to beats {start_beat}-{end_beat}",
+                clip_id.0
+            ))
+        }
+        "arrangement-clip-split" => {
+            let map = payload_map(payload)?;
+            let clip_id = resolve_clip(map, app)?;
+            let beat = require_number(map, "beat")?;
+            let right = app.arr_clip_split(clip_id, beat)?;
+            Ok(format!(
+                "Split clip {} at beat {beat} (new clip {})",
+                clip_id.0, right.0
+            ))
+        }
+        "arrangement-clip-set-source" => {
+            let map = payload_map(payload)?;
+            let clip_id = resolve_clip(map, app)?;
+            let source = parse_source(map)?;
+            app.arr_clip_set_source(clip_id, source)?;
+            Ok(format!("Set clip {} source", clip_id.0))
         }
         "song-set-end" => {
             let map = payload_map(payload)?;
             let end_beat = require_number(map, "end-beat")?;
-            app.song_set_end(end_beat)?;
+            app.arr_set_end(end_beat)?;
             Ok(format!("Set song end to beat {end_beat}"))
         }
         "song-set-loop" => {
             let map = payload_map(payload)?;
             let enabled = map_bool(map, "enabled");
-            app.song_set_loop(enabled)?;
+            app.arr_set_loop(enabled)?;
             Ok(format!(
                 "Song loop {}",
                 if enabled { "enabled" } else { "disabled" }

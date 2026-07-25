@@ -1,11 +1,19 @@
 //! Arrangement-timeline gesture translation
 //! (docs/arrangement-timeline-ui-spec.md 9): the one seam that lowers a
-//! finished scene-lane gesture into song-mode editing primitives. Live drag
-//! actions never reach this module — the Lisp view keeps them as ghost
-//! preview state and forwards only the terminal action, augmented with the
-//! ghost's final values. Each returned command is one validated, atomic,
-//! one-undo-entry song primitive (song-mode-spec 5.6); this module never
-//! mutates anything itself.
+//! finished timeline gesture into arrangement editing primitives
+//! (docs/arrangement-lane-model-spec.md 8). Live drag actions never reach
+//! this module — the Lisp view keeps them as ghost preview state and forwards
+//! only the terminal action, augmented with the ghost's final values. Each
+//! returned command is one validated, atomic, one-undo-entry primitive; this
+//! module never mutates anything itself.
+//!
+//! Gestures address the model the way the read surface lets them. Until
+//! `SEQ.song-lanes` publishes stored clip ids (lane spec 12, phase 5) the
+//! view still speaks compiled ROW ids for the scene lane and merged clip
+//! SPANS for the track lanes, so this module translates both into the
+//! beat-addressed primitives: a row id becomes its start beat, and a clip
+//! span becomes `(:track, :at-beat, :at-end)`, which the host command
+//! resolves through `App::arrangement_clip_at`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -13,7 +21,7 @@ use std::rc::Rc;
 
 use eseqlisp::vm::Value;
 
-use sequencer::sequencer::{ProjectSong, SongRowId};
+use sequencer::sequencer::{ProjectArrangement, ProjectSong, SongRowId};
 
 /// One song host command to enqueue: `(name, payload)`.
 pub(crate) type SongCommand = (&'static str, Value);
@@ -80,57 +88,73 @@ fn payload(fields: Vec<(&str, Value)>) -> Value {
     )
 }
 
-/// The row after `row_id` in start-beat order: `Ok(Some)` when a next row
-/// exists, `Ok(None)` when `row_id` is the last row, `Err` when the id is
-/// not in the song at all (a stale gesture must not silently edit the end).
-fn next_row_id(song: &ProjectSong, row_id: u64) -> Result<Option<SongRowId>, String> {
-    let index = song
-        .rows
+/// The start beat of the compiled row a scene-lane gesture named. `Err` when
+/// the id is not in the song at all — a stale gesture must never silently
+/// edit a different part of the timeline.
+fn row_start_beat(song: &ProjectSong, row_id: u64) -> Result<f64, String> {
+    song.rows
         .iter()
-        .position(|row| row.id == SongRowId(row_id))
-        .ok_or_else(|| format!("song has no row with id {row_id}"))?;
-    Ok(song.rows.get(index + 1).map(|row| row.id))
+        .find(|row| row.id == SongRowId(row_id))
+        .map(|row| row.start_beat)
+        .ok_or_else(|| format!("song has no row with id {row_id}"))
 }
 
-/// Lower one finished arrangement gesture into song primitive commands.
-/// Every gesture maps to exactly one primitive (spec 9.1) except
-/// `:delete-items`, which removes one row per selected id — each removal is
-/// its own primitive and undo entry. Returns `Ok(vec![])` for view-only
-/// actions this module does not own.
+/// The scene change immediately after `beat`, or `None` when `beat` sits in
+/// the last scene span (whose end is the arrangement end).
+fn next_scene_event_beat(arrangement: &ProjectArrangement, beat: f64) -> Option<f64> {
+    arrangement
+        .scene_lane
+        .iter()
+        .find(|event| event.start_beat > beat)
+        .map(|event| event.start_beat)
+}
+
+/// Lower one finished arrangement gesture into arrangement primitive
+/// commands. Every gesture maps to exactly one primitive (spec 9.1) except
+/// `:delete-items`, which removes one scene change per selected id — each
+/// removal is its own primitive and undo entry. Returns `Ok(vec![])` for
+/// view-only actions this module does not own.
 pub(crate) fn arrangement_action_song_commands(
     action: &Value,
     song: Option<&ProjectSong>,
+    arrangement: Option<&ProjectArrangement>,
 ) -> Result<Vec<SongCommand>, String> {
     let map = action_map(action)?;
     let Some(kind) = action_type(map) else {
         return Err("action is missing :type".to_string());
     };
     match kind.as_str() {
-        // Span drag: the ghost's final start moves the row itself.
+        // Scene-lane span drag: the ghost's final start moves the scene
+        // change the dragged row starts on.
         "finish-move-items" => {
             let row_id = require_row_id(map, "row-id")?;
             let start_beat = require_beat(map, "start")?;
+            let song = song.ok_or_else(|| "no committed song".to_string())?;
+            let from_beat = row_start_beat(song, row_id)?;
             Ok(vec![(
-                "song-row-move",
+                "arrangement-scene-move",
                 payload(vec![
-                    ("row-id", Value::Number(row_id as f64)),
-                    ("start-beat", Value::Number(start_beat)),
+                    ("from-beat", Value::Number(from_beat)),
+                    ("to-beat", Value::Number(start_beat)),
                 ]),
             )])
         }
-        // End-edge resize: a span ends where the NEXT row starts, so the
-        // gesture moves that row (spec 9.1); resizing the last row's end
-        // edge edits the song end instead.
+        // Scene-lane end-edge resize: a scene span ends where the NEXT scene
+        // change starts, so the gesture moves that change; resizing the last
+        // span's end edge edits the song end instead. (Track CLIPS have real
+        // ends now and resize themselves — lane spec 12.)
         "finish-resize-items" => {
             let row_id = require_row_id(map, "row-id")?;
             let end_beat = require_beat(map, "end")?;
             let song = song.ok_or_else(|| "no committed song".to_string())?;
-            match next_row_id(song, row_id)? {
+            let arrangement = arrangement.ok_or_else(|| "no arrangement".to_string())?;
+            let from_beat = row_start_beat(song, row_id)?;
+            match next_scene_event_beat(arrangement, from_beat) {
                 Some(next) => Ok(vec![(
-                    "song-row-move",
+                    "arrangement-scene-move",
                     payload(vec![
-                        ("row-id", Value::Number(next.0 as f64)),
-                        ("start-beat", Value::Number(end_beat)),
+                        ("from-beat", Value::Number(next)),
+                        ("to-beat", Value::Number(end_beat)),
                     ]),
                 )]),
                 None => Ok(vec![(
@@ -139,10 +163,10 @@ pub(crate) fn arrangement_action_song_commands(
                 )]),
             }
         }
-        // Create (double-click draw or scene drop): insert a row launching
-        // the chosen scene. A create beyond the committed song end first
-        // extends the end to the gesture's :end (DAW convention: dropping
-        // past the end grows the arrangement) — that gesture is two
+        // Create (double-click draw or scene drop): insert a scene change
+        // launching the chosen scene. A create beyond the committed song end
+        // first extends the end to the gesture's :end (DAW convention:
+        // dropping past the end grows the arrangement) — that gesture is two
         // primitives and therefore two undo entries.
         "finish-create-item" => {
             let start_beat = require_beat(map, "start")?;
@@ -167,27 +191,29 @@ pub(crate) fn arrangement_action_song_commands(
                 }
             }
             commands.push((
-                "song-row-insert",
+                "arrangement-scene-insert",
                 payload(vec![
-                    ("start-beat", Value::Number(start_beat)),
+                    ("beat", Value::Number(start_beat)),
                     ("scene", Value::Number(scene)),
-                    ("overrides", Value::List(vec![])),
                 ]),
             ));
             Ok(commands)
         }
-        // Erase / delete: one removal primitive (and one undo entry) per id.
+        // Scene-lane erase / delete: one removal primitive (and one undo
+        // entry) per id. Removing a scene change merges its span into the
+        // predecessor and can never touch a clip (lane spec 8).
         "delete-items" => {
             let Some(Value::List(ids)) = map_field(map, "ids") else {
                 return Err("delete-items is missing :ids".to_string());
             };
+            let song = song.ok_or_else(|| "no committed song".to_string())?;
             ids.iter()
                 .map(|id| {
                     let id = match &*id.borrow() {
                         Value::Number(value)
                             if value.is_finite() && *value >= 0.0 && value.fract() == 0.0 =>
                         {
-                            *value
+                            *value as u64
                         }
                         other => {
                             return Err(format!(
@@ -195,53 +221,64 @@ pub(crate) fn arrangement_action_song_commands(
                             ));
                         }
                     };
+                    let beat = row_start_beat(song, id)?;
                     Ok((
-                        "song-row-remove",
-                        payload(vec![("row-id", Value::Number(id))]),
+                        "arrangement-scene-remove",
+                        payload(vec![("beat", Value::Number(beat))]),
                     ))
                 })
                 .collect()
         }
-        // Track-clip surgery (delete / edge-resize on a track lane): one
-        // atomic song-track-paint primitive per gesture. :pattern-id nil (or
-        // absent) silences the region; a pool id paints it.
-        "track-paint" => {
+        // Track-lane clip edge drag: ONE clip resize (lane spec 12 — no more
+        // "resize = move the next row"). The gesture carries the span it drew
+        // on so the host command can resolve the clip it names.
+        "clip-resize" => {
             let track = require_row_id(map, "track")?;
+            let at_beat = require_beat(map, "at-beat")?;
+            let at_end = require_beat(map, "at-end")?;
             let start_beat = require_beat(map, "start")?;
             let end_beat = require_beat(map, "end")?;
-            let pattern_id = match map_field(map, "pattern-id") {
-                None | Some(Value::Nil) => Value::Nil,
-                Some(Value::Number(id))
-                    if id.is_finite() && id >= 1.0 && id.fract() == 0.0 =>
-                {
-                    Value::Number(id)
-                }
-                other => {
-                    return Err(format!(
-                        "track-paint :pattern-id must be a pool id or nil, got {other:?}"
-                    ));
-                }
-            };
-            let mut fields = vec![
-                ("track", Value::Number(track as f64)),
-                ("start-beat", Value::Number(start_beat)),
-                ("end-beat", Value::Number(end_beat)),
-                ("pattern-id", pattern_id),
-            ];
-            // Optional clip anchor (takes spec 7.4): the grow gesture
-            // forwards the existing clip's anchor so the extension
-            // continues the loop instead of re-anchoring at the paint start.
-            if let Some(Value::Number(anchor)) = map_field(map, "anchor-beat") {
-                if anchor.is_finite() {
-                    fields.push(("anchor-beat", Value::Number(anchor)));
-                }
-            }
-            if let Some(Value::Number(offset)) = map_field(map, "anchor-offset-steps") {
-                if offset.is_finite() && offset >= 0.0 {
-                    fields.push(("anchor-offset-steps", Value::Number(offset)));
-                }
-            }
-            Ok(vec![("song-track-paint", payload(fields))])
+            Ok(vec![(
+                "arrangement-clip-resize",
+                payload(vec![
+                    ("track", Value::Number(track as f64)),
+                    ("at-beat", Value::Number(at_beat)),
+                    ("at-end", Value::Number(at_end)),
+                    ("start-beat", Value::Number(start_beat)),
+                    ("end-beat", Value::Number(end_beat)),
+                ]),
+            )])
+        }
+        // Track-lane whole-clip drag: one rigid clip move (takes spec 7.4).
+        "clip-move" => {
+            let track = require_row_id(map, "track")?;
+            let at_beat = require_beat(map, "at-beat")?;
+            let at_end = require_beat(map, "at-end")?;
+            let start_beat = require_beat(map, "start")?;
+            Ok(vec![(
+                "arrangement-clip-move",
+                payload(vec![
+                    ("track", Value::Number(track as f64)),
+                    ("at-beat", Value::Number(at_beat)),
+                    ("at-end", Value::Number(at_end)),
+                    ("start-beat", Value::Number(start_beat)),
+                ]),
+            )])
+        }
+        // Track-lane Backspace: one clip delete. The lane rejoins the scene
+        // backdrop over the deleted span (lane spec 6.2).
+        "clip-delete" => {
+            let track = require_row_id(map, "track")?;
+            let at_beat = require_beat(map, "at-beat")?;
+            let at_end = require_beat(map, "at-end")?;
+            Ok(vec![(
+                "arrangement-clip-delete",
+                payload(vec![
+                    ("track", Value::Number(track as f64)),
+                    ("at-beat", Value::Number(at_beat)),
+                    ("at-end", Value::Number(at_end)),
+                ]),
+            )])
         }
         // Content-length handle release: one song-set-end (spec 9.3).
         "finish-resize-content-length" => {
@@ -259,7 +296,7 @@ pub(crate) fn arrangement_action_song_commands(
 mod tests {
     use super::*;
 
-    use sequencer::sequencer::ProjectSongRow;
+    use sequencer::sequencer::{ArrClip, ClipId, ProjectSongRow, SceneEvent};
 
     fn value_map(fields: Vec<(&str, Value)>) -> Value {
         payload(fields)
@@ -269,6 +306,9 @@ mod tests {
         Value::List(items.into_iter().map(|item| Rc::new(RefCell::new(item))).collect())
     }
 
+    /// The compiled song the scene-lane gestures address: three scene events
+    /// at beats 0/16/32, end 48. Row ids are deliberately NOT positional so a
+    /// translation that confused an id with an index would be caught.
     fn song() -> ProjectSong {
         let row = |id: u64, start_beat: f64, scene: usize| ProjectSongRow {
             id: SongRowId(id),
@@ -284,6 +324,26 @@ mod tests {
         }
     }
 
+    /// The arrangement that song compiles from, plus one clip so the clip
+    /// gestures have something to name.
+    fn arrangement() -> ProjectArrangement {
+        ProjectArrangement {
+            scene_lane: vec![
+                SceneEvent { start_beat: 0.0, scene: 0 },
+                SceneEvent { start_beat: 16.0, scene: 1 },
+                SceneEvent { start_beat: 32.0, scene: 2 },
+            ],
+            track_lanes: vec![vec![ArrClip::new(ClipId(0), 4.0, 12.0, Some(2))], Vec::new()],
+            end_beat: 48.0,
+            loop_enabled: false,
+            next_clip_id: 1,
+        }
+    }
+
+    fn lower(action: &Value) -> Result<Vec<SongCommand>, String> {
+        arrangement_action_song_commands(action, Some(&song()), Some(&arrangement()))
+    }
+
     fn payload_number(command: &SongCommand, key: &str) -> f64 {
         let Value::Map(map) = &command.1 else {
             panic!("payload must be a map");
@@ -294,59 +354,64 @@ mod tests {
         }
     }
 
+    /// Scene-lane move: the dragged row names the scene change by its start
+    /// beat, which is how the beat-addressed primitive takes it.
     #[test]
-    fn move_gesture_lowers_to_one_row_move() {
+    fn move_gesture_lowers_to_one_scene_move() {
         let action = value_map(vec![
             ("type", Value::Keyword("finish-move-items".to_string())),
             ("row-id", Value::Number(3.0)),
             ("start", Value::Number(12.5)),
         ]);
-        let commands = arrangement_action_song_commands(&action, Some(&song())).unwrap();
+        let commands = lower(&action).unwrap();
         assert_eq!(commands.len(), 1, "one gesture -> one primitive -> one undo entry");
-        assert_eq!(commands[0].0, "song-row-move");
-        assert_eq!(payload_number(&commands[0], "row-id"), 3.0);
-        assert_eq!(payload_number(&commands[0], "start-beat"), 12.5);
+        assert_eq!(commands[0].0, "arrangement-scene-move");
+        assert_eq!(payload_number(&commands[0], "from-beat"), 16.0);
+        assert_eq!(payload_number(&commands[0], "to-beat"), 12.5);
     }
 
+    /// A scene span ends where the NEXT scene change starts, so its end-edge
+    /// drag moves that change. (Track clips resize themselves now — see
+    /// `clip_resize_lowers_to_one_clip_resize`.)
     #[test]
-    fn resize_gesture_moves_the_next_row() {
+    fn scene_resize_gesture_moves_the_next_scene_change() {
         let action = value_map(vec![
             ("type", Value::Keyword("finish-resize-items".to_string())),
             ("row-id", Value::Number(7.0)),
             ("end", Value::Number(20.0)),
         ]);
-        let commands = arrangement_action_song_commands(&action, Some(&song())).unwrap();
+        let commands = lower(&action).unwrap();
         assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].0, "song-row-move");
-        // Row 7 is first in start order; the row after it is id 3.
-        assert_eq!(payload_number(&commands[0], "row-id"), 3.0);
-        assert_eq!(payload_number(&commands[0], "start-beat"), 20.0);
+        assert_eq!(commands[0].0, "arrangement-scene-move");
+        // Row 7 starts at beat 0; the next scene change is the one at 16.
+        assert_eq!(payload_number(&commands[0], "from-beat"), 16.0);
+        assert_eq!(payload_number(&commands[0], "to-beat"), 20.0);
     }
 
     #[test]
-    fn resizing_the_last_row_edits_the_song_end() {
+    fn resizing_the_last_scene_span_edits_the_song_end() {
         let action = value_map(vec![
             ("type", Value::Keyword("finish-resize-items".to_string())),
             ("row-id", Value::Number(9.0)),
             ("end", Value::Number(40.0)),
         ]);
-        let commands = arrangement_action_song_commands(&action, Some(&song())).unwrap();
+        let commands = lower(&action).unwrap();
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].0, "song-set-end");
         assert_eq!(payload_number(&commands[0], "end-beat"), 40.0);
     }
 
     #[test]
-    fn draw_gesture_inserts_a_row_for_the_chosen_scene() {
+    fn draw_gesture_inserts_a_scene_change_for_the_chosen_scene() {
         let action = value_map(vec![
             ("type", Value::Keyword("finish-create-item".to_string())),
             ("start", Value::Number(24.0)),
             ("scene", Value::Number(2.0)),
         ]);
-        let commands = arrangement_action_song_commands(&action, Some(&song())).unwrap();
+        let commands = lower(&action).unwrap();
         assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].0, "song-row-insert");
-        assert_eq!(payload_number(&commands[0], "start-beat"), 24.0);
+        assert_eq!(commands[0].0, "arrangement-scene-insert");
+        assert_eq!(payload_number(&commands[0], "beat"), 24.0);
         assert_eq!(payload_number(&commands[0], "scene"), 2.0);
     }
 
@@ -359,12 +424,12 @@ mod tests {
             ("end", Value::Number(80.0)),
             ("scene", Value::Number(1.0)),
         ]);
-        let commands = arrangement_action_song_commands(&action, Some(&song())).unwrap();
+        let commands = lower(&action).unwrap();
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0].0, "song-set-end");
         assert_eq!(payload_number(&commands[0], "end-beat"), 80.0);
-        assert_eq!(commands[1].0, "song-row-insert");
-        assert_eq!(payload_number(&commands[1], "start-beat"), 64.0);
+        assert_eq!(commands[1].0, "arrangement-scene-insert");
+        assert_eq!(payload_number(&commands[1], "beat"), 64.0);
 
         // Beyond the end without an :end to extend to is an error, never a
         // silently-rejected insert.
@@ -373,23 +438,23 @@ mod tests {
             ("start", Value::Number(64.0)),
             ("scene", Value::Number(1.0)),
         ]);
-        assert!(arrangement_action_song_commands(&action, Some(&song())).is_err());
+        assert!(lower(&action).is_err());
 
-        // With no committed song the insert itself creates one (default
-        // end); no extension command is prepended.
+        // With no committed song at all the insert stands alone; the
+        // primitive itself reports there is nothing to insert into.
         let action = value_map(vec![
             ("type", Value::Keyword("finish-create-item".to_string())),
             ("start", Value::Number(0.0)),
             ("end", Value::Number(16.0)),
             ("scene", Value::Number(0.0)),
         ]);
-        let commands = arrangement_action_song_commands(&action, None).unwrap();
+        let commands = arrangement_action_song_commands(&action, None, None).unwrap();
         assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].0, "song-row-insert");
+        assert_eq!(commands[0].0, "arrangement-scene-insert");
     }
 
     #[test]
-    fn delete_lowers_to_one_removal_per_id() {
+    fn delete_lowers_to_one_scene_removal_per_id() {
         let action = value_map(vec![
             ("type", Value::Keyword("delete-items".to_string())),
             (
@@ -397,53 +462,62 @@ mod tests {
                 value_list(vec![Value::Number(3.0), Value::Number(9.0)]),
             ),
         ]);
-        let commands = arrangement_action_song_commands(&action, Some(&song())).unwrap();
+        let commands = lower(&action).unwrap();
         assert_eq!(commands.len(), 2);
-        assert!(commands.iter().all(|command| command.0 == "song-row-remove"));
-        assert_eq!(payload_number(&commands[0], "row-id"), 3.0);
-        assert_eq!(payload_number(&commands[1], "row-id"), 9.0);
+        assert!(commands
+            .iter()
+            .all(|command| command.0 == "arrangement-scene-remove"));
+        assert_eq!(payload_number(&commands[0], "beat"), 16.0);
+        assert_eq!(payload_number(&commands[1], "beat"), 32.0);
+    }
+
+    /// Lane spec 12: a clip edge drag is ONE clip resize, carrying the span
+    /// the view drew on so the host command can resolve the stored clip.
+    #[test]
+    fn clip_resize_lowers_to_one_clip_resize() {
+        let action = value_map(vec![
+            ("type", Value::Keyword("clip-resize".to_string())),
+            ("track", Value::Number(0.0)),
+            ("at-beat", Value::Number(4.0)),
+            ("at-end", Value::Number(12.0)),
+            ("start", Value::Number(4.0)),
+            ("end", Value::Number(20.0)),
+        ]);
+        let commands = lower(&action).unwrap();
+        assert_eq!(commands.len(), 1, "one gesture -> one primitive");
+        assert_eq!(commands[0].0, "arrangement-clip-resize");
+        assert_eq!(payload_number(&commands[0], "track"), 0.0);
+        assert_eq!(payload_number(&commands[0], "at-beat"), 4.0);
+        assert_eq!(payload_number(&commands[0], "at-end"), 12.0);
+        assert_eq!(payload_number(&commands[0], "start-beat"), 4.0);
+        assert_eq!(payload_number(&commands[0], "end-beat"), 20.0);
     }
 
     #[test]
-    fn track_paint_lowers_to_one_song_track_paint() {
-        // Silence (delete / shrink): nil pattern-id.
+    fn clip_delete_and_move_lower_to_one_primitive_each() {
         let action = value_map(vec![
-            ("type", Value::Keyword("track-paint".to_string())),
-            ("track", Value::Number(2.0)),
-            ("start", Value::Number(8.0)),
-            ("end", Value::Number(16.0)),
-            ("pattern-id", Value::Nil),
+            ("type", Value::Keyword("clip-delete".to_string())),
+            ("track", Value::Number(1.0)),
+            ("at-beat", Value::Number(8.0)),
+            ("at-end", Value::Number(16.0)),
         ]);
-        let commands = arrangement_action_song_commands(&action, Some(&song())).unwrap();
-        assert_eq!(commands.len(), 1, "one gesture -> one primitive");
-        assert_eq!(commands[0].0, "song-track-paint");
-        assert_eq!(payload_number(&commands[0], "track"), 2.0);
-        assert_eq!(payload_number(&commands[0], "start-beat"), 8.0);
-        assert_eq!(payload_number(&commands[0], "end-beat"), 16.0);
-        let Value::Map(map) = &commands[0].1 else { panic!() };
-        assert!(matches!(&*map["pattern-id"].borrow(), Value::Nil));
-
-        // Extend: the clip's pattern id rides through.
-        let action = value_map(vec![
-            ("type", Value::Keyword("track-paint".to_string())),
-            ("track", Value::Number(0.0)),
-            ("start", Value::Number(16.0)),
-            ("end", Value::Number(24.0)),
-            ("pattern-id", Value::Number(3.0)),
-        ]);
-        let commands = arrangement_action_song_commands(&action, Some(&song())).unwrap();
+        let commands = lower(&action).unwrap();
         assert_eq!(commands.len(), 1);
-        assert_eq!(payload_number(&commands[0], "pattern-id"), 3.0);
+        assert_eq!(commands[0].0, "arrangement-clip-delete");
+        assert_eq!(payload_number(&commands[0], "track"), 1.0);
+        assert_eq!(payload_number(&commands[0], "at-beat"), 8.0);
 
-        // Malformed pattern id is an error, not a silent silence.
         let action = value_map(vec![
-            ("type", Value::Keyword("track-paint".to_string())),
+            ("type", Value::Keyword("clip-move".to_string())),
             ("track", Value::Number(0.0)),
-            ("start", Value::Number(0.0)),
-            ("end", Value::Number(4.0)),
-            ("pattern-id", Value::Number(1.5)),
+            ("at-beat", Value::Number(4.0)),
+            ("at-end", Value::Number(12.0)),
+            ("start", Value::Number(24.0)),
         ]);
-        assert!(arrangement_action_song_commands(&action, Some(&song())).is_err());
+        let commands = lower(&action).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].0, "arrangement-clip-move");
+        assert_eq!(payload_number(&commands[0], "start-beat"), 24.0);
     }
 
     #[test]
@@ -455,7 +529,7 @@ mod tests {
             ),
             ("length", Value::Number(64.0)),
         ]);
-        let commands = arrangement_action_song_commands(&action, Some(&song())).unwrap();
+        let commands = lower(&action).unwrap();
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].0, "song-set-end");
         assert_eq!(payload_number(&commands[0], "end-beat"), 64.0);
@@ -463,29 +537,25 @@ mod tests {
 
     #[test]
     fn malformed_and_unknown_actions_are_rejected_or_ignored() {
-        // Unknown row id in a resize: rejected against the committed song.
+        // Unknown row id in a resize: rejected against the committed song, so
+        // a stale gesture can never be mistaken for last-span semantics and
+        // silently edit the song end.
         let action = value_map(vec![
             ("type", Value::Keyword("finish-resize-items".to_string())),
             ("row-id", Value::Number(42.0)),
             ("end", Value::Number(20.0)),
         ]);
-        // Row 42 does not exist: treated as last-row semantics would be
-        // wrong, so next_row_id yields None only for the true last row;
-        // an unknown id must error out instead.
-        let result = arrangement_action_song_commands(&action, Some(&song()));
-        assert!(result.is_err(), "unknown row id must not silently set-end");
+        assert!(lower(&action).is_err(), "unknown row id must not silently set-end");
 
         // Missing fields are errors.
         let action = value_map(vec![(
             "type",
             Value::Keyword("finish-move-items".to_string()),
         )]);
-        assert!(arrangement_action_song_commands(&action, Some(&song())).is_err());
+        assert!(lower(&action).is_err());
 
         // View-only actions produce no commands.
         let action = value_map(vec![("type", Value::Keyword("set-cursor".to_string()))]);
-        assert!(arrangement_action_song_commands(&action, Some(&song()))
-            .unwrap()
-            .is_empty());
+        assert!(lower(&action).unwrap().is_empty());
     }
 }

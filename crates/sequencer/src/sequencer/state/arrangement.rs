@@ -524,6 +524,123 @@ pub fn stamped_clip_override(
     }
 }
 
+/// Re-anchor `clip` so it starts at `beat`, keeping the music it was playing
+/// there (spec 8: "left-trims re-stamp `offset_steps` by the split rule").
+///
+/// The arithmetic is not re-derived: the new source and offset are exactly
+/// what `stamped_clip_override` — the compiler's own split rule — produces at
+/// `beat`. A take clip trimmed past its end therefore becomes an
+/// explicit-empty clip, which is what that span already sounded like (the
+/// silent tail) and what validation demands (take offsets never reach
+/// `total_len_steps`).
+///
+/// `beat` may be *before* `clip.start_beat` (a left-edge grow): pattern
+/// offsets wrap backwards through `rem_euclid` and take offsets clamp at 0.
+pub fn restamped_clip(
+    ctx: &dyn SongCompileContext,
+    track: usize,
+    clip: &ArrClip,
+    beat: f64,
+) -> ArrClip {
+    let stamped = stamped_clip_override(ctx, track, clip, beat);
+    ArrClip {
+        id: clip.id,
+        start_beat: beat,
+        end_beat: clip.end_beat,
+        pattern_id: stamped.pattern_id,
+        take_id: stamped.take_id,
+        offset_steps: stamped.offset_steps,
+    }
+}
+
+/// Ableton-style truncation (spec 14, locked): clear `[start, end)` on
+/// `track`'s lane so an incoming clip can own it. The incoming clip always
+/// wins; nothing is rejected for overlapping.
+///
+/// Four cases, per existing clip `c`:
+///
+/// 1. **Disjoint** (`c.end <= start` or `c.start >= end`) — untouched.
+/// 2. **Fully covered** (`start <= c.start` and `c.end <= end`) — removed.
+/// 3. **Overlapped at one edge** — trimmed to the incoming clip's edge. A
+///    *right* trim (`c` starts before `start`) only shortens the span, so the
+///    phase anchor is untouched; a *left* trim (`c` ends after `end`)
+///    re-stamps `offset_steps` through `restamped_clip`, so the surviving
+///    tail keeps playing exactly what it played there.
+/// 4. **Strictly containing** (`c.start < start` and `end < c.end`) — split
+///    around the incoming span: the left fragment keeps `c`'s identity and
+///    anchor, the right fragment gets a fresh `ClipId` and a re-stamped
+///    offset.
+///
+/// The caller inserts its own clip afterwards (`insert_clip_sorted`); this
+/// only makes room. Non-overlap is thus an invariant every write op
+/// maintains rather than something validation has to reject at the UI edge.
+pub fn occlude_span(
+    arr: &mut ProjectArrangement,
+    ctx: &dyn SongCompileContext,
+    track: usize,
+    start: f64,
+    end: f64,
+) -> Result<(), String> {
+    if arr.track_lanes.get(track).is_none() {
+        return Err(format!("Track {} has no arrangement lane", track + 1));
+    }
+    let lane = std::mem::take(&mut arr.track_lanes[track]);
+    let mut kept: Vec<ArrClip> = Vec::with_capacity(lane.len() + 1);
+    let mut split_tails: Vec<ArrClip> = Vec::new();
+    for clip in lane {
+        // 1. Disjoint.
+        if clip.end_beat <= start || clip.start_beat >= end {
+            kept.push(clip);
+            continue;
+        }
+        // 2. Fully covered.
+        if clip.start_beat >= start && clip.end_beat <= end {
+            continue;
+        }
+        // 4. The incoming span lands strictly inside.
+        if clip.start_beat < start && clip.end_beat > end {
+            let mut left = clip;
+            left.end_beat = start;
+            kept.push(left);
+            let mut right = restamped_clip(ctx, track, &clip, end);
+            right.id = ClipId(0); // reassigned below, after the borrow ends
+            split_tails.push(right);
+            continue;
+        }
+        // 3a. Right trim: the clip starts before the span and ends inside it.
+        if clip.start_beat < start {
+            let mut trimmed = clip;
+            trimmed.end_beat = start;
+            kept.push(trimmed);
+            continue;
+        }
+        // 3b. Left trim: the clip starts inside the span and ends after it.
+        kept.push(restamped_clip(ctx, track, &clip, end));
+    }
+    for mut tail in split_tails {
+        tail.id = arr.allocate_clip_id()?;
+        kept.push(tail);
+    }
+    kept.sort_by(|a, b| {
+        a.start_beat
+            .partial_cmp(&b.start_beat)
+            .expect("validated clip beats are finite")
+    });
+    arr.track_lanes[track] = kept;
+    Ok(())
+}
+
+/// Insert `clip` into `track`'s lane keeping the lane sorted by start beat.
+/// The caller is responsible for having made room (`occlude_span`).
+pub fn insert_clip_sorted(arr: &mut ProjectArrangement, track: usize, clip: ArrClip) {
+    let lane = &mut arr.track_lanes[track];
+    let position = lane
+        .iter()
+        .position(|existing| existing.start_beat > clip.start_beat)
+        .unwrap_or(lane.len());
+    lane.insert(position, clip);
+}
+
 /// The override a lane riding the *scene backdrop* contributes at boundary
 /// `beat`, or `None` when it needs none.
 ///
@@ -1728,5 +1845,123 @@ mod tests {
             .expect("empty arrangement is valid");
         let compiled = compile_ok(&arr, &test_scenes());
         assert_eq!(compiled.rows, vec![row(0, 0.0, 0, Vec::new())]);
+    }
+    // --- truncation (spec 14, locked) -----------------------------------
+
+    /// `occlude_span`'s four cases, on one lane, against the fixture's
+    /// four-beat (16-step) patterns.
+    #[test]
+    fn occlude_span_trims_removes_and_splits() {
+        let scenes = test_scenes();
+
+        // 1. Disjoint clips are untouched.
+        let mut arr = arrangement(
+            vec![ev(0.0, 0)],
+            vec![vec![clip(0, 0.0, 4.0, 1), clip(1, 12.0, 16.0, 1)], Vec::new()],
+            32.0,
+        );
+        let untouched = arr.track_lanes[0].clone();
+        occlude_span(&mut arr, &scenes, 0, 6.0, 10.0).expect("occludes");
+        assert_eq!(arr.track_lanes[0], untouched);
+
+        // 2. A fully covered clip is removed (edges count as covered).
+        let mut arr = arrangement(
+            vec![ev(0.0, 0)],
+            vec![vec![clip(0, 4.0, 8.0, 1)], Vec::new()],
+            32.0,
+        );
+        occlude_span(&mut arr, &scenes, 0, 4.0, 8.0).expect("occludes");
+        assert!(arr.track_lanes[0].is_empty());
+
+        // 3a. Right trim: only the span shortens, the anchor is untouched.
+        let mut arr = arrangement(
+            vec![ev(0.0, 0)],
+            vec![vec![clip(0, 0.0, 8.0, 1)], Vec::new()],
+            32.0,
+        );
+        occlude_span(&mut arr, &scenes, 0, 5.0, 12.0).expect("occludes");
+        assert_eq!(
+            arr.track_lanes[0]
+                .iter()
+                .map(|c| (c.id, c.start_beat, c.end_beat, c.offset_steps))
+                .collect::<Vec<_>>(),
+            vec![(ClipId(0), 0.0, 5.0, 0.0)]
+        );
+
+        // 3b. Left trim: the survivor re-stamps its offset by the split rule
+        // — 5 beats at four steps per beat is 20 steps, 20 mod 16 == 4.
+        let mut arr = arrangement(
+            vec![ev(0.0, 0)],
+            vec![vec![clip(0, 0.0, 12.0, 1)], Vec::new()],
+            32.0,
+        );
+        occlude_span(&mut arr, &scenes, 0, 0.0, 5.0).expect("occludes");
+        assert_eq!(
+            arr.track_lanes[0]
+                .iter()
+                .map(|c| (c.id, c.start_beat, c.end_beat, c.offset_steps))
+                .collect::<Vec<_>>(),
+            vec![(ClipId(0), 5.0, 12.0, 4.0)]
+        );
+
+        // 4. A span landing strictly inside splits the clip around it; the
+        // right fragment gets a FRESH id and its own re-stamped offset
+        // (10 beats == 40 steps, 40 mod 16 == 8).
+        let mut arr = arrangement(
+            vec![ev(0.0, 0)],
+            vec![vec![clip(0, 0.0, 16.0, 1)], Vec::new()],
+            32.0,
+        );
+        occlude_span(&mut arr, &scenes, 0, 6.0, 10.0).expect("occludes");
+        assert_eq!(
+            arr.track_lanes[0]
+                .iter()
+                .map(|c| (c.id, c.start_beat, c.end_beat, c.offset_steps))
+                .collect::<Vec<_>>(),
+            vec![(ClipId(0), 0.0, 6.0, 0.0), (ClipId(1), 10.0, 16.0, 8.0)]
+        );
+        assert_eq!(arr.next_clip_id, 2, "the split tail consumes an id");
+        arr.validate(&scenes)
+            .expect("truncation leaves a valid, non-overlapping lane");
+    }
+
+    /// A take clip left-trimmed past its own end becomes an explicit-empty
+    /// clip: that span was already the silent tail, and validation forbids a
+    /// take offset at or past `total_len_steps`.
+    #[test]
+    fn occlude_span_turns_a_take_trimmed_past_its_end_into_silence() {
+        let (scenes, take) = scenes_with_take();
+        // 300 steps at four per beat == 75 beats of content.
+        let mut arr = arrangement(
+            vec![ev(0.0, 0)],
+            vec![
+                vec![ArrClip::new_take(ClipId(0), 0.0, 100.0, take.0, 0.0)],
+                Vec::new(),
+            ],
+            128.0,
+        );
+        occlude_span(&mut arr, &scenes, 0, 0.0, 80.0).expect("occludes");
+        let survivor = arr.track_lanes[0][0];
+        assert_eq!(survivor.start_beat, 80.0);
+        assert_eq!(survivor.source(), LaneSource::Empty);
+        arr.validate(&scenes).expect("still valid");
+    }
+
+    /// `restamped_clip` runs backwards too, which is what a left-edge GROW
+    /// needs: the clip has to start earlier playing what it would have been
+    /// playing then.
+    #[test]
+    fn restamped_clip_runs_backwards_for_a_left_edge_grow() {
+        let scenes = test_scenes();
+        let source = clip(0, 8.0, 16.0, 1);
+        let grown = restamped_clip(&scenes, 0, &source, 5.0);
+        assert_eq!(grown.start_beat, 5.0);
+        // -3 beats == -12 steps; rem_euclid over 16 steps == 4.
+        assert_eq!(grown.offset_steps, 4.0);
+        assert_eq!(
+            restamped_clip(&scenes, 0, &grown, 8.0).offset_steps,
+            source.offset_steps,
+            "and the round trip lands exactly back on the original anchor"
+        );
     }
 }

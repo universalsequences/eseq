@@ -10,10 +10,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::sequencer::{project_lanes, LaneSource, TakeId, TrackPatternData};
+use crate::sequencer::{
+    insert_clip_sorted, occlude_span, restamped_clip, ArrClip, LaneSource, ProjectArrangement,
+    ProjectScenes, TakeId, TrackPatternData,
+};
 
 use super::edit::finish_active_gesture;
-use super::history::{EditPatch, SceneStructurePatch, SongStructurePatch};
+use super::history::{ArrangementStructurePatch, EditPatch, SceneStructurePatch};
 use super::App;
 
 /// A committed region selection. Track indices are MODEL indices and both
@@ -51,14 +54,19 @@ impl SongRegionSelection {
 }
 
 /// One copied clip span, in beats RELATIVE to the copied region's start
-/// (region spec 5.1). Only sounding spans are stored: gaps are implicit and
-/// paste silences them, because the clipboard is the whole rectangle.
+/// (region spec 5.1). One entry per CLIP the region intersects: a lane with
+/// no clip over part of the region contributes nothing there, because in the
+/// lane model that gap is not silence — it is the scene backdrop showing
+/// through (arrangement-lane-model-spec 6.2), and pasting the rectangle
+/// somewhere else must reproduce the gap, not freeze the backdrop into clips.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ClipboardSpan {
     pub rel_start: f64,
     pub rel_end: f64,
     /// `Pattern` pastes as a reference; `Take` pastes as a fresh clone
-    /// (region spec 5.1 locked decision). `Empty` never appears.
+    /// (region spec 5.1 locked decision). `Empty` is an explicit-empty CLIP —
+    /// deliberate silence that occludes the backdrop — and travels like any
+    /// other source.
     pub source: LaneSource,
     /// The source offset AT `rel_start` — already advanced past the cut when
     /// the copy boundary sliced into the middle of a clip, so the pasted
@@ -157,23 +165,23 @@ impl App {
         }
     }
 
-    /// One track's lane spans clipped to `[start_beat, end_beat)`, in ABSOLUTE
+    /// One lane's CLIPS clipped to `[start_beat, end_beat)`, in ABSOLUTE
     /// beats, as `(start, end, source, offset_at_start)`.
     ///
-    /// A clip the window cuts into gets its offset ADVANCED to the cut, so the
-    /// span plays the identical slice wherever it is re-stamped — the property
-    /// both copy (region spec 5.1) and the per-track ripple depend on.
-    /// `keep_empty` decides whether silence travels as explicit spans (the
-    /// ripple needs it; the clipboard treats gaps as implicit).
-    fn lane_spans_in(
+    /// A clip the window cuts into gets its offset re-stamped to the cut by
+    /// the compiler's own split rule (`restamped_clip`), so the fragment plays
+    /// the identical slice wherever it is re-anchored — the property copy
+    /// (region spec 5.1) and the duplicate ripple both depend on. Lane gaps
+    /// produce nothing: they are the scene backdrop, not content.
+    fn arrangement_clip_spans_in(
         &self,
-        lanes: &[Vec<crate::sequencer::LaneClip>],
+        arrangement: &ProjectArrangement,
+        scenes: &ProjectScenes,
         track: usize,
         start_beat: f64,
         end_beat: f64,
-        keep_empty: bool,
     ) -> Vec<(f64, f64, LaneSource, f64)> {
-        let Some(lane) = lanes.get(track) else {
+        let Some(lane) = arrangement.track_lanes.get(track) else {
             return Vec::new();
         };
         lane.iter()
@@ -183,16 +191,8 @@ impl App {
                 if span_end - span_start <= 1e-9 {
                     return None;
                 }
-                if !keep_empty && matches!(clip.source, LaneSource::Empty) {
-                    return None;
-                }
-                let cut_beats = span_start - clip.start_beat;
-                let offset_steps = if cut_beats <= 1e-9 {
-                    clip.offset_steps
-                } else {
-                    self.advanced_source_offset(track, clip.source, clip.offset_steps, cut_beats)
-                };
-                Some((span_start, span_end, clip.source, offset_steps))
+                let cut = restamped_clip(scenes, track, clip, span_start);
+                Some((span_start, span_end, cut.source(), cut.offset_steps))
             })
             .collect()
     }
@@ -207,27 +207,26 @@ impl App {
         let region = self
             .song_region_selection
             .ok_or_else(|| "No arrangement region is selected".to_string())?;
-        let song = self
+        let arrangement = self
             .state
-            .committed_song()
+            .committed_arrangement()
             .ok_or_else(|| "The project has no song".to_string())?;
         let start_beat = region.start_beat;
-        let end_beat = region.end_beat.min(song.end_beat);
+        let end_beat = region.end_beat.min(arrangement.end_beat);
         if end_beat <= start_beat {
             return Err("The selected region has no length".to_string());
         }
         let scenes = self.state.capture_project_scenes();
-        let lanes = project_lanes(&song, &scenes);
 
         let mut tracks = Vec::new();
         for track in region.track_a..=region.track_b {
-            if track >= lanes.len() {
+            if track >= arrangement.track_lanes.len() {
                 continue;
             }
-            // Silent tracks stay in the rectangle (with no spans) so paste
-            // silences them: the clipboard is the whole rectangle.
+            // Clip-free tracks stay in the rectangle (with no spans) so paste
+            // clears them: the clipboard is the whole rectangle.
             let spans = self
-                .lane_spans_in(&lanes, track, start_beat, end_beat, false)
+                .arrangement_clip_spans_in(&arrangement, &scenes, track, start_beat, end_beat)
                 .into_iter()
                 .map(|(span_start, span_end, source, offset_steps)| ClipboardSpan {
                     rel_start: span_start - start_beat,
@@ -250,11 +249,12 @@ impl App {
     }
 
     /// Paste the clipboard rectangle at `dest_beat` (region spec 5.2): one
-    /// clone of the committed song, one undo entry.
+    /// clone of the committed arrangement, one undo entry.
     ///
-    /// Per clipboard track: explicit-empty over the whole destination span
-    /// first (gaps are silence), then each stored span with its offset,
-    /// anchored at its pasted start. Pattern sources paste as REFERENCES;
+    /// Per clipboard track: clear the whole destination span first (paste is
+    /// the op that truncates, spec 8), then insert each stored span as a clip
+    /// with its offset, anchored at its pasted start. Pattern sources paste as
+    /// REFERENCES;
     /// take sources are CLONED once per source take (new `TakeId`, chunk
     /// patterns deep-copied) so later per-clip editing of a pasted take never
     /// rewrites the original. A source take that has since been deleted is
@@ -274,23 +274,28 @@ impl App {
             ));
         }
         let dest_beat = clipboard.floor_destination(dest_beat);
-        let song_before = self.state.committed_song();
-        let Some(existing) = song_before.clone() else {
+        let arrangement_before = self.state.committed_arrangement();
+        let Some(existing) = arrangement_before.clone() else {
             return Err("The project has no song".to_string());
         };
 
         let (scenes_before, cloned_takes) = self.clone_clipboard_takes(clipboard)?;
-        let build = (|| -> Result<crate::sequencer::ProjectSong, String> {
-            let mut song = existing.clone();
+        let scenes = self.state.capture_project_scenes();
+        let build = (|| -> Result<ProjectArrangement, String> {
+            let mut arrangement = existing.clone();
             // The pasted rectangle may run past the song end; extending it
             // rides inside this same commit (region spec 5.2).
-            song.end_beat = song.end_beat.max(dest_beat + clipboard.len_beats);
-            self.paint_clipboard(&mut song, clipboard, dest_beat, &cloned_takes)?;
-            song.normalize();
-            self.collapse_phase_continuation_rows(&mut song);
-            Ok(song)
+            arrangement.end_beat = arrangement.end_beat.max(dest_beat + clipboard.len_beats);
+            self.paste_clipboard(
+                &mut arrangement,
+                &scenes,
+                clipboard,
+                dest_beat,
+                &cloned_takes,
+            )?;
+            Ok(arrangement)
         })();
-        self.commit_region_edit("Paste region", song_before, build, scenes_before)?;
+        self.commit_region_edit("Paste region", arrangement_before, build, scenes_before)?;
 
         let span_count = clipboard.span_count();
         let track_count = clipboard.tracks.len();
@@ -307,30 +312,26 @@ impl App {
     /// chains.
     ///
     /// Only the SELECTED tracks move; every other lane keeps playing at the
-    /// beats it always did. Two mechanisms, same audible contract:
+    /// beats it always did. Two scopes, same audible contract:
     ///
-    /// - **Region covers every track** — shift the song ROWS right. The rows
-    ///   are the shared time boundaries, so moving them moves everything at
-    ///   once and the song stays scene-resolved (no override churn). This is
-    ///   the "insert 4 bars into my song" gesture.
-    /// - **Region covers some tracks** — re-paint just those lanes' tails
-    ///   `len` beats later. The rows stay put; untouched lanes split
-    ///   phase-transparently underneath (`split_row_state`) and sound
-    ///   identical. The cost is that a rippled lane's tail becomes explicit
-    ///   overrides, so it stops following its scene cells — unavoidable,
-    ///   since its content no longer lines up with the rows' scenes.
+    /// - **Region covers every track** — every lane's clips AND the scene
+    ///   lane slide right, so the whole timeline opens up. This is the
+    ///   "insert 4 bars into my song" gesture.
+    /// - **Region covers some tracks** — only those lanes' clips slide; the
+    ///   scene lane and every other lane stay exactly where they were.
     ///
-    /// Either way the song grows by `len`; the appended tail is governed by
-    /// whatever each lane was playing at the boundary. Take sources duplicate
-    /// as fresh clones exactly as paste's do.
+    /// A clip straddling the insert point is SPLIT there first, so the part
+    /// that moves carries the phase it had at the boundary (takes spec 7.4)
+    /// and the part that stays is untouched. Either way the song grows by
+    /// `len`. Take sources duplicate as fresh clones exactly as paste's do.
     pub fn song_region_duplicate(&mut self) -> Result<String, String> {
         self.require_song_edit_unlocked()?;
         let region = self
             .song_region_selection
             .ok_or_else(|| "No arrangement region is selected".to_string())?;
         let clipboard = self.song_region_copy()?;
-        let song_before = self.state.committed_song();
-        let Some(existing) = song_before.clone() else {
+        let arrangement_before = self.state.committed_arrangement();
+        let Some(existing) = arrangement_before.clone() else {
             return Err("The project has no song".to_string());
         };
         let len_beats = clipboard.len_beats;
@@ -343,72 +344,41 @@ impl App {
         let covers_every_track =
             region.track_a == 0 && region.track_b + 1 >= self.tracks.len().max(1);
 
-        // Read the rippled lanes' tails BEFORE any mutation. Silence travels
-        // too: a gap that slides right must leave silence behind it, not the
-        // clip it used to sit next to.
-        let tails: Vec<(usize, Vec<(f64, f64, LaneSource, f64)>)> = if covers_every_track {
-            Vec::new()
-        } else {
-            let scenes = self.state.capture_project_scenes();
-            let lanes = project_lanes(&existing, &scenes);
-            clipboard
-                .tracks
-                .iter()
-                .map(|(track, _)| {
-                    (
-                        *track,
-                        self.lane_spans_in(&lanes, *track, insert_beat, existing.end_beat, true),
-                    )
-                })
-                .collect()
-        };
-
         let (scenes_before, cloned_takes) = self.clone_clipboard_takes(&clipboard)?;
-        let build = (|| -> Result<crate::sequencer::ProjectSong, String> {
-            let mut song = existing.clone();
-            if covers_every_track {
-                // Split first so the shifted suffix starts on a real row whose
-                // offsets already describe the music at the boundary; the
-                // shift is then phase-rigid (takes spec 7.4).
-                if insert_beat < song.end_beat {
-                    self.split_song_row_at(&mut song, insert_beat)?;
-                }
-                for row in &mut song.rows {
-                    if row.start_beat >= insert_beat - 1e-9 {
-                        row.start_beat += len_beats;
-                    }
-                }
-                song.end_beat += len_beats;
+        let scenes = self.state.capture_project_scenes();
+        let build = (|| -> Result<ProjectArrangement, String> {
+            let mut arrangement = existing.clone();
+            arrangement.end_beat += len_beats;
+            let rippled: Vec<usize> = if covers_every_track {
+                (0..arrangement.track_lanes.len()).collect()
             } else {
-                song.end_beat += len_beats;
-                let track_count = self.tracks.len();
-                for (track, tail) in &tails {
-                    if *track >= track_count {
-                        continue;
-                    }
-                    // Re-stamp each tail span `len` beats later with the
-                    // offset it had at its own start: same music, later.
-                    for (span_start, span_end, source, offset_steps) in tail {
-                        self.paint_source_region(
-                            &mut song,
-                            *track,
-                            span_start + len_beats,
-                            span_end + len_beats,
-                            *source,
-                            span_start + len_beats,
-                            *offset_steps,
-                        )?;
+                clipboard.tracks.iter().map(|(track, _)| *track).collect()
+            };
+            for track in rippled {
+                if track >= arrangement.track_lanes.len() {
+                    continue;
+                }
+                Self::ripple_lane_right(&mut arrangement, &scenes, track, insert_beat, len_beats)?;
+            }
+            if covers_every_track {
+                for event in &mut arrangement.scene_lane {
+                    if event.start_beat >= insert_beat && event.start_beat > 0.0 {
+                        event.start_beat += len_beats;
                     }
                 }
             }
             // Both paths leave exactly [insert, insert + len) vacated on the
             // rippled lanes; the duplicate fills it.
-            self.paint_clipboard(&mut song, &clipboard, insert_beat, &cloned_takes)?;
-            song.normalize();
-            self.collapse_phase_continuation_rows(&mut song);
-            Ok(song)
+            self.paste_clipboard(
+                &mut arrangement,
+                &scenes,
+                &clipboard,
+                insert_beat,
+                &cloned_takes,
+            )?;
+            Ok(arrangement)
         })();
-        self.commit_region_edit("Duplicate region", song_before, build, scenes_before)?;
+        self.commit_region_edit("Duplicate region", arrangement_before, build, scenes_before)?;
 
         // The highlight follows the copy, so Cmd-D again duplicates THAT.
         // It names no single clip any more, so it goes through the marquee
@@ -478,34 +448,57 @@ impl App {
         Ok((Some(scenes_before), cloned_takes))
     }
 
-    /// Stamp the clipboard rectangle onto `song` at `dest_beat`: silence the
-    /// whole destination span per track (gaps are silence), then paint each
-    /// stored span anchored at its own pasted start. Take spans paint their
-    /// clone, or nothing when the source was deleted.
-    fn paint_clipboard(
+    /// Slide everything on `track`'s lane at or after `insert_beat` right by
+    /// `len_beats`, splitting a clip that straddles the boundary so the moving
+    /// half carries the phase it had there (takes spec 7.4).
+    fn ripple_lane_right(
+        arrangement: &mut ProjectArrangement,
+        scenes: &ProjectScenes,
+        track: usize,
+        insert_beat: f64,
+        len_beats: f64,
+    ) -> Result<(), String> {
+        // Split the straddling clip first, so the shift is a clean partition.
+        let straddling = arrangement.track_lanes[track]
+            .iter()
+            .position(|clip| clip.start_beat < insert_beat && clip.end_beat > insert_beat);
+        if let Some(index) = straddling {
+            let clip = arrangement.track_lanes[track][index];
+            let mut tail = restamped_clip(scenes, track, &clip, insert_beat);
+            tail.id = arrangement.allocate_clip_id()?;
+            arrangement.track_lanes[track][index].end_beat = insert_beat;
+            arrangement.track_lanes[track].insert(index + 1, tail);
+        }
+        for clip in &mut arrangement.track_lanes[track] {
+            if clip.start_beat >= insert_beat {
+                clip.start_beat += len_beats;
+                clip.end_beat += len_beats;
+            }
+        }
+        Ok(())
+    }
+
+    /// Stamp the clipboard rectangle onto `arrangement` at `dest_beat`: clear
+    /// the whole destination span per track (a gap in the clipboard is a gap
+    /// in the destination), then insert each stored span as a clip anchored at
+    /// its own pasted start. Take spans paste their clone, or nothing when the
+    /// source was deleted.
+    fn paste_clipboard(
         &self,
-        song: &mut crate::sequencer::ProjectSong,
+        arrangement: &mut ProjectArrangement,
+        scenes: &ProjectScenes,
         clipboard: &ArrangementClipboard,
         dest_beat: f64,
         cloned_takes: &HashMap<(usize, u64), TakeId>,
     ) -> Result<(), String> {
         let dest_end = dest_beat + clipboard.len_beats;
-        let track_count = self.tracks.len();
         for (track, spans) in &clipboard.tracks {
             // The clipboard stores absolute track indices; one that no longer
             // resolves is skipped (region spec 5.1 locked decision).
-            if *track >= track_count {
+            if *track >= arrangement.track_lanes.len() {
                 continue;
             }
-            self.paint_source_region(
-                song,
-                *track,
-                dest_beat,
-                dest_end,
-                LaneSource::Empty,
-                dest_beat,
-                0.0,
-            )?;
+            occlude_span(arrangement, scenes, *track, dest_beat, dest_end)?;
             for span in spans {
                 let source = match span.source {
                     LaneSource::Take(source_take) => {
@@ -516,36 +509,35 @@ impl App {
                     }
                     other => other,
                 };
-                let start = dest_beat + span.rel_start;
-                let end = dest_beat + span.rel_end;
-                self.paint_source_region(
-                    song,
-                    *track,
-                    start,
-                    end,
-                    source,
-                    start,
-                    span.offset_steps,
-                )?;
+                let id = arrangement.allocate_clip_id()?;
+                let mut clip = ArrClip::new(id, dest_beat + span.rel_start, dest_beat + span.rel_end, None);
+                match source {
+                    LaneSource::Empty => {}
+                    LaneSource::Pattern(pattern) => clip.pattern_id = Some(pattern.0),
+                    LaneSource::Take(take) => clip.take_id = Some(take.0),
+                }
+                clip.offset_steps = span.offset_steps;
+                insert_clip_sorted(arrangement, *track, clip);
             }
         }
         Ok(())
     }
 
-    /// Shared tail for the clipboard primitives: validate the built song,
-    /// install it, and commit ONE history entry — `EditPatch::Song` when no
-    /// takes were cloned, else a composite pairing the scene patch with it
-    /// (scenes first, ordering per `song_region_to_take`). Any failure rolls
-    /// the take clones back and leaves the committed song untouched.
+    /// Shared tail for the clipboard primitives: install the built
+    /// arrangement (which validates and recompiles it) and commit ONE history
+    /// entry — `EditPatch::Arrangement` when no takes were cloned, else a
+    /// composite pairing the scene patch with it (scenes first, ordering per
+    /// `song_region_to_take`). Any failure rolls the take clones back and
+    /// leaves the committed arrangement untouched.
     fn commit_region_edit(
         &mut self,
         label: &'static str,
-        song_before: Option<crate::sequencer::ProjectSong>,
-        build: Result<crate::sequencer::ProjectSong, String>,
-        scenes_before: Option<crate::sequencer::ProjectScenes>,
+        arrangement_before: Option<ProjectArrangement>,
+        build: Result<ProjectArrangement, String>,
+        scenes_before: Option<ProjectScenes>,
     ) -> Result<(), String> {
-        let song_after = match build {
-            Ok(song) => song,
+        let arrangement_after = match build {
+            Ok(arrangement) => arrangement,
             Err(error) => {
                 if let Some(scenes) = &scenes_before {
                     self.restore_scene_structure_state(scenes)?;
@@ -553,26 +545,29 @@ impl App {
                 return Err(error);
             }
         };
+        if let Err(error) = self
+            .state
+            .set_committed_arrangement(Some(arrangement_after.clone()))
         {
-            let scenes = self.state.capture_project_scenes();
-            if let Err(error) = song_after.validate(&scenes) {
-                if let Some(scenes) = &scenes_before {
-                    self.restore_scene_structure_state(scenes)?;
-                }
-                return Err(format!("{label} produced an invalid song: {error}"));
+            if let Some(scenes) = &scenes_before {
+                self.restore_scene_structure_state(scenes)?;
             }
+            return Err(format!("{label} produced an invalid arrangement: {error}"));
         }
-        self.state.set_committed_song(Some(song_after.clone()));
-        let song_patch = SongStructurePatch {
-            before: song_before,
-            after: Some(song_after),
+        let arrangement_patch = ArrangementStructurePatch {
+            before: arrangement_before,
+            after: Some(arrangement_after),
         };
         match scenes_before {
             None => {
-                let retained_bytes = song_patch.retained_bytes();
+                let retained_bytes = arrangement_patch.retained_bytes();
                 finish_active_gesture(self);
-                self.history
-                    .commit(label, None, EditPatch::Song(song_patch), retained_bytes);
+                self.history.commit(
+                    label,
+                    None,
+                    EditPatch::Arrangement(arrangement_patch),
+                    retained_bytes,
+                );
             }
             Some(scenes_before) => {
                 let scenes_after = self.state.capture_project_scenes();
@@ -581,13 +576,14 @@ impl App {
                     before: scenes_before,
                     after: scenes_after,
                 };
-                let retained_bytes = scene_patch.retained_bytes() + song_patch.retained_bytes();
+                let retained_bytes =
+                    scene_patch.retained_bytes() + arrangement_patch.retained_bytes();
                 self.history.commit(
                     label,
                     None,
                     EditPatch::Composite(vec![
                         EditPatch::SceneStructure(scene_patch),
-                        EditPatch::Song(song_patch),
+                        EditPatch::Arrangement(arrangement_patch),
                     ]),
                     retained_bytes,
                 );
@@ -621,16 +617,21 @@ impl App {
             .map(Some)
     }
 
-    /// Silence the selected region on every track it covers (region spec
-    /// 5.2): explicit-empty overrides, one undo entry. This is what
-    /// multi-track Backspace lowers to.
+    /// Remove the clips the selected region covers, trimming the ones it only
+    /// partially covers (spec 8), in one undo entry. This is what multi-track
+    /// Backspace lowers to.
+    ///
+    /// The lanes fall back to the scene backdrop over the cleared span — in
+    /// the lane model a gap is not silence, it is "whatever the scene says"
+    /// (spec 6.2). Deliberate silence is an explicit-empty CLIP, which the
+    /// clip primitives create and which this removes like any other.
     pub fn song_region_delete(&mut self) -> Result<String, String> {
         self.require_song_edit_unlocked()?;
         let region = self
             .song_region_selection
             .ok_or_else(|| "No arrangement region is selected".to_string())?;
-        let song_before = self.state.committed_song();
-        let Some(existing) = song_before.clone() else {
+        let before = self.state.committed_arrangement();
+        let Some(existing) = before.clone() else {
             return Err("The project has no song".to_string());
         };
         let start_beat = region.start_beat;
@@ -639,36 +640,26 @@ impl App {
             return Err("The selected region has no length".to_string());
         }
 
-        let mut song = existing.clone();
-        let track_count = self.tracks.len();
-        let mut painted = 0usize;
+        let mut arrangement = existing.clone();
+        let scenes = self.state.capture_project_scenes();
+        let mut cleared = 0usize;
         for track in region.track_a..=region.track_b {
-            if track >= track_count {
+            if track >= arrangement.track_lanes.len() {
                 continue;
             }
-            self.paint_source_region(
-                &mut song,
-                track,
-                start_beat,
-                end_beat,
-                LaneSource::Empty,
-                start_beat,
-                0.0,
-            )?;
-            painted += 1;
+            occlude_span(&mut arrangement, &scenes, track, start_beat, end_beat)?;
+            cleared += 1;
         }
-        if painted == 0 {
+        if cleared == 0 {
             return Err("The selected region covers no existing track".to_string());
         }
-        song.normalize();
-        self.collapse_phase_continuation_rows(&mut song);
-        if song.rows == existing.rows && song.end_beat == existing.end_beat {
+        if arrangement.track_lanes == existing.track_lanes {
             return Ok("The region is already empty".to_string());
         }
-        self.commit_song_edit("Delete region", song_before, Some(song))?;
+        self.commit_arrangement_edit("Delete region", before, Some(arrangement))?;
         Ok(format!(
-            "Deleted beats {start_beat}-{end_beat} on {painted} track{}",
-            if painted == 1 { "" } else { "s" }
+            "Deleted beats {start_beat}-{end_beat} on {cleared} track{}",
+            if cleared == 1 { "" } else { "s" }
         ))
     }
 
@@ -740,15 +731,14 @@ mod tests {
     use super::*;
 
     use crate::app::edit::{redo, undo};
-    use crate::app::song_edit::SongRowSpec;
     use crate::app::sound_binding::tests::app_with_take;
     use crate::app::sound_binding::BoundSource;
     use crate::app::AudioBuses;
     use crate::audiograph::LiveGraphPtr;
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
-        default_empty_effect_chain, PatternId, PatternSnapshot, SequencerState, SongRowId,
-        StepParam,
+        default_empty_effect_chain, project_lanes, ClipId, PatternId, PatternSnapshot,
+        SequencerState, SongRowId, StepParam,
     };
 
     /// `tracks` tracks, three scenes; per-track pool ids are 1..=3 with scene
@@ -810,34 +800,43 @@ mod tests {
         app_with_song_tracks(2)
     }
 
-    /// Three-row song: 0.0 scene 0, 4.0 scene 1, 8.0 scene 2, end 16. Each
-    /// scene resolves every track to its own pattern, so every 4-beat span is
-    /// one clip on each lane.
+    /// Scene 0 governs the whole timeline (so every uncovered gap plays
+    /// pattern 1 — the backdrop), and every track carries three clips:
+    /// `[0,4)` P1, `[4,8)` P2, `[8,16)` P3, end 16.
+    ///
+    /// The projected lanes are byte-identical to the row fixture this
+    /// replaced (three scene rows resolving each track to its own pattern),
+    /// so every window assertion below still measures the same music — but
+    /// now the content is CLIPS, which is what the region primitives edit,
+    /// and a deleted clip reveals a visibly different backdrop.
     fn app_with_song_tracks(tracks: usize) -> App {
         let mut app = multi_track_app(tracks);
-        app.song_replace(
-            vec![
-                SongRowSpec {
-                    start_beat: 0.0,
-                    scene: 0,
-                    overrides: Vec::new(),
-                },
-                SongRowSpec {
-                    start_beat: 4.0,
-                    scene: 1,
-                    overrides: Vec::new(),
-                },
-                SongRowSpec {
-                    start_beat: 8.0,
-                    scene: 2,
-                    overrides: Vec::new(),
-                },
-            ],
-            16.0,
-            false,
-        )
-        .expect("song_replace succeeds");
+        let mut arrangement = crate::sequencer::ProjectArrangement::new(tracks, 16.0);
+        for track in 0..tracks {
+            for (start, end, pattern) in [(0.0, 4.0, 1u64), (4.0, 8.0, 2), (8.0, 16.0, 3)] {
+                let id = arrangement.allocate_clip_id().expect("clip id");
+                arrangement.track_lanes[track].push(ArrClip::new(id, start, end, Some(pattern)));
+            }
+        }
+        app.arr_replace(arrangement).expect("arrangement installs");
         app
+    }
+
+    /// The stored clips of one lane as `(start, end, source, offset)`.
+    fn clips(app: &App, track: usize) -> Vec<(f64, f64, LaneSource, f64)> {
+        app.state
+            .committed_arrangement()
+            .expect("arrangement")
+            .track_lanes[track]
+            .iter()
+            .map(|clip| (clip.start_beat, clip.end_beat, clip.source(), clip.offset_steps))
+            .collect()
+    }
+
+    /// The clip a gesture on `track` at `beat` addresses.
+    fn clip_at(app: &App, track: usize, beat: f64) -> ClipId {
+        app.arrangement_clip_at(track, beat, beat)
+            .expect("a clip covers that beat")
     }
 
     /// The lane projection of `track` as (start, end, source, offset) tuples,
@@ -949,20 +948,46 @@ mod tests {
         );
     }
 
-    /// 5.1: silence inside the rectangle is a gap — omitted from the spans,
-    /// but the track still travels so paste can silence the destination.
+    /// 5.1 on lanes: a LANE GAP is omitted — it is the scene backdrop
+    /// showing through, not content — while an explicit-empty CLIP is
+    /// deliberate silence and travels like any other source. The track stays
+    /// in the rectangle either way so paste clears the destination.
+    ///
+    /// (Rewritten from the row-model version, which could not tell the two
+    /// apart: there, silence was only ever an explicit-empty override.)
     #[test]
-    fn copy_omits_gaps_but_keeps_the_silent_track() {
+    fn copy_omits_lane_gaps_but_carries_explicit_empty_clips() {
         let mut app = app_with_song();
-        app.song_track_paint(1, 4.0, 8.0, None).expect("silence");
+        // Track 1: delete the [4,8) clip, leaving a gap.
+        let clip = clip_at(&app, 1, 4.0);
+        app.arr_clip_delete(clip).expect("clip deletes");
         app.set_song_region(SongRegionSelection::new(0, 1, 4.0, 12.0));
-
         let clipboard = app.song_region_copy().expect("copy succeeds");
         assert_eq!(clipboard.tracks[1].0, 1);
         assert_eq!(
             clipboard.tracks[1].1,
             vec![span(4.0, 8.0, 3, 0.0)],
-            "the silenced first half is a gap, not a span"
+            "the gap is not a span: the backdrop is not content"
+        );
+
+        // Same span as an explicit-empty CLIP: deliberate silence travels.
+        let mut app = app_with_song();
+        app.arr_clip_create(1, 4.0, 8.0, LaneSource::Empty, 0.0)
+            .expect("explicit-empty clip");
+        app.set_song_region(SongRegionSelection::new(0, 1, 4.0, 12.0));
+        let clipboard = app.song_region_copy().expect("copy succeeds");
+        assert_eq!(
+            clipboard.tracks[1].1,
+            vec![
+                ClipboardSpan {
+                    rel_start: 0.0,
+                    rel_end: 4.0,
+                    source: LaneSource::Empty,
+                    offset_steps: 0.0,
+                },
+                span(4.0, 8.0, 3, 0.0),
+            ],
+            "an explicit-empty clip is a span"
         );
     }
 
@@ -991,8 +1016,9 @@ mod tests {
     #[test]
     fn paste_reproduces_the_source_rectangle_shifted() {
         let mut app = app_with_song();
-        app.song_set_end(32.0).expect("extend the song");
-        app.song_track_paint(1, 4.0, 8.0, None).expect("silence");
+        app.arr_set_end(32.0).expect("extend the song");
+        app.arr_clip_create(1, 4.0, 8.0, LaneSource::Empty, 0.0)
+            .expect("explicit-empty clip");
         app.set_song_region(SongRegionSelection::new(0, 1, 4.0, 12.0));
         let clipboard = app.song_region_copy().expect("copy succeeds");
         let source: Vec<_> = (0..2).map(|track| window(&app, track, 4.0, 12.0)).collect();
@@ -1051,7 +1077,7 @@ mod tests {
     #[test]
     fn paste_floors_the_destination_to_the_clipboard_grid() {
         let mut app = app_with_song();
-        app.song_set_end(32.0).expect("extend the song");
+        app.arr_set_end(32.0).expect("extend the song");
         app.set_song_region(SongRegionSelection::new(0, 0, 4.0, 12.0));
         let clipboard = app.song_region_copy().expect("copy succeeds");
 
@@ -1073,7 +1099,7 @@ mod tests {
         let take = app
             .song_region_to_take(0, 4.0, 12.0)
             .expect("region converts");
-        app.song_set_end(32.0).expect("extend the song");
+        app.arr_set_end(32.0).expect("extend the song");
         app.set_song_region(SongRegionSelection::new(0, 0, 4.0, 12.0));
         let clipboard = app.song_region_copy().expect("copy succeeds");
         let depth = app.history.undo_len();
@@ -1124,31 +1150,49 @@ mod tests {
     }
 
     /// 5.1: the clipboard holds a take id, not the take. If it was deleted
-    /// since the copy, that span pastes as nothing — the paste still applies.
+    /// since the copy, that span pastes as nothing — the paste still applies
+    /// and the destination lane is simply left clip-free, so it plays the
+    /// scene backdrop (lane spec 6.2). The row-model version asserted
+    /// explicit-empty silence there; that was the only silence the model
+    /// could express, not an intended promise.
     #[test]
     fn paste_skips_a_take_deleted_since_the_copy() {
         let mut app = app_with_song();
         let take = app
             .song_region_to_take(0, 4.0, 12.0)
             .expect("region converts");
-        app.song_set_end(32.0).expect("extend the song");
+        app.arr_set_end(32.0).expect("extend the song");
         app.set_song_region(SongRegionSelection::new(0, 0, 4.0, 12.0));
         let clipboard = app.song_region_copy().expect("copy succeeds");
         app.song_take_delete(0, take.0).expect("take deletes");
 
         app.song_region_paste(&clipboard, 20.0)
             .expect("paste still applies");
+        assert!(
+            app.state.committed_arrangement().expect("arrangement").track_lanes[0]
+                .iter()
+                .all(|clip| clip.start_beat >= 28.0 || clip.end_beat <= 20.0),
+            "the dead take's span pastes as no clip at all"
+        );
         assert_eq!(
             window(&app, 0, 20.0, 28.0),
-            vec![(0.0, 8.0, LaneSource::Empty, 0.0)],
-            "the dead take's span pastes as the silence the rectangle promises"
+            vec![(0.0, 8.0, LaneSource::Pattern(PatternId(1)), 0.0)],
+            "so the lane falls back to the scene backdrop there"
         );
     }
 
-    /// 5.2: delete writes explicit-empty overrides across the whole
-    /// rectangle in one entry — the multi-track Backspace path.
+    /// 5.2 on lanes: delete REMOVES the clips the rectangle covers (trimming
+    /// the ones it only partly covers) in one entry — the multi-track
+    /// Backspace path.
+    ///
+    /// Rewritten from the row-model version, which asserted explicit-empty
+    /// overrides across the rectangle. That was row mechanics: an override
+    /// was the only way to express "this lane stops playing the clip". In the
+    /// lane model the clip is an object, so deleting it is a removal, and the
+    /// lane rejoins the scene backdrop (spec 6.2) — deliberate silence is now
+    /// an explicit-empty CLIP, which this removes like any other.
     #[test]
-    fn delete_silences_the_rectangle_in_one_entry() {
+    fn delete_removes_the_clips_in_the_rectangle_in_one_entry() {
         let mut app = app_with_song();
         app.set_song_region(SongRegionSelection::new(0, 1, 4.0, 12.0));
         let depth = app.history.undo_len();
@@ -1157,27 +1201,26 @@ mod tests {
         assert_eq!(app.history.undo_len(), depth + 1, "exactly one undo entry");
         for track in 0..2 {
             assert_eq!(
+                clips(&app, track),
+                vec![
+                    (0.0, 4.0, LaneSource::Pattern(PatternId(1)), 0.0),
+                    // The [8,16) clip is left-trimmed to the region end, its
+                    // offset re-stamped by the split rule: 4 beats == 16
+                    // sixteenth steps, which wraps to 0 in a 16-step pattern.
+                    (12.0, 16.0, LaneSource::Pattern(PatternId(3)), 0.0),
+                ],
+                "track {track} keeps only what the region did not cover"
+            );
+            assert_eq!(
                 window(&app, track, 4.0, 12.0),
-                vec![(0.0, 8.0, LaneSource::Empty, 0.0)],
-                "track {track} is silent across the region"
+                vec![(0.0, 8.0, LaneSource::Pattern(PatternId(1)), 0.0)],
+                "track {track} plays the scene backdrop across the cleared region"
             );
             assert_eq!(
                 window(&app, track, 0.0, 4.0),
                 vec![(0.0, 4.0, LaneSource::Pattern(PatternId(1)), 0.0)],
                 "track {track} outside the region is untouched"
             );
-        }
-        // Explicit-empty, not a fallback to the scene cell.
-        let song = app.state.committed_song().expect("song");
-        let row = song.rows.iter().find(|row| row.start_beat == 4.0).expect("row");
-        for track in 0..2 {
-            let over = row
-                .overrides
-                .iter()
-                .find(|over| over.track == track)
-                .expect("override");
-            assert_eq!(over.pattern_id, None);
-            assert_eq!(over.take_id, None);
         }
 
         undo(&mut app);
@@ -1187,6 +1230,30 @@ mod tests {
                 (0.0, 4.0, LaneSource::Pattern(PatternId(2)), 0.0),
                 (4.0, 8.0, LaneSource::Pattern(PatternId(3)), 0.0),
             ]
+        );
+    }
+
+    /// The other half of the delete contract: an explicit-empty clip is real
+    /// content, so deleting a region containing one removes it too and the
+    /// backdrop comes back.
+    #[test]
+    fn delete_removes_explicit_empty_clips_too() {
+        let mut app = app_with_song();
+        let clip = clip_at(&app, 0, 4.0);
+        app.arr_clip_set_source(clip, LaneSource::Empty)
+            .expect("clip goes explicitly silent");
+        assert_eq!(
+            window(&app, 0, 4.0, 8.0),
+            vec![(0.0, 4.0, LaneSource::Empty, 0.0)],
+            "an explicit-empty clip silences the lane"
+        );
+
+        app.set_song_region(SongRegionSelection::new(0, 0, 4.0, 8.0));
+        app.song_region_delete().expect("delete succeeds");
+        assert_eq!(
+            window(&app, 0, 4.0, 8.0),
+            vec![(0.0, 4.0, LaneSource::Pattern(PatternId(1)), 0.0)],
+            "removing the silence hands the span back to the scene backdrop"
         );
     }
 

@@ -476,7 +476,7 @@
                      1)))))))
 
 ;; Live resize ghost for a track clip: while the edge drag is in flight the
-;; clip previews its new end; the finish action lowers to one song-track-paint.
+;; clip previews its new end; the finish action lowers to one clip resize.
 (def arrangement-track-ghost-clip (i clip)
   (if (and (= (arrangement-ghost-kind) :track-resize)
         (= (get arrangement-ghost :track) i)
@@ -739,24 +739,20 @@
       (seq-song-region-paste (get event :time)))))
 
 ;; Track-lane clip editing (Ableton-style): select a clip, Backspace deletes
-;; it, dragging its end edge resizes it — fewer loops leaves silence, more
-;; eats into whatever follows. Every gesture lowers to ONE song-track-paint
-;; primitive; the paint's row surgery (split + per-row override set) is owned
-;; by the primitive, never composed here.
-(def arrangement-paint-track (i start end pattern-id)
+;; it, dragging its end edge resizes it — fewer loops shortens it, more eats
+;; into whatever follows. Every gesture lowers to ONE clip primitive
+;; (arrangement-lane-model-spec 8/12: a clip is a first-class object, so
+;; resize is a resize, not "move the next row").
+;;
+;; The view still speaks merged clip SPANS, so each gesture carries the span
+;; it drew on (:at-beat/:at-end); the host command resolves the stored clip
+;; from it.
+(def arrangement-clip-edit (i clip payload)
   (arrangement-edit-finish
-    (dict :type :track-paint
-      :track i :start start :end end :pattern-id pattern-id)))
-
-;; Paint continuing an existing clip's phase (takes spec 7.4): the anchor is
-;; the clip's start beat + stored offset, so a grown region carries the loop
-;; forward instead of re-starting it at the paint start.
-(def arrangement-paint-track-anchored (i start end pattern-id anchor anchor-offset)
-  (arrangement-edit-finish
-    (dict :type :track-paint
-      :track i :start start :end end :pattern-id pattern-id
-      :anchor-beat anchor
-      :anchor-offset-steps (or anchor-offset 0))))
+    (merge payload
+      :track i
+      :at-beat (get clip :start-beat)
+      :at-end (get clip :end-beat))))
 
 (def arrangement-track-resize-finish (i)
   (let ((row-id (get arrangement-ghost :row-id))
@@ -766,19 +762,15 @@
         (set! arrangement-ghost nil)
         (if (= clip nil)
           nil
-          (let ((old-end (get clip :end-beat)))
-            (if (< new-end old-end)
-              ;; Shrink: silence the released tail (shrinking to the clip
-              ;; start deletes it outright).
-              (arrangement-paint-track i
-                (max (get clip :start-beat) new-end) old-end nil)
-              (if (> new-end old-end)
-                ;; Grow: the clip's pattern eats into whatever follows,
-                ;; continuing the clip's own loop phase (takes spec 7.4).
-                (arrangement-paint-track-anchored i old-end new-end
-                  (get clip :pattern-id)
-                  (get clip :start-beat) (get clip :offset-steps))
-                nil))))))))
+          (if (= new-end (get clip :end-beat))
+            nil
+            (if (<= new-end (get clip :start-beat))
+              ;; Dragged past its own start: the clip is gone.
+              (arrangement-clip-edit i clip (dict :type :clip-delete))
+              (arrangement-clip-edit i clip
+                (dict :type :clip-resize
+                  :start (get clip :start-beat)
+                  :end new-end)))))))))
 
 (def arrangement-track-delete (i ids)
   (do
@@ -793,8 +785,7 @@
         (let ((clip (arrangement-find-track-clip i row-id)))
           (if (= clip nil)
             nil
-            (arrangement-paint-track i
-              (get clip :start-beat) (get clip :end-beat) nil))))
+            (arrangement-clip-edit i clip (dict :type :clip-delete)))))
       ids)))
 
 (def arrangement-track-action (i event)

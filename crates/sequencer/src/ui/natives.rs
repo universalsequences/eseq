@@ -632,6 +632,17 @@ fn song_row_id_arg(name: &str, value: Option<&Value>) -> Result<u64, String> {
     }
 }
 
+fn song_track_arg(name: &str, value: Option<&Value>) -> Result<usize, String> {
+    match value {
+        Some(Value::Number(track))
+            if track.is_finite() && *track >= 0.0 && track.fract() == 0.0 =>
+        {
+            Ok(*track as usize)
+        }
+        _ => Err(format!("{name} must be a non-negative integer track index")),
+    }
+}
+
 fn song_scene_arg(name: &str, value: Option<&Value>) -> Result<usize, String> {
     match value {
         Some(Value::Number(scene))
@@ -844,23 +855,23 @@ pub(crate) fn register_transport_toggle_play_native(
 }
 
 pub(crate) fn register_song_natives(runtime: &mut Runtime) {
+    // Arrangement editing primitives (docs/arrangement-lane-model-spec.md 8).
+    // Scene-lane ops address a scene change by its beat; clip ops address a
+    // clip by its stable id.
     runtime.register_native_with_docs(
-        "seq-song-row-insert",
-        "(seq-song-row-insert start-beat scene [overrides])",
-        "Insert a song row at an absolute beat, splitting the governing span. \
-         overrides is a list of (track pattern-id) pairs. On an empty song the \
-         insert must be at beat 0.0.",
+        "seq-arrangement-scene-insert",
+        "(seq-arrangement-scene-insert beat scene)",
+        "Insert a scene change at an absolute beat. Clips are untouched: a \
+         clip is opaque while it spans a beat, so this only changes what the \
+         uncovered lanes play.",
         move |args, ctx| {
-            let start_beat = song_beat_arg("seq-song-row-insert: start-beat", args.first())?;
-            let scene = song_scene_arg("seq-song-row-insert: scene", args.get(1))?;
-            let overrides = song_overrides_arg(args.get(2))
-                .map_err(|error| format!("seq-song-row-insert: {error}"))?;
+            let beat = song_beat_arg("seq-arrangement-scene-insert: beat", args.first())?;
+            let scene = song_scene_arg("seq-arrangement-scene-insert: scene", args.get(1))?;
             ctx.enqueue_command(HostCommand::Custom {
-                name: "song-row-insert".to_string(),
+                name: "arrangement-scene-insert".to_string(),
                 payload: song_payload(vec![
-                    ("start-beat", Value::Number(start_beat)),
+                    ("beat", Value::Number(beat)),
                     ("scene", Value::Number(scene as f64)),
-                    ("overrides", song_overrides_value(&overrides)),
                 ]),
             });
             Ok(Value::Bool(true))
@@ -868,32 +879,131 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
-        "seq-song-row-remove",
-        "(seq-song-row-remove row-id)",
-        "Remove a song row by stable id; the previous row's span extends over \
-         it. Removing the last remaining row clears the song.",
+        "seq-arrangement-scene-remove",
+        "(seq-arrangement-scene-remove beat)",
+        "Remove the scene change at an absolute beat; the predecessor's scene \
+         extends over it. Removing the change at beat 0.0 is rejected, and no \
+         clip is ever touched.",
         move |args, ctx| {
-            let row_id = song_row_id_arg("seq-song-row-remove: row-id", args.first())?;
+            let beat = song_beat_arg("seq-arrangement-scene-remove: beat", args.first())?;
             ctx.enqueue_command(HostCommand::Custom {
-                name: "song-row-remove".to_string(),
-                payload: song_payload(vec![("row-id", Value::Number(row_id as f64))]),
+                name: "arrangement-scene-remove".to_string(),
+                payload: song_payload(vec![("beat", Value::Number(beat))]),
             });
             Ok(Value::Bool(true))
         },
     );
 
     runtime.register_native_with_docs(
-        "seq-song-row-move",
-        "(seq-song-row-move row-id new-start-beat)",
-        "Move a song row to a new absolute beat; ordering is re-derived. \
-         Moving row zero off 0.0 or onto another row's beat is rejected.",
+        "seq-arrangement-scene-move",
+        "(seq-arrangement-scene-move from-beat to-beat)",
+        "Move a scene change to a new absolute beat. Moving the change at \
+         beat 0.0, or onto another change's beat, is rejected.",
         move |args, ctx| {
-            let row_id = song_row_id_arg("seq-song-row-move: row-id", args.first())?;
-            let start_beat = song_beat_arg("seq-song-row-move: new-start-beat", args.get(1))?;
+            let from_beat = song_beat_arg("seq-arrangement-scene-move: from-beat", args.first())?;
+            let to_beat = song_beat_arg("seq-arrangement-scene-move: to-beat", args.get(1))?;
             ctx.enqueue_command(HostCommand::Custom {
-                name: "song-row-move".to_string(),
+                name: "arrangement-scene-move".to_string(),
                 payload: song_payload(vec![
-                    ("row-id", Value::Number(row_id as f64)),
+                    ("from-beat", Value::Number(from_beat)),
+                    ("to-beat", Value::Number(to_beat)),
+                ]),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-arrangement-scene-set",
+        "(seq-arrangement-scene-set beat scene)",
+        "Point the scene change at an absolute beat at a different scene.",
+        move |args, ctx| {
+            let beat = song_beat_arg("seq-arrangement-scene-set: beat", args.first())?;
+            let scene = song_scene_arg("seq-arrangement-scene-set: scene", args.get(1))?;
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "arrangement-scene-set".to_string(),
+                payload: song_payload(vec![
+                    ("beat", Value::Number(beat)),
+                    ("scene", Value::Number(scene as f64)),
+                ]),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-arrangement-clip-create",
+        "(seq-arrangement-clip-create track start-beat end-beat [pattern-id] \
+          [offset-steps])",
+        "Create a clip on a track lane, truncating whatever it lands on \
+         (Ableton-style: the incoming clip always wins). pattern-id nil or 0 \
+         creates an explicit-empty clip — deliberate silence that still \
+         occludes the scene backdrop.",
+        move |args, ctx| {
+            let track = song_track_arg("seq-arrangement-clip-create: track", args.first())?;
+            let start_beat =
+                song_beat_arg("seq-arrangement-clip-create: start-beat", args.get(1))?;
+            let end_beat = song_beat_arg("seq-arrangement-clip-create: end-beat", args.get(2))?;
+            let pattern_id = match args.get(3) {
+                None | Some(Value::Nil) => Value::Nil,
+                Some(Value::Number(id)) => Value::Number(*id),
+                Some(_) => {
+                    return Err(
+                        "seq-arrangement-clip-create: pattern-id must be a number or nil".into(),
+                    )
+                }
+            };
+            let offset_steps = match args.get(4) {
+                None | Some(Value::Nil) => 0.0,
+                Some(Value::Number(offset)) if offset.is_finite() && *offset >= 0.0 => *offset,
+                Some(_) => {
+                    return Err(
+                        "seq-arrangement-clip-create: offset-steps must be a non-negative number"
+                            .into(),
+                    )
+                }
+            };
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "arrangement-clip-create".to_string(),
+                payload: song_payload(vec![
+                    ("track", Value::Number(track as f64)),
+                    ("start-beat", Value::Number(start_beat)),
+                    ("end-beat", Value::Number(end_beat)),
+                    ("pattern-id", pattern_id),
+                    ("offset-steps", Value::Number(offset_steps)),
+                ]),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-arrangement-clip-delete",
+        "(seq-arrangement-clip-delete clip-id)",
+        "Delete a clip by stable id. The lane rejoins the scene backdrop over \
+         its span.",
+        move |args, ctx| {
+            let clip_id = song_row_id_arg("seq-arrangement-clip-delete: clip-id", args.first())?;
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "arrangement-clip-delete".to_string(),
+                payload: song_payload(vec![("clip-id", Value::Number(clip_id as f64))]),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-arrangement-clip-move",
+        "(seq-arrangement-clip-move clip-id new-start-beat)",
+        "Move a clip rigidly: same length, same phase anchor, later or \
+         earlier. It truncates whatever it lands on.",
+        move |args, ctx| {
+            let clip_id = song_row_id_arg("seq-arrangement-clip-move: clip-id", args.first())?;
+            let start_beat = song_beat_arg("seq-arrangement-clip-move: new-start-beat", args.get(1))?;
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "arrangement-clip-move".to_string(),
+                payload: song_payload(vec![
+                    ("clip-id", Value::Number(clip_id as f64)),
                     ("start-beat", Value::Number(start_beat)),
                 ]),
             });
@@ -902,22 +1012,84 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
-        "seq-song-row-set-state",
-        "(seq-song-row-set-state row-id scene [overrides])",
-        "Replace a song row's complete launch state (base scene plus the full \
-         override set), preserving its id and position.",
+        "seq-arrangement-clip-resize",
+        "(seq-arrangement-clip-resize clip-id start-beat end-beat)",
+        "Resize a clip. Trimming the left edge re-stamps the phase anchor so \
+         the clip keeps playing what it played there; the right edge is pure \
+         occlusion, clamped to a take's playable length.",
         move |args, ctx| {
-            let row_id = song_row_id_arg("seq-song-row-set-state: row-id", args.first())?;
-            let scene = song_scene_arg("seq-song-row-set-state: scene", args.get(1))?;
-            let overrides = song_overrides_arg(args.get(2))
-                .map_err(|error| format!("seq-song-row-set-state: {error}"))?;
+            let clip_id = song_row_id_arg("seq-arrangement-clip-resize: clip-id", args.first())?;
+            let start_beat = song_beat_arg("seq-arrangement-clip-resize: start-beat", args.get(1))?;
+            let end_beat = song_beat_arg("seq-arrangement-clip-resize: end-beat", args.get(2))?;
             ctx.enqueue_command(HostCommand::Custom {
-                name: "song-row-set-state".to_string(),
+                name: "arrangement-clip-resize".to_string(),
                 payload: song_payload(vec![
-                    ("row-id", Value::Number(row_id as f64)),
-                    ("scene", Value::Number(scene as f64)),
-                    ("overrides", song_overrides_value(&overrides)),
+                    ("clip-id", Value::Number(clip_id as f64)),
+                    ("start-beat", Value::Number(start_beat)),
+                    ("end-beat", Value::Number(end_beat)),
                 ]),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-arrangement-clip-split",
+        "(seq-arrangement-clip-split clip-id beat)",
+        "Split a clip at an absolute beat into two clips playing the same \
+         uninterrupted music.",
+        move |args, ctx| {
+            let clip_id = song_row_id_arg("seq-arrangement-clip-split: clip-id", args.first())?;
+            let beat = song_beat_arg("seq-arrangement-clip-split: beat", args.get(1))?;
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "arrangement-clip-split".to_string(),
+                payload: song_payload(vec![
+                    ("clip-id", Value::Number(clip_id as f64)),
+                    ("beat", Value::Number(beat)),
+                ]),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-arrangement-clip-set-source",
+        "(seq-arrangement-clip-set-source clip-id [pattern-id])",
+        "Swap a clip's content in place, keeping its span and identity. The \
+         phase anchor resets to the new source's step 0.",
+        move |args, ctx| {
+            let clip_id =
+                song_row_id_arg("seq-arrangement-clip-set-source: clip-id", args.first())?;
+            let pattern_id = match args.get(1) {
+                None | Some(Value::Nil) => Value::Nil,
+                Some(Value::Number(id)) => Value::Number(*id),
+                Some(_) => {
+                    return Err(
+                        "seq-arrangement-clip-set-source: pattern-id must be a number or nil"
+                            .into(),
+                    )
+                }
+            };
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "arrangement-clip-set-source".to_string(),
+                payload: song_payload(vec![
+                    ("clip-id", Value::Number(clip_id as f64)),
+                    ("pattern-id", pattern_id),
+                ]),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-arrangement-clear",
+        "(seq-arrangement-clear)",
+        "Remove the committed arrangement (and with it the compiled song) \
+         entirely.",
+        move |_args, ctx| {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "arrangement-clear".to_string(),
+                payload: Value::Nil,
             });
             Ok(Value::Bool(true))
         },
@@ -3463,9 +3635,13 @@ pub(crate) fn init_runtime(
             return Err("seq-arrangement-action: expected action map".into());
         };
         let song = st.committed_song();
-        let commands =
-            crate::arrangement_actions::arrangement_action_song_commands(action, song.as_ref())
-                .map_err(|error| format!("seq-arrangement-action: {error}"))?;
+        let arrangement = st.committed_arrangement();
+        let commands = crate::arrangement_actions::arrangement_action_song_commands(
+            action,
+            song.as_ref(),
+            arrangement.as_ref(),
+        )
+        .map_err(|error| format!("seq-arrangement-action: {error}"))?;
         if commands.is_empty() {
             return Ok(Value::String("arrangement".to_string()));
         }

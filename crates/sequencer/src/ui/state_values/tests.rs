@@ -20149,7 +20149,7 @@
         );
 
         // Shrink: live drag ghosts the clip end, finish lowers to ONE
-        // :track-paint silencing the released tail.
+        // :clip-resize naming the clip's own span (lane spec 12).
         eval(
             &mut editor,
             "(arrangement-track-action 0 (dict :type :resize-item-absolute :id 0 :ids (list 0) :edge :end :time 6))",
@@ -20170,12 +20170,15 @@
             assert_eq!(recorded.len(), 6);
             assert_eq!(
                 action_field(&recorded[5], "type"),
-                Value::Keyword("track-paint".to_string())
+                Value::Keyword("clip-resize".to_string())
             );
             assert_eq!(action_field(&recorded[5], "track"), Value::Number(0.0));
-            assert_eq!(action_field(&recorded[5], "start"), Value::Number(6.0));
-            assert_eq!(action_field(&recorded[5], "end"), Value::Number(8.0));
-            assert_eq!(action_field(&recorded[5], "pattern-id"), Value::Nil);
+            // The gesture names the clip by the span it drew on and asks for
+            // the new end; the released tail is not a separate paint any more.
+            assert_eq!(action_field(&recorded[5], "at-beat"), Value::Number(0.0));
+            assert_eq!(action_field(&recorded[5], "at-end"), Value::Number(8.0));
+            assert_eq!(action_field(&recorded[5], "start"), Value::Number(0.0));
+            assert_eq!(action_field(&recorded[5], "end"), Value::Number(6.0));
         }
 
         // Grow: the clip's own pattern eats into what follows.
@@ -20187,9 +20190,13 @@
         {
             let recorded = recorded.lock().unwrap();
             assert_eq!(recorded.len(), 7);
-            assert_eq!(action_field(&recorded[6], "start"), Value::Number(12.0));
+            assert_eq!(
+                action_field(&recorded[6], "type"),
+                Value::Keyword("clip-resize".to_string())
+            );
+            assert_eq!(action_field(&recorded[6], "at-beat"), Value::Number(8.0));
+            assert_eq!(action_field(&recorded[6], "start"), Value::Number(8.0));
             assert_eq!(action_field(&recorded[6], "end"), Value::Number(15.0));
-            assert_eq!(action_field(&recorded[6], "pattern-id"), Value::Number(2.0));
         }
 
         // Select + delete: selection is exclusive per lane kind; Backspace
@@ -20223,11 +20230,10 @@
             assert_eq!(recorded.len(), 8);
             assert_eq!(
                 action_field(&recorded[7], "type"),
-                Value::Keyword("track-paint".to_string())
+                Value::Keyword("clip-delete".to_string())
             );
-            assert_eq!(action_field(&recorded[7], "start"), Value::Number(0.0));
-            assert_eq!(action_field(&recorded[7], "end"), Value::Number(8.0));
-            assert_eq!(action_field(&recorded[7], "pattern-id"), Value::Nil);
+            assert_eq!(action_field(&recorded[7], "at-beat"), Value::Number(0.0));
+            assert_eq!(action_field(&recorded[7], "at-end"), Value::Number(8.0));
         }
         assert_eq!(
             read(&mut editor, "(len (arrangement-lane-selection 0))"),
@@ -20327,50 +20333,80 @@
         app.tracks = vec!["Track 1".to_string()];
         app.track_registry =
             sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
-        let row = |start_beat: f64, scene: usize| sequencer::app::song_edit::SongRowSpec {
-            start_beat,
-            scene,
-            overrides: Vec::new(),
-        };
-        app.song_replace(vec![row(0.0, 0), row(8.0, 1)], 16.0, false)
-            .expect("song committed");
+        // Two scene changes and one clip on track 0: the shapes the scene-lane
+        // and track-lane gestures address.
+        let mut arrangement = sequencer::sequencer::ProjectArrangement::new(1, 16.0);
+        arrangement.scene_lane.push(sequencer::sequencer::SceneEvent {
+            start_beat: 8.0,
+            scene: 1,
+        });
+        let clip_id = arrangement.allocate_clip_id().expect("clip id");
+        arrangement.track_lanes[0].push(sequencer::sequencer::ArrClip::new(
+            clip_id, 2.0, 6.0, Some(2),
+        ));
+        app.arr_replace(arrangement).expect("arrangement committed");
         let song = app.state.committed_song().expect("committed song");
-        let move_row = song.rows[1].id.0;
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        let move_row = song
+            .rows
+            .iter()
+            .find(|row| row.start_beat == 8.0)
+            .expect("a row at the scene change")
+            .id
+            .0;
 
-        // Move gesture -> one song-row-move -> one undo entry.
+        let apply = |app: &mut sequencer::app::App, commands: &[(&str, Value)]| {
+            for (name, payload) in commands {
+                crate::host_commands::apply_song_edit_command(name, payload, app)
+                    .expect("song edit command")
+                    .expect("primitive applies");
+            }
+        };
+
+        // Scene-lane move gesture -> one arrangement-scene-move -> one entry.
         let action = map_value(vec![
             ("type", Value::Keyword("finish-move-items".to_string())),
             ("row-id", Value::Number(move_row as f64)),
             ("start", Value::Number(12.0)),
         ]);
-        let commands =
-            crate::arrangement_actions::arrangement_action_song_commands(&action, Some(&song))
-                .expect("gesture translates");
+        let commands = crate::arrangement_actions::arrangement_action_song_commands(
+            &action,
+            Some(&song),
+            Some(&arrangement),
+        )
+        .expect("gesture translates");
         assert_eq!(commands.len(), 1);
         let depth = app.history.undo_len();
-        for (name, payload) in &commands {
-            crate::host_commands::apply_song_edit_command(name, payload, &mut app)
-                .expect("song edit command")
-                .expect("primitive applies");
-        }
+        apply(&mut app, &commands);
         assert_eq!(app.history.undo_len(), depth + 1, "one gesture, one undo entry");
         assert_eq!(
-            app.state.committed_song().unwrap().rows[1].start_beat,
-            12.0
+            app.state
+                .committed_arrangement()
+                .unwrap()
+                .scene_lane
+                .iter()
+                .map(|event| event.start_beat)
+                .collect::<Vec<_>>(),
+            vec![0.0, 12.0]
         );
 
-        // A rejected primitive (moving row zero off 0.0) changes nothing and
-        // adds no history entry — the view's ghost was already discarded, so
-        // the committed song snaps the display back.
+        // A rejected primitive (moving the scene change at 0.0) changes
+        // nothing and adds no history entry — the view's ghost was already
+        // discarded, so the committed song snaps the display back.
+        let song = app.state.committed_song().unwrap();
+        let arrangement = app.state.committed_arrangement().unwrap();
         let row_zero = song.rows[0].id.0;
         let action = map_value(vec![
             ("type", Value::Keyword("finish-move-items".to_string())),
             ("row-id", Value::Number(row_zero as f64)),
             ("start", Value::Number(4.0)),
         ]);
-        let commands =
-            crate::arrangement_actions::arrangement_action_song_commands(&action, Some(&song))
-                .expect("gesture translates");
+        let commands = crate::arrangement_actions::arrangement_action_song_commands(
+            &action,
+            Some(&song),
+            Some(&arrangement),
+        )
+        .expect("gesture translates");
         let depth = app.history.undo_len();
         let result = crate::host_commands::apply_song_edit_command(
             &commands[0].0,
@@ -20378,70 +20414,93 @@
             &mut app,
         )
         .expect("song edit command");
-        assert!(result.is_err(), "moving row zero must be rejected");
+        assert!(result.is_err(), "moving the first scene change must be rejected");
         assert_eq!(app.history.undo_len(), depth, "rejection adds no history");
-        assert_eq!(app.state.committed_song().unwrap().rows[0].start_beat, 0.0);
+        assert_eq!(
+            app.state.committed_arrangement().unwrap().scene_lane[0].start_beat,
+            0.0
+        );
 
         // A scene drop beyond the song end lowers to extend-then-insert and
         // both primitives apply (the silent-rejection bug: inserting past
         // the end is invalid without the extension).
         let song = app.state.committed_song().unwrap();
+        let arrangement = app.state.committed_arrangement().unwrap();
         let action = map_value(vec![
             ("type", Value::Keyword("finish-create-item".to_string())),
             ("start", Value::Number(24.0)),
             ("end", Value::Number(40.0)),
-            // Scene 0: a state distinct from the governing row (scene 1) —
-            // inserting the governing row's own state is normalized away and
-            // therefore rejected.
             ("scene", Value::Number(0.0)),
         ]);
-        let commands =
-            crate::arrangement_actions::arrangement_action_song_commands(&action, Some(&song))
-                .expect("drop translates");
+        let commands = crate::arrangement_actions::arrangement_action_song_commands(
+            &action,
+            Some(&song),
+            Some(&arrangement),
+        )
+        .expect("drop translates");
         assert_eq!(commands.len(), 2, "extend + insert");
-        for (name, payload) in &commands {
-            crate::host_commands::apply_song_edit_command(name, payload, &mut app)
-                .expect("song edit command")
-                .expect("primitive applies");
-        }
-        let song = app.state.committed_song().unwrap();
-        assert_eq!(song.end_beat, 40.0);
-        assert_eq!(song.rows.len(), 3);
-        assert_eq!(song.rows[2].start_beat, 24.0);
+        apply(&mut app, &commands);
+        let arrangement = app.state.committed_arrangement().unwrap();
+        assert_eq!(arrangement.end_beat, 40.0);
+        assert_eq!(
+            arrangement
+                .scene_lane
+                .iter()
+                .map(|event| (event.start_beat, event.scene))
+                .collect::<Vec<_>>(),
+            vec![(0.0, 0), (12.0, 1), (24.0, 0)]
+        );
 
-        // Track-clip surgery: a delete/resize gesture lowers to exactly one
-        // song-track-paint, which applies as ONE undo entry no matter how
-        // many rows it splits or rewrites.
+        // Track-clip surgery: an edge drag lowers to exactly ONE clip resize,
+        // which applies as one undo entry no matter how many compiled rows it
+        // rewrites (lane spec 12 — a clip resize is a clip resize).
+        let song = app.state.committed_song().unwrap();
+        let arrangement = app.state.committed_arrangement().unwrap();
         let action = map_value(vec![
-            ("type", Value::Keyword("track-paint".to_string())),
+            ("type", Value::Keyword("clip-resize".to_string())),
             ("track", Value::Number(0.0)),
+            ("at-beat", Value::Number(2.0)),
+            ("at-end", Value::Number(6.0)),
             ("start", Value::Number(2.0)),
-            ("end", Value::Number(6.0)),
-            ("pattern-id", Value::Nil),
+            ("end", Value::Number(10.0)),
         ]);
-        let commands =
-            crate::arrangement_actions::arrangement_action_song_commands(&action, Some(&song))
-                .expect("track paint translates");
+        let commands = crate::arrangement_actions::arrangement_action_song_commands(
+            &action,
+            Some(&song),
+            Some(&arrangement),
+        )
+        .expect("clip resize translates");
         assert_eq!(commands.len(), 1);
         let depth = app.history.undo_len();
-        crate::host_commands::apply_song_edit_command(
-            &commands[0].0,
-            &commands[0].1,
-            &mut app,
-        )
-        .expect("song edit command")
-        .expect("paint applies");
-        assert_eq!(app.history.undo_len(), depth + 1, "row surgery is one undo entry");
+        apply(&mut app, &commands);
+        assert_eq!(
+            app.history.undo_len(),
+            depth + 1,
+            "clip surgery is one undo entry"
+        );
+        let lane = &app.state.committed_arrangement().unwrap().track_lanes[0];
+        assert_eq!(lane.len(), 1);
+        assert_eq!((lane[0].start_beat, lane[0].end_beat), (2.0, 10.0));
+
+        // And Backspace on the clip removes it outright.
         let song = app.state.committed_song().unwrap();
-        // [2,6) split out of row zero's span with an explicit-empty override
-        // on track 0, and row zero's state restored at 6.
-        assert!(song.rows.iter().any(|row| row.start_beat == 2.0
-            && row.overrides
-                == vec![sequencer::sequencer::ProjectSongTrackOverride::new(0, None)]));
-        assert!(song
-            .rows
-            .iter()
-            .any(|row| row.start_beat == 6.0 && row.overrides.is_empty()));
+        let arrangement = app.state.committed_arrangement().unwrap();
+        let action = map_value(vec![
+            ("type", Value::Keyword("clip-delete".to_string())),
+            ("track", Value::Number(0.0)),
+            ("at-beat", Value::Number(2.0)),
+            ("at-end", Value::Number(10.0)),
+        ]);
+        let commands = crate::arrangement_actions::arrangement_action_song_commands(
+            &action,
+            Some(&song),
+            Some(&arrangement),
+        )
+        .expect("clip delete translates");
+        let depth = app.history.undo_len();
+        apply(&mut app, &commands);
+        assert_eq!(app.history.undo_len(), depth + 1);
+        assert!(app.state.committed_arrangement().unwrap().track_lanes[0].is_empty());
     }
 
     /// The full keyboard-delete path for a track clip: clicking the clip
@@ -20570,7 +20629,7 @@
         );
 
         // The editor key path delivers Backspace to the lane widget, which
-        // lowers the selected clip to one :track-paint silence.
+        // lowers the selected clip to one :clip-delete.
         editor.handle_key(backspace);
         let recorded = recorded.lock().unwrap();
         assert_eq!(recorded.len(), 1, "backspace deletes the selected clip");
@@ -20579,11 +20638,10 @@
         };
         assert_eq!(
             map["type"].borrow().clone(),
-            Value::Keyword("track-paint".to_string())
+            Value::Keyword("clip-delete".to_string())
         );
-        assert_eq!(map["start"].borrow().clone(), Value::Number(0.0));
-        assert_eq!(map["end"].borrow().clone(), Value::Number(16.0));
-        assert!(matches!(&*map["pattern-id"].borrow(), Value::Nil));
+        assert_eq!(map["at-beat"].borrow().clone(), Value::Number(0.0));
+        assert_eq!(map["at-end"].borrow().clone(), Value::Number(16.0));
     }
 
     /// Clip editing must keep working after the track scroll container is
@@ -20740,7 +20798,7 @@
             };
             assert_eq!(
                 map["type"].borrow().clone(),
-                Value::Keyword("track-paint".to_string())
+                Value::Keyword("clip-delete".to_string())
             );
             assert_eq!(map["track"].borrow().clone(), Value::Number(5.0));
         }
@@ -20858,8 +20916,8 @@
             };
             assert_eq!(
                 map["type"].borrow().clone(),
-                Value::Keyword("track-paint".to_string()),
-                "resize lowers to a track paint"
+                Value::Keyword("clip-resize".to_string()),
+                "resize lowers to one clip resize"
             );
             assert_eq!(map["track"].borrow().clone(), Value::Number(5.0));
         }

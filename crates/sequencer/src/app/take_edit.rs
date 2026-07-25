@@ -234,8 +234,10 @@ mod tests {
     #[test]
     fn region_to_take_rejects_empty_regions() {
         let mut app = app_with_song();
-        // Silence the whole region first: nothing to convert.
-        app.song_track_paint(0, 4.0, 12.0, None).expect("paint silence");
+        // Silence the whole region first: nothing to convert. An
+        // explicit-empty CLIP is the lane model's deliberate silence.
+        app.arr_clip_create(0, 4.0, 12.0, crate::sequencer::LaneSource::Empty, 0.0)
+            .expect("explicit-empty clip");
         let depth = app.history.undo_len();
         let error = app
             .song_region_to_take(0, 4.0, 12.0)
