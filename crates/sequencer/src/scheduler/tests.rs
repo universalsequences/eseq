@@ -5573,6 +5573,183 @@
         });
     }
 
+    /// Repro for the arrtest3 "drone lane drops a loop at row boundaries"
+    /// report: track 1 is an 8-step pattern with ONLY step 0 active (a
+    /// half-bar clip whose trigger lands exactly on every even beat), pinned
+    /// to the same pool pattern across rows whose start beats — including
+    /// the exact fractional splice boundaries from the project file — often
+    /// coincide with its step-0 crossing. Every 2-beat loop must schedule
+    /// exactly one trigger, regardless of scheduler block size and of how
+    /// the lookahead pass is paced.
+    #[test]
+    fn song_boundary_coincident_drone_trigger_never_drops() {
+        {
+            let state = Arc::new(SequencerState::new(
+                2,
+                vec![default_empty_effect_chain(), default_empty_effect_chain()],
+            ));
+            let drone_id = state.with_scenes_mut(|scenes| {
+                let snapshots = vec![
+                    crate::sequencer::PatternSnapshot::new_default(2, &[]),
+                    crate::sequencer::PatternSnapshot::new_default(2, &[]),
+                    crate::sequencer::PatternSnapshot::new_default(2, &[]),
+                ];
+                *scenes = crate::sequencer::ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+                for scene in 0..3 {
+                    let id = scenes.scenes[scene].cells[0].expect("scene cell");
+                    let data = scenes.track_pools[0].get_mut(id).expect("pool pattern");
+                    song_mode_configure_pattern(data, (scene + 1) as f32);
+                    let id = scenes.scenes[scene].cells[1].expect("scene cell");
+                    let data = scenes.track_pools[1].get_mut(id).expect("pool pattern");
+                    data.track_params.num_steps = 8;
+                    data.track_bits = [1, 0, 0, 0];
+                    data.step_data[0][StepParam::Transpose.index()] = 7.0;
+                    data.step_data[0][StepParam::Duration.index()] = 8.0;
+                }
+                scenes.scenes[0].cells[1].expect("drone cell")
+            });
+            let drone = |offset_steps: f64| crate::sequencer::ProjectSongTrackOverride {
+                track: 1,
+                pattern_id: Some(drone_id.0),
+                take_id: None,
+                offset_steps,
+            };
+            // Row starts and drone offsets lifted verbatim from
+            // projects/arrtest3.json (track 6), through beat 28.
+            let rows = vec![
+                song_mode_row(437, 0.0, 0, Vec::new()),
+                {
+                    let mut row = song_mode_row(481, 8.0, 0, Vec::new());
+                    row.overrides = vec![drone(0.0)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(459, 9.994709105451298, 0, Vec::new());
+                    row.overrides = vec![drone(7.978836421805191)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(476, 12.0, 0, Vec::new());
+                    row.overrides = vec![drone(0.0)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(439, 13.055999999917828, 1, Vec::new());
+                    row.overrides = vec![drone(4.223999999671314)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(475, 14.0, 1, Vec::new());
+                    row.overrides = vec![drone(0.0)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(440, 14.266308332895033, 0, Vec::new());
+                    row.overrides = vec![drone(1.0652333315801314)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(441, 14.393673416895028, 1, Vec::new());
+                    row.overrides = vec![drone(1.5746936675801138)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(480, 16.0, 1, Vec::new());
+                    row.overrides = vec![drone(0.0)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(442, 20.474304416895237, 1, Vec::new());
+                    row.overrides = vec![drone(1.8972176675809465)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(478, 26.0, 1, Vec::new());
+                    row.overrides = vec![drone(0.0)];
+                    row
+                },
+            ];
+            song_mode_commit(&state, rows, 28.0, false);
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let base = state.publish_scheduler_snapshot();
+            let samples_per_quarter = 48_000.0 * 60.0 / base.transport.bpm as f64;
+            let end_sample = (28.0 * samples_per_quarter) as u64;
+
+            for &block in &[128usize, 256, 480, 512, 1000, 16_000] {
+                let state = Arc::clone(&state);
+                let runtime = Arc::clone(&runtime);
+                let base = Arc::clone(&base);
+                let triggers: Vec<ObservedTrigger> = run_with_scheduler_stack(move || {
+                    let queue = Box::new(ScheduledEventQueue::<128>::new());
+                    let mut scheduler = SchedulerLookaheadState::new(48_000);
+                    scheduler.song = Some(
+                        crate::sequencer::SongPlaybackRuntime::new(
+                            runtime,
+                            0.0,
+                            samples_per_quarter,
+                        )
+                        .expect("song playback runtime"),
+                    );
+                    let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                        std::array::from_fn(|_| LiveMidiFxTrackState::default());
+                    let mut scratch_runtime = None;
+                    // Incremental pacing like production: `rendered` creeps
+                    // forward and every pass extends the horizon by at most
+                    // the 4-block lookahead window.
+                    let mut scheduled_until = 0_u64;
+                    let mut rendered = 0_u64;
+                    let mut triggers: Vec<ObservedTrigger> = Vec::new();
+                    while rendered < end_sample + 48_000 {
+                        let result = schedule_playing_lookahead(
+                            &mut scheduler,
+                            &state,
+                            &base,
+                            &queue,
+                            &mut scratch_runtime,
+                            &live_midi_fx_tracks,
+                            base.transport.pattern_epoch,
+                            rendered,
+                            (block * 4) as u64,
+                            48_000,
+                            block,
+                            samples_per_quarter,
+                            scheduled_until,
+                            false,
+                            false,
+                        );
+                        scheduled_until = result.scheduled_until_sample;
+                        triggers.extend(observed_triggers(queue.as_ref()));
+                        rendered += block as u64;
+                    }
+                    let _ = state.drain_song_playback_notices();
+                    triggers
+                });
+                let drone_hits: Vec<u64> = triggers
+                    .iter()
+                    .filter(|event| event.track == 1)
+                    .map(|event| event.sample_time)
+                    .collect();
+                // One trigger per 2-beat loop: beats 0, 2, 4, ... 26.
+                let expected: Vec<u64> = (0..14)
+                    .map(|loop_idx| (loop_idx as f64 * 2.0 * samples_per_quarter) as u64)
+                    .collect();
+                assert_eq!(
+                    drone_hits.len(),
+                    expected.len(),
+                    "block={block}: expected one drone trigger per loop, got {drone_hits:?}"
+                );
+                for (hit, want) in drone_hits.iter().zip(&expected) {
+                    let delta = hit.abs_diff(*want);
+                    assert!(
+                        delta <= 2,
+                        "block={block}: drone trigger at {hit} expected near {want} ({drone_hits:?})"
+                    );
+                }
+            }
+        }
+    }
+
     /// Install a two-chunk take (256 + 40 = 296 steps, transposes 5/6) on
     /// track 0 and return its id. Chunks are MAX_STEPS-long 16th-timebase
     /// patterns, so one chunk spans 64 beats.

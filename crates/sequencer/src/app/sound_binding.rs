@@ -641,7 +641,18 @@ impl App {
             }
         }
         self.push_track_solo_mutes();
-        self.push_instrument_defaults_for_track(track);
+        // Same sampler exemption as `push_all_restored_defaults`: sampler
+        // voices get their params stamped per note (including p-locks), so
+        // pushing slot DEFAULTS onto live voices would stomp a sounding
+        // note's p-locked start/end — moving the region past the playhead
+        // hard-kills the voice (the boundary-coincident silent-loop bug).
+        if self.graph.track_instrument_types.get(track)
+            == Some(&crate::sequencer::InstrumentType::Rack)
+        {
+            self.push_rack_slot_instrument_defaults_for_track(track);
+        } else if !self.is_sampler_track(track) {
+            self.push_instrument_defaults_for_track(track);
+        }
     }
 }
 

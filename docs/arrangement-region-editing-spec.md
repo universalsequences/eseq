@@ -1,4 +1,4 @@
-# Arrangement Region Editing — Clip Hit Regions, Region Selection, Copy/Paste, Move
+# Arrangement Region Editing — Clip Hit Regions, Region Selection, Copy/Paste/Duplicate, Move
 
 Status: mini implementation spec, 2026-07-24
 Related: `docs/arrangement-timeline-ui-spec.md` (§9, §11 items 2/4),
@@ -18,8 +18,9 @@ Four slices, in dependency order:
 2. **Region selection** — click-drag on clip bodies / background selects a
    time × track rectangle, across multiple tracks, quantized to the
    zoom-adaptive grid.
-3. **Copy / paste** — region → clipboard → paste at the per-track cursor,
-   one undo entry.
+3. **Copy / paste / duplicate** — region → clipboard → paste at the
+   per-track cursor; Cmd-D duplicates the region in place, rippling what
+   follows right. One undo entry each.
 4. **Move** — drag a clip by its title bar; if the clip is inside the
    active region, the whole region moves in unison.
 
@@ -232,9 +233,17 @@ Arrangement lanes pass it; piano-roll doesn't.
 ```rust
 pub struct ArrangementClipboard {
     pub len_beats: f64,
+    /// Grid the copied rectangle sat on; paste floors its destination to it.
+    /// The coarsest rung of [4, 2, 1, 1/2, 1/4, 1/8] beats that divides both
+    /// the region start and its length — capped at one BAR so a 4-bar copy
+    /// snaps to the bar rather than jumping the destination four bars back.
+    /// 0.0 = paste exactly where told.
+    pub snap_beats: f64,
     /// Absolute model track index → spans, rel_start/rel_end in beats
     /// relative to the copied region start. Gaps are implicit (paste
-    /// silences them — the clipboard is the whole rectangle).
+    /// silences them — the clipboard is the whole rectangle). A track that
+    /// was silent throughout still travels, with no spans, so paste silences
+    /// its destination.
     pub tracks: Vec<(usize, Vec<ClipboardSpan>)>,
 }
 pub struct ClipboardSpan {
@@ -300,13 +309,15 @@ gap that `song-track-paint` can't paint takes.
   Label "Paste region".
 - `song_region_delete()` — explicit-empty paint over the region per track.
   Label "Delete region". (This also gives multi-track Backspace.)
+- `song_region_duplicate()` — copy the region and ripple-insert it directly
+  after itself; see §5.4. Label "Duplicate region".
 - `song_region_move(delta_beats)` — delete source rectangle + repaint at
   the shifted position on one clone (content moves **rigidly**: sources and
   offsets preserved, takes spec §7.4). Move never clones takes — it
   relocates the same clip instances. Label "Move region". Also reused for
   single-clip move (§6).
 
-Host commands `song-region-copy/paste/delete/move` registered in
+Host commands `song-region-copy/paste/delete/duplicate/move` registered in
 `host_commands/song.rs` (command list `:13-38`); copy/paste additionally
 need the clipboard handle, so they follow the piano-roll pattern of being
 applied in the UI-side host-command layer (`history_commands.rs:712-760`)
@@ -323,12 +334,55 @@ directly:
 - **Cmd-V**: paste at `(arrangement-cursor-time)` — mirror the cursor to
   Rust alongside the region native (`seq-song-set-region` carries it, or a
   tiny `seq-song-set-arr-cursor`), floored to the clipboard's snap.
+- **Cmd-D**: active region → `song-region-duplicate` (§5.4). Consumed only
+  when a region exists, so it never shadows the mixer's Cmd-D.
 - **Backspace**: active region → `song-region-delete`; else existing
-  clip/row deletion paths unchanged.
+  clip/row deletion paths unchanged. Only a MARQUEE region takes the key
+  (region set, `song_clip_selection` empty); a clip click's one-clip region
+  keeps falling through to the existing clip-delete path.
 
 Widget-emitted `:copy-items`/`:paste-items` (`timeline.rs:2336-2360`) are
 routed to the same commands when they arrive with lane focus, so both entry
 points converge.
+
+### 5.4 Duplicate — Cmd-D (ripple insert)
+
+`song_region_duplicate()` copies the region and inserts the copy directly
+after itself at `insert = region.end_beat`, pushing what follows right by
+`len = region length`. One undo entry; the region selection then becomes
+`[insert, insert+len)` so repeated Cmd-D chains down the timeline. Take
+sources clone exactly as paste's do (§5.1) — a duplicated take is its own
+performance.
+
+**Only the SELECTED tracks move.** Two mechanisms, chosen by whether the
+region covers every track, with the same audible contract:
+
+| selection | mechanism | why |
+|---|---|---|
+| every track | shift the song ROWS at/after `insert` right by `len` | rows are the shared time boundaries, so moving them moves every lane at once and the song stays **scene-resolved** — no override churn. The "insert 4 bars into my song" gesture. |
+| some tracks | re-paint just those lanes' tails `len` beats later | rows stay put, so untouched lanes keep playing at the beats they always did. |
+
+The partial path reads each rippled lane's spans from `insert` to the song
+end **before** any mutation (silence included — a gap that slides right must
+leave silence behind it, not the clip it used to sit beside), boundary-cut
+offsets advanced per §5.1, then re-stamps each span at `+len` with the offset
+it had at its own start. Both paths leave exactly `[insert, insert+len)`
+vacated on the rippled lanes, which the duplicate then fills through the same
+`paint_clipboard` helper paste uses.
+
+**Locked: partial ripple detaches the rippled lanes from scene resolution.**
+Once a lane's content sits `len` beats off the rows' scenes it cannot be
+scene-derived any more, so its tail becomes explicit overrides and later
+scene-cell edits stop reaching it. This is inherent, not an implementation
+shortcut — and it is exactly why the all-tracks case earns its own
+row-shifting path rather than being folded into the general one.
+
+Untouched lanes are not left alone by accident: the partial path inserts new
+row boundaries under them, which is safe only because every split goes
+through `split_row_state` (phase-transparent — same music, more rows). Both
+paths grow the song by `len`, so every lane gains that much new time at the
+end, governed by whatever it was playing at the boundary; existing material
+is untouched.
 
 ## 6. Slice 4 — move
 
@@ -369,11 +423,14 @@ points converge.
    ordinal↔track mapping test (UI-script pattern); `SEQ.song-region`
    publish/diff in `state_values` tests; exclusivity with clip/row
    selection + binding release.
-3. **Copy/paste/delete** (§5) — `paint_source_region` extraction must keep
-   `song_edit.rs` + `take_edit.rs` suites green; new tests: copy clips a
-   boundary-cut clip with advanced offset; paste reproduces `project_lanes`
-   of the source region shifted; paste-over extends song end in one undo
-   entry; undo restores in one step.
+3. **Copy/paste/delete/duplicate** (§5) — `paint_source_region` extraction
+   must keep `song_edit.rs` + `take_edit.rs` suites green; new tests: copy
+   clips a boundary-cut clip with advanced offset; paste reproduces
+   `project_lanes` of the source region shifted; paste-over extends song end
+   in one undo entry; undo restores in one step. Duplicate: all-tracks region
+   ripples the rows and chains on repeat; **partial region leaves every
+   unselected lane playing the same spans at the same beats**; take sources
+   clone.
 4. **Move** (§6) — `arrangement_actions.rs` lowering tests (single move →
    one command; region move; start-edge shrink/grow); phase-rigidity test
    (moved clip's audible content identical, offsets preserved).
@@ -411,6 +468,12 @@ state, 4's region move depends on 3's `song_region_move`.
   existing host commands (which would multiply undo entries).
 - Paste and move are time-shift only; cross-track re-targeting is deferred
   (per-track pattern pools).
+- Duplicate (Cmd-D) is a ripple insert after the region and moves **only the
+  selected tracks**; an all-tracks region shifts the song rows (scene
+  structure preserved), a partial one re-paints just those lanes' tails
+  (which detaches them from scene resolution). §5.4.
+- Paste floors its destination to the copied rectangle's grid, capped at one
+  bar; duplicate does not snap (it lands exactly at the region end).
 - Same-track paste **references** pattern sources (linked, like scene
   cells) but **clones** take sources (new TakeId + deep-copied chunks) so
   future per-clip piano-roll editing of a pasted take never rewrites the
@@ -421,10 +484,12 @@ state, 4's region move depends on 3's `song_region_move`.
 
 ## 9. Open questions
 
+Resolved: `Cmd-D` duplicate rode along in Slice 3 — but not as "paste
+immediately after", which would have overwritten what follows. It is a
+ripple insert, §5.4.
+
 - Title-bar height value: fixed cell constant vs scaling with lane height —
   pick during Slice 1 by eye against the Ableton reference shots.
-- Should `Cmd-D` (duplicate: paste immediately after the region/clip) ride
-  along in Slice 3? Trivial once paste exists.
 - Whether the scene lane's marquee-to-all-tracks region should also drive
   scene-row selection simultaneously (Ableton merges these; we currently
   keep them exclusive).
