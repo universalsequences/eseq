@@ -56,6 +56,7 @@ pub enum EditPatch {
     TrackPresentation(TrackPresentationPatch),
     SceneStructure(SceneStructurePatch),
     Song(SongStructurePatch),
+    Arrangement(ArrangementStructurePatch),
     BusGroupStructure(BusGroupStructurePatch),
     MacroConfiguration(MacroConfigurationPatch),
     TransportParams(TransportParamsPatch),
@@ -204,6 +205,46 @@ impl SongStructurePatch {
                         .map(|row| {
                             row.overrides.capacity()
                                 * std::mem::size_of::<crate::sequencer::ProjectSongTrackOverride>()
+                        })
+                        .sum::<usize>()
+            })
+            .unwrap_or(0)
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + Self::state_bytes(&self.before)
+            + Self::state_bytes(&self.after)
+    }
+}
+
+/// Whole-object memento of the committed arrangement
+/// (docs/arrangement-lane-model-spec.md 8), modeled on `SongStructurePatch`.
+/// `None` means "no arrangement committed". The patch restores the exact
+/// prior arrangement, including `next_clip_id`, so clip identity survives
+/// undo (invariant H5) and each arrangement primitive commits exactly one
+/// entry (H10). The compiled song is *not* stored: restoring the arrangement
+/// recompiles it (spec 7), so the two can never be restored out of step.
+#[derive(Clone, Debug)]
+pub struct ArrangementStructurePatch {
+    pub before: Option<crate::sequencer::ProjectArrangement>,
+    pub after: Option<crate::sequencer::ProjectArrangement>,
+}
+
+impl ArrangementStructurePatch {
+    fn state_bytes(state: &Option<crate::sequencer::ProjectArrangement>) -> usize {
+        state
+            .as_ref()
+            .map(|arrangement| {
+                arrangement.scene_lane.capacity()
+                    * std::mem::size_of::<crate::sequencer::SceneEvent>()
+                    + arrangement.track_lanes.capacity()
+                        * std::mem::size_of::<Vec<crate::sequencer::ArrClip>>()
+                    + arrangement
+                        .track_lanes
+                        .iter()
+                        .map(|lane| {
+                            lane.capacity() * std::mem::size_of::<crate::sequencer::ArrClip>()
                         })
                         .sum::<usize>()
             })

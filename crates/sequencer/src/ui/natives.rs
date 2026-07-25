@@ -796,9 +796,11 @@ pub(crate) fn parse_def_song_args(args: &[Value]) -> Result<DefSongSpec, String>
     })
 }
 
-/// Lower a parsed `def-song` definition to the `song-replace` host-command
-/// payload (spec 6: def-song lowers to song-replace — fresh row ids, one
-/// undo entry).
+/// Lower a parsed `def-song` definition to the `arrangement-replace`
+/// host-command payload. The payload is still a declarative *row* list; the
+/// row → lane inverse compile happens in `App::arr_replace_rows`
+/// (docs/arrangement-lane-model-spec.md 8), which needs the project's
+/// timebases and so cannot run in the native.
 pub(crate) fn def_song_replace_payload(spec: &DefSongSpec) -> Value {
     let rows = Value::List(
         spec.rows
@@ -1397,18 +1399,19 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
     // Declarative authoring (spec section 6). The compiler auto-quotes every
     // def-song argument, so the `(at ...)` rows arrive here as list data.
     // The complete definition is parsed and shape-validated before the
-    // single song-replace command is emitted; a failed definition emits
-    // nothing and leaves the committed song unchanged.
+    // single arrangement-replace command is emitted; a failed definition
+    // emits nothing and leaves the committed arrangement unchanged.
     runtime.register_native_with_docs(
         "def-song",
         "(def-song \"name\" (at 0 :scene 0) (at 32 :scene 1 :patterns ((1 3))) :end 64 [:loop true])",
         "Define the project song declaratively from absolute beat positions. \
-         Lowers to the song-replace primitive: fresh row ids, one undo entry. \
-         A failed definition leaves the previous song unchanged.",
+         Lowers to the arrangement: scene changes become scene events, \
+         per-track overrides become clips, one undo entry. A failed \
+         definition leaves the previous song unchanged.",
         move |args, ctx| {
             let spec = parse_def_song_args(&args).map_err(|error| format!("def-song: {error}"))?;
             ctx.enqueue_command(HostCommand::Custom {
-                name: "song-replace".to_string(),
+                name: "arrangement-replace".to_string(),
                 payload: def_song_replace_payload(&spec),
             });
             Ok(Value::String(spec.name))

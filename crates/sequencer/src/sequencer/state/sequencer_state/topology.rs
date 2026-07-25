@@ -517,6 +517,11 @@ impl SequencerState {
                 remap_song_overrides_after_track_move(song, last, target);
             }
         });
+        self.with_committed_arrangement_mut(|arrangement| {
+            if let Some(arrangement) = arrangement {
+                remap_arrangement_after_track_move(arrangement, last, target);
+            }
+        });
         live.restore(self);
         self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.schedule_mod_resync();
@@ -573,6 +578,11 @@ impl SequencerState {
         self.with_committed_song_mut(|song| {
             if let Some(song) = song {
                 remap_song_overrides_after_track_delete(song, track_idx);
+            }
+        });
+        self.with_committed_arrangement_mut(|arrangement| {
+            if let Some(arrangement) = arrangement {
+                remap_arrangement_after_track_delete(arrangement, track_idx);
             }
         });
 

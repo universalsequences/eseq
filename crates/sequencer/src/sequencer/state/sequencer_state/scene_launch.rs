@@ -960,6 +960,11 @@ impl SequencerState {
                     remap_song_after_scene_delete(song, cur);
                 }
             });
+            self.with_committed_arrangement_mut(|arrangement| {
+                if let Some(arrangement) = arrangement {
+                    remap_arrangement_after_scene_delete(arrangement, cur);
+                }
+            });
             let launched = scenes
                 .launch_scene(new_idx)
                 .ok_or_else(|| "Could not launch the replacement scene".to_string())?;

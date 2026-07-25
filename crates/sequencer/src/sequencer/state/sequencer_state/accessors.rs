@@ -78,6 +78,7 @@ impl SequencerState {
                     0,
                 )),
                 song: Mutex::new(None),
+                arrangement: Mutex::new(None),
                 song_revision: AtomicU64::new(0),
                 current_pattern: AtomicU32::new(0),
                 num_patterns: AtomicU32::new(1),
@@ -566,10 +567,119 @@ impl SequencerState {
         self.pattern.song.lock().unwrap().clone()
     }
 
-    /// Replace the committed song wholesale (project load / new project).
+    /// Replace the committed song wholesale (row primitives, undo replay,
+    /// new project).
+    ///
+    /// This is the *row* path (docs/song-mode-spec.md 5.6), and the stored
+    /// model is now lanes: only the arrangement is serialized, so a song
+    /// installed here must bring an arrangement with it or the next save
+    /// would write `arrangement: null` and destroy the project's song. The
+    /// row list is therefore **lowered** back to lanes (the inverse compile
+    /// `def-song` uses) and stored alongside. `None` clears both.
+    ///
+    /// Lowering cannot fail for a song the row primitives produced — they all
+    /// validate before installing — but this cannot return `Result` without
+    /// churning every call site for a case that means "the caller handed us a
+    /// song that does not fit the project". On failure the arrangement is
+    /// cleared (never left stale) and the reason is reported on stderr; the
+    /// song still installs, so playback is unaffected and only the *next save*
+    /// loses the arrangement. Phase 3 of the lane spec deletes the row
+    /// primitives and with them the last caller that needs any of this.
     pub fn set_committed_song(&self, song: Option<ProjectSong>) {
+        let derived = song.as_ref().and_then(|song| {
+            self.arrangement_lowered_from_song(song)
+                .map_err(|error| {
+                    eprintln!(
+                        "warning: could not derive an arrangement from the committed song \
+                         ({error}); the song plays but will not be saved"
+                    );
+                })
+                .ok()
+        });
+        *self.pattern.arrangement.lock().unwrap() = derived;
+        self.install_committed_song(song);
+    }
+
+    /// Lower `song`'s rows back to lanes against the live scenes, continuing
+    /// the current clip-id allocator. The result is validated before it is
+    /// handed back, so `set_committed_song` can never store an arrangement
+    /// that would fail to save or reload.
+    fn arrangement_lowered_from_song(
+        &self,
+        song: &ProjectSong,
+    ) -> Result<ProjectArrangement, String> {
+        let next_clip_id = self
+            .pattern
+            .arrangement
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|arrangement| arrangement.next_clip_id)
+            .unwrap_or(0);
+        self.with_project_scenes(|scenes| {
+            let arrangement = lower_rows_to_arrangement(
+                &song.rows,
+                song.end_beat,
+                song.loop_enabled,
+                scenes.song_track_count(),
+                next_clip_id,
+                scenes,
+            )?;
+            arrangement.validate(scenes)?;
+            Ok(arrangement)
+        })
+    }
+
+    /// Install a compiled/committed song without touching the arrangement.
+    fn install_committed_song(&self, song: Option<ProjectSong>) {
         *self.pattern.song.lock().unwrap() = song;
         self.pattern.song_revision.fetch_add(1, Ordering::Release);
+    }
+
+    /// Clone of the committed arrangement, or `None` when the project has
+    /// none (docs/arrangement-lane-model-spec.md 6).
+    pub fn committed_arrangement(&self) -> Option<ProjectArrangement> {
+        self.pattern.arrangement.lock().unwrap().clone()
+    }
+
+    /// Install `arrangement` and its compiled song together (spec 7).
+    ///
+    /// The arrangement is compiled against the **live** project scenes, which
+    /// is the only context that can see scene cells and timebases — compiling
+    /// against `SerializedSongContext` silently loses every scene-backdrop
+    /// phase override. A compile (or validation) failure installs *nothing*
+    /// and returns the error, so the committed song can never disagree with
+    /// the committed arrangement: the invariant is
+    /// `committed_arrangement() == Some(a)` implies
+    /// `committed_song() == Some(compile_arrangement(a, live scenes))`.
+    /// `None` clears both.
+    pub fn set_committed_arrangement(
+        &self,
+        arrangement: Option<ProjectArrangement>,
+    ) -> Result<(), String> {
+        let compiled = match &arrangement {
+            // Borrowed, not cloned: `capture_project_scenes` would copy every
+            // pattern pool on every arrangement edit.
+            Some(arrangement) => Some(
+                self.with_project_scenes(|scenes| compile_arrangement(arrangement, scenes))?,
+            ),
+            None => None,
+        };
+        *self.pattern.arrangement.lock().unwrap() = arrangement;
+        self.install_committed_song(compiled);
+        Ok(())
+    }
+
+    /// Edit the committed arrangement in place (topology remaps). The song is
+    /// left alone; callers that change lane content must recompile through
+    /// `set_committed_arrangement`. Used by the remaps that already edit the
+    /// compiled song in place through `with_committed_song_mut`, so the two
+    /// stay in lockstep without a recompile.
+    pub(crate) fn with_committed_arrangement_mut<R>(
+        &self,
+        f: impl FnOnce(&mut Option<ProjectArrangement>) -> R,
+    ) -> R {
+        f(&mut self.pattern.arrangement.lock().unwrap())
     }
 
     /// Monotonic counter bumped on every committed-song change; per-frame UI

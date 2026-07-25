@@ -27,6 +27,9 @@ pub use snapshot::{
 };
 #[allow(unused_imports)]
 pub use state::{
+    arrangement_for_serialization, compile_arrangement, lower_rows_to_arrangement,
+    stamped_clip_override, ArrClip,
+    ArrangementContext, ClipId, ProjectArrangement, SceneEvent, SongCompileContext,
     default_empty_effect_chain, default_rack_macros, format_song_row_positions, project_lanes,
     remap_song_after_scene_delete, song_for_serialization, song_rows_referencing_scene,
     song_rows_referencing_track_pattern, state_at_beat, BusGateSequence, BusPatternSnapshot,

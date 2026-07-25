@@ -245,7 +245,13 @@ removes/trims clips in the region. No ripple row insertion, no
 declarative form translate 1:1: each row's scene → scene event when it
 changes, each override → a clip spanning to the next row that changes that
 lane — the inverse compile, unambiguous because declarative input has no
-clip identity to preserve).
+clip identity to preserve). "Changes that lane" is *phase-continuity
+equivalence*, not source equality: a later row's override merges into the
+open clip only when `stamped_clip_override(clip, row.start_beat) ==
+declared`. Merging on source equality alone would swallow a deliberate
+retrigger — the same pattern re-anchored to step 0 mid-cycle — turning it
+into an uninterrupted clip. The same lowering runs wherever a row list has
+to become lanes (`set_committed_song` while the row primitives survive).
 
 ## 9. Capture and take recording
 
@@ -291,8 +297,13 @@ trim of whatever it overlaps).
   serialization`), same constraint: a clip referencing a pattern assigned
   to no scene cell errors on save. Takes serialize by stable take id,
   unchanged.
-- On load: build `SerializedSongContext` as today, validate the
-  arrangement, compile, `set_committed_arrangement`.
+- On load: build `SerializedSongContext` as today and **validate** the
+  arrangement against it (id domain, take lengths), then **compile against
+  the live `ProjectScenes`**, after `replace_pattern_repository` and the
+  take-pool install have rebuilt the pools. Not against the serialized
+  context: it answers "unknown" for every scene cell and timebase, so
+  compiling there materializes no backdrop phase overrides at all and
+  silently loses scene-backdrop phase continuity.
 - `use_arrangement`, `record_armed`, `scene_cell_presence`, `take_pools`
   fields are untouched.
 

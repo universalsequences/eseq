@@ -31,6 +31,7 @@ use crate::sequencer::{
 };
 use crate::track_color::TrackColor;
 
+pub mod arr_edit;
 mod browser;
 pub mod command;
 pub mod edit;

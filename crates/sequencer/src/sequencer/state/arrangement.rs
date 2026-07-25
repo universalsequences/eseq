@@ -4,9 +4,11 @@
 //! and one **track lane** of first-class clips per track. Rows
 //! (`ProjectSong`) remain the playback representation, produced from lanes by
 //! the pure `compile_arrangement`. This module owns the types, validation
-//! (spec 6.1), the resolution accessors (spec 6.2), and the compiler (spec
-//! 7). Nothing here is wired into `SequencerState` yet — phase 1 of spec 13
-//! is deliberately additive.
+//! (spec 6.1), the resolution accessors (spec 6.2), the compiler (spec 7),
+//! and the save-time id mapping (spec 10). `SequencerState` stores the
+//! arrangement beside the compiled song and keeps the two in lockstep
+//! (`set_committed_arrangement`); the editing primitives live in
+//! `app/arr_edit.rs`.
 
 use super::*;
 
@@ -482,7 +484,7 @@ fn advanced_pattern_offset(
 /// `offset_steps` stamped by the takes spec 7 split rule — the same arithmetic
 /// `split_row_state` applies to a row split, measured from the clip's start
 /// instead of the governing row's.
-fn stamped_clip_override(
+pub fn stamped_clip_override(
     ctx: &dyn SongCompileContext,
     track: usize,
     clip: &ArrClip,
@@ -645,6 +647,179 @@ pub fn compile_arrangement<C: ArrangementContext>(
             .map_err(|err| format!("compiled arrangement is invalid: {err}"))?;
     }
     Ok(song)
+}
+
+/// The inverse of `compile_arrangement`: derive lanes from a row list (spec 8).
+///
+/// Rows carry no clip identity, so the mapping is unambiguous:
+///
+/// - A row's scene becomes a `SceneEvent` only when it differs from the
+///   previous row's scene (the row model's scene column fragments at every
+///   row; that is exactly the "jagged lane" the lane model removes).
+/// - A per-track override opens a clip that runs until the first later row
+///   that changes that lane; a row that drops the override closes the clip at
+///   its beat, and an explicit-empty override becomes an explicit-empty clip.
+/// - "Changes that lane" is decided by *compiling the open clip forward*: a
+///   later row's override merges into the open clip only when the clip would
+///   compile to exactly that override at that beat
+///   (`stamped_clip_override(clip, beat) == declared`). Anything else — a
+///   different source, or the same source re-anchored to a phase the clip
+///   would not have reached — closes the clip and opens a new one. Source
+///   equality alone would silently swallow a deliberate retrigger.
+///
+/// The guarantee this buys, for any `rows` a row primitive produced: every
+/// row start is a boundary of the compiled arrangement, and every declared
+/// override reappears verbatim on its row. Compile may add *more* overrides
+/// than the rows had — a lane riding the scene backdrop mid-cycle gets its
+/// phase materialized (`backdrop_override`), which the row model could not
+/// express — so `compile_arrangement(lowered)` is the input song plus, per
+/// row, zero or more overrides on tracks that row did not mention.
+///
+/// `rows` must already be sorted by `start_beat` with canonical (track-sorted,
+/// duplicate-free) overrides — everything `ProjectSong::validate` guarantees.
+/// `ctx` has to see the live scenes: the phase arithmetic needs the timebases.
+pub fn lower_rows_to_arrangement<C: ArrangementContext>(
+    rows: &[ProjectSongRow],
+    end_beat: f64,
+    loop_enabled: bool,
+    track_count: usize,
+    next_clip_id: u64,
+    ctx: &C,
+) -> Result<ProjectArrangement, String> {
+    if rows.is_empty() {
+        return Err("An arrangement needs at least one row to lower".to_string());
+    }
+    let last_start = rows[rows.len() - 1].start_beat;
+    if !end_beat.is_finite() || end_beat <= last_start {
+        // Rows at or past the end would lower to zero-length clips and
+        // silently vanish; `ProjectSong::validate` words it the same way.
+        return Err(format!(
+            "Song end beat {end_beat} must be finite and greater than the last row's start \
+             beat {last_start}"
+        ));
+    }
+
+    let mut arrangement = ProjectArrangement {
+        scene_lane: Vec::new(),
+        track_lanes: vec![Vec::new(); track_count],
+        end_beat,
+        loop_enabled,
+        next_clip_id,
+    };
+
+    // Scene lane: one event per *change*.
+    for row in rows {
+        let changed = match arrangement.scene_lane.last() {
+            Some(event) => event.scene != row.scene,
+            None => true,
+        };
+        if changed {
+            arrangement.scene_lane.push(SceneEvent {
+                start_beat: row.start_beat,
+                scene: row.scene,
+            });
+        }
+    }
+
+    // Track lanes: one clip per contiguous run of a lane's launch state.
+    for track in 0..track_count {
+        let mut open: Option<ArrClip> = None;
+        for row in rows {
+            match row.overrides.iter().find(|over| over.track == track) {
+                Some(declared) => {
+                    let continues = open.as_ref().is_some_and(|clip| {
+                        stamped_clip_override(ctx, track, clip, row.start_beat) == *declared
+                    });
+                    if continues {
+                        continue;
+                    }
+                    if let Some(mut clip) = open.take() {
+                        clip.end_beat = row.start_beat;
+                        push_lowered_clip(&mut arrangement, track, clip)?;
+                    }
+                    open = Some(ArrClip {
+                        id: ClipId(0), // assigned when the clip is pushed
+                        start_beat: row.start_beat,
+                        end_beat,
+                        pattern_id: declared.pattern_id,
+                        take_id: declared.take_id,
+                        offset_steps: declared.offset_steps,
+                    });
+                }
+                None => {
+                    if let Some(mut clip) = open.take() {
+                        clip.end_beat = row.start_beat;
+                        push_lowered_clip(&mut arrangement, track, clip)?;
+                    }
+                }
+            }
+        }
+        if let Some(clip) = open.take() {
+            push_lowered_clip(&mut arrangement, track, clip)?;
+        }
+    }
+
+    Ok(arrangement)
+}
+
+/// Append `clip` to `track`'s lane with a freshly allocated id. Zero-length
+/// clips cannot arise from sorted rows (starts are strictly increasing), but
+/// one would be meaningless anyway, so it is dropped rather than stored.
+fn push_lowered_clip(
+    arrangement: &mut ProjectArrangement,
+    track: usize,
+    mut clip: ArrClip,
+) -> Result<(), String> {
+    if clip.end_beat <= clip.start_beat {
+        return Ok(());
+    }
+    clip.id = arrangement.allocate_clip_id()?;
+    arrangement.track_lanes[track].push(clip);
+    Ok(())
+}
+
+/// Translate a live committed arrangement into the id domain the project
+/// loader rebuilds (spec 10) — the sibling of `song_for_serialization`, with
+/// the same "scene index + 1" mapping and the same refusal to save a
+/// reference the project format cannot persist.
+///
+/// Pools are reconstructed from scene cells on load, so track `t`'s cell in
+/// scene `j` becomes `PatternId(j + 1)`. A clip referencing a pattern that is
+/// in no scene cell is not persisted by the project format at all, so saving
+/// it is rejected — naming the clip and its track — rather than silently
+/// dropped. Take clips need no mapping: take ids are stable across save/load.
+pub fn arrangement_for_serialization(
+    arrangement: &ProjectArrangement,
+    scenes: &ProjectScenes,
+) -> Result<ProjectArrangement, String> {
+    let mut serialized = arrangement.clone();
+    for (track, lane) in serialized.track_lanes.iter_mut().enumerate() {
+        for (idx, clip) in lane.iter_mut().enumerate() {
+            // Explicit-empty and take clips carry no pool id.
+            let Some(live_raw) = clip.pattern_id else {
+                continue;
+            };
+            let live_id = PatternId(live_raw);
+            let scene_idx = scenes
+                .scenes
+                .iter()
+                .position(|scene| scene.cells.get(track).copied().flatten() == Some(live_id))
+                .ok_or_else(|| {
+                    format!(
+                        "Track {} clip {} (beats {}-{}) references pattern {} which is not \
+                         assigned to any scene cell and cannot be saved; assign it to a scene \
+                         cell or change the clip",
+                        track + 1,
+                        idx + 1,
+                        clip.start_beat,
+                        clip.end_beat,
+                        live_raw
+                    )
+                })?;
+            clip.pattern_id = Some(scene_idx as u64 + 1);
+        }
+    }
+    Ok(serialized)
 }
 
 #[cfg(test)]
@@ -1448,6 +1623,102 @@ mod tests {
             LaneSource::Take(TakeId(5))
         );
         assert!(empty_clip(0, 0.0, 4.0).source().is_empty());
+    }
+
+    // --- serialization (spec 10) ----------------------------------------
+
+    #[test]
+    fn arrangement_for_serialization_maps_pool_ids_to_scene_cell_positions() {
+        let scenes = test_scenes();
+        let arr = valid_arrangement();
+        // In the rebuilt-shape pools the ids already equal scene index + 1,
+        // so serialization is the identity here.
+        let serialized = arrangement_for_serialization(&arr, &scenes).expect("serializable");
+        assert_eq!(serialized, arr);
+    }
+
+    #[test]
+    fn arrangement_for_serialization_rejects_pattern_not_in_any_scene_cell() {
+        let mut scenes = test_scenes();
+        // Fork a pattern into track 1's pool without assigning it to a cell.
+        let source = scenes.track_pools[1].get(PatternId(1)).unwrap().clone();
+        let orphan = scenes.track_pools[1].insert(source);
+        let mut arr = valid_arrangement();
+        arr.track_lanes[1] = vec![clip(1, 16.0, 24.0, orphan.0)];
+        let err = arrangement_for_serialization(&arr, &scenes).unwrap_err();
+        assert!(err.contains("Track 2 clip 1"), "{err}");
+        assert!(err.contains("beats 16-24"), "{err}");
+        assert!(err.contains("not assigned"), "{err}");
+    }
+
+    #[test]
+    fn arrangement_for_serialization_passes_empty_and_take_clips_through() {
+        let (scenes, take) = scenes_with_take();
+        let mut arr = valid_arrangement();
+        arr.track_lanes[0] = vec![
+            empty_clip(0, 4.0, 8.0),
+            ArrClip::new_take(ClipId(4), 8.0, 12.0, take.0, 2.0),
+        ];
+        arr.next_clip_id = 5;
+        let serialized = arrangement_for_serialization(&arr, &scenes).expect("serializable");
+        assert_eq!(serialized.track_lanes[0], arr.track_lanes[0]);
+    }
+
+    /// The save/load round trip end to end (spec 10): serialize into the
+    /// rebuilt-pool id domain, go through the wire, and compile against the
+    /// scenes the loader rebuilt — the compiled song must be the one the live
+    /// arrangement produced.
+    #[test]
+    fn arrangement_round_trips_through_save_and_load() {
+        let scenes = test_scenes();
+        let mut arr = valid_arrangement();
+        arr.loop_enabled = true;
+        arr.track_lanes[0][0].offset_steps = 5.0;
+        let live_song = compile_arrangement(&arr, &scenes).expect("live compile");
+
+        let serialized = arrangement_for_serialization(&arr, &scenes).expect("serializable");
+        let json = serde_json::to_string(&serialized).expect("serialize");
+        let loaded: ProjectArrangement = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(loaded, serialized);
+
+        // The loader rebuilds pools from scene cells, which is exactly what
+        // `test_scenes` models.
+        let rebuilt = test_scenes();
+        let loaded_song = compile_arrangement(&loaded, &rebuilt).expect("load compile");
+        assert_eq!(loaded_song, live_song);
+    }
+
+    /// The load path may not compile against `SerializedSongContext`: it
+    /// answers "unknown" for every scene cell and timebase, so compiling
+    /// against it silently drops every scene-backdrop phase override.
+    #[test]
+    fn compiling_against_the_serialized_context_loses_backdrop_phase() {
+        let arr = arrangement(
+            vec![ev(0.0, 0)],
+            vec![vec![clip(0, 3.0, 5.0, 2)], Vec::new()],
+            16.0,
+        );
+        let live = compile_arrangement(&arr, &test_scenes()).expect("live compile");
+        let serialized_ctx = SerializedSongContext {
+            scene_count: 3,
+            track_count: 2,
+            takes: Vec::new(),
+        };
+        let thin = compile_arrangement(&arr, &serialized_ctx).expect("thin compile");
+        assert!(
+            live.rows.iter().any(|row| row
+                .overrides
+                .iter()
+                .any(|over| over.offset_steps != 0.0)),
+            "the live compile materializes backdrop phase"
+        );
+        assert!(
+            thin.rows
+                .iter()
+                .all(|row| row.overrides.iter().all(|over| over.offset_steps == 0.0)),
+            "the serialized context knows no timebases, so it stamps nothing"
+        );
+        assert_ne!(live, thin);
     }
 
     #[test]

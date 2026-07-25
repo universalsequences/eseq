@@ -22,6 +22,12 @@ pub struct PatternState {
     /// because several paths rebuild `ProjectScenes` wholesale from snapshots
     /// (`from_pattern_snapshots`) and would silently drop an embedded song.
     pub(super) song: Mutex<Option<ProjectSong>>,
+    /// The committed arrangement (docs/arrangement-lane-model-spec.md 6), or
+    /// `None` when the project has no arrangement. This is the *authored*
+    /// model; `song` above is its compiled playback form, kept in lockstep by
+    /// `set_committed_arrangement` (spec 7). Lives beside `song` for the same
+    /// reason: `ProjectScenes` is rebuilt wholesale from snapshots.
+    pub(super) arrangement: Mutex<Option<ProjectArrangement>>,
     /// Bumped on every committed-song replacement/edit so per-frame UI code
     /// can rebuild song-derived reactive values (`song-rows`) only when the
     /// song actually changed (docs/song-mode-spec.md 12).

@@ -1909,14 +1909,14 @@ impl App {
             },
             patterns,
             groups: self.groups.clone(),
-            song: match self.state.committed_song() {
+            arrangement: match self.state.committed_arrangement() {
                 // Serialization maps live pattern-pool ids into the
-                // deterministic ids the loader rebuilds from scene cells;
-                // a song referencing an unpersistable pattern fails the save
-                // with the referencing row positions instead of silently
-                // dropping the reference.
-                Some(song) => Some(crate::sequencer::song_for_serialization(
-                    &song,
+                // deterministic ids the loader rebuilds from scene cells; a
+                // clip referencing an unpersistable pattern fails the save
+                // naming the clip and its track instead of silently dropping
+                // the reference (docs/arrangement-lane-model-spec.md 10).
+                Some(arrangement) => Some(crate::sequencer::arrangement_for_serialization(
+                    &arrangement,
                     &self.state.capture_project_scenes(),
                 )?),
                 None => None,
@@ -2898,7 +2898,7 @@ impl App {
             device_instances,
             patterns: _,
             groups,
-            song,
+            arrangement,
             macros,
             next_macro_id,
             use_arrangement,
@@ -2964,16 +2964,20 @@ impl App {
         loaded_armed.resize(self.tracks.len(), false);
         self.graph.record_armed = loaded_armed;
         self.record_arm_sync_pending = true;
-        // The serialized song was validated at deserialize time against the
-        // deterministic rebuilt-pool id domain, which is exactly what
-        // `replace_pattern_repository` just installed; re-check against the
-        // live scenes and reject the load rather than installing a song that
-        // dangles.
-        if let Some(song) = &song {
-            song.validate(&self.state.capture_project_scenes())
-                .map_err(|error| format!("Project song failed to load: {error}"))?;
-        }
-        self.state.set_committed_song(song);
+        // The serialized arrangement was structurally validated at
+        // deserialize time against `SerializedSongContext`, which knows only
+        // the id domain — it can see neither scene cells nor timebases, so a
+        // compile against it would silently produce no scene-backdrop phase
+        // overrides at all. Compile here instead: `replace_pattern_repository`
+        // and `install_project_arrangement` above have just installed the
+        // rebuilt pattern pools, scene cells, and take pools, so the live
+        // scenes are exactly the context the compiler needs.
+        // `set_committed_arrangement` validates, compiles, and installs the
+        // arrangement together with its compiled song, and installs nothing
+        // if the arrangement no longer fits the project.
+        self.state
+            .set_committed_arrangement(arrangement)
+            .map_err(|error| format!("Project arrangement failed to load: {error}"))?;
         // Persisted transport preference (docs/song-mode-spec.md 7.1); loads
         // happen with the transport stopped, so setting it directly is safe.
         self.use_arrangement = use_arrangement;
@@ -4266,7 +4270,7 @@ mod tests {
             master_volume: 1.0,
             current_pattern: 0,
             current_track: Some(0),
-            song: None,
+            arrangement: None,
             reverb: ProjectReverbState {
                 size: 0.2,
                 brightness: 0.8,

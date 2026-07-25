@@ -551,8 +551,9 @@ fn apply_capture_macro_host_commands(
         let HostCommand::Custom { name, payload } = command else {
             continue;
         };
-        // Song editing primitives (def-song lowers to song-replace) so
-        // arrangement fixtures can commit a song during capture setup.
+        // Song/arrangement editing primitives (def-song lowers to
+        // arrangement-replace) so arrangement fixtures can commit a song
+        // during capture setup.
         if let Some(result) = crate::host_commands::apply_song_edit_command(&name, &payload, app) {
             result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
             applied = true;

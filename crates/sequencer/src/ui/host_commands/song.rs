@@ -19,6 +19,10 @@ pub(super) const COMMANDS: &[&str] = &[
     "song-set-loop",
     "song-replace",
     "song-clear",
+    // Declarative authoring: `def-song` lowers to the arrangement (lane
+    // spec 8), not to the row primitives.
+    "arrangement-replace",
+    "arrangement-clear",
     // Take lifecycle (takes spec 6.4) + the Phase C region→take harness.
     "song-take-delete",
     "song-region-to-take",
@@ -340,6 +344,25 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
         }
         "song-clear" => {
             app.song_clear()?;
+            Ok("Cleared song".to_string())
+        }
+        "arrangement-replace" => {
+            let map = payload_map(payload)?;
+            let rows = parse_rows(map)?;
+            let row_count = rows.len();
+            let end_beat = require_number(map, "end-beat")?;
+            let loop_enabled = map_bool(map, "loop");
+            let name = map_string(map, "name");
+            app.arr_replace_rows(rows, end_beat, loop_enabled)?;
+            Ok(match name {
+                Some(name) => format!(
+                    "Committed song \"{name}\": {row_count} row(s), end beat {end_beat}"
+                ),
+                None => format!("Replaced song: {row_count} row(s), end beat {end_beat}"),
+            })
+        }
+        "arrangement-clear" => {
+            app.arr_clear()?;
             Ok("Cleared song".to_string())
         }
         "song-take-delete" => {
