@@ -207,14 +207,25 @@ enum HitRegion {
     ItemEdgeStart { item: TimelineItem },
 }
 
-thread_local! {
-    static TIMELINE_HOVER_EDGE: RefCell<Option<(u64, Value)>> = const { RefCell::new(None) };
+/// Which edge the pointer is over. Both are grabbable on a title-barred
+/// clip, so the highlight has to say WHICH one — with narrow handles and
+/// abutting clips, "some edge here" is exactly the ambiguity that made
+/// resizing feel like a coin flip.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HoverEdge {
+    Start,
+    End,
 }
 
-fn set_timeline_hover_edge(widget_id: u64, item_id: Option<Value>) {
+thread_local! {
+    static TIMELINE_HOVER_EDGE: RefCell<Option<(u64, Value, HoverEdge)>> =
+        const { RefCell::new(None) };
+}
+
+fn set_timeline_hover_edge(widget_id: u64, hover: Option<(Value, HoverEdge)>) {
     TIMELINE_HOVER_EDGE.with(|state| {
         let mut state = state.borrow_mut();
-        let next = item_id.map(|id| (widget_id, id));
+        let next = hover.map(|(id, edge)| (widget_id, id, edge));
         if *state != next {
             *state = next;
             super::bump_widget_state_generation();
@@ -222,13 +233,13 @@ fn set_timeline_hover_edge(widget_id: u64, item_id: Option<Value>) {
     });
 }
 
-fn timeline_hover_edge_matches(widget_id: u64, item_id: &Value) -> bool {
+fn timeline_hover_edge_for(widget_id: u64, item_id: &Value) -> Option<HoverEdge> {
     TIMELINE_HOVER_EDGE.with(|state| {
         state
             .borrow()
             .as_ref()
-            .is_some_and(|(hover_widget_id, hover_item_id)| {
-                *hover_widget_id == widget_id && hover_item_id == item_id
+            .and_then(|(hover_widget_id, hover_item_id, edge)| {
+                (*hover_widget_id == widget_id && hover_item_id == item_id).then_some(*edge)
             })
     })
 }
@@ -507,11 +518,12 @@ impl WidgetDefinition for TimelineWidget {
         let view = TimelineView::from_props(&node.props, node.rect);
         match mouse_kind {
             MouseEventKind::Moved => {
-                let hovered_item = match view.hit_test(local_col, local_row) {
-                    Some(HitRegion::ItemEdgeEnd { item }) => Some(item.id),
+                let hovered_edge = match view.hit_test(local_col, local_row) {
+                    Some(HitRegion::ItemEdgeEnd { item }) => Some((item.id, HoverEdge::End)),
+                    Some(HitRegion::ItemEdgeStart { item }) => Some((item.id, HoverEdge::Start)),
                     _ => None,
                 };
-                set_timeline_hover_edge(node.widget_id, hovered_item);
+                set_timeline_hover_edge(node.widget_id, hovered_edge);
                 MouseEventOutcome::Consume
             }
             MouseEventKind::Down(MouseButton::Left) => view
@@ -1206,7 +1218,7 @@ fn build_metal_primitives(
             width,
             height,
             selected_border(selected, title_bar_height),
-            timeline_hover_edge_matches(node.widget_id, &item.id),
+            timeline_hover_edge_for(node.widget_id, &item.id),
         ));
     }
 
@@ -1253,13 +1265,17 @@ fn build_metal_primitives(
                 color: border_color,
             }));
         }
-        if resize_hovered {
+        if let Some(hovered_edge) = resize_hovered {
             let hover_width = 0.22_f32.min(width.max(0.0));
+            let hover_col = match hovered_edge {
+                HoverEdge::Start => x,
+                HoverEdge::End => x + width - hover_width,
+            };
             push_item_fill(
                 &mut primitives,
                 Rect {
                     row: y,
-                    col: x + width - hover_width,
+                    col: hover_col,
                     width: hover_width,
                     height,
                 },
@@ -2270,6 +2286,14 @@ impl TimelineView {
             }
             return Some(HitRegion::Header);
         }
+        // A handle hit INSIDE an item always beats a slop hit from a
+        // neighbour that merely ends/starts nearby: back-to-back clips share
+        // a boundary, and without this the two slop zones overlap and the
+        // winner is decided by draw order — grabbing a clip's end edge would
+        // flip to resizing the NEXT clip's start a pixel later. Slop hits are
+        // therefore collected as a fallback and only used when no item
+        // contains the pointer at all.
+        let mut slop_hit: Option<HitRegion> = None;
         for item in self.items.iter().rev() {
             let Some(rect) = self.item_rect(item) else {
                 continue;
@@ -2280,7 +2304,10 @@ impl TimelineView {
 
             let left = rect.col;
             let right = rect.col + rect.width;
-            let handle_width = (rect.width * 0.24).clamp(1.25, 4.0);
+            // Narrow, roughly fixed-width grips (Ableton): a fat handle over
+            // a long clip swallows most of its title bar, and on abutting
+            // clips it makes the boundary a coin flip.
+            let handle_width = (rect.width * 0.24).clamp(0.5, 1.25);
             let outside_slop = 0.75;
 
             // With a title bar the drag handles live on the bar only, so the
@@ -2293,32 +2320,35 @@ impl TimelineView {
                 Some(bottom) => local_row < bottom,
                 None => true,
             };
+            let has_handles = in_title_bar && rect.width > 1.0;
 
-            if in_title_bar
-                && rect.width > 1.0
-                && local_col >= right - handle_width
-                && local_col <= right + outside_slop
-            {
-                return Some(HitRegion::ItemEdgeEnd { item: item.clone() });
-            }
-            if title_bar_bottom.is_some()
-                && in_title_bar
-                && rect.width > 1.0
-                && local_col >= left - outside_slop
-                && local_col <= left + handle_width
-            {
-                return Some(HitRegion::ItemEdgeStart { item: item.clone() });
-            }
             if local_col >= left && local_col < right {
+                if has_handles && local_col >= right - handle_width {
+                    return Some(HitRegion::ItemEdgeEnd { item: item.clone() });
+                }
+                if has_handles && title_bar_bottom.is_some() && local_col <= left + handle_width {
+                    return Some(HitRegion::ItemEdgeStart { item: item.clone() });
+                }
                 if in_title_bar && title_bar_bottom.is_some() {
                     return Some(HitRegion::ItemTitleBar { item: item.clone() });
                 }
                 return Some(HitRegion::ItemBody { item: item.clone() });
             }
+
+            if has_handles && slop_hit.is_none() {
+                if local_col >= right && local_col <= right + outside_slop {
+                    slop_hit = Some(HitRegion::ItemEdgeEnd { item: item.clone() });
+                } else if title_bar_bottom.is_some()
+                    && local_col <= left
+                    && local_col >= left - outside_slop
+                {
+                    slop_hit = Some(HitRegion::ItemEdgeStart { item: item.clone() });
+                }
+            }
         }
-        Some(HitRegion::Background {
+        slop_hit.or(Some(HitRegion::Background {
             time: self.time_at_col(local_col),
-        })
+        }))
     }
 
     fn begin_gesture(&self, local_col: f32, local_row: f32) -> Option<Value> {
@@ -6484,6 +6514,63 @@ mod tests {
             assert_eq!(hit_name(&view, 11.8, row), "body", "row {row}");
             assert_eq!(hit_name(&view, 3.5, row), "background", "row {row}");
         }
+    }
+
+    /// Back-to-back clips share one boundary, and each wants a handle there.
+    /// The point decides: left of the boundary is the LEFT clip's end handle,
+    /// right of it the RIGHT clip's start handle — never the other way round,
+    /// whatever the draw order. (The bug this pins: a fat handle plus
+    /// symmetric outside-slop made the zones overlap, so approaching a clip's
+    /// end edge flipped to resizing the next clip's start.)
+    #[test]
+    fn abutting_clips_split_their_shared_boundary_by_side() {
+        let props = HashMap::from([
+            (
+                "items".to_string(),
+                list_value_raw(vec![
+                    map_value_raw(vec![
+                        ("id", number_value(1.0)),
+                        ("lane", number_value(0.0)),
+                        ("start", number_value(0.0)),
+                        ("end", number_value(8.0)),
+                    ]),
+                    map_value_raw(vec![
+                        ("id", number_value(2.0)),
+                        ("lane", number_value(0.0)),
+                        ("start", number_value(8.0)),
+                        ("end", number_value(16.0)),
+                    ]),
+                ]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(0.0)),
+            ("title-bar-height".to_string(), number_value(2.0)),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect { row: 0.0, col: 0.0, width: 16.0, height: 8.0 },
+        );
+        let item_at = |col: f32| match view.hit_test(col, 1.0) {
+            Some(HitRegion::ItemEdgeEnd { item }) | Some(HitRegion::ItemEdgeStart { item }) => {
+                match item.id {
+                    Value::Number(id) => id,
+                    other => panic!("expected a numeric item id, got {other:?}"),
+                }
+            }
+            _ => panic!("expected an edge handle at {col}"),
+        };
+        // Boundary at col 8. Just inside the left clip: its end handle.
+        assert_eq!(hit_name(&view, 7.9, 1.0), "edge-end");
+        assert_eq!(item_at(7.9), 1.0);
+        // Just inside the right clip: its start handle.
+        assert_eq!(hit_name(&view, 8.0, 1.0), "edge-start");
+        assert_eq!(item_at(8.0), 2.0);
+
+        // And the handles stay narrow: a long clip is mostly title bar, not
+        // grip. Half a beat in from either edge is already the move zone.
+        assert_eq!(hit_name(&view, 1.5, 1.0), "title-bar");
+        assert_eq!(hit_name(&view, 6.5, 1.0), "title-bar");
     }
 
     /// The bar never swallows the whole clip: a title bar taller than the
