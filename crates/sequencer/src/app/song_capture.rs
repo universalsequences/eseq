@@ -15,17 +15,22 @@
 //!
 //! Stop consolidates the take per spec 10.4 (sort by audible beat, group per
 //! boundary with scene-clears-overrides, drop adjacent identical states) and
-//! commits atomically through the existing `song_replace` primitive: one
-//! project mutation, one undo entry, fresh row ids. Overflow or any
-//! normalization/validation failure leaves the previous committed song
-//! intact and surfaces an actionable error.
+//! commits it onto the stored **arrangement**
+//! (docs/arrangement-lane-model-spec.md 9): scene launches become scene
+//! events, per-track launches become clips, and the punch region is spliced
+//! by ordinary clip trimming (`occlude_span`). One project mutation, one undo
+//! entry. Overflow or any validation/compile failure leaves the previous
+//! committed arrangement intact and surfaces an actionable error.
 
 use std::collections::BTreeMap;
 
 use crate::quantized_launch::PatternLaunchTarget;
-use crate::sequencer::PatternId;
+use crate::sequencer::{
+    insert_clip_sorted, occlude_span, stamped_clip_override, ArrClip, ClipId, PatternId,
+    ProjectArrangement, ProjectScenes, ProjectSongTrackOverride, SceneEvent, SongProjectContext,
+};
 
-use super::song_edit::SongRowSpec;
+use super::edit::finish_active_gesture;
 use super::App;
 
 /// One complete consolidated session state at a capture boundary
@@ -307,13 +312,14 @@ impl App {
         });
     }
 
-    /// Stop-commit (spec 7.4.7/10.4): normalize the take and atomically
-    /// replace the committed song through the `song_replace` primitive (one
-    /// project mutation, one undo entry, fresh row ids). `end_raw_beats` is
-    /// the scheduler rendered-beat clock at Stop — the same clock the events
-    /// were recorded against. On any failure the previous committed song is
-    /// intact, the failure state is latched for the `song-capture-failed` /
-    /// `song-capture-error` bindings, and the take is discarded.
+    /// Stop-commit (spec 7.4.7/10.4, lane spec 9): decompose the consolidated
+    /// take into scene events and clips and splice them into the committed
+    /// **arrangement** (one project mutation, one undo entry).
+    /// `end_raw_beats` is the scheduler rendered-beat clock at Stop — the same
+    /// clock the events were recorded against. On any failure the previous
+    /// committed arrangement is intact, the failure state is latched for the
+    /// `song-capture-failed` / `song-capture-error` bindings, and the take is
+    /// discarded.
     pub(crate) fn finish_song_capture_take(
         &mut self,
         end_raw_beats: f64,
@@ -350,33 +356,38 @@ impl App {
         }
         let end_beat = (end_raw_beats - take.origin_beats).max(0.0);
         let captured = consolidate(&take.initial, &take.events);
-        let previous = self.state.committed_song();
-        // Keep the previous song's loop preference; a fresh project captures
-        // a non-looping song.
-        let loop_enabled = previous
-            .as_ref()
-            .map(|song| song.loop_enabled)
-            .unwrap_or(false);
+        let previous = self.state.committed_arrangement();
 
-        // Splice stopgap (takes spec 9.5): with an existing committed song,
-        // the commit replaces it only from the FIRST captured launch event's
-        // beat onward — hitting record and listening before the first launch
-        // must not erase the head of the song. Recording over an empty
-        // project keeps the whole-song commit (spec 9.3: "record from an
-        // empty song").
+        // Punch region (takes spec 9.1): `P` is the first captured launch —
+        // hitting record and listening before the first launch must not erase
+        // the head of the song — and `Q` is the Stop beat. Recording over an
+        // empty project keeps the whole-song commit (spec 9.3: "record from an
+        // empty song"), which is the same splice over `[0, Q)` onto an empty
+        // arrangement.
         let punch_in = take
             .events
             .iter()
             .map(|event| event.beat)
             .min_by(|a, b| a.partial_cmp(b).expect("capture beats are finite"));
 
-        let mut specs: Vec<SongRowSpec> = Vec::new();
-        let final_end_beat;
-        match (&previous, punch_in) {
+        // The beats the performer changed SCENE at. Consolidated states carry
+        // a scene at every boundary (a track launch inherits the previous
+        // one), so only the launch stream can say where a scene *event*
+        // belongs — writing one at a track launch would move the backdrop
+        // under every lane the performer never touched.
+        let scene_launch_beats: Vec<f64> = take
+            .events
+            .iter()
+            .filter(|event| matches!(event.kind, CaptureLaunchKind::Scene { .. }))
+            .map(|event| event.beat)
+            .collect();
+
+        let scenes = self.state.capture_project_scenes();
+        let arrangement = match (&previous, punch_in) {
             (Some(previous), None) => {
                 // No launches performed: nothing to splice; the committed
-                // song is untouched (spec 9.1) — unless takes were recorded,
-                // in which case they commit onto the unchanged rows.
+                // arrangement is untouched (spec 9.1) — unless takes were
+                // recorded, in which case they paint onto it unchanged.
                 if pending.is_empty() {
                     return Ok(
                         "Arrangement capture ended: no launches captured; the committed \
@@ -384,138 +395,432 @@ impl App {
                             .to_string(),
                     );
                 }
-                specs.extend(previous.rows.iter().map(|row| SongRowSpec {
-                    start_beat: row.start_beat,
-                    scene: row.scene,
-                    overrides: row.overrides.clone(),
-                }));
-                final_end_beat = previous.end_beat;
+                previous.clone()
             }
-            (Some(previous), Some(punch_in)) => {
-                // Full region splice (takes spec 9.1/9.2): replace-in-place
-                // between the first captured launch `P` and the stop beat
-                // `Q`. Existing rows before `P` survive verbatim (offsets
-                // and explicit-empty overrides included).
-                let punch_out = end_beat.max(punch_in);
-                specs.extend(
-                    previous
-                        .rows
-                        .iter()
-                        .filter(|row| row.start_beat < punch_in)
-                        .map(|row| SongRowSpec {
-                            start_beat: row.start_beat,
-                            scene: row.scene,
-                            overrides: row.overrides.clone(),
-                        }),
-                );
-                // Captured state over [P, Q): the captured row governing
-                // `punch_in` (re-based to start exactly there), then every
-                // later captured row inside the region. Row zero of
-                // `captured` always exists, so a governing row is
-                // guaranteed. Untouched lanes inherit the pre-existing
-                // arrangement's resolution, materialized (spec 9.4).
-                let governing = captured
-                    .iter()
-                    .rposition(|row| row.start_beat <= punch_in)
-                    .expect("captured rows always include a beat-zero row");
-                for (idx, row) in captured.iter().enumerate().skip(governing) {
-                    let start_beat = if idx == governing {
-                        punch_in
-                    } else {
-                        row.start_beat
-                    };
-                    if start_beat > 0.0 && start_beat >= punch_out {
-                        // A launch audible at or after the Stop boundary was
-                        // never part of the audible performance: drop it.
-                        continue;
-                    }
-                    specs.push(self.stamped_captured_row_spec(start_beat, row, Some(previous)));
-                }
-                // The row beginning at `Q` restores the pre-existing
-                // arrangement from `Q` onward (spec 9.2 step 5): nothing
-                // after `Q` moves; rows past `Q` survive verbatim.
-                if punch_out < previous.end_beat {
-                    if !previous
-                        .rows
-                        .iter()
-                        .any(|row| row.start_beat == punch_out)
-                    {
-                        if let Some(governing_prev) =
-                            crate::sequencer::state_at_beat(previous, punch_out)
-                        {
-                            specs.push(SongRowSpec {
-                                start_beat: punch_out,
-                                scene: governing_prev.scene,
-                                overrides: self.split_row_state(governing_prev, punch_out),
-                            });
-                        }
-                    }
-                    specs.extend(
-                        previous
-                            .rows
-                            .iter()
-                            .filter(|row| row.start_beat >= punch_out)
-                            .map(|row| SongRowSpec {
-                                start_beat: row.start_beat,
-                                scene: row.scene,
-                                overrides: row.overrides.clone(),
-                            }),
-                    );
-                }
-                final_end_beat = previous.end_beat.max(end_beat);
-            }
+            (Some(previous), Some(punch_in)) => self.spliced_arrangement(
+                previous,
+                &scenes,
+                &captured,
+                &scene_launch_beats,
+                punch_in,
+                end_beat,
+            )?,
             (None, _) => {
-                // Whole-song commit, exactly as before this stopgap.
-                specs.extend(
-                    captured
-                        .iter()
-                        .filter(|row| row.start_beat == 0.0 || row.start_beat < end_beat)
-                        .map(|row| self.stamped_captured_row_spec(row.start_beat, row, None)),
-                );
-                final_end_beat = end_beat;
+                let base = ProjectArrangement {
+                    scene_lane: vec![SceneEvent {
+                        start_beat: 0.0,
+                        scene: captured[0].scene,
+                    }],
+                    track_lanes: vec![Vec::new(); scenes.song_track_count()],
+                    end_beat,
+                    loop_enabled: false,
+                    next_clip_id: 0,
+                };
+                self.spliced_arrangement(&base, &scenes, &captured, &scene_launch_beats, 0.0, end_beat)?
             }
-        }
-        // The seam between the preserved head and the spliced tail may leave
-        // adjacent identical states; drop the later one (the same canonical
-        // form `ProjectSong::normalize` enforces) so validation accepts it.
-        specs.dedup_by(|later, earlier| {
-            earlier.scene == later.scene && earlier.overrides == later.overrides
-        });
+        };
 
-        // No takes and (by the arm above) no launches ⇒ nothing to commit
-        // for a fresh project either: the transport ran and nothing was
-        // performed.
+        // Guarded like every other authoring path; a no-op stop above returns
+        // before reaching it, exactly as the row primitive's check did.
+        self.require_song_edit_unlocked()?;
         if pending.is_empty() {
-            let row_count = specs.len();
-            self.song_replace(specs, final_end_beat, loop_enabled)
-                .map_err(|error| {
-                    format!("the captured take could not be committed: {error}")
-                })?;
+            let before = previous;
+            self.commit_arrangement_edit("Capture arrangement", before, Some(arrangement))
+                .map_err(|error| format!("the captured take could not be committed: {error}"))?;
+            let row_count = self
+                .state
+                .committed_song()
+                .map(|song| song.rows.len())
+                .unwrap_or(0);
+            let end = self
+                .state
+                .committed_arrangement()
+                .map(|arrangement| arrangement.end_beat)
+                .unwrap_or(0.0);
             return Ok(format!(
-                "Arrangement capture committed: {row_count} row(s), end beat \
-                 {final_end_beat:.3}"
+                "Arrangement capture committed: {row_count} row(s), end beat {end:.3}"
             ));
         }
-        self.commit_capture_with_takes(specs, final_end_beat, loop_enabled, pending)
+        self.commit_capture_with_takes(arrangement, previous, pending)
+    }
+
+    /// Splice the consolidated capture into `previous` over `[P, Q)` (lane
+    /// spec 9, takes spec 9.2).
+    ///
+    /// The region boundaries are the punch region: `P` is the first captured
+    /// launch's audible beat, `Q` the Stop beat (never before `P`). Everything
+    /// outside `[P, Q)` is left untouched — including clips the region only
+    /// clips into, which `occlude_span` trims and re-stamps exactly as any
+    /// other write op does, so the pre-existing arrangement resumes at `Q`
+    /// with its phase intact. No restore rows are constructed.
+    fn spliced_arrangement(
+        &self,
+        previous: &ProjectArrangement,
+        scenes: &ProjectScenes,
+        captured: &[CapturedSongState],
+        scene_launch_beats: &[f64],
+        punch_in: f64,
+        stop_beat: f64,
+    ) -> Result<ProjectArrangement, String> {
+        let punch_out = stop_beat.max(punch_in);
+        // The captured state governing `P`, re-based to start exactly there,
+        // plus every later captured state inside the region. Row zero of
+        // `captured` always exists, so a governing state is guaranteed.
+        let governing = captured
+            .iter()
+            .rposition(|state| state.start_beat <= punch_in)
+            .expect("captured states always include a beat-zero state");
+        let mut states: Vec<CapturedSongState> = Vec::new();
+        for (idx, state) in captured.iter().enumerate().skip(governing) {
+            let start_beat = if idx == governing {
+                punch_in
+            } else {
+                state.start_beat
+            };
+            if start_beat > 0.0 && start_beat >= punch_out {
+                // A launch audible at or after the Stop boundary was never
+                // part of the audible performance: drop it.
+                continue;
+            }
+            states.push(CapturedSongState {
+                start_beat,
+                ..state.clone()
+            });
+        }
+        // The scene the ARRANGEMENT is playing as the region opens — the
+        // baseline the captured scene changes are measured against.
+        let baseline_scene = previous
+            .scene_at_beat(punch_in)
+            .unwrap_or(captured[governing].scene);
+
+        let mut arrangement = previous.clone();
+        arrangement.end_beat = previous.end_beat.max(punch_out);
+        Self::splice_scene_lane(
+            &mut arrangement,
+            previous,
+            &states,
+            scene_launch_beats,
+            baseline_scene,
+            punch_out,
+        );
+        for track in 0..arrangement.track_lanes.len() {
+            if !self.splice_captured_lane(&mut arrangement, scenes, track, &states, punch_out)? {
+                continue;
+            }
+            self.restore_lane_at_punch_out(&mut arrangement, previous, scenes, track, punch_out)?;
+        }
+        Ok(arrangement)
+    }
+
+    /// Write the captured scene *changes* onto the scene lane.
+    ///
+    /// A scene event is emitted only where the performance actually changed
+    /// scene, so a capture of nothing but track launches leaves the scene lane
+    /// alone. Pre-existing scene events are removed only from the first
+    /// captured change onward: a scene launch claims every lane (takes spec
+    /// 10), so from there the performance owns the backdrop, while before it
+    /// the lanes the performer never touched must keep the scene changes they
+    /// were playing. At `Q` the pre-existing scene resumes.
+    fn splice_scene_lane(
+        arrangement: &mut ProjectArrangement,
+        previous: &ProjectArrangement,
+        states: &[CapturedSongState],
+        scene_launch_beats: &[f64],
+        baseline_scene: usize,
+        punch_out: f64,
+    ) {
+        let mut captured_events: Vec<SceneEvent> = Vec::new();
+        let mut effective = baseline_scene;
+        for state in states {
+            let launched = scene_launch_beats
+                .iter()
+                .any(|beat| *beat == state.start_beat);
+            if launched && state.scene != effective {
+                captured_events.push(SceneEvent {
+                    start_beat: state.start_beat,
+                    scene: state.scene,
+                });
+                effective = state.scene;
+            }
+        }
+        let Some(splice_start) = captured_events.first().map(|event| event.start_beat) else {
+            return;
+        };
+        // Resolved against the ORIGINAL lane, before anything is removed.
+        let restore_scene = previous.scene_at_beat(punch_out);
+
+        let mut lane: Vec<SceneEvent> = previous
+            .scene_lane
+            .iter()
+            .copied()
+            .filter(|event| event.start_beat < splice_start || event.start_beat >= punch_out)
+            .collect();
+        lane.extend(captured_events.iter().copied());
+        // Restore event at `Q`: the pre-existing scene resumes. It is omitted
+        // when the performance left that very scene in effect — the lane
+        // holds changes only, and a redundant event would re-anchor every
+        // backdrop lane's phase at `Q` (an event's beat IS its phase anchor,
+        // spec 7). Where the pre-existing backdrop phase differs anyway,
+        // `restore_lane_at_punch_out` carries it on a clip instead.
+        if punch_out < arrangement.end_beat {
+            if let Some(scene) = restore_scene {
+                if scene != effective && !lane.iter().any(|event| event.start_beat == punch_out) {
+                    lane.push(SceneEvent {
+                        start_beat: punch_out,
+                        scene,
+                    });
+                }
+            }
+        }
+        lane.sort_by(|a, b| {
+            a.start_beat
+                .partial_cmp(&b.start_beat)
+                .expect("scene event beats are finite")
+        });
+        arrangement.scene_lane = lane;
+    }
+
+    /// Hand a touched lane back to the pre-existing arrangement at `Q`.
+    ///
+    /// Clips the region cut into are already restored: `occlude_span`
+    /// left-trimmed them and re-stamped their phase, so a clip covering `Q`
+    /// resumes by construction. What cannot restore itself is a lane the
+    /// pre-existing arrangement resolved from the scene *backdrop* mid-cycle:
+    /// the spliced scene lane anchors phase at its own events, so the beat the
+    /// old scene launched at is gone. That phase materializes as a clip
+    /// spanning `Q` to the next change — the same reason compile materializes
+    /// `backdrop_override`, and the only materialization the splice performs.
+    fn restore_lane_at_punch_out(
+        &self,
+        arrangement: &mut ProjectArrangement,
+        previous: &ProjectArrangement,
+        scenes: &ProjectScenes,
+        track: usize,
+        punch_out: f64,
+    ) -> Result<(), String> {
+        if punch_out >= arrangement.end_beat || arrangement.clip_at(track, punch_out).is_some() {
+            return Ok(());
+        }
+        let restored = self.backdrop_lane_resolution(previous, scenes, track, punch_out);
+        let spliced = self.backdrop_lane_resolution(arrangement, scenes, track, punch_out);
+        if lane_resolutions_equal(restored, spliced) {
+            return Ok(());
+        }
+        // The clip only has to bridge to the next thing that changes this
+        // lane; from there the arrangement speaks for itself again.
+        let next_event = arrangement
+            .scene_lane
+            .iter()
+            .find(|event| event.start_beat > punch_out)
+            .map(|event| event.start_beat);
+        let next_clip = arrangement.track_lanes[track]
+            .iter()
+            .find(|clip| clip.start_beat > punch_out)
+            .map(|clip| clip.start_beat);
+        let end_beat = [next_event, next_clip]
+            .into_iter()
+            .flatten()
+            .fold(arrangement.end_beat, f64::min);
+        if end_beat <= punch_out {
+            return Ok(());
+        }
+        let id = arrangement.allocate_clip_id()?;
+        let clip = match restored {
+            Some((pattern_id, offset_steps)) => ArrClip {
+                id,
+                start_beat: punch_out,
+                end_beat,
+                pattern_id: Some(pattern_id),
+                take_id: None,
+                offset_steps,
+            },
+            // The lane was silent there; an explicit-empty clip is how the
+            // model says "silence", and the spliced backdrop is not silent.
+            None => ArrClip::new(id, punch_out, end_beat, None),
+        };
+        insert_clip_sorted(arrangement, track, clip);
+        Ok(())
+    }
+
+    /// Decompose one lane's captured launches into clips over `[T, Q)`, where
+    /// `T` is the beat the performer first took the lane over (takes spec
+    /// 9.2's "touched").
+    ///
+    /// An **untouched** lane is not written at all — no clip, no trim — so the
+    /// pre-existing clips and the scene backdrop keep playing straight through
+    /// the region. That is the whole inheritance rule; nothing has to be
+    /// materialized to express it.
+    ///
+    /// A touched lane's launches become clips: each state's resolved source
+    /// (the explicit launch else the captured scene's cell) with the free-run
+    /// offset `steps(beat) mod L` stamped (takes spec 7.2), opened where it
+    /// first differs and closed where the lane changes again or at `Q`. A
+    /// state whose resolution is exactly what the scene lane already plays
+    /// there gets no clip — that is a scene launch handing the lane back to
+    /// the backdrop.
+    fn splice_captured_lane(
+        &self,
+        arrangement: &mut ProjectArrangement,
+        scenes: &ProjectScenes,
+        track: usize,
+        states: &[CapturedSongState],
+        punch_out: f64,
+    ) -> Result<bool, String> {
+        let Some(first) = states
+            .iter()
+            .position(|state| state.touched.contains(&track))
+        else {
+            return Ok(false);
+        };
+        let touched_beat = states[first].start_beat;
+        if touched_beat >= punch_out {
+            return Ok(false);
+        }
+        occlude_span(arrangement, scenes, track, touched_beat, punch_out)?;
+
+        let mut clips: Vec<ArrClip> = Vec::new();
+        let mut open: Option<ArrClip> = None;
+        for state in &states[first..] {
+            let beat = state.start_beat;
+            if beat >= punch_out {
+                break;
+            }
+            let desired = self.captured_lane_resolution(scenes, track, state, beat);
+            if let Some(clip) = open.as_ref() {
+                if lane_resolution_matches(&stamped_clip_override(scenes, track, clip, beat), desired)
+                {
+                    // The open clip already plays exactly this here.
+                    continue;
+                }
+            }
+            let backdrop = self.backdrop_lane_resolution(arrangement, scenes, track, beat);
+            if let Some(mut clip) = open.take() {
+                clip.end_beat = beat;
+                clips.push(clip);
+            }
+            if lane_resolutions_equal(desired, backdrop) {
+                continue;
+            }
+            let Some((pattern_id, offset_steps)) = desired else {
+                continue;
+            };
+            open = Some(ArrClip {
+                id: ClipId(0), // assigned once the lane's clips are inserted
+                start_beat: beat,
+                end_beat: punch_out,
+                pattern_id: Some(pattern_id),
+                take_id: None,
+                offset_steps,
+            });
+        }
+        if let Some(mut clip) = open.take() {
+            clip.end_beat = punch_out;
+            clips.push(clip);
+        }
+        for mut clip in clips {
+            if clip.end_beat <= clip.start_beat {
+                continue;
+            }
+            clip.id = arrangement.allocate_clip_id()?;
+            insert_clip_sorted(arrangement, track, clip);
+        }
+        Ok(true)
+    }
+
+    /// What `track` played at `beat` during the performance: the explicit
+    /// launch if the performer made one, else the captured scene's cell, with
+    /// the free-run phase stamped (takes spec 7.2 — every audible pattern
+    /// free-runs against the global clock, so its position is
+    /// `steps(beat) mod L`). `None` when the lane resolved to nothing.
+    fn captured_lane_resolution(
+        &self,
+        scenes: &ProjectScenes,
+        track: usize,
+        state: &CapturedSongState,
+        beat: f64,
+    ) -> Option<(u64, f64)> {
+        let pattern_id = match state
+            .overrides
+            .iter()
+            .find(|(over_track, _)| *over_track == track)
+        {
+            Some((_, pattern)) => pattern.0,
+            None => crate::sequencer::SongCompileContext::song_scene_cell(
+                scenes,
+                state.scene,
+                track,
+            )?,
+        };
+        Some((pattern_id, self.advanced_offset(track, pattern_id, 0.0, beat)))
+    }
+
+    /// What `track` plays at `beat` from the spliced arrangement's scene lane
+    /// alone — the source and phase a lane WITHOUT a clip resolves to (spec
+    /// 6.2, the `backdrop_override` the compiler materializes). A captured
+    /// resolution equal to this needs no clip.
+    fn backdrop_lane_resolution(
+        &self,
+        arrangement: &ProjectArrangement,
+        scenes: &ProjectScenes,
+        track: usize,
+        beat: f64,
+    ) -> Option<(u64, f64)> {
+        let event = arrangement.scene_event_at_beat(beat)?;
+        let pattern_id =
+            crate::sequencer::SongCompileContext::song_scene_cell(scenes, event.scene, track)?;
+        Some((
+            pattern_id,
+            self.advanced_offset(track, pattern_id, 0.0, beat - event.start_beat),
+        ))
+    }
+
+    /// Paint one take clip per recorded lane over its punch region (takes spec
+    /// 8.5, lane spec 9): `offset 0` by construction — recording writes
+    /// clip-relative positions, so take step 0 IS the punch-in — truncating
+    /// whatever it lands on like any other clip write.
+    fn paint_take_clips(
+        &self,
+        arrangement: &mut ProjectArrangement,
+        scenes: &ProjectScenes,
+        lanes: &[super::take_recording::CommittedTakeLane],
+    ) -> Result<(), String> {
+        // A take running past the song end extends it (spec 8.5).
+        for lane in lanes {
+            arrangement.end_beat = arrangement.end_beat.max(lane.punch_out_beat);
+        }
+        for lane in lanes {
+            if lane.track >= arrangement.track_lanes.len() {
+                return Err(format!("Track {} has no arrangement lane", lane.track + 1));
+            }
+            let end_beat = lane.punch_out_beat.min(arrangement.end_beat);
+            if end_beat <= lane.punch_in_beat {
+                continue;
+            }
+            self.paint_take_clip(
+                arrangement,
+                scenes,
+                lane.track,
+                lane.punch_in_beat,
+                end_beat,
+                lane.take_id,
+            )?;
+        }
+        Ok(())
     }
 
     /// Atomic commit of the launch splice PLUS the recorded takes (takes
-    /// spec 8.5): register every pending take, rebuild the song from the
-    /// splice specs, repoint each recorded region `[P, Q)` at its take (rows
-    /// re-anchored with `offset = steps(row.start - P)`), extend the song
-    /// end when a take runs past it, and commit ONE composite undo entry
-    /// (scenes + song). Any failure rolls both back.
+    /// spec 8.5): register every pending take, paint one take clip per
+    /// recorded lane onto the spliced arrangement, and commit ONE composite
+    /// undo entry (scenes + arrangement). Any failure rolls both back.
     fn commit_capture_with_takes(
         &mut self,
-        specs: Vec<SongRowSpec>,
-        end_beat: f64,
-        loop_enabled: bool,
+        arrangement: ProjectArrangement,
+        arrangement_before: Option<ProjectArrangement>,
         pending: Vec<(usize, super::take_recording::PendingTakeLane)>,
     ) -> Result<String, String> {
-        use super::history::{EditPatch, SceneStructurePatch, SongStructurePatch};
+        use super::history::{ArrangementStructurePatch, EditPatch, SceneStructurePatch};
 
         let scenes_before = self.capture_synchronized_scene_structure_state()?;
-        let song_before = self.state.committed_song();
         let lanes = match self.register_pending_takes(pending) {
             Ok(lanes) => lanes,
             Err(error) => {
@@ -532,88 +837,41 @@ impl App {
             app.restore_scene_structure_state(&scenes_before)
         };
 
-        // Build the spliced song (mirrors `song_replace`: sorted rows, fresh
-        // ids continuing the previous allocator).
-        let mut song = crate::sequencer::ProjectSong {
-            rows: Vec::with_capacity(specs.len()),
-            end_beat,
-            loop_enabled,
-            next_row_id: song_before
-                .as_ref()
-                .map(|song| song.next_row_id)
-                .unwrap_or(0),
-        };
-        let mut sorted = specs;
-        sorted.sort_by(|a, b| {
-            a.start_beat
-                .partial_cmp(&b.start_beat)
-                .expect("song row start beats are finite")
-        });
-        let build = (|| -> Result<crate::sequencer::ProjectSong, String> {
-            for spec in sorted {
-                let row_id = song.allocate_row_id()?;
-                let mut overrides = spec.overrides;
-                overrides.sort_by_key(|over| over.track);
-                song.rows.push(crate::sequencer::ProjectSongRow {
-                    id: row_id,
-                    start_beat: spec.start_beat,
-                    scene: spec.scene,
-                    overrides,
-                });
-            }
-            // A take running past the song end extends it (spec 8.5).
-            for lane in &lanes {
-                song.end_beat = song.end_beat.max(lane.punch_out_beat);
-            }
-            let mut song = song.clone();
-            for lane in &lanes {
-                song = self.paint_take_region(
-                    &song,
-                    lane.track,
-                    lane.punch_in_beat,
-                    lane.punch_out_beat.min(song.end_beat),
-                    lane.take_id,
-                )?;
-            }
-            song.normalize();
-            Ok(song)
-        })();
-        let song_after = match build {
-            Ok(song) => song,
-            Err(error) => {
-                rollback(self, &lanes)?;
-                return Err(format!("recorded takes could not be committed: {error}"));
-            }
-        };
-        {
-            let scenes = self.state.capture_project_scenes();
-            if let Err(error) = song_after.validate(&scenes) {
-                rollback(self, &lanes)?;
-                return Err(format!(
-                    "the captured take could not be committed: {error}"
-                ));
-            }
+        // The take pool changed, so the paint runs against the POST-register
+        // scenes: the clips reference takes that only exist now.
+        let scenes = self.state.capture_project_scenes();
+        let mut arrangement = arrangement;
+        if let Err(error) = self.paint_take_clips(&mut arrangement, &scenes, &lanes) {
+            rollback(self, &lanes)?;
+            return Err(format!("recorded takes could not be committed: {error}"));
         }
-        self.state.set_committed_song(Some(song_after.clone()));
+        if let Err(error) = self
+            .state
+            .set_committed_arrangement(Some(arrangement.clone()))
+        {
+            rollback(self, &lanes)?;
+            return Err(format!("the captured take could not be committed: {error}"));
+        }
         let scenes_after = self.state.capture_project_scenes();
+        finish_active_gesture(self);
         let scene_patch = SceneStructurePatch {
             before: scenes_before,
             after: scenes_after,
         };
-        let song_patch = SongStructurePatch {
-            before: song_before,
-            after: Some(song_after.clone()),
+        let arrangement_patch = ArrangementStructurePatch {
+            before: arrangement_before,
+            after: Some(arrangement.clone()),
         };
-        let retained_bytes = scene_patch.retained_bytes() + song_patch.retained_bytes();
-        // Scenes first: redo restores the takes before the song referencing
-        // them; undo removes the references before the takes (see
+        let retained_bytes = scene_patch.retained_bytes() + arrangement_patch.retained_bytes();
+        // Scenes first: redo restores the takes before the arrangement
+        // referencing them; undo removes the references before the takes (see
         // take_edit.rs for the same ordering rationale).
         self.history.commit(
             "Record arrangement takes",
             None,
             EditPatch::Composite(vec![
                 EditPatch::SceneStructure(scene_patch),
-                EditPatch::Song(song_patch),
+                EditPatch::Arrangement(arrangement_patch),
             ]),
             retained_bytes,
         );
@@ -623,142 +881,43 @@ impl App {
         if let Some(lane) = lanes.iter().min_by_key(|lane| lane.track) {
             self.select_committed_take(lane.track, lane.take_id);
         }
+        let row_count = self
+            .state
+            .committed_song()
+            .map(|song| song.rows.len())
+            .unwrap_or(0);
         Ok(format!(
-            "Arrangement capture committed: {} row(s), {} take(s), end beat {:.3}",
-            song_after.rows.len(),
+            "Arrangement capture committed: {row_count} row(s), {} take(s), end beat {:.3}",
             lanes.len(),
-            song_after.end_beat
+            arrangement.end_beat
         ))
     }
 }
 
-impl App {
-    /// Turn one consolidated captured state into a row spec with free-run
-    /// phase stamped (takes spec 7.2/9.4): during capture every audible
-    /// pattern free-runs against the global clock, so its position at any
-    /// row start is `steps(start_beat) mod L`. Stamping that as the lane's
-    /// offset makes committed playback reproduce the performance — an
-    /// unquantized scene launch mid-bar re-enters its patterns mid-pattern
-    /// ON the grid, instead of re-anchoring step 0 at an off-beat. Lanes
-    /// resolved through the scene cell get a materialized override whenever
-    /// their offset is nonzero (locked decision: phase lives on overrides
-    /// only).
-    fn stamped_captured_row_spec(
-        &self,
-        start_beat: f64,
-        row: &CapturedSongState,
-        previous: Option<&crate::sequencer::ProjectSong>,
-    ) -> SongRowSpec {
-        let scene_cells: Vec<Option<PatternId>> = self.state.with_project_scenes(|scenes| {
-            (0..scenes.track_pools.len())
-                .map(|track| {
-                    scenes
-                        .scenes
-                        .get(row.scene)
-                        .and_then(|scene| scene.cells.get(track))
-                        .copied()
-                        .flatten()
-                })
-                .collect()
-        });
-        // Inheritance for untouched lanes (takes spec 9.4): the pre-existing
-        // arrangement's resolution at this beat, with lane offsets advanced
-        // so playback continues unchanged. `split_row_state` computes
-        // exactly that (override sources advanced; scene-resolved lanes
-        // materialized only when their offset is nonzero).
-        let inherited = previous.and_then(|previous| {
-            crate::sequencer::state_at_beat(previous, start_beat).map(|governing| {
-                (
-                    governing.scene,
-                    self.split_row_state(governing, start_beat),
-                    governing.start_beat,
-                )
-            })
-        });
-        let mut overrides = Vec::new();
-        for (track, cell) in scene_cells.iter().enumerate() {
-            if !row.touched.contains(&track) {
-                if let Some(previous) = previous {
-                    // Untouched lane: the song kept playing it (spec 9.3).
-                    // Materialize its inherited resolution as an override so
-                    // scene-clears-overrides consolidation cannot silence it
-                    // (spec 9.4).
-                    let over = match &inherited {
-                        Some((prev_scene, inherited_overrides, prev_row_start)) => {
-                            match inherited_overrides
-                                .iter()
-                                .find(|over| over.track == track)
-                            {
-                                Some(over) => *over,
-                                None => {
-                                    // Scene-resolved in the pre-existing
-                                    // arrangement with offset 0 (or a
-                                    // whole-cycle offset the split
-                                    // collapsed): materialize explicitly.
-                                    let prev_cell =
-                                        self.state.with_project_scenes(|scenes| {
-                                            scenes
-                                                .scenes
-                                                .get(*prev_scene)
-                                                .and_then(|scene| scene.cells.get(track))
-                                                .copied()
-                                                .flatten()
-                                        });
-                                    match prev_cell {
-                                        Some(pattern) => {
-                                            let offset = self.advanced_offset(
-                                                track,
-                                                pattern.0,
-                                                0.0,
-                                                start_beat - prev_row_start,
-                                            );
-                                            crate::sequencer::ProjectSongTrackOverride {
-                                                track,
-                                                pattern_id: Some(pattern.0),
-                                                take_id: None,
-                                                offset_steps: offset,
-                                            }
-                                        }
-                                        None => crate::sequencer::ProjectSongTrackOverride::new(
-                                            track, None,
-                                        ),
-                                    }
-                                }
-                            }
-                        }
-                        // Past the pre-existing song's end: the lane was
-                        // silent there.
-                        None => crate::sequencer::ProjectSongTrackOverride::new(track, None),
-                    };
-                    let _ = previous;
-                    overrides.push(over);
-                    continue;
-                }
-            }
-            let explicit = row
-                .overrides
-                .iter()
-                .find(|(over_track, _)| *over_track == track)
-                .map(|(_, id)| *id);
-            let Some(pattern) = explicit.or(*cell) else {
-                continue;
-            };
-            let offset_steps = self.advanced_offset(track, pattern.0, 0.0, start_beat);
-            if explicit.is_some() || offset_steps != 0.0 {
-                overrides.push(crate::sequencer::ProjectSongTrackOverride {
-                    track,
-                    pattern_id: Some(pattern.0),
-                    take_id: None,
-                    offset_steps,
-                });
-            }
+/// Two lane resolutions (source pool id + phase in steps) are the same launch
+/// when they name the same pattern at the same phase. Offsets are compared
+/// with the stamping epsilon: the free-run and scene-anchored derivations of
+/// one phase are algebraically equal but not bit-identical.
+fn lane_resolutions_equal(a: Option<(u64, f64)>, b: Option<(u64, f64)>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some((pattern_a, offset_a)), Some((pattern_b, offset_b))) => {
+            pattern_a == pattern_b && (offset_a - offset_b).abs() < 1e-9
         }
-        SongRowSpec {
-            start_beat,
-            scene: row.scene,
-            overrides,
-        }
+        _ => false,
     }
+}
+
+/// Whether the override a clip compiles to at some beat is the same launch as
+/// the captured resolution there — i.e. whether the clip plays it already.
+fn lane_resolution_matches(
+    over: &ProjectSongTrackOverride,
+    resolution: Option<(u64, f64)>,
+) -> bool {
+    if over.take_id.is_some() {
+        return false;
+    }
+    lane_resolutions_equal(over.pattern_id.map(|id| (id, over.offset_steps)), resolution)
 }
 
 #[cfg(test)]

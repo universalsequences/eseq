@@ -1411,56 +1411,6 @@ mod tests {
         assert!(app.state.track_take(0, take).is_some());
     }
 
-    /// The extracted helper paints TAKE sources too (region spec 5.2 — the
-    /// latent gap `song-track-paint` had), re-anchoring each row it covers
-    /// linearly from the anchor, and commits nothing on its own.
-    #[test]
-    fn paint_source_region_paints_takes_without_committing() {
-        let mut app = app_with_song();
-        let take = app
-            .song_region_to_take(0, 0.0, 16.0)
-            .expect("region converts");
-        let mut song = app.state.committed_song().expect("song");
-        let depth = app.history.undo_len();
-
-        app.paint_source_region(
-            &mut song,
-            0,
-            4.0,
-            12.0,
-            LaneSource::Take(take),
-            4.0,
-            8.0,
-        )
-        .expect("take paint succeeds");
-
-        // 16th steps: the row at 8.0 is 4 beats (16 steps) past the anchor,
-        // so it CONTINUES the take at 8 + 16 rather than restarting it.
-        let offsets: Vec<(f64, Option<u64>, f64)> = song
-            .rows
-            .iter()
-            .filter(|row| row.start_beat >= 4.0 && row.start_beat < 12.0)
-            .map(|row| {
-                let over = row
-                    .overrides
-                    .iter()
-                    .find(|over| over.track == 0)
-                    .expect("painted override");
-                (row.start_beat, over.take_id, over.offset_steps)
-            })
-            .collect();
-        assert_eq!(
-            offsets,
-            vec![(4.0, Some(take.0), 8.0), (8.0, Some(take.0), 24.0)]
-        );
-        assert_eq!(app.history.undo_len(), depth, "the helper never commits");
-        assert_ne!(
-            app.state.committed_song().expect("song").rows,
-            song.rows,
-            "and it never installs the song it edited"
-        );
-    }
-
     #[test]
     fn new_normalizes_reversed_ends() {
         let region = SongRegionSelection::new(5, 2, 16.0, 4.0);

@@ -567,67 +567,23 @@ impl SequencerState {
         self.pattern.song.lock().unwrap().clone()
     }
 
-    /// Replace the committed song wholesale (row primitives, undo replay,
-    /// new project).
+    /// Replace the committed song directly, clearing any stored arrangement.
     ///
-    /// This is the *row* path (docs/song-mode-spec.md 5.6), and the stored
-    /// model is now lanes: only the arrangement is serialized, so a song
-    /// installed here must bring an arrangement with it or the next save
-    /// would write `arrangement: null` and destroy the project's song. The
-    /// row list is therefore **lowered** back to lanes (the inverse compile
-    /// `def-song` uses) and stored alongside. `None` clears both.
-    ///
-    /// Lowering cannot fail for a song the row primitives produced — they all
-    /// validate before installing — but this cannot return `Result` without
-    /// churning every call site for a case that means "the caller handed us a
-    /// song that does not fit the project". On failure the arrangement is
-    /// cleared (never left stale) and the reason is reported on stderr; the
-    /// song still installs, so playback is unaffected and only the *next save*
-    /// loses the arrangement. Phase 3 of the lane spec deletes the row
-    /// primitives and with them the last caller that needs any of this.
+    /// The stored authoring model is lanes and rows are compiled output
+    /// (docs/arrangement-lane-model-spec.md 7), so this is NOT an authoring
+    /// path: nothing that edits the project reaches it any more. What is left
+    /// is project reset (`start_new_project`, always `None`), the undo replay
+    /// of the retired `EditPatch::Song`, and playback tests that install a row
+    /// model directly. Installing a song therefore *clears* the arrangement
+    /// rather than deriving one: an arrangement left standing beside a song it
+    /// did not compile to would break the
+    /// `committed_arrangement() == Some(a) implies committed_song() ==
+    /// Some(compile(a))` invariant and, on the next save, write lanes that do
+    /// not match what plays. Authoring goes through
+    /// `set_committed_arrangement`.
     pub fn set_committed_song(&self, song: Option<ProjectSong>) {
-        let derived = song.as_ref().and_then(|song| {
-            self.arrangement_lowered_from_song(song)
-                .map_err(|error| {
-                    eprintln!(
-                        "warning: could not derive an arrangement from the committed song \
-                         ({error}); the song plays but will not be saved"
-                    );
-                })
-                .ok()
-        });
-        *self.pattern.arrangement.lock().unwrap() = derived;
+        *self.pattern.arrangement.lock().unwrap() = None;
         self.install_committed_song(song);
-    }
-
-    /// Lower `song`'s rows back to lanes against the live scenes, continuing
-    /// the current clip-id allocator. The result is validated before it is
-    /// handed back, so `set_committed_song` can never store an arrangement
-    /// that would fail to save or reload.
-    fn arrangement_lowered_from_song(
-        &self,
-        song: &ProjectSong,
-    ) -> Result<ProjectArrangement, String> {
-        let next_clip_id = self
-            .pattern
-            .arrangement
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|arrangement| arrangement.next_clip_id)
-            .unwrap_or(0);
-        self.with_project_scenes(|scenes| {
-            let arrangement = lower_rows_to_arrangement(
-                &song.rows,
-                song.end_beat,
-                song.loop_enabled,
-                scenes.song_track_count(),
-                next_clip_id,
-                scenes,
-            )?;
-            arrangement.validate(scenes)?;
-            Ok(arrangement)
-        })
     }
 
     /// Install a compiled/committed song without touching the arrangement.

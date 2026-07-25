@@ -11,9 +11,8 @@
 //! unregistered chunks.
 //!
 //! Commit happens inside the capture stop-commit (`song_capture.rs`):
-//! pending lanes register as takes and the song rows over `[P, Q)` are
-//! repointed at them, in the same single undo entry as the launch splice
-//! (spec 8.5).
+//! pending lanes register as takes and one take clip per lane is painted over
+//! `[P, Q)`, in the same single undo entry as the launch splice (spec 8.5).
 
 use crate::record_quantize::RecordQuantize;
 use crate::sequencer::{PatternSnapshot, StepParam, TakeId, TrackPatternData, MAX_STEPS};
@@ -75,7 +74,7 @@ impl TakeRecordingSession {
     }
 }
 
-/// A registered-and-finalized pending lane, ready for row surgery.
+/// A registered-and-finalized pending lane, ready to be painted as a clip.
 pub(crate) struct CommittedTakeLane {
     pub(crate) track: usize,
     pub(crate) take_id: TakeId,
@@ -137,7 +136,7 @@ mod tests {
     /// (the monotonic test-clock origin cannot represent the past).
     fn capture_app() -> (App, Instant) {
         let mut app = test_app();
-        app.song_replace(
+        app.arr_replace_rows(
             vec![
                 SongRowSpec {
                     start_beat: 0.0,
@@ -153,7 +152,7 @@ mod tests {
             16.0,
             false,
         )
-        .expect("song_replace succeeds");
+        .expect("arr_replace_rows succeeds");
         app.begin_song_capture_take();
         app.song_transport_mode = SongTransportMode::ArrangementCapture;
         // First publish initializes the monotonic clock origin; the real

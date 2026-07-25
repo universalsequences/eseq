@@ -4,18 +4,19 @@
 //! share.
 //!
 //! Both primitives mutate scenes (take pool + chunk patterns) and the
-//! committed song (take overrides) together and commit ONE history entry —
-//! an `EditPatch::Composite` pairing a `SceneStructurePatch` with a
-//! `SongStructurePatch`. Patch order inside the composite is chosen so
-//! replay validation always sees the take exist before any song state that
-//! references it (undo replays a composite in reverse).
+//! committed arrangement (take clips) together and commit ONE history entry —
+//! an `EditPatch::Composite` pairing a `SceneStructurePatch` with an
+//! `ArrangementStructurePatch`. Patch order inside the composite is chosen so
+//! replay validation always sees the take exist before any arrangement state
+//! that references it (undo replays a composite in reverse).
 
 use crate::sequencer::{
-    LaneSource, ProjectSong, TakeId, TrackPatternData, MAX_STEPS,
+    insert_clip_sorted, occlude_span, ArrClip, LaneSource, ProjectArrangement, ProjectScenes,
+    ProjectSong, TakeId, TrackPatternData, MAX_STEPS,
 };
 
 use super::edit::finish_active_gesture;
-use super::history::{EditPatch, SceneStructurePatch, SongStructurePatch};
+use super::history::{ArrangementStructurePatch, EditPatch, SceneStructurePatch};
 use super::App;
 
 #[cfg(test)]
@@ -82,7 +83,7 @@ mod tests {
     /// Three-row song: 0.0 scene 0, 4.0 scene 1, 8.0 scene 2, end 16.
     fn app_with_song() -> App {
         let mut app = test_app();
-        app.song_replace(
+        app.arr_replace_rows(
             vec![
                 SongRowSpec {
                     start_beat: 0.0,
@@ -103,7 +104,7 @@ mod tests {
             16.0,
             false,
         )
-        .expect("song_replace succeeds");
+        .expect("arr_replace_rows succeeds");
         app
     }
 
@@ -249,58 +250,55 @@ mod tests {
 
 impl App {
     /// Delete a take (takes spec 6.4): its chunk patterns leave the pattern
-    /// pool and every song override referencing it is removed (those lanes
-    /// fall back to scene-cell resolution). One undo entry restores both.
+    /// pool and every arrangement clip playing it is removed (those lanes fall
+    /// back to the scene backdrop over the clip's span). One undo entry
+    /// restores both.
     pub fn song_take_delete(&mut self, track: usize, take_id: u64) -> Result<(), String> {
         if self.song_edits_locked() {
             return Err(super::song_edit::SONG_EDITS_LOCKED_ERROR.to_string());
         }
         let take_id = TakeId(take_id);
         let scenes_before = self.capture_synchronized_scene_structure_state()?;
-        let song_before = self.state.committed_song();
+        let arrangement_before = self.state.committed_arrangement();
 
         self.state.remove_track_take(track, take_id)?;
 
-        let song_after = song_before.as_ref().map(|song| {
-            let mut song = song.clone();
-            for row in &mut song.rows {
-                row.overrides
-                    .retain(|over| !(over.track == track && over.take_id == Some(take_id.0)));
+        let arrangement_after = arrangement_before.as_ref().map(|arrangement| {
+            let mut arrangement = arrangement.clone();
+            if let Some(lane) = arrangement.track_lanes.get_mut(track) {
+                lane.retain(|clip| clip.take_id != Some(take_id.0));
             }
-            song.normalize();
-            song
+            arrangement
         });
-        if let Some(song) = &song_after {
-            let scenes = self.state.capture_project_scenes();
-            if let Err(error) = song.validate(&scenes) {
-                // Roll the scenes mutation back; the committed song was
-                // never touched.
+        if let Some(arrangement) = arrangement_after.clone() {
+            // Installing validates and recompiles; a failure installs nothing,
+            // so only the scenes mutation has to roll back.
+            if let Err(error) = self.state.set_committed_arrangement(Some(arrangement)) {
                 self.restore_scene_structure_state(&scenes_before)?;
                 return Err(format!(
                     "deleting the take left an invalid song and was rolled back: {error}"
                 ));
             }
         }
-        self.state.set_committed_song(song_after.clone());
         let scenes_after = self.state.capture_project_scenes();
         finish_active_gesture(self);
         let scene_patch = SceneStructurePatch {
             before: scenes_before,
             after: scenes_after,
         };
-        let song_patch = SongStructurePatch {
-            before: song_before,
-            after: song_after,
+        let arrangement_patch = ArrangementStructurePatch {
+            before: arrangement_before,
+            after: arrangement_after,
         };
-        let retained_bytes = scene_patch.retained_bytes() + song_patch.retained_bytes();
-        // Song first: undo replays in reverse (scenes-with-take restored
-        // before the take-referencing song), redo forward (the reference-free
-        // song validates against any scenes).
+        let retained_bytes = scene_patch.retained_bytes() + arrangement_patch.retained_bytes();
+        // Arrangement first: undo replays in reverse (scenes-with-take restored
+        // before the take-referencing arrangement), redo forward (the
+        // reference-free arrangement validates against any scenes).
         self.history.commit(
             "Delete take",
             None,
             EditPatch::Composite(vec![
-                EditPatch::Song(song_patch),
+                EditPatch::Arrangement(arrangement_patch),
                 EditPatch::SceneStructure(scene_patch),
             ]),
             retained_bytes,
@@ -327,17 +325,24 @@ impl App {
         if !start_beat.is_finite() || !end_beat.is_finite() || start_beat < 0.0 {
             return Err("conversion region beats must be finite and non-negative".to_string());
         }
+        let arrangement = self
+            .state
+            .committed_arrangement()
+            .ok_or_else(|| "The project has no song".to_string())?;
+        // The compiled song is what resolves the region's audible content
+        // (backdrop included); the arrangement is what the result is written
+        // onto.
         let song = self
             .state
             .committed_song()
             .ok_or_else(|| "The project has no song".to_string())?;
-        if start_beat >= song.end_beat {
+        if start_beat >= arrangement.end_beat {
             return Err(format!(
                 "conversion region starts at beat {start_beat} but the song ends at {}",
-                song.end_beat
+                arrangement.end_beat
             ));
         }
-        let end_beat = end_beat.min(song.end_beat);
+        let end_beat = end_beat.min(arrangement.end_beat);
         if end_beat <= start_beat {
             return Err(format!(
                 "conversion region must have a positive span (got [{start_beat}, {end_beat}))"
@@ -349,50 +354,55 @@ impl App {
             self.render_region_chunks(track, &song, start_beat, end_beat)?;
 
         let scenes_before = self.capture_synchronized_scene_structure_state()?;
-        let song_before = Some(song.clone());
+        let arrangement_before = Some(arrangement.clone());
         let take_id = self
             .state
             .register_track_take(track, None, chunks, total_len_steps)?;
 
-        let song_after =
-            match self.paint_take_region(&song, track, start_beat, end_beat, take_id) {
-                Ok(song) => song,
-                Err(error) => {
-                    self.state.remove_track_take(track, take_id)?;
-                    self.restore_scene_structure_state(&scenes_before)?;
-                    return Err(error);
-                }
-            };
-        {
-            let scenes = self.state.capture_project_scenes();
-            if let Err(error) = song_after.validate(&scenes) {
-                self.state.remove_track_take(track, take_id)?;
-                self.restore_scene_structure_state(&scenes_before)?;
-                return Err(format!(
-                    "region conversion produced an invalid song and was rolled back: {error}"
-                ));
-            }
+        let mut arrangement_after = arrangement;
+        let scenes = self.state.capture_project_scenes();
+        let painted = self.paint_take_clip(
+            &mut arrangement_after,
+            &scenes,
+            track,
+            start_beat,
+            end_beat,
+            take_id,
+        );
+        if let Err(error) = painted {
+            self.state.remove_track_take(track, take_id)?;
+            self.restore_scene_structure_state(&scenes_before)?;
+            return Err(error);
         }
-        self.state.set_committed_song(Some(song_after.clone()));
+        if let Err(error) = self
+            .state
+            .set_committed_arrangement(Some(arrangement_after.clone()))
+        {
+            self.state.remove_track_take(track, take_id)?;
+            self.restore_scene_structure_state(&scenes_before)?;
+            return Err(format!(
+                "region conversion produced an invalid song and was rolled back: {error}"
+            ));
+        }
         let scenes_after = self.state.capture_project_scenes();
         finish_active_gesture(self);
         let scene_patch = SceneStructurePatch {
             before: scenes_before,
             after: scenes_after,
         };
-        let song_patch = SongStructurePatch {
-            before: song_before,
-            after: Some(song_after),
+        let arrangement_patch = ArrangementStructurePatch {
+            before: arrangement_before,
+            after: Some(arrangement_after),
         };
-        let retained_bytes = scene_patch.retained_bytes() + song_patch.retained_bytes();
-        // Scenes first: redo restores the take before the song that
-        // references it; undo removes the song reference before the take.
+        let retained_bytes = scene_patch.retained_bytes() + arrangement_patch.retained_bytes();
+        // Scenes first: redo restores the take before the arrangement that
+        // references it; undo removes the clip before the take.
         self.history.commit(
             "Convert region to take",
             None,
             EditPatch::Composite(vec![
                 EditPatch::SceneStructure(scene_patch),
-                EditPatch::Song(song_patch),
+                EditPatch::Arrangement(arrangement_patch),
             ]),
             retained_bytes,
         );
@@ -514,30 +524,34 @@ impl App {
         Ok((chunks, total_len_steps))
     }
 
-    /// Row surgery pointing the region's lane at the take: split rows at the
-    /// region edges (phase-transparent per `split_row_state`), then set the
-    /// take override on every row inside, re-anchoring each with
-    /// `offset = steps(row.start - start_beat)` so mid-region rows continue
-    /// the take instead of restarting it (takes spec 8.5 semantics).
-    pub(super) fn paint_take_region(
+    /// Point one lane's `[start_beat, end_beat)` at `take_id`: a single take
+    /// clip anchored at source step 0, truncating whatever it lands on exactly
+    /// as any other clip write does (spec 8/14). Shared with the capture
+    /// commit's take painting.
+    pub(super) fn paint_take_clip(
         &self,
-        existing: &ProjectSong,
+        arrangement: &mut ProjectArrangement,
+        scenes: &ProjectScenes,
         track: usize,
         start_beat: f64,
         end_beat: f64,
         take_id: TakeId,
-    ) -> Result<ProjectSong, String> {
-        let mut song = existing.clone();
-        self.paint_source_region(
-            &mut song,
+    ) -> Result<(), String> {
+        if track >= arrangement.track_lanes.len() {
+            return Err(format!("Track {} has no arrangement lane", track + 1));
+        }
+        if end_beat <= start_beat {
+            return Err(format!(
+                "A take clip must have a positive span (got [{start_beat}, {end_beat}))"
+            ));
+        }
+        occlude_span(arrangement, scenes, track, start_beat, end_beat)?;
+        let id = arrangement.allocate_clip_id()?;
+        insert_clip_sorted(
+            arrangement,
             track,
-            start_beat,
-            end_beat,
-            LaneSource::Take(take_id),
-            start_beat,
-            0.0,
-        )?;
-        song.normalize();
-        Ok(song)
+            ArrClip::new_take(id, start_beat, end_beat, take_id.0, 0.0),
+        );
+        Ok(())
     }
 }

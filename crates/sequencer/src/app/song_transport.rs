@@ -540,7 +540,7 @@ mod tests {
     /// Three-row song: scenes 0/1/2 at beats 0/4/8, end beat 16.
     fn app_with_song() -> App {
         let mut app = test_app();
-        app.song_replace(
+        app.arr_replace_rows(
             vec![
                 SongRowSpec {
                     start_beat: 0.0,
@@ -561,7 +561,7 @@ mod tests {
             16.0,
             false,
         )
-        .expect("song_replace succeeds");
+        .expect("arr_replace_rows succeeds");
         app
     }
 
@@ -813,7 +813,7 @@ mod tests {
     #[test]
     fn per_track_back_to_song_clears_only_that_lane() {
         let mut app = test_app_two_tracks();
-        app.song_replace(
+        app.arr_replace_rows(
             vec![SongRowSpec {
                 start_beat: 0.0,
                 scene: 0,
@@ -916,12 +916,12 @@ mod tests {
         app.set_use_arrangement(true).unwrap();
         for record in [false, true] {
             app.song_transport_play(record).expect("play succeeds");
-            let error = app.song_set_loop(true).expect_err("edits must be locked");
+            let error = app.arr_set_loop(true).expect_err("edits must be locked");
             assert_eq!(error, crate::app::song_edit::SONG_EDITS_LOCKED_ERROR);
             // Zero-length capture commits fail; the transport still stops
             // and the primitives unlock.
             let _ = app.song_transport_stop();
-            app.song_set_loop(app.state.committed_song().unwrap().loop_enabled)
+            app.arr_set_loop(app.state.committed_song().unwrap().loop_enabled)
                 .expect("no-op edit succeeds when unlocked");
         }
     }
@@ -1077,7 +1077,7 @@ mod tests {
             tracks: vec![0],
         })
         .expect("track launch");
-        app.song_clear().expect("start from an empty song");
+        app.arr_clear().expect("start from an empty song");
 
         start_capture(&mut app);
         // A launch at the capture origin replaces the beat-zero row's state.
@@ -1343,14 +1343,57 @@ mod tests {
         app.state.set_scheduler_rendered_beats(0.0);
     }
 
+    /// The resolved `(pattern, step position)` of one lane at `beat` under a
+    /// compiled song: the row's override if it has one, else the row scene's
+    /// cell advanced from the row start. This is what the runtime plays.
+    fn lane_phase_at(
+        app: &App,
+        song: &crate::sequencer::ProjectSong,
+        track: usize,
+        beat: f64,
+    ) -> (Option<u64>, f64) {
+        let row = crate::sequencer::state_at_beat(song, beat).expect("a row governs the beat");
+        let delta = beat - row.start_beat;
+        match row.overrides.iter().find(|over| over.track == track) {
+            Some(over) => match over.pattern_id {
+                Some(pattern) => (
+                    Some(pattern),
+                    app.advanced_offset(track, pattern, over.offset_steps, delta),
+                ),
+                None => (None, 0.0),
+            },
+            None => {
+                let cell = app.state.with_project_scenes(|scenes| {
+                    scenes
+                        .scenes
+                        .get(row.scene)
+                        .and_then(|scene| scene.cells.get(track))
+                        .copied()
+                        .flatten()
+                        .map(|pattern| pattern.0)
+                });
+                match cell {
+                    Some(pattern) => (
+                        Some(pattern),
+                        app.advanced_offset(track, pattern, 0.0, delta),
+                    ),
+                    None => (None, 0.0),
+                }
+            }
+        }
+    }
+
     #[test]
-    fn capture_untouched_lanes_inherit_the_previous_arrangement() {
+    fn capture_leaves_untouched_lanes_unwritten_and_phase_continuous() {
         // Two tracks; the performer only launches track 0. Track 1 keeps
-        // playing the committed song underneath (takes spec 9.3), so the
-        // spliced rows must materialize its inherited resolution (spec 9.4)
-        // — a scene-clears-overrides consolidation can then never silence it.
+        // playing the committed song underneath (takes spec 9.3). In the lane
+        // model that inheritance needs NO representation: the lane is simply
+        // not written, so the scene backdrop plays straight through the punch
+        // region. (The row model had to materialize an override carrying the
+        // inherited pattern and its advanced phase onto every captured row,
+        // because a row's scene column would otherwise silence it.)
         let mut app = test_app_two_tracks();
-        app.song_replace(
+        app.arr_replace_rows(
             vec![
                 SongRowSpec {
                     start_beat: 0.0,
@@ -1367,8 +1410,12 @@ mod tests {
             false,
         )
         .expect("song committed");
+        let before = committed(&app);
+
         start_capture(&mut app);
-        app.state.set_scheduler_rendered_beats(4.0);
+        // 4.5 beats in, so the untouched lane sits mid-pattern (18 steps into
+        // a 16-step cycle) exactly where inheritance is easiest to get wrong.
+        app.state.set_scheduler_rendered_beats(4.5);
         app.apply_manual_pattern_launch(&PatternLaunchTarget::SceneTracks {
             scene: 2,
             tracks: vec![0],
@@ -1381,32 +1428,57 @@ mod tests {
         );
         app.state.set_scheduler_rendered_beats(6.0);
         app.song_transport_stop().expect("stop commits");
-        let song = committed(&app);
-        // The spliced row at P carries the performer's track 0 override AND
-        // track 1's materialized inheritance (scene 0's cell, offset 0 —
-        // 4 beats = 16 steps = one full cycle).
-        let spliced = song
-            .rows
-            .iter()
-            .find(|row| row.start_beat == 4.0)
-            .expect("spliced row at the punch-in");
-        let track0 = spliced
-            .overrides
-            .iter()
-            .find(|over| over.track == 0)
-            .expect("performer's track 0 override");
-        assert_eq!(track0.pattern_id, Some(3), "scene 2's cell for track 0");
-        let track1 = spliced
-            .overrides
-            .iter()
-            .find(|over| over.track == 1)
-            .expect("track 1 is materialized, not left to the captured scene");
-        assert_eq!(
-            track1.pattern_id,
-            Some(1),
-            "track 1 inherits the PREVIOUS arrangement's scene-0 pattern"
+
+        let arrangement = app
+            .state
+            .committed_arrangement()
+            .expect("the capture commits an arrangement");
+        // The headline win: nothing at all is written on the untouched lane.
+        assert!(
+            arrangement.track_lanes[1].is_empty(),
+            "the untouched lane must carry no clip, got {:?}",
+            arrangement.track_lanes[1]
         );
-        assert_eq!(track1.offset_steps, 0.0);
+        // The performer's lane is one clip over the punch region, stamped
+        // with the free-run phase (takes spec 7.2): 4.5 beats = 18 steps mod
+        // the 16-step pattern = 2.
+        let clip = arrangement.track_lanes[0]
+            .iter()
+            .find(|clip| clip.start_beat == 4.5)
+            .expect("the launch opens a clip at the punch-in");
+        assert_eq!(clip.pattern_id, Some(3), "scene 2's cell for track 0");
+        assert!((clip.offset_steps - 2.0).abs() < 1e-9, "{}", clip.offset_steps);
+        assert_eq!(clip.end_beat, 6.0, "the clip closes at the punch-out");
+
+        let song = committed(&app);
+        // The compiled song may still touch the lane, but only to carry the scene
+        // backdrop's PHASE across a boundary another track's clip created
+        // (`backdrop_override`): its source is always the row scene's own
+        // cell, never a launch the performer did not make.
+        for row in &song.rows {
+            let Some(over) = row.overrides.iter().find(|over| over.track == 1) else {
+                continue;
+            };
+            let cell = app.state.with_project_scenes(|scenes| {
+                scenes.scenes[row.scene].cells[1].map(|pattern| pattern.0)
+            });
+            assert_eq!(
+                (over.pattern_id, over.take_id),
+                (cell, None),
+                "beat {}: the untouched lane may only be phase-materialized",
+                row.start_beat
+            );
+        }
+        // And it plays exactly what it played before the capture — through
+        // the punch region, across the punch-out, and past the song's own
+        // scene change at beat 8.
+        for beat in [3.0, 4.5, 5.0, 6.0, 7.5, 8.0, 9.25, 15.0] {
+            assert_eq!(
+                lane_phase_at(&app, &song, 1, beat),
+                lane_phase_at(&app, &before, 1, beat),
+                "track 1 must play phase-continuously at beat {beat}"
+            );
+        }
         // The latch auto-clears at punch-out (takes spec 10).
         assert_eq!(app.state.song_manual_latch_mask(), 0);
         app.state.set_scheduler_rendered_beats(0.0);
@@ -1431,7 +1503,7 @@ mod tests {
             .state
             .register_track_take(0, None, vec![chunk], 64)
             .expect("take registers");
-        app.song_replace(
+        app.arr_replace_rows(
             vec![SongRowSpec {
                 start_beat: 0.0,
                 scene: 0,
@@ -1565,7 +1637,7 @@ mod tests {
                     .expect("take registers"),
             );
         }
-        app.song_replace(
+        app.arr_replace_rows(
             vec![SongRowSpec {
                 start_beat: 0.0,
                 scene: 0,
@@ -1663,9 +1735,23 @@ mod tests {
         );
         let captured = app.state.committed_song();
         assert_ne!(captured, song_before);
-        // Fresh row ids continue the allocator (spec 10.4.8/5.2).
+        // Rows are compiled output now, so their ids are positional (lane
+        // spec 7 step 4); the identity that must never be reused lives on
+        // clips, and the capture's clips continue that allocator.
         let song = committed(&app);
-        assert_eq!(song.next_row_id, 6, "ids continue after the previous song's 0..=2");
+        assert_eq!(song.next_row_id, song.rows.len() as u64);
+        let arrangement = app
+            .state
+            .committed_arrangement()
+            .expect("the capture commits an arrangement");
+        assert!(
+            arrangement
+                .track_lanes
+                .iter()
+                .flatten()
+                .all(|clip| clip.id.0 < arrangement.next_clip_id),
+            "clip ids stay below the allocator"
+        );
 
         assert!(matches!(
             crate::app::edit::undo(&mut app),
@@ -1738,7 +1824,7 @@ mod tests {
         // Start from an empty song so the commit takes the whole-song path
         // (with a committed song and no launches, stop is a documented
         // no-op instead of a failure — takes spec 9.5).
-        app.song_clear().expect("clear song");
+        app.arr_clear().expect("clear song");
         let song_before = app.state.committed_song();
         start_capture(&mut app);
         app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })

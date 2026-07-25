@@ -391,12 +391,13 @@ impl ProjectArrangement {
 /// Everything compile needs beyond `SongProjectContext`'s existence checks:
 /// the scene cells it resolves the backdrop from, and the `steps()` mapping it
 /// stamps offsets with. Mirrors `SongApp::pattern_step_mapping` /
-/// `take_step_mapping` and the scene-cell lookup inside `split_row_state`.
+/// `take_step_mapping` and the scene-cell lookup the retired row-split helper
+/// did.
 ///
 /// Every method defaults to `None` ("unknown") so contexts that cannot see
 /// project internals — `SerializedSongContext` — stay valid; an unknown
-/// mapping leaves offsets untouched, the same fallback `split_row_state`
-/// takes, and an unknown scene cell simply materializes no backdrop override.
+/// mapping leaves offsets untouched, the same fallback the row path took, and
+/// an unknown scene cell simply materializes no backdrop override.
 pub trait SongCompileContext {
     /// The pattern in scene `scene`'s cell for `track`, as a raw pool id.
     fn song_scene_cell(&self, _scene: usize, _track: usize) -> Option<u64> {
@@ -482,8 +483,8 @@ fn advanced_pattern_offset(
 
 /// The launch override a clip contributes at boundary `beat`, with
 /// `offset_steps` stamped by the takes spec 7 split rule — the same arithmetic
-/// `split_row_state` applies to a row split, measured from the clip's start
-/// instead of the governing row's.
+/// the row path applied to a row split, measured from the clip's start instead
+/// of the governing row's.
 pub fn stamped_clip_override(
     ctx: &dyn SongCompileContext,
     track: usize,
@@ -644,7 +645,7 @@ pub fn insert_clip_sorted(arr: &mut ProjectArrangement, track: usize, clip: ArrC
 /// The override a lane riding the *scene backdrop* contributes at boundary
 /// `beat`, or `None` when it needs none.
 ///
-/// This is `split_row_state`'s `None` arm, and it is not optional: the row
+/// This is the row path's scene-resolved arm, and it is not optional: the row
 /// model gives scene-resolved lanes no phase memory (`RuntimeSongRow::
 /// lane_offsets` is `0.0` for them and `song_playback` advances only from the
 /// row's own `start_beat`), so without a materialized offset a backdrop lane
@@ -653,7 +654,7 @@ pub fn insert_clip_sorted(arr: &mut ProjectArrangement, track: usize, clip: ArrC
 ///
 /// The anchor is the governing scene *event*'s `start_beat`: the scene
 /// launches at its event and runs continuously until the next one. As in
-/// `split_row_state`, an override is materialized only when the advanced
+/// the row path, an override is materialized only when the advanced
 /// offset is nonzero, so lanes stay implicit whenever they can and `normalize`
 /// still collapses no-op boundaries.
 fn backdrop_override(

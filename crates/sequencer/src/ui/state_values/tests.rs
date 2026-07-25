@@ -19609,7 +19609,7 @@
             overrides: Vec::new(),
         };
         test_app
-            .song_replace(vec![row(0.0, 0), row(4.0, 1), row(8.0, 2)], 16.0, true)
+            .arr_replace_rows(vec![row(0.0, 0), row(4.0, 1), row(8.0, 2)], 16.0, true)
             .expect("song committed");
 
         let mut frame = SongFrameState::default();
@@ -19679,7 +19679,7 @@
         assert_eq!(read(&mut editor, "SEQ.song-capture-error"), Value::Nil);
 
         // Clearing the song flips song-exists and empties song-rows.
-        test_app.song_clear().expect("clear succeeds");
+        test_app.arr_clear().expect("clear succeeds");
         assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(read(&mut editor, "SEQ.song-exists"), Value::Bool(false));
@@ -19840,7 +19840,7 @@
             overrides: Vec::new(),
         };
         test_app
-            .song_replace(vec![row(0.0, 0), row(4.0, 1), row(8.0, 2)], 16.0, false)
+            .arr_replace_rows(vec![row(0.0, 0), row(4.0, 1), row(8.0, 2)], 16.0, false)
             .expect("song committed");
 
         let mut frame = SongFrameState::default();
@@ -19917,7 +19917,7 @@
         );
 
         // A song edit republishes the projection.
-        test_app.song_set_end(24.0).expect("end moved");
+        test_app.arr_set_end(24.0).expect("end moved");
         assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(

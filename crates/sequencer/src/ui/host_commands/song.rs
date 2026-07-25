@@ -390,23 +390,26 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
                 if enabled { "enabled" } else { "disabled" }
             ))
         }
+        // `seq-song-replace` / `seq-song-clear` keep their names (spec 5,
+        // non-goal: renaming the natives) but lower to the arrangement like
+        // every other authoring path.
         "song-replace" => {
             let map = payload_map(payload)?;
             let rows = parse_rows(map)?;
+            let row_count = rows.len();
             let end_beat = require_number(map, "end-beat")?;
             let loop_enabled = map_bool(map, "loop");
             let name = map_string(map, "name");
-            let ids = app.song_replace(rows, end_beat, loop_enabled)?;
+            app.arr_replace_rows(rows, end_beat, loop_enabled)?;
             Ok(match name {
                 Some(name) => format!(
-                    "Committed song \"{name}\": {} row(s), end beat {end_beat}",
-                    ids.len()
+                    "Committed song \"{name}\": {row_count} row(s), end beat {end_beat}"
                 ),
-                None => format!("Replaced song: {} row(s), end beat {end_beat}", ids.len()),
+                None => format!("Replaced song: {row_count} row(s), end beat {end_beat}"),
             })
         }
         "song-clear" => {
-            app.song_clear()?;
+            app.arr_clear()?;
             Ok("Cleared song".to_string())
         }
         "arrangement-replace" => {

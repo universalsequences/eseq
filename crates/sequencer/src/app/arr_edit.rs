@@ -579,15 +579,15 @@ impl App {
     }
 }
 
-/// Validate a declarative row list (`def-song`) exactly as `song_replace`
-/// would, then lower it to lanes with `lower_rows_to_arrangement`.
+/// Validate a declarative row list (`def-song`) exactly as the retired
+/// `song_replace` primitive did, then lower it to lanes with
+/// `lower_rows_to_arrangement`.
 ///
-/// The lowering itself lives in `sequencer::state::arrangement` because
-/// `set_committed_song` needs it too. What lives here is the *declarative*
-/// input contract: `SongRowSpec` is unvalidated caller data, while the
-/// lowering assumes everything `ProjectSong::validate` guarantees. Each check
-/// below is a verbatim port of the row path's, message included, so a
-/// definition `song_replace` refused is refused identically here.
+/// What lives here is the *declarative* input contract: `SongRowSpec` is
+/// unvalidated caller data, while the lowering assumes everything
+/// `ProjectSong::validate` guarantees. Each check below is a verbatim port of
+/// the row path's, message included, so a definition the row path refused is
+/// refused identically here.
 fn lower_row_specs_to_arrangement<C: crate::sequencer::ArrangementContext>(
     rows: Vec<SongRowSpec>,
     end_beat: f64,
@@ -788,191 +788,21 @@ mod tests {
         assert_eq!(app.state.committed_song(), song);
     }
 
-    /// Assert the exact relationship a lowering guarantees (spec 8): compile
-    /// reproduces the song row for row — same beats, same scenes, every
-    /// declared override verbatim — and may only *add* overrides, on tracks
-    /// the row did not mention, for lanes whose scene-backdrop phase the row
-    /// model could not express.
-    #[track_caller]
-    fn assert_compiles_back_to(compiled: &ProjectSong, song: &ProjectSong) {
-        assert_eq!(compiled.end_beat, song.end_beat);
-        assert_eq!(compiled.loop_enabled, song.loop_enabled);
-        assert_eq!(
-            compiled.rows.iter().map(|row| row.start_beat).collect::<Vec<_>>(),
-            song.rows.iter().map(|row| row.start_beat).collect::<Vec<_>>(),
-            "every row start is a boundary and no boundary is invented"
-        );
-        for (compiled_row, row) in compiled.rows.iter().zip(&song.rows) {
-            assert_eq!(compiled_row.scene, row.scene, "beat {}", row.start_beat);
-            for over in &row.overrides {
-                assert!(
-                    compiled_row.overrides.contains(over),
-                    "beat {}: declared override {over:?} must survive verbatim, got {:?}",
-                    row.start_beat,
-                    compiled_row.overrides
-                );
-            }
-            for over in &compiled_row.overrides {
-                if row.overrides.contains(over) {
-                    continue;
-                }
-                assert!(
-                    !row.overrides.iter().any(|declared| declared.track == over.track),
-                    "beat {}: track {} was declared but compiled differently ({over:?})",
-                    row.start_beat,
-                    over.track + 1
-                );
-                assert_ne!(
-                    over.offset_steps, 0.0,
-                    "beat {}: the only added overrides are materialized backdrop phase",
-                    row.start_beat
-                );
-            }
-        }
-    }
-
-    /// The row path is the legacy authoring path, but only the arrangement is
-    /// serialized — so a song installed through it must arrive with an
-    /// arrangement, or the next save would write `arrangement: null` and
-    /// destroy the project's song.
+    /// The row model is compiled output, not an authoring path: installing a
+    /// song directly (project reset, playback tests) must not leave an
+    /// arrangement standing that did not compile to it.
     #[test]
-    fn set_committed_song_derives_an_arrangement_that_compiles_back() {
-        let app = test_app();
-        // Clips, an explicit-empty, and a take — every source kind.
-        // Install a 300-step, two-chunk take on track 0 through the same
-        // seam the loader uses.
-        let chunk = app
-            .state
-            .with_project_scenes(|scenes| scenes.track_pools[0].get(PatternId(1)).cloned())
-            .expect("track 0 pool holds scene 0's pattern");
-        app.state.install_project_arrangement(
-            &[],
-            vec![
-                (
-                    4,
-                    vec![(3, "Take 4".to_string(), 300, vec![chunk.clone(), chunk])],
-                ),
-                (0, Vec::new()),
-            ],
-        );
-        let take = crate::sequencer::TakeId(3);
-        let song = ProjectSong {
-            rows: vec![
-                ProjectSongRow {
-                    id: SongRowId(7),
-                    start_beat: 0.0,
-                    scene: 0,
-                    overrides: vec![ov(0, 2)],
-                },
-                ProjectSongRow {
-                    id: SongRowId(8),
-                    start_beat: 8.0,
-                    scene: 1,
-                    overrides: vec![
-                        ProjectSongTrackOverride::new_take(0, take.0, 0.0),
-                        ProjectSongTrackOverride::new(1, None),
-                    ],
-                },
-                ProjectSongRow {
-                    id: SongRowId(9),
-                    start_beat: 16.0,
-                    scene: 1,
-                    overrides: Vec::new(),
-                },
-            ],
-            end_beat: 32.0,
-            loop_enabled: true,
-            next_row_id: 10,
-        };
-        app.state.set_committed_song(Some(song.clone()));
-
-        let arrangement = app
-            .state
-            .committed_arrangement()
-            .expect("a row-path song must bring an arrangement");
-        assert_eq!(arrangement.end_beat, 32.0);
-        assert!(arrangement.loop_enabled);
-        // One event per scene change, not one per row.
-        assert_eq!(arrangement.scene_lane.len(), 2);
-        assert_compiles_back_to(&compiled(&app, &arrangement), &song);
-
-        // Clearing still clears both.
-        app.state.set_committed_song(None);
-        assert_eq!(app.state.committed_arrangement(), None);
-        assert_eq!(app.state.committed_song(), None);
-    }
-
-    /// Every row-path edit must survive a save/reload: the song is not
-    /// serialized any more, so if the derived arrangement were missing the
-    /// whole song would vanish from the file.
-    #[test]
-    fn row_path_edit_then_save_preserves_the_song() {
-        let mut app = test_app();
-        app.arr_replace(ProjectArrangement {
-            scene_lane: vec![SceneEvent {
-                start_beat: 0.0,
-                scene: 0,
-            }],
-            track_lanes: vec![vec![ArrClip::new(ClipId(0), 0.0, 8.0, Some(2))], Vec::new()],
-            end_beat: 16.0,
-            loop_enabled: false,
-            next_clip_id: 1,
-        })
-        .expect("arrangement installs");
-
-        // A row primitive — the surviving legacy path (capture commits
-        // through it) — rewrites the song.
-        app.song_replace(
-            vec![
-                spec(0.0, 0, vec![ov(0, 2)]),
-                spec(12.0, 1, vec![ov(1, 3)]),
-            ],
-            16.0,
-            false,
-        )
-        .expect("row replace applies");
-        let song = app.state.committed_song().expect("song after the row edit");
-        assert!(song.rows.iter().any(|row| row.start_beat == 12.0));
-
-        // Save: only the arrangement reaches the file.
-        let scenes = app.state.capture_project_scenes();
-        let arrangement = app
-            .state
-            .committed_arrangement()
-            .expect("the row edit must leave an arrangement to save");
-        let serialized = crate::sequencer::arrangement_for_serialization(&arrangement, &scenes)
-            .expect("serializable");
-        let json = serde_json::to_string(&serialized).expect("serialize");
-
-        // Reload: compile against the (unchanged) live scenes.
-        let reloaded: ProjectArrangement = serde_json::from_str(&json).expect("deserialize");
-        app.state
-            .set_committed_arrangement(Some(reloaded))
-            .expect("the reloaded arrangement installs");
-        assert_compiles_back_to(
-            &app.state.committed_song().expect("song after reload"),
-            &song,
-        );
-    }
-
-    /// A song that does not fit the project cannot lower. The fallback is
-    /// documented: the song still installs (playback is unaffected), the
-    /// arrangement is cleared rather than left stale, and the reason goes to
-    /// stderr.
-    #[test]
-    fn set_committed_song_clears_the_arrangement_when_lowering_fails() {
+    fn set_committed_song_clears_the_arrangement() {
         let app = test_app();
         app.state
             .set_committed_arrangement(Some(ProjectArrangement::new(2, 16.0)))
             .expect("arrangement installs");
-        // Pattern 9 is in no pool, so validation of the lowered arrangement
-        // fails.
         let song = ProjectSong {
             rows: vec![ProjectSongRow {
                 id: SongRowId(0),
                 start_beat: 0.0,
                 scene: 0,
-                overrides: vec![ov(0, 9)],
+                overrides: vec![ov(0, 2)],
             }],
             end_beat: 16.0,
             loop_enabled: false,
@@ -983,8 +813,12 @@ mod tests {
         assert_eq!(
             app.state.committed_arrangement(),
             None,
-            "never left stale: an arrangement that cannot be derived is cleared"
+            "a directly installed song can never be the compile of a stored arrangement"
         );
+
+        app.state.set_committed_song(None);
+        assert_eq!(app.state.committed_song(), None);
+        assert_eq!(app.state.committed_arrangement(), None);
     }
 
     #[test]
@@ -1063,13 +897,40 @@ mod tests {
     /// The `def-song` contract (spec 8): lowering the declarative rows and
     /// compiling the result must reproduce exactly the `ProjectSong` the row
     /// path produced — same beats, same scenes, same overrides.
+    /// The `ProjectSong` the declarative rows describe verbatim — what the
+    /// retired row primitive built: sorted by start beat, overrides in
+    /// canonical track order, ids positional.
+    fn song_from_specs(rows: &[SongRowSpec], end_beat: f64, loop_enabled: bool) -> ProjectSong {
+        let mut sorted = rows.to_vec();
+        sorted.sort_by(|a, b| {
+            a.start_beat
+                .partial_cmp(&b.start_beat)
+                .expect("row start beats are finite")
+        });
+        ProjectSong {
+            rows: sorted
+                .into_iter()
+                .enumerate()
+                .map(|(idx, spec)| {
+                    let mut overrides = spec.overrides;
+                    overrides.sort_by_key(|over| over.track);
+                    ProjectSongRow {
+                        id: SongRowId(idx as u64),
+                        start_beat: spec.start_beat,
+                        scene: spec.scene,
+                        overrides,
+                    }
+                })
+                .collect(),
+            end_beat,
+            loop_enabled,
+            next_row_id: rows.len() as u64,
+        }
+    }
+
     #[track_caller]
     fn assert_def_song_round_trips(rows: Vec<SongRowSpec>, end_beat: f64, loop_enabled: bool) {
-        let mut row_app = test_app();
-        row_app
-            .song_replace(rows.clone(), end_beat, loop_enabled)
-            .expect("song_replace succeeds");
-        let from_rows = row_app.state.committed_song().expect("row song");
+        let from_rows = song_from_specs(&rows, end_beat, loop_enabled);
 
         let mut arr_app = test_app();
         arr_app
@@ -1223,16 +1084,10 @@ mod tests {
         let mut app = test_app();
         let rows = vec![spec(0.0, 0, Vec::new()), spec(100.0, 1, vec![ov(0, 2)])];
         let error = app
-            .arr_replace_rows(rows.clone(), 50.0, false)
+            .arr_replace_rows(rows, 50.0, false)
             .expect_err("a row past the end must be rejected, not silently dropped");
         assert!(error.contains("greater than the last row's start beat"), "{error}");
         assert_eq!(app.state.committed_arrangement(), None);
-        // Exactly what the row path says, too.
-        let mut row_app = test_app();
-        let row_error = row_app
-            .song_replace(rows, 50.0, false)
-            .expect_err("the row path rejects it as well");
-        assert_eq!(row_error, error);
     }
 
     /// The row model rejects adjacent identical launch states; the lowering
