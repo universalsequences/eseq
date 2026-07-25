@@ -55,7 +55,6 @@ pub enum EditPatch {
     TrackDeletion(TrackDeletionPatch),
     TrackPresentation(TrackPresentationPatch),
     SceneStructure(SceneStructurePatch),
-    Song(SongStructurePatch),
     Arrangement(ArrangementStructurePatch),
     BusGroupStructure(BusGroupStructurePatch),
     MacroConfiguration(MacroConfigurationPatch),
@@ -182,44 +181,8 @@ impl SceneStructurePatch {
     }
 }
 
-/// Whole-object memento of the committed song (docs/song-mode-spec.md 5.6),
-/// modeled on `SceneStructurePatch`. `None` means "no song committed". The
-/// patch restores the exact prior song, including `next_row_id`, satisfying
-/// undo invariants H5 (rows carry stable `SongRowId`s) and H10 (each song
-/// primitive commits exactly one entry).
-#[derive(Clone, Debug)]
-pub struct SongStructurePatch {
-    pub before: Option<crate::sequencer::ProjectSong>,
-    pub after: Option<crate::sequencer::ProjectSong>,
-}
-
-impl SongStructurePatch {
-    fn state_bytes(state: &Option<crate::sequencer::ProjectSong>) -> usize {
-        state
-            .as_ref()
-            .map(|song| {
-                song.rows.capacity() * std::mem::size_of::<crate::sequencer::ProjectSongRow>()
-                    + song
-                        .rows
-                        .iter()
-                        .map(|row| {
-                            row.overrides.capacity()
-                                * std::mem::size_of::<crate::sequencer::ProjectSongTrackOverride>()
-                        })
-                        .sum::<usize>()
-            })
-            .unwrap_or(0)
-    }
-
-    pub fn retained_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + Self::state_bytes(&self.before)
-            + Self::state_bytes(&self.after)
-    }
-}
-
 /// Whole-object memento of the committed arrangement
-/// (docs/arrangement-lane-model-spec.md 8), modeled on `SongStructurePatch`.
+/// (docs/arrangement-lane-model-spec.md 8), modeled on `SceneStructurePatch`.
 /// `None` means "no arrangement committed". The patch restores the exact
 /// prior arrangement, including `next_clip_id`, so clip identity survives
 /// undo (invariant H5) and each arrangement primitive commits exactly one

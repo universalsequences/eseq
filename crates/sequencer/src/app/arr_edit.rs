@@ -288,38 +288,6 @@ impl App {
         })
     }
 
-    /// Resolve the clip a timeline gesture named by position rather than by
-    /// id. Until the UI read surface publishes stored clip ids (spec 12,
-    /// phase 5) a gesture addresses its clip by the span it drew on: the
-    /// merged view span can start before or end after the stored clip (the
-    /// projection merges phase-continuous backdrop spans into it), so the
-    /// search accepts the clip covering `beat` and otherwise the first clip
-    /// starting inside `[beat, end_hint)`.
-    pub fn arrangement_clip_at(
-        &self,
-        track: usize,
-        beat: f64,
-        end_hint: f64,
-    ) -> Result<ClipId, String> {
-        let arrangement = self.require_arrangement()?;
-        let lane = arrangement
-            .track_lanes
-            .get(track)
-            .ok_or_else(|| format!("Track {} has no arrangement lane", track + 1))?;
-        if let Some(clip) = lane.iter().find(|clip| clip.contains(beat)) {
-            return Ok(clip.id);
-        }
-        lane.iter()
-            .find(|clip| clip.start_beat >= beat && clip.start_beat < end_hint)
-            .map(|clip| clip.id)
-            .ok_or_else(|| {
-                format!(
-                    "Track {} has no clip at beat {beat}; the timeline selection is stale",
-                    track + 1
-                )
-            })
-    }
-
     // --- scene-lane ops (spec 8) ----------------------------------------
 
     /// Insert a scene change at `beat`. Clips are untouched: a clip is opaque
@@ -1184,6 +1152,19 @@ mod tests {
         app
     }
 
+    /// The id of the clip covering `beat` on `track`. Tests address clips
+    /// positionally for convenience; the UI addresses them by id (spec 12).
+    fn clip_at(app: &App, track: usize, beat: f64) -> ClipId {
+        app.state
+            .committed_arrangement()
+            .expect("arrangement")
+            .track_lanes[track]
+            .iter()
+            .find(|clip| clip.contains(beat))
+            .unwrap_or_else(|| panic!("no clip covers beat {beat} on track {track}"))
+            .id
+    }
+
     fn lane(app: &App, track: usize) -> Vec<(f64, f64, Option<u64>, f64)> {
         app.state
             .committed_arrangement()
@@ -1297,7 +1278,7 @@ mod tests {
     #[test]
     fn clip_delete_removes_one_object_and_leaves_the_rest() {
         let mut app = app_with_clips();
-        let id = app.arrangement_clip_at(0, 8.0, 8.0).expect("clip at 8");
+        let id = clip_at(&app, 0, 8.0);
         assert_one_entry_and_undoable(&mut app, |app| {
             app.arr_clip_delete(id).expect("clip deletes");
         });
@@ -1311,11 +1292,11 @@ mod tests {
     #[test]
     fn clip_move_is_rigid_and_truncates_what_it_lands_on() {
         let mut app = app_with_clips();
-        let id = app.arrangement_clip_at(0, 8.0, 8.0).expect("clip at 8");
+        let id = clip_at(&app, 0, 8.0);
         app.arr_clip_resize(id, 8.0, 16.0).expect("no-op resize");
         // Give it a nonzero anchor so rigidity is observable.
         app.arr_clip_split(id, 10.0).expect("split");
-        let right = app.arrangement_clip_at(0, 10.0, 10.0).expect("right half");
+        let right = clip_at(&app, 0, 10.0);
         assert_eq!(lane(&app, 0)[2], (10.0, 16.0, Some(2), 8.0));
 
         assert_one_entry_and_undoable(&mut app, |app| {
@@ -1338,7 +1319,7 @@ mod tests {
     #[test]
     fn clip_resize_restamps_the_left_edge_and_occludes_the_right() {
         let mut app = app_with_clips();
-        let id = app.arrangement_clip_at(0, 8.0, 8.0).expect("clip at 8");
+        let id = clip_at(&app, 0, 8.0);
         assert_one_entry_and_undoable(&mut app, |app| {
             app.arr_clip_resize(id, 10.0, 14.0).expect("clip resizes");
         });
@@ -1385,7 +1366,7 @@ mod tests {
     #[test]
     fn clip_split_keeps_the_music_uninterrupted() {
         let mut app = app_with_clips();
-        let id = app.arrangement_clip_at(0, 8.0, 8.0).expect("clip at 8");
+        let id = clip_at(&app, 0, 8.0);
         let depth = app.history.undo_len();
         let right = app.arr_clip_split(id, 10.0).expect("clip splits");
         assert_eq!(app.history.undo_len(), depth + 1, "exactly one entry");
@@ -1411,7 +1392,7 @@ mod tests {
     #[test]
     fn clip_set_source_swaps_content_in_place() {
         let mut app = app_with_clips();
-        let id = app.arrangement_clip_at(0, 8.0, 8.0).expect("clip at 8");
+        let id = clip_at(&app, 0, 8.0);
         app.arr_clip_split(id, 10.0).expect("split for a nonzero anchor");
         assert_one_entry_and_undoable(&mut app, |app| {
             app.arr_clip_set_source(id, LaneSource::Pattern(PatternId(3)))
@@ -1510,7 +1491,7 @@ mod tests {
         // The last scene change is the other floor: clear the clips so only
         // it can block, then try to shrink onto it.
         for beat in [0.0, 8.0] {
-            let id = app.arrangement_clip_at(0, beat, beat).expect("clip");
+            let id = clip_at(&app, 0, beat);
             app.arr_clip_delete(id).expect("clip deletes");
         }
         app.arr_scene_event_insert(12.0, 1).expect("insert");
@@ -1529,26 +1510,12 @@ mod tests {
         assert_eq!(app.history.undo_len(), depth, "a no-op commits nothing");
     }
 
-    /// A gesture names its clip by the span it drew on, which may reach past
-    /// the stored clip in either direction (the view merges phase-continuous
-    /// backdrop spans into it).
-    #[test]
-    fn arrangement_clip_at_resolves_a_gesture_span() {
-        let app = app_with_clips();
-        let id = app.arrangement_clip_at(0, 8.0, 8.0).expect("covering clip");
-        assert_eq!(app.arrangement_clip_at(0, 12.0, 12.0).unwrap(), id);
-        // A span starting in the gap still finds the clip it reaches.
-        assert_eq!(app.arrangement_clip_at(0, 6.0, 16.0).unwrap(), id);
-        let error = app.arrangement_clip_at(0, 5.0, 6.0).expect_err("nothing there");
-        assert!(error.contains("no clip at beat 5"), "{error}");
-    }
-
     /// Every new primitive is refused while a transport mode locks song
     /// editing, and refusing commits nothing.
     #[test]
     fn clip_and_scene_primitives_are_rejected_while_song_editing_is_locked() {
         let mut app = app_with_clips();
-        let id = app.arrangement_clip_at(0, 8.0, 8.0).expect("clip at 8");
+        let id = clip_at(&app, 0, 8.0);
         let before = app.state.committed_arrangement();
         let depth = app.history.undo_len();
         app.song_transport_locks_edits = true;

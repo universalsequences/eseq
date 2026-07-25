@@ -7,13 +7,10 @@
 //! returned command is one validated, atomic, one-undo-entry primitive; this
 //! module never mutates anything itself.
 //!
-//! Gestures address the model the way the read surface lets them. Until
-//! `SEQ.song-lanes` publishes stored clip ids (lane spec 12, phase 5) the
-//! view still speaks compiled ROW ids for the scene lane and merged clip
-//! SPANS for the track lanes, so this module translates both into the
-//! beat-addressed primitives: a row id becomes its start beat, and a clip
-//! span becomes `(:track, :at-beat, :at-end)`, which the host command
-//! resolves through `App::arrangement_clip_at`.
+//! Gestures address REAL model objects (lane spec 12, phase 5): a scene-lane
+//! item is a scene EVENT, named by its start beat, and a track-lane item is a
+//! stored CLIP, named by its `clip-id`. Nothing here resolves a span into an
+//! object any more, so a gesture can never land on the wrong one.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -21,7 +18,7 @@ use std::rc::Rc;
 
 use eseqlisp::vm::Value;
 
-use sequencer::sequencer::{ProjectArrangement, ProjectSong, SongRowId};
+use sequencer::sequencer::{ProjectArrangement, ProjectSong};
 
 /// One song host command to enqueue: `(name, payload)`.
 pub(crate) type SongCommand = (&'static str, Value);
@@ -47,7 +44,8 @@ fn require_beat(
     }
 }
 
-fn require_row_id(
+/// A non-negative integer id field (`:clip-id`, `:track`).
+fn require_id(
     map: &HashMap<String, Rc<RefCell<Value>>>,
     key: &str,
 ) -> Result<u64, String> {
@@ -88,15 +86,16 @@ fn payload(fields: Vec<(&str, Value)>) -> Value {
     )
 }
 
-/// The start beat of the compiled row a scene-lane gesture named. `Err` when
-/// the id is not in the song at all — a stale gesture must never silently
-/// edit a different part of the timeline.
-fn row_start_beat(song: &ProjectSong, row_id: u64) -> Result<f64, String> {
-    song.rows
+/// Validate that a scene-lane gesture named a scene event that really
+/// exists. `Err` when it does not — a stale gesture must never silently edit
+/// a different part of the timeline.
+fn require_scene_event(arrangement: &ProjectArrangement, beat: f64) -> Result<f64, String> {
+    arrangement
+        .scene_lane
         .iter()
-        .find(|row| row.id == SongRowId(row_id))
-        .map(|row| row.start_beat)
-        .ok_or_else(|| format!("song has no row with id {row_id}"))
+        .find(|event| event.start_beat == beat)
+        .map(|event| event.start_beat)
+        .ok_or_else(|| format!("the arrangement has no scene change at beat {beat}"))
 }
 
 /// The scene change immediately after `beat`, or `None` when `beat` sits in
@@ -125,12 +124,13 @@ pub(crate) fn arrangement_action_song_commands(
     };
     match kind.as_str() {
         // Scene-lane span drag: the ghost's final start moves the scene
-        // change the dragged row starts on.
+        // event the dragged span belongs to. The span IS the event, so the
+        // gesture carries its start beat directly.
         "finish-move-items" => {
-            let row_id = require_row_id(map, "row-id")?;
+            let from_beat = require_beat(map, "from-beat")?;
             let start_beat = require_beat(map, "start")?;
-            let song = song.ok_or_else(|| "no committed song".to_string())?;
-            let from_beat = row_start_beat(song, row_id)?;
+            let arrangement = arrangement.ok_or_else(|| "no arrangement".to_string())?;
+            let from_beat = require_scene_event(arrangement, from_beat)?;
             Ok(vec![(
                 "arrangement-scene-move",
                 payload(vec![
@@ -144,11 +144,10 @@ pub(crate) fn arrangement_action_song_commands(
         // span's end edge edits the song end instead. (Track CLIPS have real
         // ends now and resize themselves — lane spec 12.)
         "finish-resize-items" => {
-            let row_id = require_row_id(map, "row-id")?;
+            let from_beat = require_beat(map, "from-beat")?;
             let end_beat = require_beat(map, "end")?;
-            let song = song.ok_or_else(|| "no committed song".to_string())?;
             let arrangement = arrangement.ok_or_else(|| "no arrangement".to_string())?;
-            let from_beat = row_start_beat(song, row_id)?;
+            let from_beat = require_scene_event(arrangement, from_beat)?;
             match next_scene_event_beat(arrangement, from_beat) {
                 Some(next) => Ok(vec![(
                     "arrangement-scene-move",
@@ -200,28 +199,26 @@ pub(crate) fn arrangement_action_song_commands(
             Ok(commands)
         }
         // Scene-lane erase / delete: one removal primitive (and one undo
-        // entry) per id. Removing a scene change merges its span into the
-        // predecessor and can never touch a clip (lane spec 8).
+        // entry) per id. The ids ARE the scene events' start beats, so a span
+        // that exists only because some track's clip edge landed there is no
+        // longer even representable. Removing a scene change merges its span
+        // into the predecessor and can never touch a clip (lane spec 8).
         "delete-items" => {
             let Some(Value::List(ids)) = map_field(map, "ids") else {
                 return Err("delete-items is missing :ids".to_string());
             };
-            let song = song.ok_or_else(|| "no committed song".to_string())?;
+            let arrangement = arrangement.ok_or_else(|| "no arrangement".to_string())?;
             ids.iter()
                 .map(|id| {
-                    let id = match &*id.borrow() {
-                        Value::Number(value)
-                            if value.is_finite() && *value >= 0.0 && value.fract() == 0.0 =>
-                        {
-                            *value as u64
-                        }
+                    let beat = match &*id.borrow() {
+                        Value::Number(value) if value.is_finite() => *value,
                         other => {
                             return Err(format!(
-                                "delete-items id must be a row id, got {other:?}"
+                                "delete-items id must be a scene-event beat, got {other:?}"
                             ));
                         }
                     };
-                    let beat = row_start_beat(song, id)?;
+                    let beat = require_scene_event(arrangement, beat)?;
                     Ok((
                         "arrangement-scene-remove",
                         payload(vec![("beat", Value::Number(beat))]),
@@ -230,20 +227,17 @@ pub(crate) fn arrangement_action_song_commands(
                 .collect()
         }
         // Track-lane clip edge drag: ONE clip resize (lane spec 12 — no more
-        // "resize = move the next row"). The gesture carries the span it drew
-        // on so the host command can resolve the clip it names.
+        // "resize = move the next row"), naming the stored clip by id.
         "clip-resize" => {
-            let track = require_row_id(map, "track")?;
-            let at_beat = require_beat(map, "at-beat")?;
-            let at_end = require_beat(map, "at-end")?;
+            let track = require_id(map, "track")?;
+            let clip_id = require_id(map, "clip-id")?;
             let start_beat = require_beat(map, "start")?;
             let end_beat = require_beat(map, "end")?;
             Ok(vec![(
                 "arrangement-clip-resize",
                 payload(vec![
                     ("track", Value::Number(track as f64)),
-                    ("at-beat", Value::Number(at_beat)),
-                    ("at-end", Value::Number(at_end)),
+                    ("clip-id", Value::Number(clip_id as f64)),
                     ("start-beat", Value::Number(start_beat)),
                     ("end-beat", Value::Number(end_beat)),
                 ]),
@@ -251,16 +245,14 @@ pub(crate) fn arrangement_action_song_commands(
         }
         // Track-lane whole-clip drag: one rigid clip move (takes spec 7.4).
         "clip-move" => {
-            let track = require_row_id(map, "track")?;
-            let at_beat = require_beat(map, "at-beat")?;
-            let at_end = require_beat(map, "at-end")?;
+            let track = require_id(map, "track")?;
+            let clip_id = require_id(map, "clip-id")?;
             let start_beat = require_beat(map, "start")?;
             Ok(vec![(
                 "arrangement-clip-move",
                 payload(vec![
                     ("track", Value::Number(track as f64)),
-                    ("at-beat", Value::Number(at_beat)),
-                    ("at-end", Value::Number(at_end)),
+                    ("clip-id", Value::Number(clip_id as f64)),
                     ("start-beat", Value::Number(start_beat)),
                 ]),
             )])
@@ -268,15 +260,13 @@ pub(crate) fn arrangement_action_song_commands(
         // Track-lane Backspace: one clip delete. The lane rejoins the scene
         // backdrop over the deleted span (lane spec 6.2).
         "clip-delete" => {
-            let track = require_row_id(map, "track")?;
-            let at_beat = require_beat(map, "at-beat")?;
-            let at_end = require_beat(map, "at-end")?;
+            let track = require_id(map, "track")?;
+            let clip_id = require_id(map, "clip-id")?;
             Ok(vec![(
                 "arrangement-clip-delete",
                 payload(vec![
                     ("track", Value::Number(track as f64)),
-                    ("at-beat", Value::Number(at_beat)),
-                    ("at-end", Value::Number(at_end)),
+                    ("clip-id", Value::Number(clip_id as f64)),
                 ]),
             )])
         }
@@ -296,7 +286,7 @@ pub(crate) fn arrangement_action_song_commands(
 mod tests {
     use super::*;
 
-    use sequencer::sequencer::{ArrClip, ClipId, ProjectSongRow, SceneEvent};
+    use sequencer::sequencer::{ArrClip, ClipId, ProjectSongRow, SceneEvent, SongRowId};
 
     fn value_map(fields: Vec<(&str, Value)>) -> Value {
         payload(fields)
@@ -306,9 +296,8 @@ mod tests {
         Value::List(items.into_iter().map(|item| Rc::new(RefCell::new(item))).collect())
     }
 
-    /// The compiled song the scene-lane gestures address: three scene events
-    /// at beats 0/16/32, end 48. Row ids are deliberately NOT positional so a
-    /// translation that confused an id with an index would be caught.
+    /// The compiled song, used only for the song-end checks now that scene
+    /// gestures address the arrangement's own events.
     fn song() -> ProjectSong {
         let row = |id: u64, start_beat: f64, scene: usize| ProjectSongRow {
             id: SongRowId(id),
@@ -324,8 +313,8 @@ mod tests {
         }
     }
 
-    /// The arrangement that song compiles from, plus one clip so the clip
-    /// gestures have something to name.
+    /// Scene events at 0/16/32 plus one clip, whose id is deliberately not
+    /// its lane index so a translation confusing the two would be caught.
     fn arrangement() -> ProjectArrangement {
         ProjectArrangement {
             scene_lane: vec![
@@ -333,10 +322,10 @@ mod tests {
                 SceneEvent { start_beat: 16.0, scene: 1 },
                 SceneEvent { start_beat: 32.0, scene: 2 },
             ],
-            track_lanes: vec![vec![ArrClip::new(ClipId(0), 4.0, 12.0, Some(2))], Vec::new()],
+            track_lanes: vec![vec![ArrClip::new(ClipId(5), 4.0, 12.0, Some(2))], Vec::new()],
             end_beat: 48.0,
             loop_enabled: false,
-            next_clip_id: 1,
+            next_clip_id: 6,
         }
     }
 
@@ -354,13 +343,13 @@ mod tests {
         }
     }
 
-    /// Scene-lane move: the dragged row names the scene change by its start
-    /// beat, which is how the beat-addressed primitive takes it.
+    /// Scene-lane move: the dragged span names its scene event by start beat,
+    /// which is exactly what the beat-addressed primitive takes.
     #[test]
     fn move_gesture_lowers_to_one_scene_move() {
         let action = value_map(vec![
             ("type", Value::Keyword("finish-move-items".to_string())),
-            ("row-id", Value::Number(3.0)),
+            ("from-beat", Value::Number(16.0)),
             ("start", Value::Number(12.5)),
         ]);
         let commands = lower(&action).unwrap();
@@ -377,13 +366,13 @@ mod tests {
     fn scene_resize_gesture_moves_the_next_scene_change() {
         let action = value_map(vec![
             ("type", Value::Keyword("finish-resize-items".to_string())),
-            ("row-id", Value::Number(7.0)),
+            ("from-beat", Value::Number(0.0)),
             ("end", Value::Number(20.0)),
         ]);
         let commands = lower(&action).unwrap();
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].0, "arrangement-scene-move");
-        // Row 7 starts at beat 0; the next scene change is the one at 16.
+        // The dragged span starts at 0; the next scene change is at 16.
         assert_eq!(payload_number(&commands[0], "from-beat"), 16.0);
         assert_eq!(payload_number(&commands[0], "to-beat"), 20.0);
     }
@@ -392,7 +381,7 @@ mod tests {
     fn resizing_the_last_scene_span_edits_the_song_end() {
         let action = value_map(vec![
             ("type", Value::Keyword("finish-resize-items".to_string())),
-            ("row-id", Value::Number(9.0)),
+            ("from-beat", Value::Number(32.0)),
             ("end", Value::Number(40.0)),
         ]);
         let commands = lower(&action).unwrap();
@@ -459,7 +448,7 @@ mod tests {
             ("type", Value::Keyword("delete-items".to_string())),
             (
                 "ids",
-                value_list(vec![Value::Number(3.0), Value::Number(9.0)]),
+                value_list(vec![Value::Number(16.0), Value::Number(32.0)]),
             ),
         ]);
         let commands = lower(&action).unwrap();
@@ -471,15 +460,36 @@ mod tests {
         assert_eq!(payload_number(&commands[1], "beat"), 32.0);
     }
 
-    /// Lane spec 12: a clip edge drag is ONE clip resize, carrying the span
-    /// the view drew on so the host command can resolve the stored clip.
+    /// A beat with no scene event on it is not addressable at all now — the
+    /// spans the view draws are exactly the events, so this can only be a
+    /// stale gesture, and it must be refused rather than snapped somewhere.
+    #[test]
+    fn scene_gestures_reject_a_beat_with_no_scene_event() {
+        for kind in ["finish-move-items", "finish-resize-items"] {
+            let action = value_map(vec![
+                ("type", Value::Keyword(kind.to_string())),
+                ("from-beat", Value::Number(24.0)),
+                ("start", Value::Number(8.0)),
+                ("end", Value::Number(28.0)),
+            ]);
+            let error = lower(&action).expect_err("no scene change at beat 24");
+            assert!(error.contains("no scene change at beat 24"), "{error}");
+        }
+        let action = value_map(vec![
+            ("type", Value::Keyword("delete-items".to_string())),
+            ("ids", value_list(vec![Value::Number(24.0)])),
+        ]);
+        assert!(lower(&action).is_err());
+    }
+
+    /// Lane spec 12: a clip edge drag is ONE clip resize, naming the stored
+    /// clip by its id.
     #[test]
     fn clip_resize_lowers_to_one_clip_resize() {
         let action = value_map(vec![
             ("type", Value::Keyword("clip-resize".to_string())),
             ("track", Value::Number(0.0)),
-            ("at-beat", Value::Number(4.0)),
-            ("at-end", Value::Number(12.0)),
+            ("clip-id", Value::Number(5.0)),
             ("start", Value::Number(4.0)),
             ("end", Value::Number(20.0)),
         ]);
@@ -487,8 +497,7 @@ mod tests {
         assert_eq!(commands.len(), 1, "one gesture -> one primitive");
         assert_eq!(commands[0].0, "arrangement-clip-resize");
         assert_eq!(payload_number(&commands[0], "track"), 0.0);
-        assert_eq!(payload_number(&commands[0], "at-beat"), 4.0);
-        assert_eq!(payload_number(&commands[0], "at-end"), 12.0);
+        assert_eq!(payload_number(&commands[0], "clip-id"), 5.0);
         assert_eq!(payload_number(&commands[0], "start-beat"), 4.0);
         assert_eq!(payload_number(&commands[0], "end-beat"), 20.0);
     }
@@ -498,25 +507,24 @@ mod tests {
         let action = value_map(vec![
             ("type", Value::Keyword("clip-delete".to_string())),
             ("track", Value::Number(1.0)),
-            ("at-beat", Value::Number(8.0)),
-            ("at-end", Value::Number(16.0)),
+            ("clip-id", Value::Number(5.0)),
         ]);
         let commands = lower(&action).unwrap();
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].0, "arrangement-clip-delete");
         assert_eq!(payload_number(&commands[0], "track"), 1.0);
-        assert_eq!(payload_number(&commands[0], "at-beat"), 8.0);
+        assert_eq!(payload_number(&commands[0], "clip-id"), 5.0);
 
         let action = value_map(vec![
             ("type", Value::Keyword("clip-move".to_string())),
             ("track", Value::Number(0.0)),
-            ("at-beat", Value::Number(4.0)),
-            ("at-end", Value::Number(12.0)),
+            ("clip-id", Value::Number(5.0)),
             ("start", Value::Number(24.0)),
         ]);
         let commands = lower(&action).unwrap();
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].0, "arrangement-clip-move");
+        assert_eq!(payload_number(&commands[0], "clip-id"), 5.0);
         assert_eq!(payload_number(&commands[0], "start-beat"), 24.0);
     }
 
@@ -537,21 +545,18 @@ mod tests {
 
     #[test]
     fn malformed_and_unknown_actions_are_rejected_or_ignored() {
-        // Unknown row id in a resize: rejected against the committed song, so
-        // a stale gesture can never be mistaken for last-span semantics and
-        // silently edit the song end.
-        let action = value_map(vec![
-            ("type", Value::Keyword("finish-resize-items".to_string())),
-            ("row-id", Value::Number(42.0)),
-            ("end", Value::Number(20.0)),
-        ]);
-        assert!(lower(&action).is_err(), "unknown row id must not silently set-end");
-
         // Missing fields are errors.
         let action = value_map(vec![(
             "type",
             Value::Keyword("finish-move-items".to_string()),
         )]);
+        assert!(lower(&action).is_err());
+
+        // A clip gesture with no id is an error, never a positional guess.
+        let action = value_map(vec![
+            ("type", Value::Keyword("clip-delete".to_string())),
+            ("track", Value::Number(0.0)),
+        ]);
         assert!(lower(&action).is_err());
 
         // View-only actions produce no commands.

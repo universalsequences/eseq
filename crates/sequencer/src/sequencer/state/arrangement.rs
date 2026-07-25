@@ -674,6 +674,118 @@ fn backdrop_override(
     })
 }
 
+/// One derived scene span for the UI read surface (spec 12): a scene EVENT
+/// plus the beat it runs to (the next event's start, else the arrangement
+/// end). One span per event and no more — this is the surface that makes the
+/// jagged scene lane structurally impossible.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SceneSpan {
+    pub start_beat: f64,
+    pub end_beat: f64,
+    pub scene: usize,
+}
+
+/// One derived backdrop ghost span (spec 12): a stretch of a track lane with
+/// NO clip over it, where the governing scene's cell shows through. The UI
+/// renders these dimmer than clips — the dim/solid distinction is structural
+/// (clip vs. gap) rather than a `from_override` flag on a merged projection.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BackdropSpan {
+    pub start_beat: f64,
+    pub end_beat: f64,
+    pub scene: usize,
+    pub pattern_id: u64,
+    /// The pattern phase at `start_beat`, anchored on the scene event exactly
+    /// as `backdrop_override` anchors the compiled row's.
+    pub offset_steps: f64,
+}
+
+/// Derive the scene spans (spec 12). Each event runs until the next one, and
+/// the last runs to `end_beat`; events at or past `end_beat` produce nothing.
+pub fn arrangement_scene_spans(arr: &ProjectArrangement) -> Vec<SceneSpan> {
+    let mut spans = Vec::with_capacity(arr.scene_lane.len());
+    for (index, event) in arr.scene_lane.iter().enumerate() {
+        if event.start_beat >= arr.end_beat {
+            continue;
+        }
+        let end_beat = arr
+            .scene_lane
+            .get(index + 1)
+            .map(|next| next.start_beat.min(arr.end_beat))
+            .unwrap_or(arr.end_beat);
+        if end_beat <= event.start_beat {
+            continue;
+        }
+        spans.push(SceneSpan {
+            start_beat: event.start_beat,
+            end_beat,
+            scene: event.scene,
+        });
+    }
+    spans
+}
+
+/// Derive the backdrop ghost spans (spec 12), one list per track lane.
+///
+/// Every gap in a lane — before the first clip, between clips, after the last
+/// — is intersected with the scene spans, and each intersection where the
+/// governing scene has a cell for the track yields one ghost. A scene cell
+/// that is empty contributes nothing: the lane really is silent there.
+pub fn arrangement_backdrop_spans(
+    arr: &ProjectArrangement,
+    ctx: &dyn SongCompileContext,
+) -> Vec<Vec<BackdropSpan>> {
+    let scene_spans = arrangement_scene_spans(arr);
+    arr.track_lanes
+        .iter()
+        .enumerate()
+        .map(|(track, lane)| {
+            // Lane gaps, in order. Clips are sorted and non-overlapping.
+            let mut gaps: Vec<(f64, f64)> = Vec::new();
+            let mut cursor = 0.0f64;
+            for clip in lane {
+                if clip.start_beat > cursor {
+                    gaps.push((cursor, clip.start_beat.min(arr.end_beat)));
+                }
+                cursor = cursor.max(clip.end_beat);
+            }
+            if cursor < arr.end_beat {
+                gaps.push((cursor, arr.end_beat));
+            }
+            let mut spans = Vec::new();
+            for (gap_start, gap_end) in gaps {
+                if gap_end <= gap_start {
+                    continue;
+                }
+                for scene_span in &scene_spans {
+                    let start = gap_start.max(scene_span.start_beat);
+                    let end = gap_end.min(scene_span.end_beat);
+                    if end <= start {
+                        continue;
+                    }
+                    let Some(pattern_id) = ctx.song_scene_cell(scene_span.scene, track) else {
+                        continue;
+                    };
+                    spans.push(BackdropSpan {
+                        start_beat: start,
+                        end_beat: end,
+                        scene: scene_span.scene,
+                        pattern_id,
+                        offset_steps: advanced_pattern_offset(
+                            ctx,
+                            track,
+                            pattern_id,
+                            0.0,
+                            start - scene_span.start_beat,
+                        ),
+                    });
+                }
+            }
+            spans
+        })
+        .collect()
+}
+
 /// Spec 7: compile lanes into the playback row model.
 ///
 /// The boundary set is every scene-event start plus every clip start and end
@@ -1963,6 +2075,132 @@ mod tests {
             restamped_clip(&scenes, 0, &grown, 8.0).offset_steps,
             source.offset_steps,
             "and the round trip lands exactly back on the original anchor"
+        );
+    }
+
+    // --- derived UI read surfaces (spec 12) ------------------------------
+
+    /// One span per scene EVENT, ending at the next (or at `end_beat`) — the
+    /// surface that makes the jagged scene lane structurally impossible: a
+    /// clip edge contributes no span at all.
+    #[test]
+    fn scene_spans_emit_one_span_per_event_regardless_of_clips() {
+        let arr = arrangement(
+            vec![ev(0.0, 0), ev(16.0, 1), ev(32.0, 2)],
+            // Four clips with edges at 4/8/20/40 — none of which may split
+            // the scene lane.
+            vec![
+                vec![clip(0, 4.0, 8.0, 2), clip(1, 20.0, 40.0, 3)],
+                Vec::new(),
+            ],
+            48.0,
+        );
+        assert_eq!(
+            arrangement_scene_spans(&arr),
+            vec![
+                SceneSpan { start_beat: 0.0, end_beat: 16.0, scene: 0 },
+                SceneSpan { start_beat: 16.0, end_beat: 32.0, scene: 1 },
+                SceneSpan { start_beat: 32.0, end_beat: 48.0, scene: 2 },
+            ]
+        );
+
+        // A single scene over the whole arrangement is exactly ONE span —
+        // the phase-5 acceptance case.
+        let arr = arrangement(
+            vec![ev(0.0, 0)],
+            vec![vec![clip(0, 16.0, 32.0, 2)], Vec::new()],
+            48.0,
+        );
+        assert_eq!(
+            arrangement_scene_spans(&arr),
+            vec![SceneSpan { start_beat: 0.0, end_beat: 48.0, scene: 0 }]
+        );
+    }
+
+    /// A scene event at or past `end_beat` contributes nothing, and the last
+    /// span is clamped to the end.
+    #[test]
+    fn scene_spans_drop_events_at_or_past_the_end() {
+        let arr = arrangement(vec![ev(0.0, 0), ev(48.0, 1)], vec![Vec::new(); 2], 48.0);
+        assert_eq!(
+            arrangement_scene_spans(&arr),
+            vec![SceneSpan { start_beat: 0.0, end_beat: 48.0, scene: 0 }]
+        );
+    }
+
+    /// Backdrop ghosts fill every lane GAP with the governing scene's cell,
+    /// split at scene boundaries, phase-anchored on the scene event exactly
+    /// as `backdrop_override` anchors the compiled row's.
+    #[test]
+    fn backdrop_spans_fill_lane_gaps_split_by_scene() {
+        let scenes = test_scenes();
+        // Track 0: clip over [8,16); track 1: no clips at all.
+        let arr = arrangement(
+            vec![ev(0.0, 0), ev(24.0, 1)],
+            vec![vec![clip(0, 8.0, 16.0, 2)], Vec::new()],
+            32.0,
+        );
+        let spans = arrangement_backdrop_spans(&arr, &scenes);
+
+        // Lane 0's gaps are [0,8) and [16,32); the second is split by the
+        // scene change at 24. Scene j's cell is PatternId(j + 1).
+        assert_eq!(
+            spans[0],
+            vec![
+                BackdropSpan {
+                    start_beat: 0.0,
+                    end_beat: 8.0,
+                    scene: 0,
+                    pattern_id: 1,
+                    offset_steps: 0.0,
+                },
+                BackdropSpan {
+                    start_beat: 16.0,
+                    end_beat: 24.0,
+                    scene: 0,
+                    // 16 beats past the scene event at 4 steps/beat is 64
+                    // steps, which wraps to 0 in a 16-step pattern.
+                    pattern_id: 1,
+                    offset_steps: 0.0,
+                },
+                BackdropSpan {
+                    start_beat: 24.0,
+                    end_beat: 32.0,
+                    scene: 1,
+                    pattern_id: 2,
+                    offset_steps: 0.0,
+                },
+            ]
+        );
+        // A clip-free lane is backdrop end to end, one span per scene.
+        assert_eq!(
+            spans[1]
+                .iter()
+                .map(|span| (span.start_beat, span.end_beat, span.scene))
+                .collect::<Vec<_>>(),
+            vec![(0.0, 24.0, 0), (24.0, 32.0, 1)]
+        );
+    }
+
+    /// A gap that opens mid-pattern-cycle carries the advanced phase, and a
+    /// lane fully covered by clips has no ghosts at all.
+    #[test]
+    fn backdrop_spans_carry_phase_and_vanish_under_full_coverage() {
+        let scenes = test_scenes();
+        let arr = arrangement(
+            vec![ev(0.0, 0)],
+            // Track 0's clip ends at beat 2, a quarter of the way into the
+            // 4-beat pattern: the ghost after it starts at step 8.
+            vec![vec![clip(0, 0.0, 2.0, 2)], vec![clip(1, 0.0, 16.0, 3)]],
+            16.0,
+        );
+        let spans = arrangement_backdrop_spans(&arr, &scenes);
+        assert_eq!(spans[0].len(), 1);
+        assert_eq!(spans[0][0].start_beat, 2.0);
+        assert_eq!(spans[0][0].offset_steps, 8.0);
+        assert!(
+            spans[1].is_empty(),
+            "a lane with no gaps has no backdrop showing through"
         );
     }
 }

@@ -147,6 +147,10 @@ struct CaptureTrackSpec {
 #[derive(Debug, Clone, PartialEq)]
 struct CaptureProjectSpec {
     tracks: Vec<CaptureTrackSpec>,
+    /// How many scenes the project should have. The headless capture project
+    /// starts with one; `(scenes N)` clones the first N-1 more so a fixture
+    /// can define a song that actually CHANGES scene.
+    scenes: usize,
 }
 
 struct ParsedCaptureScript {
@@ -231,13 +235,34 @@ fn parse_capture_project(expression: &Expression) -> Result<CaptureProjectSpec, 
         return Err("capture-project must be a list".to_string());
     };
     let mut tracks = Vec::new();
+    let mut scenes = 1usize;
     for (index, expression) in items.iter().skip(1).enumerate() {
+        if expression_name(expression_head_item(expression)) == Some("scenes") {
+            let Expression::List(items) = expression else {
+                unreachable!("head matched, so this is a list");
+            };
+            scenes = items
+                .get(1)
+                .and_then(expression_usize)
+                .filter(|count| *count >= 1)
+                .ok_or_else(|| "(scenes N) expects a positive integer".to_string())?;
+            continue;
+        }
         tracks.push(
             parse_capture_track(expression)
                 .map_err(|error| format!("capture-project track {}: {error}", index + 1))?,
         );
     }
-    Ok(CaptureProjectSpec { tracks })
+    Ok(CaptureProjectSpec { tracks, scenes })
+}
+
+/// The head item of a list expression, for dispatching `capture-project`
+/// entries that are not tracks.
+fn expression_head_item(expression: &Expression) -> Option<&Expression> {
+    match expression {
+        Expression::List(items) => items.first(),
+        _ => None,
+    }
 }
 
 fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, String> {
@@ -522,6 +547,27 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
             .ok_or_else(|| {
                 format!("failed to persist :steps into scene {} pattern pool", scene + 1)
             })?;
+    }
+    // Extra scenes, cloned from the first exactly as the "clone-pattern" host
+    // command does, so every scene has a full cell set for every track.
+    for _ in 1..project.scenes {
+        app.state.clone_pattern(
+            app.tracks.len(),
+            &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates,
+            &app.tracks,
+            &app.graph.track_instrument_types,
+        );
+    }
+    if project.scenes > 1 {
+        app.state.launch_scene(
+            0,
+            app.tracks.len(),
+            &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates,
+            &app.tracks,
+            &app.graph.track_instrument_types,
+        );
     }
     Ok(())
 }

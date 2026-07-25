@@ -28,17 +28,36 @@ pub struct SongRegionSelection {
     pub track_b: usize,
     pub start_beat: f64,
     pub end_beat: f64,
+    /// True when the marquee was swept in the SCENE lane (lane spec 8: "copy
+    /// … plus scene events inside a scene-lane region"). The rectangle is
+    /// identical either way — a scene-lane sweep already spans every visible
+    /// track — but this bit is what tells copy/paste/delete to carry the
+    /// scene EVENTS as well as the clips. A track-lane marquee, even one that
+    /// happens to cover every track, never touches the scene lane.
+    pub scene_lane: bool,
 }
 
 impl SongRegionSelection {
     /// Normalizing constructor: callers pass the two ends of a drag in
-    /// whatever order the pointer produced them.
+    /// whatever order the pointer produced them. Track-lane marquee.
     pub fn new(track_a: usize, track_b: usize, start_beat: f64, end_beat: f64) -> Self {
+        Self::new_in_lane(track_a, track_b, start_beat, end_beat, false)
+    }
+
+    /// `new` with the scene-lane bit set explicitly.
+    pub fn new_in_lane(
+        track_a: usize,
+        track_b: usize,
+        start_beat: f64,
+        end_beat: f64,
+        scene_lane: bool,
+    ) -> Self {
         Self {
             track_a: track_a.min(track_b),
             track_b: track_a.max(track_b),
             start_beat: start_beat.min(end_beat).max(0.0),
             end_beat: start_beat.max(end_beat).max(0.0),
+            scene_lane,
         }
     }
 
@@ -88,6 +107,13 @@ pub struct ArrangementClipboard {
     /// was silent throughout the region still appears, with no spans, so
     /// paste silences it.
     pub tracks: Vec<(usize, Vec<ClipboardSpan>)>,
+    /// The scene lane's contribution, present only for a SCENE-LANE region
+    /// (lane spec 8). `scene_events` are `(rel_beat, scene)` for every scene
+    /// event inside the copied span, with a leading entry at `rel_beat 0.0`
+    /// for the scene governing the region's start — so pasting reproduces
+    /// what the scene lane sounded like, not just its change points.
+    pub scene_lane: bool,
+    pub scene_events: Vec<(f64, usize)>,
 }
 
 impl ArrangementClipboard {
@@ -241,10 +267,32 @@ impl App {
             return Err("The selected region covers no existing track".to_string());
         }
         let len_beats = end_beat - start_beat;
+        // Scene-lane regions carry the scene lane too (lane spec 8). The
+        // leading entry restates the governing scene at the region's start,
+        // so a paste re-establishes the backdrop rather than inheriting the
+        // destination's.
+        let scene_events = if region.scene_lane {
+            let mut events: Vec<(f64, usize)> = arrangement
+                .scene_at_beat(start_beat)
+                .map(|scene| vec![(0.0, scene)])
+                .unwrap_or_default();
+            events.extend(
+                arrangement
+                    .scene_lane
+                    .iter()
+                    .filter(|event| event.start_beat > start_beat && event.start_beat < end_beat)
+                    .map(|event| (event.start_beat - start_beat, event.scene)),
+            );
+            events
+        } else {
+            Vec::new()
+        };
         Ok(ArrangementClipboard {
             len_beats,
             snap_beats: region_snap_beats(start_beat, len_beats),
             tracks,
+            scene_lane: region.scene_lane,
+            scene_events,
         })
     }
 
@@ -341,8 +389,10 @@ impl App {
 
         // Whole-timeline shift only when the region really covers everything;
         // otherwise the untouched lanes must not move.
-        let covers_every_track =
-            region.track_a == 0 && region.track_b + 1 >= self.tracks.len().max(1);
+        // A scene-lane sweep is by definition a whole-timeline gesture: it
+        // carries the scene lane, so the ripple has to move it too.
+        let covers_every_track = region.scene_lane
+            || (region.track_a == 0 && region.track_b + 1 >= self.tracks.len().max(1));
 
         let (scenes_before, cloned_takes) = self.clone_clipboard_takes(&clipboard)?;
         let scenes = self.state.capture_project_scenes();
@@ -383,11 +433,12 @@ impl App {
         // The highlight follows the copy, so Cmd-D again duplicates THAT.
         // It names no single clip any more, so it goes through the marquee
         // door (spec 4.1) and hands the sound binding back.
-        self.set_song_region(SongRegionSelection::new(
+        self.set_song_region(SongRegionSelection::new_in_lane(
             region.track_a,
             region.track_b,
             insert_beat,
             insert_beat + len_beats,
+            region.scene_lane,
         ));
         let scope = if covers_every_track {
             "pushing the song right"
@@ -520,7 +571,81 @@ impl App {
                 insert_clip_sorted(arrangement, *track, clip);
             }
         }
+        if clipboard.scene_lane {
+            Self::paste_scene_events(arrangement, &clipboard.scene_events, dest_beat, dest_end);
+        }
         Ok(())
+    }
+
+    /// Set the scene of the event at `beat`, inserting one if there is none.
+    /// Keeps the lane sorted; `beat` is assumed inside the arrangement.
+    fn set_scene_event(arrangement: &mut ProjectArrangement, beat: f64, scene: usize) {
+        match arrangement
+            .scene_lane
+            .iter()
+            .position(|event| event.start_beat == beat)
+        {
+            Some(index) => arrangement.scene_lane[index].scene = scene,
+            None => {
+                let position = arrangement
+                    .scene_lane
+                    .iter()
+                    .position(|event| event.start_beat > beat)
+                    .unwrap_or(arrangement.scene_lane.len());
+                arrangement
+                    .scene_lane
+                    .insert(position, crate::sequencer::SceneEvent { start_beat: beat, scene });
+            }
+        }
+    }
+
+    /// Clear the scene lane over `[start, end)` — never removing the
+    /// mandatory event at 0.0 — while preserving what governed `end`, so
+    /// everything after the region keeps playing the scene it always did.
+    /// Returns the scene that has to be restored at `end`, if any.
+    fn clear_scene_lane_span(
+        arrangement: &mut ProjectArrangement,
+        start: f64,
+        end: f64,
+    ) -> Option<usize> {
+        let tail_scene = arrangement.scene_at_beat(end);
+        arrangement
+            .scene_lane
+            .retain(|event| event.start_beat == 0.0 || event.start_beat < start || event.start_beat >= end);
+        tail_scene
+    }
+
+    /// Re-establish `tail_scene` at `end` when the span edit changed what
+    /// governs it (and `end` is still inside the arrangement).
+    fn restore_scene_tail(arrangement: &mut ProjectArrangement, end: f64, tail_scene: Option<usize>) {
+        let Some(scene) = tail_scene else { return };
+        if end >= arrangement.end_beat {
+            return;
+        }
+        if arrangement.scene_at_beat(end) != Some(scene) {
+            Self::set_scene_event(arrangement, end, scene);
+        }
+    }
+
+    /// Stamp the copied scene events into `[dest, dest_end)` (lane spec 8):
+    /// clear that span of the scene lane, drop the copied events in at their
+    /// relative beats, then restore whatever governed `dest_end` so the paste
+    /// is local to the rectangle.
+    fn paste_scene_events(
+        arrangement: &mut ProjectArrangement,
+        events: &[(f64, usize)],
+        dest_beat: f64,
+        dest_end: f64,
+    ) {
+        let tail_scene = Self::clear_scene_lane_span(arrangement, dest_beat, dest_end);
+        for (rel_beat, scene) in events {
+            let beat = dest_beat + rel_beat;
+            if beat >= arrangement.end_beat {
+                continue;
+            }
+            Self::set_scene_event(arrangement, beat, *scene);
+        }
+        Self::restore_scene_tail(arrangement, dest_end, tail_scene);
     }
 
     /// Shared tail for the clipboard primitives: install the built
@@ -653,7 +778,14 @@ impl App {
         if cleared == 0 {
             return Err("The selected region covers no existing track".to_string());
         }
-        if arrangement.track_lanes == existing.track_lanes {
+        // A scene-lane region also removes the scene CHANGES inside it (lane
+        // spec 8): each merges into its predecessor, and the scene governing
+        // the region's end is restored so nothing after it moves.
+        if region.scene_lane {
+            let tail_scene = Self::clear_scene_lane_span(&mut arrangement, start_beat, end_beat);
+            Self::restore_scene_tail(&mut arrangement, end_beat, tail_scene);
+        }
+        if arrangement == existing {
             return Ok("The region is already empty".to_string());
         }
         self.commit_arrangement_edit("Delete region", before, Some(arrangement))?;
@@ -738,7 +870,7 @@ mod tests {
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
         default_empty_effect_chain, project_lanes, ClipId, PatternId, PatternSnapshot,
-        SequencerState, SongRowId, StepParam,
+        SequencerState, StepParam,
     };
 
     /// `tracks` tracks, three scenes; per-track pool ids are 1..=3 with scene
@@ -822,6 +954,25 @@ mod tests {
         app
     }
 
+    /// `app_with_song` plus a scene CHANGE at beat 8 (scene 0 -> scene 1),
+    /// so the scene-lane region ops have something to carry.
+    fn app_with_scene_change() -> App {
+        let mut app = app_with_song();
+        app.arr_scene_event_insert(8.0, 1)
+            .expect("scene change inserts");
+        app
+    }
+
+    fn scene_lane(app: &App) -> Vec<(f64, usize)> {
+        app.state
+            .committed_arrangement()
+            .expect("arrangement")
+            .scene_lane
+            .iter()
+            .map(|event| (event.start_beat, event.scene))
+            .collect()
+    }
+
     /// The stored clips of one lane as `(start, end, source, offset)`.
     fn clips(app: &App, track: usize) -> Vec<(f64, f64, LaneSource, f64)> {
         app.state
@@ -835,8 +986,14 @@ mod tests {
 
     /// The clip a gesture on `track` at `beat` addresses.
     fn clip_at(app: &App, track: usize, beat: f64) -> ClipId {
-        app.arrangement_clip_at(track, beat, beat)
+        app.state
+            .committed_arrangement()
+            .expect("arrangement")
+            .track_lanes[track]
+            .iter()
+            .find(|clip| clip.contains(beat))
             .expect("a clip covers that beat")
+            .id
     }
 
     /// The lane projection of `track` as (start, end, source, offset) tuples,
@@ -1441,7 +1598,7 @@ mod tests {
     #[test]
     fn setting_a_region_releases_the_bound_clip() {
         let (mut app, take, scene_pattern, _chunks) = app_with_take();
-        app.select_song_clip(0, SongRowId(0))
+        app.select_song_clip(0, ClipId(0))
             .expect("clip selects");
         assert_eq!(
             app.track_sound_binding(0).source,
@@ -1469,7 +1626,7 @@ mod tests {
         app.set_song_region(SongRegionSelection::new(0, 0, 0.0, 64.0));
         assert!(app.song_region_selection.is_some());
 
-        app.select_song_clip_span(0, SongRowId(0), Some((4.0, 12.0)))
+        app.select_song_clip_span(0, ClipId(0), Some((4.0, 12.0)))
             .expect("clip selects");
         assert_eq!(
             app.song_region_selection,
@@ -1489,7 +1646,7 @@ mod tests {
     fn selecting_a_clip_without_a_span_clears_the_region() {
         let (mut app, _take, _scene_pattern, _chunks) = app_with_take();
         app.set_song_region(SongRegionSelection::new(0, 0, 0.0, 64.0));
-        app.select_song_clip_span(0, SongRowId(0), None)
+        app.select_song_clip_span(0, ClipId(0), None)
             .expect("clip selects");
         assert_eq!(app.song_region_selection, None);
     }
@@ -1519,5 +1676,93 @@ mod tests {
         app.set_song_region(SongRegionSelection::new(0, 0, 4.0, 12.0));
         app.set_song_region(SongRegionSelection::new(0, 0, 8.0, 8.0));
         assert_eq!(app.song_region_selection, None);
+    }
+
+    // --- scene-lane regions (lane spec 8) --------------------------------
+
+    /// A SCENE-LANE marquee copies the scene events inside it, led by the
+    /// scene governing its start so a paste re-establishes the backdrop
+    /// rather than inheriting the destination's.
+    #[test]
+    fn scene_lane_region_copy_carries_the_scene_events() {
+        let mut app = app_with_scene_change();
+        app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 4.0, 12.0, true));
+        let clipboard = app.song_region_copy().expect("copy succeeds");
+        assert!(clipboard.scene_lane);
+        assert_eq!(clipboard.scene_events, vec![(0.0, 0), (4.0, 1)]);
+
+        // The identical rectangle swept in a TRACK lane carries no scene
+        // events at all — that is the whole point of the bit.
+        app.set_song_region(SongRegionSelection::new(0, 1, 4.0, 12.0));
+        let clipboard = app.song_region_copy().expect("copy succeeds");
+        assert!(!clipboard.scene_lane);
+        assert!(clipboard.scene_events.is_empty());
+    }
+
+    /// Pasting a scene-lane rectangle stamps its events at the destination
+    /// and leaves everything outside the rectangle playing what it did.
+    #[test]
+    fn scene_lane_region_paste_stamps_the_scene_events() {
+        let mut app = app_with_scene_change();
+        app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 4.0, 12.0, true));
+        let clipboard = app.song_region_copy().expect("copy succeeds");
+        let depth = app.history.undo_len();
+
+        app.song_region_paste(&clipboard, 16.0).expect("paste succeeds");
+        assert_eq!(app.history.undo_len(), depth + 1, "exactly one undo entry");
+        assert_eq!(
+            scene_lane(&app),
+            vec![(0.0, 0), (8.0, 1), (16.0, 0), (20.0, 1)],
+            "the copied scene changes land at the destination, relative beats intact"
+        );
+
+        undo(&mut app);
+        assert_eq!(scene_lane(&app), vec![(0.0, 0), (8.0, 1)]);
+        redo(&mut app);
+        assert_eq!(scene_lane(&app), vec![(0.0, 0), (8.0, 1), (16.0, 0), (20.0, 1)]);
+    }
+
+    /// Deleting a scene-lane region removes the scene CHANGES inside it and
+    /// restores the scene governing its end, so nothing after the rectangle
+    /// moves. It also clears the clips, exactly like a track-lane region.
+    #[test]
+    fn scene_lane_region_delete_removes_the_scene_changes_and_keeps_the_tail() {
+        let mut app = app_with_scene_change();
+        app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 4.0, 12.0, true));
+        let depth = app.history.undo_len();
+
+        app.song_region_delete().expect("delete succeeds");
+        assert_eq!(app.history.undo_len(), depth + 1, "exactly one undo entry");
+        assert_eq!(
+            scene_lane(&app),
+            vec![(0.0, 0), (12.0, 1)],
+            "the change at 8 is gone; scene 1 still governs from the region's end"
+        );
+
+        undo(&mut app);
+        assert_eq!(scene_lane(&app), vec![(0.0, 0), (8.0, 1)]);
+    }
+
+    /// The same rectangle swept in a TRACK lane never touches the scene lane.
+    #[test]
+    fn a_track_lane_region_delete_leaves_the_scene_lane_alone() {
+        let mut app = app_with_scene_change();
+        app.set_song_region(SongRegionSelection::new(0, 1, 4.0, 12.0));
+        app.song_region_delete().expect("delete succeeds");
+        assert_eq!(scene_lane(&app), vec![(0.0, 0), (8.0, 1)]);
+    }
+
+    /// The mandatory event at beat 0 can never be removed by a region op
+    /// (lane spec 8: the arrangement must start on a scene).
+    #[test]
+    fn scene_lane_region_ops_never_remove_the_event_at_zero() {
+        let mut app = app_with_scene_change();
+        app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 0.0, 12.0, true));
+        app.song_region_delete().expect("delete succeeds");
+        assert_eq!(
+            scene_lane(&app),
+            vec![(0.0, 0), (12.0, 1)],
+            "beat 0 survives; the tail scene is restored at the region end"
+        );
     }
 }

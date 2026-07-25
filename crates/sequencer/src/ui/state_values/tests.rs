@@ -4703,6 +4703,41 @@
             .expect("parse ui/sequencer.lisp");
     }
 
+    /// One `SEQ.scene-spans` entry (lane spec 12): a scene EVENT plus its
+    /// derived end. The span's identity — and every scene gesture's id — is
+    /// its start beat.
+    fn scene_span(start: f64, end: f64, scene: f64) -> Value {
+        map_value([
+            ("start-beat", Value::Number(start)),
+            ("end-beat", Value::Number(end)),
+            ("scene", Value::Number(scene)),
+        ])
+    }
+
+    /// One `SEQ.song-lanes` entry (lane spec 12): a STORED clip, addressed
+    /// by its real `clip-id`.
+    fn lane_clip(clip_id: f64, start: f64, end: f64, pattern: Value) -> Value {
+        map_value([
+            ("clip-id", Value::Number(clip_id)),
+            ("start-beat", Value::Number(start)),
+            ("end-beat", Value::Number(end)),
+            ("pattern-id", pattern),
+        ])
+    }
+
+    /// One `SEQ.song-backdrops` entry: the governing scene's cell showing
+    /// through a lane gap.
+    #[allow(dead_code)]
+    fn backdrop_span(start: f64, end: f64, pattern: f64) -> Value {
+        map_value([
+            ("start-beat", Value::Number(start)),
+            ("end-beat", Value::Number(end)),
+            ("scene", Value::Number(0.0)),
+            ("pattern-id", Value::Number(pattern)),
+            ("offset-steps", Value::Number(0.0)),
+        ])
+    }
+
     fn test_list(values: Vec<Value>) -> Value {
         Value::List(
             values
@@ -13003,8 +13038,9 @@
                 ("song-loop-enabled", Value::Bool(false)),
                 ("song-capture-failed", Value::Bool(false)),
                 ("song-capture-error", Value::Nil),
-                ("song-rows", Value::List(vec![])),
                 ("song-lanes", Value::List(vec![])),
+                ("song-backdrops", Value::List(vec![])),
+                ("scene-spans", Value::List(vec![])),
                 ("song-lane-events", Value::List(vec![])),
                 ("scene-names", Value::List(vec![])),
                 ("sampler-playhead", Value::Number(0.0)),
@@ -19562,8 +19598,8 @@
 
     /// Reactive-bindings smoke test (docs/song-mode-spec.md 12) at the
     /// `sync_song_state` seam the event loop calls each frame: after entering
-    /// song playback the mode binding reads "song-playback", `song-rows` is
-    /// rebuilt only when the committed-song revision changes, and stop
+    /// song playback the mode binding reads "song-playback", the derived
+    /// lane surfaces rebuild when the committed revision changes, and stop
     /// returns the bindings to "session". The exact `song-current-row`
     /// display value needs the scheduler's position atomics, which stay
     /// inactive in this headless test, so it must read -1 here.
@@ -19633,12 +19669,12 @@
         assert_eq!(read(&mut editor, "SEQ.song-loop-enabled"), Value::Bool(true));
         assert_eq!(read(&mut editor, "SEQ.song-current-row"), Value::Number(-1.0));
         assert_eq!(read(&mut editor, "SEQ.song-capture-failed"), Value::Bool(false));
-        let Value::List(rows) = read(&mut editor, "SEQ.song-rows") else {
-            panic!("song-rows must be a list");
+        let Value::List(spans) = read(&mut editor, "SEQ.scene-spans") else {
+            panic!("scene-spans must be a list");
         };
-        assert_eq!(rows.len(), 3, "song-rows carries one entry per row");
+        assert_eq!(spans.len(), 3, "one span per scene event");
 
-        // No change: no publish, and song-rows is not rebuilt (revision key).
+        // No change: no publish, and nothing is rebuilt (revision key).
         assert!(
             !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
             "an unchanged frame publishes nothing"
@@ -19678,15 +19714,19 @@
         assert_eq!(read(&mut editor, "SEQ.song-capture-failed"), Value::Bool(false));
         assert_eq!(read(&mut editor, "SEQ.song-capture-error"), Value::Nil);
 
-        // Clearing the song flips song-exists and empties song-rows.
+        // Clearing the song flips song-exists and empties the lane surfaces.
         test_app.arr_clear().expect("clear succeeds");
         assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(read(&mut editor, "SEQ.song-exists"), Value::Bool(false));
-        let Value::List(rows) = read(&mut editor, "SEQ.song-rows") else {
-            panic!("song-rows must be a list");
+        let Value::List(spans) = read(&mut editor, "SEQ.scene-spans") else {
+            panic!("scene-spans must be a list");
         };
-        assert!(rows.is_empty());
+        assert!(spans.is_empty());
+        let Value::List(lanes) = read(&mut editor, "SEQ.song-lanes") else {
+            panic!("song-lanes must be a list");
+        };
+        assert!(lanes.is_empty());
     }
 
     /// `SEQ.song-region` publish + diff
@@ -19744,7 +19784,7 @@
             "no region selected yet"
         );
 
-        // Setting a region publishes the four-element rectangle.
+        // Setting a region publishes the rectangle plus the scene-lane bit.
         test_app.set_song_region(sequencer::app::song_region::SongRegionSelection::new(
             1, 3, 8.0, 24.0,
         ));
@@ -19761,8 +19801,28 @@
                 Value::Number(3.0),
                 Value::Number(8.0),
                 Value::Number(24.0),
+                Value::Bool(false),
             ]
         );
+
+        // A scene-lane marquee over the same rectangle is a DIFFERENT region
+        // (lane spec 8: it carries the scene events too), so it republishes.
+        test_app.set_song_region(
+            sequencer::app::song_region::SongRegionSelection::new_in_lane(
+                1, 3, 8.0, 24.0, true,
+            ),
+        );
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        let Value::List(region) = read(&mut editor, "SEQ.song-region") else {
+            panic!("song-region must still be a list");
+        };
+        assert_eq!(region[4].borrow().clone(), Value::Bool(true));
+        test_app.set_song_region(sequencer::app::song_region::SongRegionSelection::new(
+            1, 3, 8.0, 24.0,
+        ));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
 
         // Same region again: nothing to republish.
         assert!(
@@ -19854,28 +19914,38 @@
                 .expect("binding read returns a value")
         };
 
-        // One lane per track; one clip span per row covering [0, end_beat).
+        // Lane spec 12: `song-lanes` carries the STORED clips, and this song
+        // is three scene changes with no overrides — so every lane is empty
+        // and the whole timeline is backdrop.
         assert_eq!(read(&mut editor, "(len SEQ.song-lanes)"), Value::Number(1.0));
         assert_eq!(
             read(&mut editor, "(len (nth SEQ.song-lanes 0))"),
-            Value::Number(3.0)
+            Value::Number(0.0),
+            "a scene-only arrangement stores no clips"
         );
+        // One scene span per scene EVENT, ending at the next.
+        assert_eq!(read(&mut editor, "(len SEQ.scene-spans)"), Value::Number(3.0));
         assert_eq!(
-            read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 1) :start-beat)"),
+            read(&mut editor, "(get (nth SEQ.scene-spans 1) :start-beat)"),
             Value::Number(4.0)
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 1) :end-beat)"),
+            read(&mut editor, "(get (nth SEQ.scene-spans 1) :end-beat)"),
             Value::Number(8.0)
         );
-        // Rebuilt-on-load scene cells resolve scene j to PatternId(j + 1).
+        // The backdrop ghosts fill the (entirely empty) lane, one per scene
+        // span; rebuilt-on-load scene cells resolve scene j to PatternId(j+1).
         assert_eq!(
-            read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 2) :pattern-id)"),
+            read(&mut editor, "(len (nth SEQ.song-backdrops 0))"),
             Value::Number(3.0)
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 2) :from-override)"),
-            Value::Bool(false)
+            read(&mut editor, "(get (nth (nth SEQ.song-backdrops 0) 1) :start-beat)"),
+            Value::Number(4.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (nth SEQ.song-backdrops 0) 2) :pattern-id)"),
+            Value::Number(3.0)
         );
         assert_eq!(
             read(&mut editor, "(len SEQ.scene-names)"),
@@ -19916,12 +19986,16 @@
             Value::String("Drop".to_string())
         );
 
-        // A song edit republishes the projection.
+        // A song edit republishes the derived surfaces.
         test_app.arr_set_end(24.0).expect("end moved");
         assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(
-            read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 2) :end-beat)"),
+            read(&mut editor, "(get (nth SEQ.scene-spans 2) :end-beat)"),
+            Value::Number(24.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (nth SEQ.song-backdrops 0) 2) :end-beat)"),
             Value::Number(24.0)
         );
 
@@ -19958,21 +20032,13 @@
                 Ok(Value::String("recorded".to_string()))
             });
 
-        let song_row = |id: f64, start: f64, scene: f64| {
-            map_value(vec![
-                ("id", Value::Number(id)),
-                ("start-beat", Value::Number(start)),
-                ("scene", Value::Number(scene)),
-                ("overrides", Value::List(vec![])),
-            ])
-        };
         let rt = editor.runtime_mut();
         rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
         rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
         rt.set_reactive(
             "SEQ",
-            "song-rows",
-            test_list(vec![song_row(0.0, 0.0, 0.0), song_row(1.0, 8.0, 1.0)]),
+            "scene-spans",
+            test_list(vec![scene_span(0.0, 8.0, 0.0), scene_span(8.0, 16.0, 1.0)]),
         );
         rt.run_reactive_cycle();
 
@@ -19996,7 +20062,7 @@
         // forwards the ghost's final start, ghost clears.
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :move-items-absolute :anchor-id 1 :ids (list 1) :start 12))",
+            "(arrangement-scene-action (dict :type :move-items-absolute :anchor-id 8 :ids (list 8) :start 12))",
         );
         assert!(recorded.lock().unwrap().is_empty(), "live drags never commit");
         assert_eq!(
@@ -20006,7 +20072,7 @@
         );
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :finish-move-items :anchor-id 1 :ids (list 1)))",
+            "(arrangement-scene-action (dict :type :finish-move-items :anchor-id 8 :ids (list 8)))",
         );
         assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
         {
@@ -20016,12 +20082,12 @@
                 action_field(&recorded[0], "type"),
                 Value::Keyword("finish-move-items".to_string())
             );
-            assert_eq!(action_field(&recorded[0], "row-id"), Value::Number(1.0));
+            assert_eq!(action_field(&recorded[0], "from-beat"), Value::Number(8.0));
             assert_eq!(action_field(&recorded[0], "start"), Value::Number(12.0));
         }
 
-        // Resize drag: the ghost moves the shared boundary (row 0's end and
-        // row 1's start), the commit carries the resized row's id + end.
+        // Resize drag: the ghost moves the shared boundary (span 0's end and
+        // span 1's start), the commit carries the resized event's beat + end.
         eval(
             &mut editor,
             "(arrangement-scene-action (dict :type :resize-item-absolute :id 0 :ids (list 0) :edge :end :time 10))",
@@ -20033,7 +20099,7 @@
         assert_eq!(
             read(&mut editor, "(get (nth (arrangement-scene-items) 1) :start)"),
             Value::Number(10.0),
-            "the next row's start previews the boundary move"
+            "the next span's start previews the boundary move"
         );
         eval(
             &mut editor,
@@ -20046,7 +20112,7 @@
                 action_field(&recorded[1], "type"),
                 Value::Keyword("finish-resize-items".to_string())
             );
-            assert_eq!(action_field(&recorded[1], "row-id"), Value::Number(0.0));
+            assert_eq!(action_field(&recorded[1], "from-beat"), Value::Number(0.0));
             assert_eq!(action_field(&recorded[1], "end"), Value::Number(10.0));
         }
 
@@ -20091,17 +20157,17 @@
             assert_eq!(action_field(&recorded[3], "length"), Value::Number(20.0));
         }
 
-        // Erase forwards the ids untouched.
+        // Erase forwards the ids (scene-event beats) untouched.
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :delete-items :ids (list 1)))",
+            "(arrangement-scene-action (dict :type :delete-items :ids (list 8)))",
         );
         assert_eq!(recorded.lock().unwrap().len(), 5);
 
         // A finish with no preceding live drag is a no-op commit-wise.
         eval(
             &mut editor,
-            "(arrangement-scene-action (dict :type :finish-move-items :anchor-id 1 :ids (list 1)))",
+            "(arrangement-scene-action (dict :type :finish-move-items :anchor-id 8 :ids (list 8)))",
         );
         assert_eq!(
             recorded.lock().unwrap().len(),
@@ -20109,34 +20175,23 @@
             "no ghost -> nothing to commit"
         );
 
-        // ── Track-clip editing over the merged lane projection ────────────
-        // Lane 0: rows 0+1 play the same pattern (they merge into one clip
-        // spanning [0,8), id = first row-id), row 2 plays pattern 2, row 3
-        // is empty (the gap).
-        let lane_clip = |row_id: f64, start: f64, end: f64, pattern: Value| {
-            map_value(vec![
-                ("row-id", Value::Number(row_id)),
-                ("start-beat", Value::Number(start)),
-                ("end-beat", Value::Number(end)),
-                ("pattern-id", pattern),
-                ("from-override", Value::Bool(false)),
-            ])
-        };
+        // ── Track-clip editing over the STORED clips (lane spec 12) ───────
+        // Lane 0: clip 0 spans [0,8) on pattern 1, clip 2 spans [8,12) on
+        // pattern 2, and clip 3 is explicit-empty (drawn as a gap).
         editor.runtime_mut().set_reactive(
             "SEQ",
             "song-lanes",
             test_list(vec![test_list(vec![
-                lane_clip(0.0, 0.0, 4.0, Value::Number(1.0)),
-                lane_clip(1.0, 4.0, 8.0, Value::Number(1.0)),
+                lane_clip(0.0, 0.0, 8.0, Value::Number(1.0)),
                 lane_clip(2.0, 8.0, 12.0, Value::Number(2.0)),
                 lane_clip(3.0, 12.0, 16.0, Value::Nil),
             ])]),
         );
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(
-            read(&mut editor, "(len (arrangement-merged-track-clips 0))"),
+            read(&mut editor, "(len (arrangement-track-clips 0))"),
             Value::Number(2.0),
-            "adjacent same-pattern spans merge; the empty span is the gap"
+            "explicit-empty clips draw as gaps, not items"
         );
         assert_eq!(
             read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :end)"),
@@ -20145,7 +20200,7 @@
         assert_eq!(
             read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :id)"),
             Value::Number(0.0),
-            "the merged clip keeps the first row's id"
+            "the item id IS the stored clip id"
         );
 
         // Shrink: live drag ghosts the clip end, finish lowers to ONE
@@ -20173,10 +20228,9 @@
                 Value::Keyword("clip-resize".to_string())
             );
             assert_eq!(action_field(&recorded[5], "track"), Value::Number(0.0));
-            // The gesture names the clip by the span it drew on and asks for
-            // the new end; the released tail is not a separate paint any more.
-            assert_eq!(action_field(&recorded[5], "at-beat"), Value::Number(0.0));
-            assert_eq!(action_field(&recorded[5], "at-end"), Value::Number(8.0));
+            // The gesture names the STORED clip by id and asks for the new
+            // end; the released tail is not a separate paint any more.
+            assert_eq!(action_field(&recorded[5], "clip-id"), Value::Number(0.0));
             assert_eq!(action_field(&recorded[5], "start"), Value::Number(0.0));
             assert_eq!(action_field(&recorded[5], "end"), Value::Number(6.0));
         }
@@ -20194,16 +20248,16 @@
                 action_field(&recorded[6], "type"),
                 Value::Keyword("clip-resize".to_string())
             );
-            assert_eq!(action_field(&recorded[6], "at-beat"), Value::Number(8.0));
+            assert_eq!(action_field(&recorded[6], "clip-id"), Value::Number(2.0));
             assert_eq!(action_field(&recorded[6], "start"), Value::Number(8.0));
             assert_eq!(action_field(&recorded[6], "end"), Value::Number(15.0));
         }
 
         // Select + delete: selection is exclusive per lane kind; Backspace
-        // silences the merged clip's whole span.
+        // deletes the whole clip.
         eval(
             &mut editor,
-            "(do (arrangement-scene-action (dict :type :select :ids (list 1) :time 4)) \
+            "(do (arrangement-scene-action (dict :type :select :ids (list 8) :time 4)) \
              (arrangement-track-action 0 (dict :type :select :ids (list 0) :time 1)))",
         );
         assert_eq!(
@@ -20232,8 +20286,7 @@
                 action_field(&recorded[7], "type"),
                 Value::Keyword("clip-delete".to_string())
             );
-            assert_eq!(action_field(&recorded[7], "at-beat"), Value::Number(0.0));
-            assert_eq!(action_field(&recorded[7], "at-end"), Value::Number(8.0));
+            assert_eq!(action_field(&recorded[7], "clip-id"), Value::Number(0.0));
         }
         assert_eq!(
             read(&mut editor, "(len (arrangement-lane-selection 0))"),
@@ -20241,7 +20294,7 @@
             "delete clears the track selection"
         );
 
-        // A delete for an id with no merged clip (stale gesture) commits
+        // A delete for an id with no stored clip (stale gesture) commits
         // nothing.
         eval(
             &mut editor,
@@ -20347,13 +20400,6 @@
         app.arr_replace(arrangement).expect("arrangement committed");
         let song = app.state.committed_song().expect("committed song");
         let arrangement = app.state.committed_arrangement().expect("arrangement");
-        let move_row = song
-            .rows
-            .iter()
-            .find(|row| row.start_beat == 8.0)
-            .expect("a row at the scene change")
-            .id
-            .0;
 
         let apply = |app: &mut sequencer::app::App, commands: &[(&str, Value)]| {
             for (name, payload) in commands {
@@ -20366,7 +20412,8 @@
         // Scene-lane move gesture -> one arrangement-scene-move -> one entry.
         let action = map_value(vec![
             ("type", Value::Keyword("finish-move-items".to_string())),
-            ("row-id", Value::Number(move_row as f64)),
+            // Scene gestures name the EVENT by its beat (lane spec 12).
+            ("from-beat", Value::Number(8.0)),
             ("start", Value::Number(12.0)),
         ]);
         let commands = crate::arrangement_actions::arrangement_action_song_commands(
@@ -20395,10 +20442,9 @@
         // discarded, so the committed song snaps the display back.
         let song = app.state.committed_song().unwrap();
         let arrangement = app.state.committed_arrangement().unwrap();
-        let row_zero = song.rows[0].id.0;
         let action = map_value(vec![
             ("type", Value::Keyword("finish-move-items".to_string())),
-            ("row-id", Value::Number(row_zero as f64)),
+            ("from-beat", Value::Number(0.0)),
             ("start", Value::Number(4.0)),
         ]);
         let commands = crate::arrangement_actions::arrangement_action_song_commands(
@@ -20459,8 +20505,7 @@
         let action = map_value(vec![
             ("type", Value::Keyword("clip-resize".to_string())),
             ("track", Value::Number(0.0)),
-            ("at-beat", Value::Number(2.0)),
-            ("at-end", Value::Number(6.0)),
+            ("clip-id", Value::Number(clip_id.0 as f64)),
             ("start", Value::Number(2.0)),
             ("end", Value::Number(10.0)),
         ]);
@@ -20488,8 +20533,7 @@
         let action = map_value(vec![
             ("type", Value::Keyword("clip-delete".to_string())),
             ("track", Value::Number(0.0)),
-            ("at-beat", Value::Number(2.0)),
-            ("at-end", Value::Number(10.0)),
+            ("clip-id", Value::Number(clip_id.0 as f64)),
         ]);
         let commands = crate::arrangement_actions::arrangement_action_song_commands(
             &action,
@@ -20519,30 +20563,13 @@
                 Ok(Value::String("recorded".to_string()))
             });
 
-        let song_row = |id: f64, start: f64, scene: f64| {
-            map_value(vec![
-                ("id", Value::Number(id)),
-                ("start-beat", Value::Number(start)),
-                ("scene", Value::Number(scene)),
-                ("overrides", Value::List(vec![])),
-            ])
-        };
-        let lane_clip = |row_id: f64, start: f64, end: f64, pattern: Value| {
-            map_value(vec![
-                ("row-id", Value::Number(row_id)),
-                ("start-beat", Value::Number(start)),
-                ("end-beat", Value::Number(end)),
-                ("pattern-id", pattern),
-                ("from-override", Value::Bool(false)),
-            ])
-        };
         let rt = editor.runtime_mut();
         rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
         rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
         rt.set_reactive(
             "SEQ",
-            "song-rows",
-            test_list(vec![song_row(0.0, 0.0, 0.0)]),
+            "scene-spans",
+            test_list(vec![scene_span(0.0, 16.0, 0.0)]),
         );
         rt.set_reactive(
             "SEQ",
@@ -20640,8 +20667,7 @@
             map["type"].borrow().clone(),
             Value::Keyword("clip-delete".to_string())
         );
-        assert_eq!(map["at-beat"].borrow().clone(), Value::Number(0.0));
-        assert_eq!(map["at-end"].borrow().clone(), Value::Number(16.0));
+        assert_eq!(map["clip-id"].borrow().clone(), Value::Number(0.0));
     }
 
     /// Clip editing must keep working after the track scroll container is
@@ -20661,23 +20687,6 @@
                 Ok(Value::String("recorded".to_string()))
             });
 
-        let song_row = |id: f64, start: f64, scene: f64| {
-            map_value(vec![
-                ("id", Value::Number(id)),
-                ("start-beat", Value::Number(start)),
-                ("scene", Value::Number(scene)),
-                ("overrides", Value::List(vec![])),
-            ])
-        };
-        let lane_clip = |row_id: f64, start: f64, end: f64, pattern: Value| {
-            map_value(vec![
-                ("row-id", Value::Number(row_id)),
-                ("start-beat", Value::Number(start)),
-                ("end-beat", Value::Number(end)),
-                ("pattern-id", pattern),
-                ("from-override", Value::Bool(false)),
-            ])
-        };
         // Eight tracks so the lane rows overflow the scroll container; only
         // track 5 has a clip.
         let track_count = 8usize;
@@ -20692,8 +20701,8 @@
         rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
         rt.set_reactive(
             "SEQ",
-            "song-rows",
-            test_list(vec![song_row(0.0, 0.0, 0.0)]),
+            "scene-spans",
+            test_list(vec![scene_span(0.0, 16.0, 0.0)]),
         );
         let lanes: Vec<Value> = (0..track_count)
             .map(|track| {
@@ -20932,15 +20941,6 @@
     fn metal_seq_arrangement_dots_flatten_normalized_and_capped() {
         let mut editor = full_grid_editor_for_scroll_tests();
 
-        let lane_clip = |row_id: f64, start: f64, end: f64, pattern: Value| {
-            map_value(vec![
-                ("row-id", Value::Number(row_id)),
-                ("start-beat", Value::Number(start)),
-                ("end-beat", Value::Number(end)),
-                ("pattern-id", pattern),
-                ("from-override", Value::Bool(false)),
-            ])
-        };
         let sparse = LanePatternEvents {
             pattern_id: 1,
             take_id: None,
@@ -21065,15 +21065,14 @@
     #[test]
     fn metal_seq_arrangement_take_clips_clamp_and_window_dots() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        let take_clip = |row_id: f64, start: f64, end: f64, offset: f64| {
+        let take_clip = |clip_id: f64, start: f64, end: f64, offset: f64| {
             map_value(vec![
-                ("row-id", Value::Number(row_id)),
+                ("clip-id", Value::Number(clip_id)),
                 ("start-beat", Value::Number(start)),
                 ("end-beat", Value::Number(end)),
                 ("pattern-id", Value::Nil),
                 ("take-id", Value::Number(7.0)),
                 ("offset-steps", Value::Number(offset)),
-                ("from-override", Value::Bool(true)),
             ])
         };
         // 32-step take over 8 beats (0.25 beats/step); events at steps
@@ -21094,12 +21093,10 @@
             "SEQ",
             "song-lanes",
             test_list(vec![test_list(vec![
-                // Rows [0,4) offset 0 and [4,10) offset 16 are continuous
-                // (4 steps/beat): they merge into one clip anchored at 0.
-                // The merged row span reaches 10 but the take ends at 8.
-                take_clip(0.0, 0.0, 4.0, 0.0),
-                take_clip(1.0, 4.0, 10.0, 16.0),
-                // A re-anchored clip: rows [12,16) playing from step 16.
+                // One stored take clip [0,10) anchored at step 0. The stored
+                // span reaches 10 but the take itself ends at beat 8.
+                take_clip(0.0, 0.0, 10.0, 0.0),
+                // A re-anchored clip: [12,16) playing from step 16.
                 take_clip(2.0, 12.0, 16.0, 16.0),
             ])]),
         );
@@ -21118,15 +21115,15 @@
                 .expect("expr returns a value")
         };
         assert_eq!(
-            read(&mut editor, "(len (arrangement-merged-track-clips 0))"),
+            read(&mut editor, "(len (arrangement-track-clips 0))"),
             Value::Number(2.0),
-            "continuous take rows merge; the re-anchored row is separate"
+            "two stored take clips, published verbatim"
         );
-        // Merged clip [0,10) clamps to the take end: 0 + 32 * 0.25 = 8.
+        // Clip [0,10) clamps to the take end: 0 + 32 * 0.25 = 8.
         assert_eq!(
             read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :end)"),
             Value::Number(8.0),
-            "the item ends at the take's true end, not the row span"
+            "the item ends at the take's true end, not the stored span"
         );
         let dots = "(get (get (nth (arrangement-track-items 0) 0) :content) :dots)";
         assert_eq!(
@@ -21172,30 +21169,13 @@
     fn metal_seq_arrangement_layout_one_ruler_headerless_lanes_and_sparse_items() {
         let mut editor = full_grid_editor_for_scroll_tests();
 
-        let song_row = |id: f64, start: f64, scene: f64| {
-            map_value(vec![
-                ("id", Value::Number(id)),
-                ("start-beat", Value::Number(start)),
-                ("scene", Value::Number(scene)),
-                ("overrides", Value::List(vec![])),
-            ])
-        };
-        let lane_clip = |row_id: f64, start: f64, end: f64, pattern: Value| {
-            map_value(vec![
-                ("row-id", Value::Number(row_id)),
-                ("start-beat", Value::Number(start)),
-                ("end-beat", Value::Number(end)),
-                ("pattern-id", pattern),
-                ("from-override", Value::Bool(false)),
-            ])
-        };
         let rt = editor.runtime_mut();
         rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
         rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
         rt.set_reactive(
             "SEQ",
-            "song-rows",
-            test_list(vec![song_row(0.0, 0.0, 0.0), song_row(1.0, 8.0, 1.0)]),
+            "scene-spans",
+            test_list(vec![scene_span(0.0, 8.0, 0.0), scene_span(8.0, 16.0, 1.0)]),
         );
         rt.set_reactive(
             "SEQ",
@@ -21381,23 +21361,6 @@
     /// showing beats 0..64.
     fn arrangement_region_editor(tracks: usize, collapsed: &[usize]) -> eseqlisp::Editor {
         let mut editor = full_grid_editor_for_scroll_tests();
-        let song_row = |id: f64, start: f64, scene: f64| {
-            map_value(vec![
-                ("id", Value::Number(id)),
-                ("start-beat", Value::Number(start)),
-                ("scene", Value::Number(scene)),
-                ("overrides", Value::List(vec![])),
-            ])
-        };
-        let lane_clip = |row_id: f64, start: f64, end: f64, pattern: Value| {
-            map_value(vec![
-                ("row-id", Value::Number(row_id)),
-                ("start-beat", Value::Number(start)),
-                ("end-beat", Value::Number(end)),
-                ("pattern-id", pattern),
-                ("from-override", Value::Bool(false)),
-            ])
-        };
         let rt = editor.runtime_mut();
         rt.set_reactive("SEQ", "num-tracks", Value::Number(tracks as f64));
         rt.set_reactive(
@@ -21416,7 +21379,7 @@
         );
         rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
         rt.set_reactive("SEQ", "song-end-beat", Value::Number(64.0));
-        rt.set_reactive("SEQ", "song-rows", test_list(vec![song_row(0.0, 0.0, 0.0)]));
+        rt.set_reactive("SEQ", "scene-spans", test_list(vec![scene_span(0.0, 16.0, 0.0)]));
         rt.set_reactive(
             "SEQ",
             "song-lanes",
@@ -21583,8 +21546,11 @@
         editor
             .runtime_mut()
             .register_native("seq-song-set-region", move |args, _ctx| {
+                // The 5th argument is the scene-lane bit (lane spec 8); the
+                // rectangle itself is the first four numbers.
                 sink.lock().unwrap().push(
                     args.iter()
+                        .take(4)
                         .map(|arg| match arg {
                             Value::Number(value) => *value,
                             other => panic!("region args must be numbers, got {other:?}"),

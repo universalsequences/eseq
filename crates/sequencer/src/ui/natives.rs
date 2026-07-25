@@ -1300,18 +1300,18 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
 
     runtime.register_native_with_docs(
         "seq-song-select-clip",
-        "(seq-song-select-clip track row-id [start end])",
+        "(seq-song-select-clip track clip-id [start end])",
         "Bind a track's device panel, monitor sound and take punch-in \
-         template to the clip identified by `row-id` on `track` (takes spec \
+         template to the stored clip `clip-id` on `track` (takes spec \
          16.2/16.6). With the clip's beat span, ALSO select that span as a \
          one-track region (region spec 4.1) so the clip body lights up and \
          copy/delete have a target. Call with no arguments (or \
          seq-song-deselect-clip) to fall back to the playing/scene source.",
         move |args, ctx| {
-            let (Some(Value::Number(track)), Some(Value::Number(row_id))) =
+            let (Some(Value::Number(track)), Some(Value::Number(clip_id))) =
                 (args.first(), args.get(1))
             else {
-                return Err("seq-song-select-clip: expected track and row-id".into());
+                return Err("seq-song-select-clip: expected track and clip-id".into());
             };
             let mut payload = HashMap::new();
             payload.insert(
@@ -1319,8 +1319,8 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
                 Rc::new(RefCell::new(Value::Number(*track))),
             );
             payload.insert(
-                "row-id".to_string(),
-                Rc::new(RefCell::new(Value::Number(*row_id))),
+                "clip-id".to_string(),
+                Rc::new(RefCell::new(Value::Number(*clip_id))),
             );
             if let (Some(Value::Number(start)), Some(Value::Number(end))) =
                 (args.get(2), args.get(3))
@@ -1355,12 +1355,15 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
 
     runtime.register_native_with_docs(
         "seq-song-set-region",
-        "(seq-song-set-region track-a track-b start end)",
+        "(seq-song-set-region track-a track-b start end [scene-lane])",
         "Select an arrangement REGION — the inclusive model-track span \
          `track-a`..`track-b` over the half-open beat span `[start, end)` \
          (region spec 4.1). Rust-owned, so it survives view switches; \
          published as SEQ.song-region. A region names no single clip, so it \
-         clears the clip selection and releases the sound binding.",
+         clears the clip selection and releases the sound binding. Pass a \
+         truthy `scene-lane` for a marquee swept in the SCENE lane: \
+         copy/paste/delete then carry the scene EVENTS inside the rectangle \
+         as well as the clips (lane spec 8).",
         move |args, ctx| {
             let (
                 Some(Value::Number(track_a)),
@@ -1382,6 +1385,11 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
             ] {
                 payload.insert(key.to_string(), Rc::new(RefCell::new(Value::Number(value))));
             }
+            let scene_lane = matches!(args.get(4), Some(Value::Bool(true)));
+            payload.insert(
+                "scene-lane".to_string(),
+                Rc::new(RefCell::new(Value::Bool(scene_lane))),
+            );
             ctx.enqueue_command(HostCommand::Custom {
                 name: "song-set-region".to_string(),
                 payload: Value::Map(payload),
@@ -2017,10 +2025,14 @@ pub(crate) fn init_runtime(
                 ("song-track-governed", Value::List(vec![])),
                 ("song-bound-clip", Value::Nil),
                 // Region selection (region spec 4.1): nil, or
-                // (track-a track-b start end).
+                // (track-a track-b start end scene-lane?).
                 ("song-region", Value::Nil),
-                ("song-rows", Value::List(vec![])),
+                // Arrangement read surfaces (lane spec 12): the stored clips,
+                // the derived scene-event spans, and the derived backdrop
+                // ghosts filling each lane's gaps.
                 ("song-lanes", Value::List(vec![])),
+                ("song-backdrops", Value::List(vec![])),
+                ("scene-spans", Value::List(vec![])),
                 ("song-lane-events", Value::List(vec![])),
                 ("scene-names", Value::List(vec![])),
                 ("num-steps", Value::Number(PAGE_SIZE as f64)),

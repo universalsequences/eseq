@@ -27,9 +27,10 @@ pub use snapshot::{
 };
 #[allow(unused_imports)]
 pub use state::{
-    arrangement_for_serialization, compile_arrangement, insert_clip_sorted,
+    arrangement_backdrop_spans, arrangement_for_serialization, arrangement_scene_spans,
+    compile_arrangement, insert_clip_sorted,
     lower_rows_to_arrangement, occlude_span, restamped_clip,
-    stamped_clip_override, ArrClip,
+    stamped_clip_override, ArrClip, BackdropSpan, SceneSpan,
     ArrangementContext, ClipId, ProjectArrangement, SceneEvent, SongCompileContext,
     default_empty_effect_chain, default_rack_macros, format_song_row_positions, project_lanes,
     remap_song_after_scene_delete, song_for_serialization, song_rows_referencing_scene,

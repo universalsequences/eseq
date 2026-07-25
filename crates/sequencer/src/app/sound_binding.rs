@@ -12,7 +12,7 @@
 //! selection lifecycle (16.6); routing edits through it lives in `edit.rs`
 //! and the panel read surfaces.
 
-use crate::sequencer::{LaneSource, PatternId, SongRowId, TakeId};
+use crate::sequencer::{ClipId, LaneSource, PatternId, TakeId};
 
 use super::App;
 
@@ -93,9 +93,9 @@ impl TrackBinding {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SongClipSelection {
     pub track: usize,
-    /// First row id of the merged clip — the timeline's gesture identity,
-    /// used to render the bound-clip highlight.
-    pub row_id: SongRowId,
+    /// The STORED clip's id (arrangement-lane-model-spec 12) — the timeline's
+    /// gesture identity, used to render the bound-clip highlight.
+    pub clip_id: ClipId,
     pub source: BoundSource,
 }
 
@@ -533,37 +533,30 @@ impl App {
     }
 
     /// Select the clip a timeline gesture picked (16.6 causes 1–2). The
-    /// timeline identifies a clip by the first row id of its merged span, so
-    /// the source is resolved here — override first, else the row's scene
-    /// cell — and stamped into the selection: selection is intent about
-    /// THIS take or clip, not about whatever a later row edit resolves.
-    pub fn select_song_clip(&mut self, track: usize, row_id: SongRowId) -> Result<(), String> {
-        let song = self
+    /// timeline names the STORED clip by its id (lane spec 12), so the source
+    /// is read straight off the clip and stamped into the selection:
+    /// selection is intent about THIS take or clip, not about whatever a
+    /// later edit resolves at that beat.
+    pub fn select_song_clip(&mut self, track: usize, clip_id: ClipId) -> Result<(), String> {
+        let arrangement = self
             .state
-            .committed_song()
+            .committed_arrangement()
             .ok_or_else(|| "The project has no committed song".to_string())?;
-        let row = song
-            .rows
-            .iter()
-            .find(|row| row.id == row_id)
-            .ok_or_else(|| format!("Song has no row with id {}", row_id.0))?;
-        let source = match row
-            .overrides
-            .iter()
-            .find(|over| over.track == track)
-            .map(|over| over.source())
-        {
-            Some(source) => source,
-            None => self
-                .state
-                .scene_track_pattern_id(row.scene, track)
-                .map(LaneSource::Pattern)
-                .unwrap_or(LaneSource::Empty),
-        };
-        // An empty lane is not a clip; a gesture on one is a deselect.
-        let selection = BoundSource::from_lane(source).map(|source| SongClipSelection {
+        let (clip_track, clip) = arrangement
+            .find_clip(clip_id)
+            .ok_or_else(|| format!("The arrangement has no clip with id {}", clip_id.0))?;
+        if clip_track != track {
+            return Err(format!(
+                "Clip {} is on track {}, not track {}",
+                clip_id.0,
+                clip_track + 1,
+                track + 1
+            ));
+        }
+        // An empty clip is not a sound; a gesture on one is a deselect.
+        let selection = BoundSource::from_lane(clip.source()).map(|source| SongClipSelection {
             track,
-            row_id,
+            clip_id,
             source,
         });
         self.set_song_clip_selection(selection);
@@ -575,16 +568,15 @@ impl App {
     /// click is BOTH gestures — it binds the track's sound to this clip and
     /// selects the clip's span as a one-track region, so the body lights up
     /// and copy/delete have something to act on. The span comes from the
-    /// timeline because a clip there is the MERGED run of rows sharing a
-    /// source, which only the lane projection knows. `None` (no clip under
-    /// the pointer) clears the region.
+    /// timeline because that is where the drawn item's extent lives. `None`
+    /// (no clip under the pointer) clears the region.
     pub fn select_song_clip_span(
         &mut self,
         track: usize,
-        row_id: SongRowId,
+        clip_id: ClipId,
         span: Option<(f64, f64)>,
     ) -> Result<(), String> {
-        self.select_song_clip(track, row_id)?;
+        self.select_song_clip(track, clip_id)?;
         // An empty lane is a deselect, not a selection: it must not leave a
         // region highlighting a clip that is not there.
         match span.filter(|_| self.song_clip_selection.is_some()) {
@@ -603,20 +595,18 @@ impl App {
     /// Auto-select a freshly committed take (16.3/16.6 cause 3) so
     /// post-record tweaks bind to what the performer just played.
     pub(crate) fn select_committed_take(&mut self, track: usize, take: TakeId) {
-        let row_id = self.state.committed_song().and_then(|song| {
-            song.rows
+        let clip_id = self.state.committed_arrangement().and_then(|arrangement| {
+            arrangement
+                .track_lanes
+                .get(track)?
                 .iter()
-                .find(|row| {
-                    row.overrides
-                        .iter()
-                        .any(|over| over.track == track && over.take_id == Some(take.0))
-                })
-                .map(|row| row.id)
+                .find(|clip| clip.take_id == Some(take.0))
+                .map(|clip| clip.id)
         });
-        let Some(row_id) = row_id else { return };
+        let Some(clip_id) = clip_id else { return };
         self.set_song_clip_selection(Some(SongClipSelection {
             track,
-            row_id,
+            clip_id,
             source: BoundSource::Take(take),
         }));
     }
@@ -666,8 +656,7 @@ pub(crate) mod tests {
     use crate::audiograph::LiveGraphPtr;
     use crate::recorder::MasterRecorder;
     use crate::sequencer::{
-        default_empty_effect_chain, PatternSnapshot, ProjectSong, ProjectSongRow,
-        ProjectSongTrackOverride, SequencerState, TrackPatternData,
+        default_empty_effect_chain, PatternSnapshot, SequencerState, TrackPatternData,
     };
 
     const TAKE: BoundSource = BoundSource::Take(TakeId(3));
@@ -753,17 +742,21 @@ pub(crate) mod tests {
         let chunks = state
             .with_project_scenes(|scenes| scenes.take_pools[0].get(take).unwrap().chunks.clone());
 
-        state.set_committed_song(Some(ProjectSong {
-            rows: vec![ProjectSongRow {
-                id: crate::sequencer::SongRowId(0),
-                start_beat: 0.0,
-                scene: 0,
-                overrides: vec![ProjectSongTrackOverride::new_take(0, take.0, 0.0)],
-            }],
-            end_beat: 16.0,
-            loop_enabled: false,
-            next_row_id: 1,
-        }));
+        // The arrangement is the stored model (lane spec 2/12); installing it
+        // compiles the equivalent one-row song, so the timeline names the
+        // take by ClipId(0).
+        let mut arrangement = crate::sequencer::ProjectArrangement::new(1, 16.0);
+        arrangement.track_lanes[0].push(crate::sequencer::ArrClip::new_take(
+            crate::sequencer::ClipId(0),
+            0.0,
+            16.0,
+            take.0,
+            0.0,
+        ));
+        arrangement.next_clip_id = 1;
+        state
+            .set_committed_arrangement(Some(arrangement))
+            .expect("arrangement installs");
 
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
         let mut app = App::new(
@@ -809,7 +802,7 @@ pub(crate) mod tests {
     #[test]
     fn take_bound_device_edit_fans_out_to_chunks_and_spares_the_scene_pattern() {
         let (mut app, take, scene_pattern, chunks) = app_with_take();
-        app.select_song_clip(0, crate::sequencer::SongRowId(0))
+        app.select_song_clip(0, ClipId(0))
             .expect("clip selects");
         assert_eq!(
             app.track_sound_binding(0).source,
@@ -847,7 +840,7 @@ pub(crate) mod tests {
     #[test]
     fn deselecting_returns_edits_to_the_scene_pattern() {
         let (mut app, _take, scene_pattern, chunks) = app_with_take();
-        app.select_song_clip(0, crate::sequencer::SongRowId(0))
+        app.select_song_clip(0, ClipId(0))
             .expect("clip selects");
         app.set_song_clip_selection(None);
         assert!(app.track_sound_binding(0).is_scene());
@@ -879,7 +872,7 @@ pub(crate) mod tests {
     #[test]
     fn selection_is_dormant_while_the_arrangement_view_is_hidden() {
         let (mut app, take, scene_pattern, _chunks) = app_with_take();
-        app.select_song_clip(0, crate::sequencer::SongRowId(0))
+        app.select_song_clip(0, ClipId(0))
             .expect("clip selects");
 
         app.set_arrangement_view_visible(false);
@@ -928,7 +921,7 @@ pub(crate) mod tests {
 
         app.set_song_clip_selection(Some(SongClipSelection {
             track: 0,
-            row_id: crate::sequencer::SongRowId(0),
+            clip_id: ClipId(0),
             source: BoundSource::Pattern(other),
         }));
         assert_eq!(
@@ -956,7 +949,7 @@ pub(crate) mod tests {
     #[test]
     fn a_selection_is_audible_while_the_transport_is_stopped() {
         let (mut app, take, _scene_pattern, _chunks) = app_with_take();
-        app.select_song_clip(0, crate::sequencer::SongRowId(0))
+        app.select_song_clip(0, ClipId(0))
             .expect("clip selects");
         app.sync_track_sound_bindings();
         assert_eq!(
@@ -972,7 +965,7 @@ pub(crate) mod tests {
     fn turning_off_use_arrangement_clears_the_selection() {
         let (mut app, _take, scene_pattern, _chunks) = app_with_take();
         app.set_use_arrangement(true).expect("song mode on");
-        app.select_song_clip(0, crate::sequencer::SongRowId(0))
+        app.select_song_clip(0, ClipId(0))
             .expect("clip selects");
         app.set_use_arrangement(false).expect("back to session mode");
         assert_eq!(app.song_clip_selection, None);
@@ -987,7 +980,7 @@ pub(crate) mod tests {
     #[test]
     fn push_to_pattern_promotes_the_bound_takes_sound() {
         let (mut app, _take, scene_pattern, chunks) = app_with_take();
-        app.select_song_clip(0, crate::sequencer::SongRowId(0))
+        app.select_song_clip(0, ClipId(0))
             .expect("clip selects");
         let target = instrument_default(&app, scene_pattern) - 0.25;
         try_apply_command(
@@ -1024,20 +1017,20 @@ pub(crate) mod tests {
             data.instrument_slot.defaults[0] = 0.125;
             scenes.track_pools[0].insert(data)
         });
-        app.state.set_committed_song(Some(ProjectSong {
-            rows: vec![ProjectSongRow {
-                id: crate::sequencer::SongRowId(0),
-                start_beat: 0.0,
-                scene: 0,
-                overrides: vec![ProjectSongTrackOverride::new(0, Some(other.0))],
-            }],
-            end_beat: 16.0,
-            loop_enabled: false,
-            next_row_id: 1,
-        }));
+        let mut arrangement = crate::sequencer::ProjectArrangement::new(1, 16.0);
+        arrangement.track_lanes[0].push(crate::sequencer::ArrClip::new(
+            ClipId(0),
+            0.0,
+            16.0,
+            Some(other.0),
+        ));
+        arrangement.next_clip_id = 1;
+        app.state
+            .set_committed_arrangement(Some(arrangement))
+            .expect("arrangement installs");
 
         let epoch = app.sound_binding_epoch;
-        app.select_song_clip(0, crate::sequencer::SongRowId(0))
+        app.select_song_clip(0, ClipId(0))
             .expect("clip selects");
 
         let binding = app.track_sound_binding(0);

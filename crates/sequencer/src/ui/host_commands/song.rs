@@ -7,7 +7,7 @@
 use crate::*;
 
 use sequencer::sequencer::{
-    ClipId, LaneSource, PatternId, ProjectSongTrackOverride, SongRowId, TakeId,
+    ClipId, LaneSource, PatternId, ProjectSongTrackOverride, TakeId,
 };
 use sequencer::app::song_edit::SongRowSpec;
 
@@ -81,14 +81,6 @@ fn require_number(
     key: &str,
 ) -> Result<f64, String> {
     map_number(map, key).ok_or_else(|| format!("missing or non-numeric :{key}"))
-}
-
-fn require_row_id(map: &HashMap<String, Rc<RefCell<Value>>>) -> Result<SongRowId, String> {
-    let value = require_number(map, "row-id")?;
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
-        return Err("row-id must be a non-negative integer".to_string());
-    }
-    Ok(SongRowId(value as u64))
 }
 
 fn require_scene(map: &HashMap<String, Rc<RefCell<Value>>>) -> Result<usize, String> {
@@ -226,22 +218,15 @@ fn parse_source(map: &HashMap<String, Rc<RefCell<Value>>>) -> Result<LaneSource,
     }
 }
 
-/// Address a clip by stable id (`:clip-id`) or, for a timeline gesture that
-/// only knows where it drew, by `(:track, :at-beat[, :at-end])`.
-fn resolve_clip(
-    map: &HashMap<String, Rc<RefCell<Value>>>,
-    app: &app::App,
-) -> Result<ClipId, String> {
-    if let Some(clip_id) = map_number(map, "clip-id") {
-        if !clip_id.is_finite() || clip_id < 0.0 || clip_id.fract() != 0.0 {
-            return Err("clip-id must be a non-negative integer".to_string());
-        }
-        return Ok(ClipId(clip_id as u64));
+/// Address a clip by its stable id. The lane read surface publishes stored
+/// clip ids (lane spec 12), so every gesture names the object it edits —
+/// there is no positional fallback to be stale about.
+fn resolve_clip(map: &HashMap<String, Rc<RefCell<Value>>>) -> Result<ClipId, String> {
+    let clip_id = require_number(map, "clip-id")?;
+    if !clip_id.is_finite() || clip_id < 0.0 || clip_id.fract() != 0.0 {
+        return Err("clip-id must be a non-negative integer".to_string());
     }
-    let track = require_track(map)?;
-    let at_beat = require_number(map, "at-beat")?;
-    let at_end = map_number(map, "at-end").unwrap_or(at_beat);
-    app.arrangement_clip_at(track, at_beat, at_end.max(at_beat))
+    Ok(ClipId(clip_id as u64))
 }
 
 fn parse_overrides(
@@ -336,20 +321,20 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
         }
         "arrangement-clip-delete" => {
             let map = payload_map(payload)?;
-            let clip_id = resolve_clip(map, app)?;
+            let clip_id = resolve_clip(map)?;
             app.arr_clip_delete(clip_id)?;
             Ok(format!("Deleted clip {}", clip_id.0))
         }
         "arrangement-clip-move" => {
             let map = payload_map(payload)?;
-            let clip_id = resolve_clip(map, app)?;
+            let clip_id = resolve_clip(map)?;
             let start_beat = require_number(map, "start-beat")?;
             app.arr_clip_move(clip_id, start_beat)?;
             Ok(format!("Moved clip {} to beat {start_beat}", clip_id.0))
         }
         "arrangement-clip-resize" => {
             let map = payload_map(payload)?;
-            let clip_id = resolve_clip(map, app)?;
+            let clip_id = resolve_clip(map)?;
             let start_beat = require_number(map, "start-beat")?;
             let end_beat = require_number(map, "end-beat")?;
             app.arr_clip_resize(clip_id, start_beat, end_beat)?;
@@ -360,7 +345,7 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
         }
         "arrangement-clip-split" => {
             let map = payload_map(payload)?;
-            let clip_id = resolve_clip(map, app)?;
+            let clip_id = resolve_clip(map)?;
             let beat = require_number(map, "beat")?;
             let right = app.arr_clip_split(clip_id, beat)?;
             Ok(format!(
@@ -370,7 +355,7 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
         }
         "arrangement-clip-set-source" => {
             let map = payload_map(payload)?;
-            let clip_id = resolve_clip(map, app)?;
+            let clip_id = resolve_clip(map)?;
             let source = parse_source(map)?;
             app.arr_clip_set_source(clip_id, source)?;
             Ok(format!("Set clip {} source", clip_id.0))
@@ -530,9 +515,9 @@ fn run_transport(
         "song-select-clip" => {
             let map = payload_map(payload)?;
             let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
-            let row_id = require_row_id(map)?;
-            // The timeline sends the MERGED clip's span alongside the row id
-            // so the selection is also a one-clip region (region spec 4.1,
+            let clip_id = resolve_clip(map)?;
+            // The timeline sends the clip's drawn span alongside its id so
+            // the selection is also a one-clip region (region spec 4.1,
             // amended): selecting a clip lights its body and gives
             // copy/delete a target. Absent span = clear the region.
             let span = match (map_number(map, "start"), map_number(map, "end")) {
@@ -541,7 +526,7 @@ fn run_transport(
                 }
                 _ => None,
             };
-            app.select_song_clip_span(track, row_id, span)?;
+            app.select_song_clip_span(track, clip_id, span)?;
             Ok(app.track_binding_label(track).map(|label| format!("Bound: {label}")))
         }
         "song-deselect-clip" => {
@@ -560,8 +545,12 @@ fn run_transport(
             if !start.is_finite() || !end.is_finite() {
                 return Err("region bounds must be finite".to_string());
             }
-            app.set_song_region(app::song_region::SongRegionSelection::new(
-                track_a, track_b, start, end,
+            // `:scene-lane` marks a marquee swept in the SCENE lane (region
+            // spec 4.2, lane spec 8): the same rectangle, but copy/paste/
+            // delete carry the scene EVENTS inside it as well as the clips.
+            let scene_lane = map_bool(map, "scene-lane");
+            app.set_song_region(app::song_region::SongRegionSelection::new_in_lane(
+                track_a, track_b, start, end, scene_lane,
             ));
             Ok(None)
         }

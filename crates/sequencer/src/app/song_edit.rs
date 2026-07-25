@@ -8,7 +8,7 @@
 //! `def-song` parses into, the `steps()` mappings offsets are stamped with,
 //! and the undo-replay hook for the committed song.
 
-use crate::sequencer::{PatternId, ProjectSong, ProjectSongTrackOverride};
+use crate::sequencer::{PatternId, ProjectSongTrackOverride};
 
 use super::App;
 
@@ -36,21 +36,6 @@ impl App {
     /// check) when it lands.
     pub fn song_edits_locked(&self) -> bool {
         self.song_transport_locks_edits
-    }
-
-    /// Restore the committed song to `target` (undo/redo replay). Validates
-    /// a `Some` target against the current project before installing it.
-    pub(crate) fn restore_committed_song_state(
-        &mut self,
-        target: &Option<ProjectSong>,
-    ) -> Result<(), String> {
-        if let Some(song) = target {
-            let scenes = self.state.capture_project_scenes();
-            song.validate(&scenes)
-                .map_err(|error| format!("Song history no longer matches the project: {error}"))?;
-        }
-        self.state.set_committed_song(target.clone());
-        Ok(())
     }
 
     pub(super) fn require_song_edit_unlocked(&self) -> Result<(), String> {

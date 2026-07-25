@@ -241,6 +241,15 @@ op that *does* truncate, matching today's paint-over behavior); delete
 removes/trims clips in the region. No ripple row insertion, no
 `normalize` cleanup passes.
 
+`SongRegionSelection` carries a `scene_lane` bit saying the marquee was
+swept in the scene lane; only then do the region ops touch the scene lane.
+Copy stores `(rel_beat, scene)` for every event inside the span, led by an
+entry at `rel 0` restating the scene governing the span's start. Paste and
+delete both clear the scene lane over the destination span (never the
+mandatory event at 0.0) and then **restore the scene that governed the
+span's end** by inserting an event there if the edit changed it — so a
+scene-lane region op is local to its rectangle and nothing after it moves.
+
 `def-song` keeps its surface but lowers to `arr_replace` (rows in the
 declarative form translate 1:1: each row's scene → scene event when it
 changes, each override → a clip spanning to the next row that changes that
@@ -335,7 +344,11 @@ Direct ports of the row versions, simpler on lanes:
   content for gaps (today `project_lanes` bakes it in). Expose it as
   derived ghost spans (per gap: governing scene's cell), rendered dimmer —
   which the UI already does via the `from-override` tint; the distinction
-  becomes structural instead of a flag.
+  becomes structural instead of a flag. Implemented as **`SEQ.song-backdrops`**:
+  per track, `{start-beat, end-beat, scene, pattern-id, offset-steps}`, one
+  entry per (lane gap ∩ scene span) where the scene has a cell. Ghosts have
+  no stored object, so they carry negative item ids and every gesture on one
+  is a deselect.
 - `arrangement.lisp`: scene lane renders `SEQ.scene-spans` (one block per
   actual scene change — the jagged lane is gone without any label
   suppression tricks); `arrangement-scene-row-label`'s dedup hack dies.

@@ -6,8 +6,8 @@ use super::*;
 
 use sequencer::app::song_transport::SongTransportMode;
 use sequencer::sequencer::{
-    project_lanes, state_at_beat, LaneClip, PatternId, ProjectScenes, ProjectSong,
-    ProjectSongRow, StepParam,
+    arrangement_backdrop_spans, arrangement_scene_spans, state_at_beat, ArrClip, BackdropSpan,
+    ProjectScenes, ProjectSong, ProjectSongRow, SceneSpan, StepParam,
 };
 
 /// Scalar song bindings published to `SEQ.*`, snapshotted per frame so each
@@ -44,27 +44,32 @@ pub(crate) struct SongBindingsSnapshot {
     /// (takes spec 10): the SONG indicator glows amber and the Back to Song
     /// control appears.
     pub(crate) manual_latch: bool,
-    /// The bound clip's `(track, row-id)` when a timeline selection holds the
+    /// The bound clip's `(track, clip-id)` when a timeline selection holds the
     /// binding (rule 1), for the bound-clip highlight. `None` under rules 2/3.
     pub(crate) bound_clip: Option<(usize, u64)>,
-    /// The committed region selection as `(track-a track-b start end)`
-    /// (docs/arrangement-region-editing-spec.md 4.1), or `None`. Rust-owned
-    /// so every lane's `:selection-rect` survives a view switch.
-    pub(crate) region: Option<(usize, usize, f64, f64)>,
+    /// The committed region selection as `(track-a track-b start end
+    /// scene-lane?)` (docs/arrangement-region-editing-spec.md 4.1), or `None`.
+    /// Rust-owned so every lane's `:selection-rect` survives a view switch.
+    pub(crate) region: Option<(usize, usize, f64, f64, bool)>,
 }
 
-/// Per-frame diff state for the song bindings: the committed song is cached
-/// and `song-rows` rebuilt only when `committed_song_revision` changes. The
-/// lane projection (`song-lanes`) and `scene-names` also depend on the live
-/// scenes, which have no revision counter, so they diff by value: recomputed
-/// each frame (cheap — rows x tracks `Copy` spans) but republished to Lisp
+/// Per-frame diff state for the song bindings: the committed song and
+/// arrangement are cached and re-read only when `committed_song_revision`
+/// changes (`set_committed_arrangement` bumps it). The lane surfaces
+/// (`song-lanes`, `song-backdrops`, `scene-spans`) and `scene-names` also
+/// depend on the live scenes, which have no revision counter, so they diff by
+/// value: recomputed each frame (cheap — `Copy` spans) but republished to Lisp
 /// only when the derived data actually changed.
 #[derive(Default)]
 pub(crate) struct SongFrameState {
     pub(crate) revision: Option<u64>,
     pub(crate) cached_song: Option<ProjectSong>,
+    pub(crate) cached_arrangement: Option<sequencer::sequencer::ProjectArrangement>,
     pub(crate) prev: Option<SongBindingsSnapshot>,
-    pub(crate) cached_lanes: Option<Vec<Vec<LaneClip>>>,
+    /// The stored clip lanes, published verbatim as `SEQ.song-lanes`.
+    pub(crate) cached_lanes: Option<Vec<Vec<ArrClip>>>,
+    pub(crate) cached_backdrops: Option<Vec<Vec<BackdropSpan>>>,
+    pub(crate) cached_scene_spans: Option<Vec<SceneSpan>>,
     pub(crate) cached_scene_names: Option<Vec<String>>,
     /// Pattern-pool event snapshots for the patterns the lane projection
     /// references (`song-lane-events`), rekeyed when the projection or the
@@ -167,10 +172,12 @@ fn flatten_pattern_events(
 /// bloat the reactive value; the view additionally caps dots per item.
 const LANE_PATTERN_EVENT_CAP: usize = 1024;
 
-/// Collect the distinct pool patterns each track's lane clips resolve to and
-/// flatten their step/chord snapshots into preview events.
+/// Collect the distinct pool patterns each track's lane clips (and backdrop
+/// ghost spans) resolve to and flatten their step/chord snapshots into preview
+/// events.
 pub(crate) fn collect_lane_pattern_events(
-    lanes: &[Vec<LaneClip>],
+    lanes: &[Vec<ArrClip>],
+    backdrops: &[Vec<BackdropSpan>],
     scenes: &ProjectScenes,
 ) -> Vec<Vec<LanePatternEvents>> {
     lanes
@@ -179,7 +186,14 @@ pub(crate) fn collect_lane_pattern_events(
         .map(|(track, clips)| {
             let mut ids: Vec<u64> = clips
                 .iter()
-                .filter_map(|clip| clip.pattern.map(|pattern| pattern.0))
+                .filter_map(|clip| clip.pattern_id)
+                .chain(
+                    backdrops
+                        .get(track)
+                        .into_iter()
+                        .flatten()
+                        .map(|span| span.pattern_id),
+                )
                 .collect();
             ids.sort_unstable();
             ids.dedup();
@@ -207,7 +221,7 @@ pub(crate) fn collect_lane_pattern_events(
             // chunks on a continuous step axis.
             let mut take_ids: Vec<u64> = clips
                 .iter()
-                .filter_map(|clip| clip.source.take().map(|take| take.0))
+                .filter_map(|clip| clip.take_id)
                 .collect();
             take_ids.sort_unstable();
             take_ids.dedup();
@@ -373,13 +387,14 @@ pub(crate) fn build_song_bindings_snapshot(
         take_lane_states: song_take_lane_states(app),
         bound_clip: app
             .song_clip_selection
-            .map(|selection| (selection.track, selection.row_id.0)),
+            .map(|selection| (selection.track, selection.clip_id.0)),
         region: app.song_region_selection.map(|region| {
             (
                 region.track_a,
                 region.track_b,
                 region.start_beat,
                 region.end_beat,
+                region.scene_lane,
             )
         }),
     }
@@ -424,61 +439,31 @@ pub(crate) fn song_take_lane_states(app: &app::App) -> Vec<u8> {
     states
 }
 
-/// Read-only `song-rows` value (spec 12): a list of
-/// `{id, start-beat, scene, overrides: ((track pattern-id)...)}` maps.
-pub(crate) fn build_song_rows_value(song: Option<&ProjectSong>) -> Value {
-    let Some(song) = song else {
-        return Value::List(vec![]);
-    };
-    let rows = song
-        .rows
-        .iter()
-        .map(|row| {
-            let overrides = row
-                .overrides
-                .iter()
-                .map(|over| {
-                    let pattern_value = match over.pattern_id {
-                        Some(id) => Value::Number(id as f64),
-                        // Explicit-empty override: the track plays nothing.
-                        None => Value::Nil,
-                    };
-                    Rc::new(RefCell::new(Value::List(vec![
-                        Rc::new(RefCell::new(Value::Number(over.track as f64))),
-                        Rc::new(RefCell::new(pattern_value)),
-                    ])))
-                })
-                .collect();
-            let mut map = HashMap::new();
-            map.insert(
-                "id".to_string(),
-                Rc::new(RefCell::new(Value::Number(row.id.0 as f64))),
-            );
-            map.insert(
-                "start-beat".to_string(),
-                Rc::new(RefCell::new(Value::Number(row.start_beat))),
-            );
-            map.insert(
-                "scene".to_string(),
-                Rc::new(RefCell::new(Value::Number(row.scene as f64))),
-            );
-            map.insert(
-                "overrides".to_string(),
-                Rc::new(RefCell::new(Value::List(overrides))),
-            );
-            Rc::new(RefCell::new(Value::Map(map)))
-        })
-        .collect();
-    Value::List(rows)
+fn number_field(map: &mut HashMap<String, Rc<RefCell<Value>>>, key: &str, value: f64) {
+    map.insert(key.to_string(), Rc::new(RefCell::new(Value::Number(value))));
 }
 
-/// Read-only `song-lanes` value (docs/arrangement-timeline-ui-spec.md 5.5/6):
-/// the per-track lane projection as a list (one entry per track) of clip-span
-/// lists. Each clip is `{row-id, start-beat, end-beat, pattern-id,
-/// offset-steps, from-override}`
-/// with `pattern-id` `Nil` for spans where the row resolves no pattern for the
-/// track (sparse lanes render nothing for those spans).
-pub(crate) fn build_song_lanes_value(lanes: Option<&Vec<Vec<LaneClip>>>) -> Value {
+fn optional_number_field(
+    map: &mut HashMap<String, Rc<RefCell<Value>>>,
+    key: &str,
+    value: Option<u64>,
+) {
+    map.insert(
+        key.to_string(),
+        Rc::new(RefCell::new(match value {
+            Some(value) => Value::Number(value as f64),
+            None => Value::Nil,
+        })),
+    );
+}
+
+/// Read-only `song-lanes` value (arrangement-lane-model-spec 12): the STORED
+/// clips, one list per track, each `{clip-id, start-beat, end-beat,
+/// pattern-id, take-id, offset-steps}`. Real identity — the view never merges
+/// or re-derives anything, and `from-override` is gone: every lane item IS a
+/// clip. Lane gaps carry no entry; the scene backdrop showing through them is
+/// published separately as `song-backdrops`.
+pub(crate) fn build_song_lanes_value(lanes: Option<&Vec<Vec<ArrClip>>>) -> Value {
     let Some(lanes) = lanes else {
         return Value::List(vec![]);
     };
@@ -489,40 +474,12 @@ pub(crate) fn build_song_lanes_value(lanes: Option<&Vec<Vec<LaneClip>>>) -> Valu
                 .iter()
                 .map(|clip| {
                     let mut map = HashMap::new();
-                    map.insert(
-                        "row-id".to_string(),
-                        Rc::new(RefCell::new(Value::Number(clip.row_id.0 as f64))),
-                    );
-                    map.insert(
-                        "start-beat".to_string(),
-                        Rc::new(RefCell::new(Value::Number(clip.start_beat))),
-                    );
-                    map.insert(
-                        "end-beat".to_string(),
-                        Rc::new(RefCell::new(Value::Number(clip.end_beat))),
-                    );
-                    map.insert(
-                        "pattern-id".to_string(),
-                        Rc::new(RefCell::new(match clip.pattern {
-                            Some(id) => Value::Number(id.0 as f64),
-                            None => Value::Nil,
-                        })),
-                    );
-                    map.insert(
-                        "take-id".to_string(),
-                        Rc::new(RefCell::new(match clip.source.take() {
-                            Some(take) => Value::Number(take.0 as f64),
-                            None => Value::Nil,
-                        })),
-                    );
-                    map.insert(
-                        "offset-steps".to_string(),
-                        Rc::new(RefCell::new(Value::Number(clip.offset_steps))),
-                    );
-                    map.insert(
-                        "from-override".to_string(),
-                        Rc::new(RefCell::new(Value::Bool(clip.from_override))),
-                    );
+                    number_field(&mut map, "clip-id", clip.id.0 as f64);
+                    number_field(&mut map, "start-beat", clip.start_beat);
+                    number_field(&mut map, "end-beat", clip.end_beat);
+                    optional_number_field(&mut map, "pattern-id", clip.pattern_id);
+                    optional_number_field(&mut map, "take-id", clip.take_id);
+                    number_field(&mut map, "offset-steps", clip.offset_steps);
                     Rc::new(RefCell::new(Value::Map(map)))
                 })
                 .collect();
@@ -530,6 +487,58 @@ pub(crate) fn build_song_lanes_value(lanes: Option<&Vec<Vec<LaneClip>>>) -> Valu
         })
         .collect();
     Value::List(tracks)
+}
+
+/// Read-only `song-backdrops` value (spec 12): per track, the derived ghost
+/// spans covering the lane's GAPS — `{start-beat, end-beat, scene,
+/// pattern-id, offset-steps}` — where the governing scene's cell shows
+/// through. Rendered dimmer than clips; not editable, because there is no
+/// stored object to edit.
+pub(crate) fn build_song_backdrops_value(backdrops: Option<&Vec<Vec<BackdropSpan>>>) -> Value {
+    let Some(backdrops) = backdrops else {
+        return Value::List(vec![]);
+    };
+    let tracks = backdrops
+        .iter()
+        .map(|spans| {
+            let spans = spans
+                .iter()
+                .map(|span| {
+                    let mut map = HashMap::new();
+                    number_field(&mut map, "start-beat", span.start_beat);
+                    number_field(&mut map, "end-beat", span.end_beat);
+                    number_field(&mut map, "scene", span.scene as f64);
+                    number_field(&mut map, "pattern-id", span.pattern_id as f64);
+                    number_field(&mut map, "offset-steps", span.offset_steps);
+                    Rc::new(RefCell::new(Value::Map(map)))
+                })
+                .collect();
+            Rc::new(RefCell::new(Value::List(spans)))
+        })
+        .collect();
+    Value::List(tracks)
+}
+
+/// Read-only `scene-spans` value (spec 12): one span per scene EVENT,
+/// `{start-beat, end-beat, scene}`. Replaces the scene half of the retired
+/// `song-rows`; the scene lane renders these directly, so a clip edge on some
+/// track can no longer fragment it.
+pub(crate) fn build_scene_spans_value(spans: Option<&Vec<SceneSpan>>) -> Value {
+    let Some(spans) = spans else {
+        return Value::List(vec![]);
+    };
+    Value::List(
+        spans
+            .iter()
+            .map(|span| {
+                let mut map = HashMap::new();
+                number_field(&mut map, "start-beat", span.start_beat);
+                number_field(&mut map, "end-beat", span.end_beat);
+                number_field(&mut map, "scene", span.scene as f64);
+                Rc::new(RefCell::new(Value::Map(map)))
+            })
+            .collect(),
+    )
 }
 
 fn build_scene_names_value(names: &[String]) -> Value {
@@ -541,8 +550,9 @@ fn build_scene_names_value(names: &[String]) -> Value {
     )
 }
 
-/// Per-frame publish of the song bindings (spec 12). `song-rows` is rebuilt
-/// only when the committed-song revision changes; the lane projection and
+/// Per-frame publish of the song bindings (spec 12). The committed song and
+/// arrangement are re-read only when the committed-song revision changes; the
+/// three lane surfaces (`song-lanes`, `song-backdrops`, `scene-spans`) and the
 /// scene names diff by value (the scenes side has no revision counter);
 /// scalars publish on change; the render-rate `song-position-beats` publishes
 /// only while a panel that renders it (transport or arrangement) is visible.
@@ -555,22 +565,41 @@ pub(crate) fn sync_song_state(
 ) -> bool {
     let mut dirty = false;
     let revision = app.state.committed_song_revision();
+    // `song-lanes` and `scene-spans` are functions of the arrangement ALONE,
+    // so they are rebuilt only when the revision moves; the backdrop ghosts
+    // additionally resolve scene cells, which have no revision counter, and
+    // therefore diff by value each frame.
+    let mut lanes_changed = false;
     if frame.revision != Some(revision) {
         frame.cached_song = app.state.committed_song();
-        rt.set_reactive(
-            "SEQ",
-            "song-rows",
-            build_song_rows_value(frame.cached_song.as_ref()),
-        );
+        let arrangement = app.state.committed_arrangement();
+        let lanes = arrangement
+            .as_ref()
+            .map(|arrangement| arrangement.track_lanes.clone());
+        let scene_spans = arrangement.as_ref().map(arrangement_scene_spans);
+        if frame.cached_lanes != lanes {
+            rt.set_reactive("SEQ", "song-lanes", build_song_lanes_value(lanes.as_ref()));
+            frame.cached_lanes = lanes;
+            lanes_changed = true;
+        }
+        if frame.cached_scene_spans != scene_spans {
+            rt.set_reactive(
+                "SEQ",
+                "scene-spans",
+                build_scene_spans_value(scene_spans.as_ref()),
+            );
+            frame.cached_scene_spans = scene_spans;
+        }
+        frame.cached_arrangement = arrangement;
         frame.revision = Some(revision);
         dirty = true;
     }
-    let (lanes, scene_names) = app.state.with_project_scenes(|scenes| {
+    let (backdrops, scene_names) = app.state.with_project_scenes(|scenes| {
         (
             frame
-                .cached_song
+                .cached_arrangement
                 .as_ref()
-                .map(|song| project_lanes(song, scenes)),
+                .map(|arrangement| arrangement_backdrop_spans(arrangement, scenes)),
             scenes
                 .scenes
                 .iter()
@@ -578,10 +607,14 @@ pub(crate) fn sync_song_state(
                 .collect::<Vec<_>>(),
         )
     });
-    let lanes_changed = frame.cached_lanes != lanes;
-    if lanes_changed {
-        rt.set_reactive("SEQ", "song-lanes", build_song_lanes_value(lanes.as_ref()));
-        frame.cached_lanes = lanes;
+    let backdrops_changed = frame.cached_backdrops != backdrops;
+    if backdrops_changed {
+        rt.set_reactive(
+            "SEQ",
+            "song-backdrops",
+            build_song_backdrops_value(backdrops.as_ref()),
+        );
+        frame.cached_backdrops = backdrops;
         dirty = true;
     }
     if frame.cached_scene_names.as_ref() != Some(&scene_names) {
@@ -599,11 +632,14 @@ pub(crate) fn sync_song_state(
         .transport
         .pattern_epoch
         .load(std::sync::atomic::Ordering::Relaxed);
-    if lanes_changed || frame.prev_pattern_epoch != Some(pattern_epoch) {
+    if lanes_changed || backdrops_changed || frame.prev_pattern_epoch != Some(pattern_epoch) {
         let events = match frame.cached_lanes.as_ref() {
-            Some(lanes) => app
-                .state
-                .with_project_scenes(|scenes| collect_lane_pattern_events(lanes, scenes)),
+            Some(lanes) => {
+                let backdrops = frame.cached_backdrops.clone().unwrap_or_default();
+                app.state.with_project_scenes(|scenes| {
+                    collect_lane_pattern_events(lanes, &backdrops, scenes)
+                })
+            }
             None => Vec::new(),
         };
         if frame.cached_lane_events.as_ref() != Some(&events) {
@@ -710,11 +746,12 @@ pub(crate) fn sync_song_state(
         "song-region",
         region,
         match next.region {
-            Some((track_a, track_b, start, end)) => Value::List(vec![
+            Some((track_a, track_b, start, end, scene_lane)) => Value::List(vec![
                 Rc::new(RefCell::new(Value::Number(track_a as f64))),
                 Rc::new(RefCell::new(Value::Number(track_b as f64))),
                 Rc::new(RefCell::new(Value::Number(start))),
                 Rc::new(RefCell::new(Value::Number(end))),
+                Rc::new(RefCell::new(Value::Bool(scene_lane))),
             ]),
             None => Value::Nil,
         }

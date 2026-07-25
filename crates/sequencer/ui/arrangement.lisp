@@ -140,65 +140,56 @@
     (nth SEQ.scene-names scene)
     (str "Scene " (+ scene 1))))
 
-(def arrangement-row-end-beat (index)
-  (if (< (+ index 1) (len SEQ.song-rows))
-    (get (nth SEQ.song-rows (+ index 1)) :start-beat)
-    SEQ.song-end-beat))
-
 (def arrangement-ghost-kind ()
   (if (= arrangement-ghost nil) nil (get arrangement-ghost :kind)))
 
-(def arrangement-ghost-row? (kind row-id)
+;; Scene-lane gestures address a scene EVENT, whose identity is its start
+;; beat (lane spec 12: every span IS a scene event, so there is no ambiguity
+;; left to resolve).
+(def arrangement-ghost-event? (kind beat)
   (and (= (arrangement-ghost-kind) kind)
-    (= (get arrangement-ghost :row-id) row-id)))
+    (= (get arrangement-ghost :beat) beat)))
 
 ;; Ghost overlay for one scene span (spec 9.1 live preview): a move ghost
-;; shifts its row's span; a resize ghost moves the boundary shared by the
-;; resized row's end and the next row's start.
-(def arrangement-scene-span-start (row index start)
-  (if (arrangement-ghost-row? :move (get row :id))
+;; shifts its event's span; a resize ghost moves the boundary shared by the
+;; resized span's end and the next event's start.
+(def arrangement-scene-span-start (index start)
+  (if (arrangement-ghost-event? :move start)
     (get arrangement-ghost :start)
     (if (and (> index 0)
-          (arrangement-ghost-row? :resize
-            (get (nth SEQ.song-rows (- index 1)) :id)))
+          (arrangement-ghost-event? :resize
+            (get (nth SEQ.scene-spans (- index 1)) :start-beat)))
       (get arrangement-ghost :end)
       start)))
 
-(def arrangement-scene-span-end (row start end)
-  (if (arrangement-ghost-row? :move (get row :id))
+(def arrangement-scene-span-end (start end)
+  (if (arrangement-ghost-event? :move start)
     (+ (get arrangement-ghost :start) (- end start))
-    (if (arrangement-ghost-row? :resize (get row :id))
+    (if (arrangement-ghost-event? :resize start)
       (get arrangement-ghost :end)
       end)))
 
-;; Scene-lane items (spec 8): one span per song row covering
-;; [start_beat, next start_beat) labeled with the row's scene name. Spans (not
-;; markers) so Slice C gets move/resize edges for free. Rows created by
-;; track-clip surgery keep the same base scene as their predecessor; labeling
-;; only scene CHANGES keeps the lane readable ("Scene 4 | | |" reads as one
-;; region with row splits, not four different states).
-(def arrangement-scene-row-label (row index)
-  (if (and (> index 0)
-        (= (get row :scene) (get (nth SEQ.song-rows (- index 1)) :scene)))
-    nil
-    (arrangement-scene-name (get row :scene))))
-
+;; Scene-lane items (lane spec 12): ONE span per scene EVENT, running to the
+;; next event (SEQ.scene-spans derives the end). A clip edge on any track can
+;; no longer split this lane, so every span is labeled — the old
+;; dedup-the-repeated-label hack that made a fragmented lane readable is gone
+;; with the fragmentation.
 (def arrangement-scene-row-items ()
   (map
     (lambda (index)
-      (let ((row (nth SEQ.song-rows index)))
-        (let ((start (get row :start-beat))
-              (end (arrangement-row-end-beat index)))
+      (let ((span (nth SEQ.scene-spans index)))
+        (let ((start (get span :start-beat))
+              (end (get span :end-beat)))
           (dict
-            :id (get row :id)
+            :id start
             :lane 0
-            :start (arrangement-scene-span-start row index start)
-            :end (arrangement-scene-span-end row start end)
-            :label (arrangement-scene-row-label row index)
+            :start (arrangement-scene-span-start index start)
+            :end (arrangement-scene-span-end start end)
+            :label (arrangement-scene-name (get span :scene))
             :kind :scene
-            :selected (arrangement-row-selected? (get row :id))
+            :selected (arrangement-row-selected? start)
             :color (list 0.52 0.56 0.62)))))
-    (range 0 (len SEQ.song-rows))))
+    (range 0 (len SEQ.scene-spans))))
 
 (def arrangement-scene-items ()
   (if (= (arrangement-ghost-kind) :create)
@@ -220,116 +211,60 @@
     (get arrangement-ghost :length)
     SEQ.song-end-beat))
 
-;; The model rejects an end at/before the last row's start (spec 9.3); the
+;; The model rejects an end at/before the last scene change (spec 9.3); the
 ;; widget clamp mirrors that boundary.
 (def arrangement-content-length-min ()
-  (let ((count (len SEQ.song-rows)))
+  (let ((count (len SEQ.scene-spans)))
     (if (= count 0)
       1
-      (max 1 (get (nth SEQ.song-rows (- count 1)) :start-beat)))))
+      (max 1 (get (nth SEQ.scene-spans (- count 1)) :start-beat)))))
 
-(def arrangement-row-selected? (row-id)
-  (> (len (filter (lambda (id) (= id row-id)) arrangement-selection)) 0))
+(def arrangement-row-selected? (id)
+  (> (len (filter (lambda (candidate) (= candidate id)) arrangement-selection)) 0))
 
 (def arrangement-track-color (i)
   (if (and (>= i 0) (< i (len SEQ.track-colors)))
     (nth SEQ.track-colors i)
     (list 0.34 0.48 0.98)))
 
-;; Override spans are tinted brighter than scene-provided spans — the
-;; `from-override` render hint from the lane projection (song-mode-spec 5.5).
-;; The lift is multiplicative, not a lerp toward white: mixing in white
-;; desaturated the track color into pastel, so arrangement clips no longer
-;; read as the same color the session grid and piano roll use for the track.
-(def arrangement-clip-color (i from-override)
+;; Clips are tinted brighter than the scene backdrop showing through a lane
+;; GAP (lane spec 12: the dim/solid distinction is structural — a clip is a
+;; stored object, a backdrop ghost is not). The lift is multiplicative, not a
+;; lerp toward white: mixing in white desaturated the track color into pastel,
+;; so arrangement clips no longer read as the same color the session grid and
+;; piano roll use for the track.
+(def arrangement-clip-color (i clip?)
   (let ((color (arrangement-track-color i)))
-    (if from-override
+    (if clip?
       (list
         (min 1 (* 1.15 (nth color 0)))
         (min 1 (* 1.15 (nth color 1)))
         (min 1 (* 1.15 (nth color 2))))
       color)))
 
+;; The STORED clips of one track lane (lane spec 12): already merged, with
+;; real ids — the view derives nothing. Explicit-empty clips carry no source
+;; and draw as a gap, exactly like an unwritten stretch of lane.
 (def arrangement-track-clips (i)
-  (if (< i (len SEQ.song-lanes))
-    (nth SEQ.song-lanes i)
+  (filter (lambda (clip)
+            (not (and (= (get clip :pattern-id) nil)
+                   (= (get clip :take-id) nil))))
+    (if (< i (len SEQ.song-lanes))
+      (nth SEQ.song-lanes i)
+      '())))
+
+;; Derived backdrop ghosts for one lane's gaps (lane spec 12): the governing
+;; scene's cell showing through. Not editable — there is no stored object to
+;; edit — so they get negative ids, which never collide with a clip id and
+;; make every gesture on one a no-op/deselect.
+(def arrangement-track-backdrops (i)
+  (if (< i (len SEQ.song-backdrops))
+    (nth SEQ.song-backdrops i)
     '()))
 
-;; Steps-per-beat of a pattern from the lane-events read surface; nil when
-;; the entry is missing (merge falls back to pattern identity alone).
-(def arrangement-pattern-steps-per-beat (track pattern-id)
-  (let ((entry (arrangement-lane-pattern-events track pattern-id)))
-    (if (or (= entry nil) (<= (get entry :length-beats) 0))
-      nil
-      (/ (get entry :num-steps) (get entry :length-beats)))))
-
-;; Phase continuity between two adjacent same-pattern spans (takes spec 7):
-;; the later span continues the earlier clip iff its stored offset equals the
-;; earlier anchor's offset advanced by the elapsed beats, modulo the pattern
-;; length. Discontinuous spans are separate clips (the later one re-anchors).
-;; Take spans (spec 6.1) are linear — continuity is exact offset advance, no
-;; modulo.
-(def arrangement-offsets-continuous? (track cur clip)
-  (if (not (= (get cur :take-id) nil))
-    (let ((entry (arrangement-lane-take-events track (get cur :take-id))))
-      (if (or (= entry nil) (<= (get entry :length-beats) 0))
-        true
-        (let ((spb (/ (get entry :num-steps) (get entry :length-beats))))
-          (let ((expected (+ (or (get cur :offset-steps) 0)
-                            (* spb (- (get clip :start-beat) (get cur :start-beat))))))
-            (let ((err (- expected (or (get clip :offset-steps) 0))))
-              (< (max err (- 0 err)) 0.0001))))))
-    (let ((spb (arrangement-pattern-steps-per-beat track (get cur :pattern-id)))
-          (entry (arrangement-lane-pattern-events track (get cur :pattern-id))))
-      (if (or (= spb nil) (= entry nil))
-        true
-        (let ((num-steps (max 1 (get entry :num-steps)))
-              (expected (+ (or (get cur :offset-steps) 0)
-                          (* spb (- (get clip :start-beat) (get cur :start-beat))))))
-          (let ((cycles (/ (- expected (or (get clip :offset-steps) 0)) num-steps)))
-            (let ((wrap-error (- cycles (floor (+ cycles 0.5)))))
-              (< (max wrap-error (- 0 wrap-error)) 0.0001))))))))
-
-;; Merge adjacent same-pattern, phase-continuous spans into one clip (the
-;; spec's "merging is a view concern"): a row split made to edit ANOTHER
-;; track must not visually fragment this track's clip. Empty spans never
-;; merge — they are the gaps — and a re-anchored span (offset discontinuity)
-;; starts a new clip. The merged clip keeps the FIRST row's id as its stable
-;; gesture identity and the first span's start/offset as its phase anchor.
-(def arrangement-merge-clip-fold (i acc clip)
-  (let ((cur (get acc :cur)))
-    (if (= cur nil)
-      (dict :done (get acc :done) :cur clip)
-      (if (and (= (get cur :pattern-id) (get clip :pattern-id))
-            (= (get cur :take-id) (get clip :take-id))
-            (= (get cur :end-beat) (get clip :start-beat))
-            (arrangement-offsets-continuous? i cur clip))
-        (dict :done (get acc :done)
-          :cur (dict
-                 :row-id (get cur :row-id)
-                 :start-beat (get cur :start-beat)
-                 :end-beat (get clip :end-beat)
-                 :pattern-id (get cur :pattern-id)
-                 :take-id (get cur :take-id)
-                 :offset-steps (get cur :offset-steps)
-                 :from-override (or (get cur :from-override)
-                                  (get clip :from-override))))
-        (dict :done (append (get acc :done) (list cur)) :cur clip)))))
-
-(def arrangement-merged-track-clips (i)
-  (let ((folded (reduce |acc clip| (arrangement-merge-clip-fold i acc clip)
-                  (dict :done '() :cur nil)
-                  (filter (lambda (clip)
-                            (not (and (= (get clip :pattern-id) nil)
-                                   (= (get clip :take-id) nil))))
-                    (arrangement-track-clips i)))))
-    (if (= (get folded :cur) nil)
-      (get folded :done)
-      (append (get folded :done) (list (get folded :cur))))))
-
-(def arrangement-find-track-clip (i row-id)
-  (let ((matches (filter (lambda (clip) (= (get clip :row-id) row-id))
-                   (arrangement-merged-track-clips i))))
+(def arrangement-find-track-clip (i clip-id)
+  (let ((matches (filter (lambda (clip) (= (get clip :clip-id) clip-id))
+                   (arrangement-track-clips i))))
     (if (> (len matches) 0) (nth matches 0) nil)))
 
 ;; ── MIDI content flattening (spec 7.1) ─────────────────────────────────────
@@ -480,30 +415,31 @@
 (def arrangement-track-ghost-clip (i clip)
   (if (and (= (arrangement-ghost-kind) :track-resize)
         (= (get arrangement-ghost :track) i)
-        (= (get arrangement-ghost :row-id) (get clip :row-id)))
+        (= (get arrangement-ghost :clip-id) (get clip :clip-id)))
     (dict
-      :row-id (get clip :row-id)
+      :clip-id (get clip :clip-id)
       :start-beat (get clip :start-beat)
       :end-beat (max (+ (get clip :start-beat) 1)
                   (min SEQ.song-end-beat (get arrangement-ghost :end)))
       :pattern-id (get clip :pattern-id)
       :take-id (get clip :take-id)
-      :from-override (get clip :from-override))
+      :offset-steps (get clip :offset-steps))
     clip))
 
-;; Track-lane items (spec 6): merged clips; spans whose resolved pattern is
-;; nil produce NO item — a track with nothing playing renders as an empty
-;; lane, and empty gaps are exactly where merged clips end.
-(def arrangement-track-items (i)
+;; Track-lane items (lane spec 12): the stored clips, plus one dim ghost per
+;; lane gap for the scene backdrop showing through it. Explicit-empty clips
+;; and scene cells with no pattern produce NO item — the lane really is
+;; silent there.
+(def arrangement-track-clip-items (i)
   (map
     (lambda (raw)
       (let ((clip (arrangement-track-ghost-clip i raw)))
         (dict
-          :id (get clip :row-id)
+          :id (get clip :clip-id)
           :lane 0
           :start (get clip :start-beat)
           ;; Take items clamp to the take's true remaining length (takes
-          ;; spec 11.3) — the row may extend past the take's end, but that
+          ;; spec 11.3) — the clip may extend past the take's end, but that
           ;; tail is silent and draws as empty lane.
           :end (if (= (get clip :take-id) nil)
                  (get clip :end-beat)
@@ -513,8 +449,27 @@
                      (get window :end-beat))))
           :kind :midi
           :content (arrangement-clip-content i clip)
-          :color (arrangement-clip-color i (get clip :from-override)))))
-    (arrangement-merged-track-clips i)))
+          :color (arrangement-clip-color i true))))
+    (arrangement-track-clips i)))
+
+(def arrangement-track-backdrop-items (i)
+  (let ((spans (arrangement-track-backdrops i)))
+    (map
+      (lambda (index)
+        (let ((span (nth spans index)))
+          (dict
+            :id (- -1 index)
+            :lane 0
+            :start (get span :start-beat)
+            :end (get span :end-beat)
+            :kind :midi
+            :content (arrangement-clip-content i span)
+            :color (arrangement-clip-color i false))))
+      (range 0 (len spans)))))
+
+(def arrangement-track-items (i)
+  (append (arrangement-track-backdrop-items i)
+    (arrangement-track-clip-items i)))
 
 ;; Selection prop for one track lane: only the owning track shows its ids.
 ;; The bound clip (takes spec 16.6) is Rust-side persistent timeline state,
@@ -579,8 +534,13 @@
         :track-a (nth visible 0)
         :track-b (nth visible (- (len visible) 1))
         :start (get event :time-a)
-        :end (get event :time-b)))))
+        :end (get event :time-b)
+        :scene-lane true))))
 
+;; The fifth argument is the SCENE-LANE bit (lane spec 8): a marquee swept in
+;; the scene lane copies/pastes/deletes the scene EVENTS inside it as well as
+;; the clips, which a track-lane marquee covering the same rectangle never
+;; does.
 (def arrangement-region-commit (region)
   (do
     (set! arrangement-region-ghost nil)
@@ -588,19 +548,20 @@
       (seq-song-clear-region)
       (seq-song-set-region
         (get region :track-a) (get region :track-b)
-        (get region :start) (get region :end)))))
+        (get region :start) (get region :end)
+        (= (get region :scene-lane) true)))))
 
 ;; Clicking a clip's title bar is BOTH gestures: it binds the track's sound to
 ;; the clip AND selects the clip's span as a one-track region, so the body
 ;; lights up exactly like a swept region does and copy/delete have a target
-;; (Ableton). The span travels with the select because a timeline clip is the
-;; MERGED run of rows sharing a source — only this projection knows it. A free
-;; marquee, which names no single clip, still releases the binding.
-(def arrangement-select-clip (i row-id)
-  (let ((clip (arrangement-find-track-clip i row-id)))
+;; (Ableton). A free marquee, which names no single clip, still releases the
+;; binding — and so does a click on a BACKDROP ghost (negative id, lane spec
+;; 12): a gap is not a clip, so there is nothing to bind or select.
+(def arrangement-select-clip (i clip-id)
+  (let ((clip (arrangement-find-track-clip i clip-id)))
     (if (= clip nil)
-      (seq-song-select-clip i row-id)
-      (seq-song-select-clip i row-id
+      (do (seq-song-deselect-clip) (seq-song-clear-region))
+      (seq-song-select-clip i clip-id
         (get clip :start-beat) (get clip :end-beat)))))
 
 ;; Any other selection gesture drops the region: the two are mutually
@@ -610,6 +571,18 @@
   (do
     (set! arrangement-region-ghost nil)
     (seq-song-clear-region)))
+
+;; The scene lane draws its own marquee echo while a drag is live, then keeps
+;; the committed rect lit for a SCENE-LANE region (region spec 4.4) — the
+;; visible sign that the region carries the scene events, not just the clips.
+(def arrangement-scene-region-rect ()
+  (if (not (= arrangement-selection-rect nil))
+    arrangement-selection-rect
+    (if (and (not (= SEQ.song-region nil))
+          (= (nth SEQ.song-region 4) true))
+      (dict :time-a (nth SEQ.song-region 2) :time-b (nth SEQ.song-region 3)
+        :lane-a 0 :lane-b 0)
+      nil)))
 
 ;; The rect one lane draws: the ghost while a drag is live, else the committed
 ;; Rust-owned region, else nothing. Full lane height over [start, end) — the
@@ -652,7 +625,7 @@
         (set! arrangement-track-selection '())
         (set! arrangement-selected-track -1)
         (set! arrangement-selection (get event :ids))
-        ;; A scene row spans every track and names no single clip, so it
+        ;; A scene span covers every track and names no single clip, so it
         ;; releases the sound binding (takes spec 16.6 cause 2) — and, for the
         ;; same reason, drops the region (region spec 4.1).
         (arrangement-region-clear)
@@ -678,16 +651,17 @@
       (do
         (set! arrangement-selection-rect nil)
         (arrangement-region-commit (arrangement-region-all-tracks event)))
-      ;; Live drags: ghost only, never a primitive (spec 9.1).
+      ;; Live drags: ghost only, never a primitive (spec 9.1). A scene-lane
+      ;; item's id IS its scene event's start beat (lane spec 12).
       :move-items-absolute
       (set! arrangement-ghost
         (dict :kind :move
-          :row-id (get event :anchor-id)
+          :beat (get event :anchor-id)
           :start (get event :start)))
       :resize-item-absolute
       (set! arrangement-ghost
         (dict :kind :resize
-          :row-id (get event :id)
+          :beat (get event :id)
           :end (get event :time)))
       :create-item
       (set! arrangement-ghost
@@ -703,14 +677,14 @@
       (if (= (arrangement-ghost-kind) :move)
         (arrangement-edit-finish
           (dict :type :finish-move-items
-            :row-id (get arrangement-ghost :row-id)
+            :from-beat (get arrangement-ghost :beat)
             :start (get arrangement-ghost :start)))
         (set! arrangement-ghost nil))
       :finish-resize-items
       (if (= (arrangement-ghost-kind) :resize)
         (arrangement-edit-finish
           (dict :type :finish-resize-items
-            :row-id (get arrangement-ghost :row-id)
+            :from-beat (get arrangement-ghost :beat)
             :end (get arrangement-ghost :end)))
         (set! arrangement-ghost nil))
       :finish-create-item
@@ -725,8 +699,9 @@
           :length (get event :length)))
       :delete-items
       (do
-        ;; Removing rows re-times everything after them, so a region measured
-        ;; against the old song is stale — drop it with the selection.
+        ;; The ids ARE the scene events' beats (lane spec 12). Removing a
+        ;; scene change can never touch a clip, but the selection/region were
+        ;; measured against the old lane — drop them with it.
         (set! arrangement-selection '())
         (arrangement-region-clear)
         (arrangement-edit-finish
@@ -744,20 +719,18 @@
 ;; (arrangement-lane-model-spec 8/12: a clip is a first-class object, so
 ;; resize is a resize, not "move the next row").
 ;;
-;; The view still speaks merged clip SPANS, so each gesture carries the span
-;; it drew on (:at-beat/:at-end); the host command resolves the stored clip
-;; from it.
+;; The view speaks STORED clip ids (lane spec 12), so each gesture names the
+;; object it edits — no span-to-clip resolution anywhere.
 (def arrangement-clip-edit (i clip payload)
   (arrangement-edit-finish
     (merge payload
       :track i
-      :at-beat (get clip :start-beat)
-      :at-end (get clip :end-beat))))
+      :clip-id (get clip :clip-id))))
 
 (def arrangement-track-resize-finish (i)
-  (let ((row-id (get arrangement-ghost :row-id))
+  (let ((clip-id (get arrangement-ghost :clip-id))
         (new-end (max 0 (min SEQ.song-end-beat (get arrangement-ghost :end)))))
-    (let ((clip (arrangement-find-track-clip i row-id)))
+    (let ((clip (arrangement-find-track-clip i clip-id)))
       (do
         (set! arrangement-ghost nil)
         (if (= clip nil)
@@ -781,8 +754,8 @@
     (arrangement-region-clear)
     (seq-song-deselect-clip)
     (map
-      (lambda (row-id)
-        (let ((clip (arrangement-find-track-clip i row-id)))
+      (lambda (clip-id)
+        (let ((clip (arrangement-find-track-clip i clip-id)))
           (if (= clip nil)
             nil
             (arrangement-clip-edit i clip (dict :type :clip-delete)))))
@@ -830,7 +803,7 @@
       :resize-item-absolute
       (set! arrangement-ghost
         (dict :kind :track-resize :track i
-          :row-id (get event :id) :end (get event :time)))
+          :clip-id (get event :id) :end (get event :time)))
       :finish-resize-items
       (if (and (= (arrangement-ghost-kind) :track-resize)
             (= (get arrangement-ghost :track) i))
@@ -901,7 +874,7 @@
     :on-drop (lambda (event) (arrangement-drop-scene event))
     :items (arrangement-scene-items)
     :selection arrangement-selection
-    :selection-rect arrangement-selection-rect
+    :selection-rect (arrangement-scene-region-rect)
     :view-start arrangement-view-start
     :view-duration arrangement-view-duration
     :zoom-min-duration arrangement-min-view-duration

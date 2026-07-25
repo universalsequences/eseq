@@ -336,7 +336,8 @@ pub(crate) fn reactive_tick_and_render(
             ctx.frame.prev_master_recording = master_rec_on;
         }
         // Song-mode bindings (docs/song-mode-spec.md 12): diff-published each
-        // frame; `song-rows` rebuilds only on committed-song revision change.
+        // frame; the arrangement is re-read only on committed-song revision
+        // change, and the lane surfaces derived from it diff by value.
         // The render-rate song position drives the transport readout and the
         // arrangement playhead, so it publishes while either is visible.
         let arrangement_visible = editor_has_visible_buffer(&editor, "*arrangement*");
