@@ -47,6 +47,10 @@ pub(crate) struct SongBindingsSnapshot {
     /// The bound clip's `(track, row-id)` when a timeline selection holds the
     /// binding (rule 1), for the bound-clip highlight. `None` under rules 2/3.
     pub(crate) bound_clip: Option<(usize, u64)>,
+    /// The committed region selection as `(track-a track-b start end)`
+    /// (docs/arrangement-region-editing-spec.md 4.1), or `None`. Rust-owned
+    /// so every lane's `:selection-rect` survives a view switch.
+    pub(crate) region: Option<(usize, usize, f64, f64)>,
 }
 
 /// Per-frame diff state for the song bindings: the committed song is cached
@@ -370,6 +374,14 @@ pub(crate) fn build_song_bindings_snapshot(
         bound_clip: app
             .song_clip_selection
             .map(|selection| (selection.track, selection.row_id.0)),
+        region: app.song_region_selection.map(|region| {
+            (
+                region.track_a,
+                region.track_b,
+                region.start_beat,
+                region.end_beat,
+            )
+        }),
     }
 }
 
@@ -690,6 +702,19 @@ pub(crate) fn sync_song_state(
             Some((track, row_id)) => Value::List(vec![
                 Rc::new(RefCell::new(Value::Number(track as f64))),
                 Rc::new(RefCell::new(Value::Number(row_id as f64))),
+            ]),
+            None => Value::Nil,
+        }
+    );
+    publish_on_change!(
+        "song-region",
+        region,
+        match next.region {
+            Some((track_a, track_b, start, end)) => Value::List(vec![
+                Rc::new(RefCell::new(Value::Number(track_a as f64))),
+                Rc::new(RefCell::new(Value::Number(track_b as f64))),
+                Rc::new(RefCell::new(Value::Number(start))),
+                Rc::new(RefCell::new(Value::Number(end))),
             ]),
             None => Value::Nil,
         }

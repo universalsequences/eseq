@@ -122,6 +122,12 @@ struct TimelineView {
     view_duration: f64,
     zoom_min_duration: f64,
     zoom_max_duration: f64,
+    /// `:grid-density` — divides the zoom-adaptive grid step, so `2` gives
+    /// twice as many grid cells at every zoom. Both the drawn grid and every
+    /// `:grid` snap (marquee, resize) follow it, so a host that wants finer
+    /// selection without zooming in raises this. Default `1` leaves the stock
+    /// ladder, which is what the piano roll and every other host get.
+    grid_density: f64,
     content_length: Option<f64>,
     content_length_min: f64,
     content_length_max: f64,
@@ -147,6 +153,11 @@ struct TimelineView {
     snap: f64,
     resize_snap: f64,
     resize_snap_to_grid: bool,
+    /// `:marquee-snap :grid` — marquee spans are emitted quantized to the
+    /// zoom-adaptive grid ladder, min down / max up
+    /// (docs/arrangement-region-editing-spec.md 4.3), so a drag always selects
+    /// whole grid cells. Default off: the piano roll keeps raw pointer times.
+    marquee_snap_to_grid: bool,
     snap_floor: bool,
     resize_snap_floor: bool,
     min_duration: Option<f64>,
@@ -164,6 +175,22 @@ struct TimelineView {
     items: Vec<TimelineItem>,
     selection: Vec<Value>,
     selection_rect: Option<TimelineSelectionRect>,
+    selection_rect_style: SelectionRectStyle,
+}
+
+/// How `:selection-rect` paints (`:selection-rect-style`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SelectionRectStyle {
+    /// Default: a translucent blue wash with a bright outline — a marquee
+    /// lassoing items, which is what the piano roll and the scene lane draw.
+    Marquee,
+    /// `:region` — Ableton's arrangement region
+    /// (docs/arrangement-region-editing-spec.md 4.4): the selection LIGHTS the
+    /// lane instead of shading over it. Empty lane background inside the span
+    /// takes the selected-body colour, and every clip's BODY inside the span
+    /// takes the same colour while its title bar keeps the clip colour, so the
+    /// highlight reads as one continuous band across clips and gaps alike.
+    Region,
 }
 
 #[derive(Clone)]
@@ -599,6 +626,23 @@ impl WidgetDefinition for TimelineWidget {
     }
 }
 
+/// Test accessor for a laid-out timeline's grid: `(grid step, grid line xs,
+/// ruler labels)`. Hosts compose several timeline instances over one shared
+/// time axis (the arrangement's ruler lane plus one lane per track), and every
+/// one of them must land on the SAME grid — it is what both the drawn lines
+/// and `:grid` snapping quantize to. This exists so a test can assert that
+/// across instances, which no public render output makes checkable.
+#[cfg(target_os = "macos")]
+pub fn debug_grid(node: &LayoutNode) -> (f64, Vec<f32>, Vec<(f32, String)>) {
+    let view = TimelineView::from_props(&node.props, node.rect);
+    let vp = view.time_viewport();
+    (
+        view.alignment_helper_grid_step(),
+        vp.metal_grid_lines(view.time_ruler.as_ref()).into_iter().map(|(x, _)| x).collect(),
+        vp.metal_time_ruler_labels(view.time_ruler.as_ref()),
+    )
+}
+
 #[cfg(target_os = "macos")]
 fn build_metal_primitives(
     node: &LayoutNode,
@@ -871,54 +915,98 @@ fn build_metal_primitives(
         }));
     }
 
+    // The region span this instance draws, if any: reused below to light each
+    // clip's body over the same x-range, so the highlight is continuous across
+    // clips and the gaps between them.
+    let region_span = match (view.selection_rect_style, view.metal_selection_rect()) {
+        (SelectionRectStyle::Region, Some((x, _, width, _))) => Some((x, x + width)),
+        _ => None,
+    };
     if let Some((x, y, width, height)) = view.metal_selection_rect() {
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-            x,
-            y,
-            width,
-            height,
-            color: crate::backend::Color {
+        if view.selection_rect_style == SelectionRectStyle::Region {
+            // Lane background inside the region: the SAME colour a selected
+            // clip's body takes, so an empty lane and a clip body inside the
+            // selection read as one band (Ableton's arrangement region).
+            // Clips draw over this and re-light their own bodies below.
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x,
+                y,
+                width,
+                height,
+                color: SELECTED_ITEM_BODY_COLOR,
+            }));
+            // The fill is opaque — it REPLACES the lane colour rather than
+            // shading it, which is what makes a bare lane and a clip body read
+            // as one band — so the lane's grid would vanish under it. Redraw
+            // it on top in the same dark wash clips use for their in-body grid
+            // continuation, so the bar lines stay legible and identical either
+            // side of a clip edge.
+            for &(grid_x, is_major) in &grid_lines {
+                if grid_x <= x || grid_x >= x + width {
+                    continue;
+                }
+                primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                    x: grid_x - 0.0625,
+                    y,
+                    width: 0.125,
+                    height,
+                    color: crate::backend::Color {
+                        r: 0.02,
+                        g: 0.025,
+                        b: 0.03,
+                        a: if is_major { 0.22 } else { 0.10 },
+                    },
+                }));
+            }
+        } else {
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x,
+                y,
+                width,
+                height,
+                color: crate::backend::Color {
+                    r: 0.38,
+                    g: 0.68,
+                    b: 0.92,
+                    a: 0.15,
+                },
+            }));
+            let border_color = crate::backend::Color {
                 r: 0.38,
                 g: 0.68,
                 b: 0.92,
-                a: 0.15,
-            },
-        }));
-        let border_color = crate::backend::Color {
-            r: 0.38,
-            g: 0.68,
-            b: 0.92,
-            a: 0.78,
-        };
-        let thickness = 0.07;
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-            x,
-            y,
-            width,
-            height: thickness,
-            color: border_color,
-        }));
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-            x,
-            y: y + height - thickness,
-            width,
-            height: thickness,
-            color: border_color,
-        }));
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-            x,
-            y,
-            width: thickness,
-            height,
-            color: border_color,
-        }));
-        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-            x: x + width - thickness,
-            y,
-            width: thickness,
-            height,
-            color: border_color,
-        }));
+                a: 0.78,
+            };
+            let thickness = 0.07;
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x,
+                y,
+                width,
+                height: thickness,
+                color: border_color,
+            }));
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x,
+                y: y + height - thickness,
+                width,
+                height: thickness,
+                color: border_color,
+            }));
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x,
+                y,
+                width: thickness,
+                height,
+                color: border_color,
+            }));
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x: x + width - thickness,
+                y,
+                width: thickness,
+                height,
+                color: border_color,
+            }));
+        }
     }
 
     let mut item_rects = Vec::new();
@@ -996,6 +1084,24 @@ fn build_metal_primitives(
             radius_px,
             clip,
         );
+        // Region highlight over a clip: relight the fill across the part of
+        // the clip the region covers, using the same rounded geometry (so the
+        // clip's corners still round) merely clipped to the region's x-range.
+        // The title bar redraws on top right below, which is what keeps the
+        // bar in the clip's own colour while the BODY lights up.
+        if let Some((region_x0, region_x1)) = region_span {
+            let region_clip = (clip.0.max(region_x0), clip.1.min(region_x1));
+            if region_clip.1 > region_clip.0 {
+                push_item_fill(
+                    &mut primitives,
+                    fill_rect,
+                    SELECTED_ITEM_BODY_COLOR,
+                    viewport,
+                    radius_px,
+                    region_clip,
+                );
+            }
+        }
         if let Some(bar_height) = title_bar_height {
             // The bar rounds only its top corners: the arc rows are laid out
             // over a rect that runs one radius past the bar, then the draw is
@@ -1533,6 +1639,7 @@ impl TimelineView {
             view_duration: self.view_duration,
             zoom_min_duration: self.zoom_min_duration,
             zoom_max_duration: self.zoom_max_duration,
+            grid_density: self.grid_density,
         }
     }
 
@@ -1547,6 +1654,7 @@ impl TimelineView {
             view_duration,
             zoom_min_duration: get_num(props, "zoom-min-duration", 8.0).max(0.0001),
             zoom_max_duration: get_num(props, "zoom-max-duration", 128.0).max(0.0001),
+            grid_density: get_num(props, "grid-density", 1.0).clamp(1.0, 8.0),
             content_length: props
                 .get("content-length")
                 .and_then(as_number)
@@ -1577,6 +1685,10 @@ impl TimelineView {
             resize_snap: get_num(props, "resize-snap", get_num(props, "snap", 0.0)).max(0.0),
             resize_snap_to_grid: matches!(
                 props.get("resize-snap"),
+                Some(Value::Keyword(mode)) | Some(Value::String(mode)) if mode == "grid"
+            ),
+            marquee_snap_to_grid: matches!(
+                props.get("marquee-snap"),
                 Some(Value::Keyword(mode)) | Some(Value::String(mode)) if mode == "grid"
             ),
             snap_floor: matches!(
@@ -1618,6 +1730,12 @@ impl TimelineView {
             items: get_items(props),
             selection: get_selection(props),
             selection_rect: get_selection_rect(props),
+            selection_rect_style: match props.get("selection-rect-style") {
+                Some(Value::Keyword(style)) | Some(Value::String(style)) if style == "region" => {
+                    SelectionRectStyle::Region
+                }
+                _ => SelectionRectStyle::Marquee,
+            },
         };
         view.lane_scroll = view.clamp_lane_scroll(view.lane_scroll);
         view
@@ -1910,6 +2028,29 @@ impl TimelineView {
         Some(self.alignment_helper_time_for_drag(raw_start, anchor_start, gesture_value))
     }
 
+    /// Ordered marquee span, grid-quantized under `:marquee-snap :grid`
+    /// (docs/arrangement-region-editing-spec.md 4.3): the low edge floors and
+    /// the high edge ceils onto the zoom-adaptive ladder, so the selection is
+    /// always whole grid cells and "grab exactly 4 bars" is a sloppy drag.
+    /// A span that quantizes to nothing (a vertical-only drag landing on a
+    /// grid line) widens to the one cell the pointer is in rather than
+    /// selecting zero time.
+    fn marquee_span(&self, time_a: f64, time_b: f64) -> (f64, f64) {
+        let low = time_a.min(time_b);
+        let high = time_a.max(time_b);
+        if !self.marquee_snap_to_grid {
+            return (low, high);
+        }
+        let grid = self.alignment_helper_grid_step();
+        let start = (low / grid).floor() * grid;
+        let end = (high / grid).ceil() * grid;
+        if end <= start + f64::EPSILON {
+            (start, start + grid)
+        } else {
+            (start, end)
+        }
+    }
+
     fn effective_resize_snap(&self) -> f64 {
         if self.resize_snap_to_grid {
             self.time_viewport().grid_step(self.time_ruler.as_ref())
@@ -2194,6 +2335,7 @@ impl TimelineView {
                     ("kind", keyword(":marquee")),
                     ("time", Value::Number(current_marquee_time)),
                     ("lane", Value::Number(current_lane as f64)),
+                    ("row", Value::Number(local_row as f64)),
                     // A body marquee starts on a clip the pointer-down
                     // already selected; a zero-movement release must not
                     // then clear that selection the way a background click
@@ -2261,6 +2403,7 @@ impl TimelineView {
                     ("kind", keyword(":marquee")),
                     ("time", Value::Number(current_marquee_time)),
                     ("lane", Value::Number(current_lane as f64)),
+                    ("row", Value::Number(local_row as f64)),
                 ])),
                 HitRegion::Header => Some(map_value(vec![("kind", keyword(":scrub"))])),
                 HitRegion::Sidebar { lane } => Some(map_value(vec![
@@ -2277,6 +2420,7 @@ impl TimelineView {
                 ("kind", keyword(":marquee")),
                 ("time", Value::Number(current_marquee_time)),
                 ("lane", Value::Number(current_lane as f64)),
+                ("row", Value::Number(local_row as f64)),
             ])),
             TimelineTool::Pan => Some(map_value(vec![
                 ("kind", keyword(":pan")),
@@ -2292,6 +2436,21 @@ impl TimelineView {
         let hit = self.hit_test(local_col, local_row)?;
         match self.tool {
             TimelineTool::Pointer => match hit {
+                // With a title bar the body is a REGION surface, not the clip:
+                // pressing it must not select the clip
+                // (docs/arrangement-region-editing-spec.md 3.1/4.4 — only the
+                // bar selects). It behaves like pressing empty lane space:
+                // drop the current selection and park the edit cursor, which
+                // is also where the region drag about to start begins.
+                HitRegion::ItemBody { .. } if self.has_title_bar() => {
+                    Some(action_map(vec![
+                        ("type", keyword(":clear-selection")),
+                        (
+                            "time",
+                            Value::Number(self.cursor_snap_time(self.time_at_col(local_col))),
+                        ),
+                    ]))
+                }
                 HitRegion::ItemBody { item }
                 | HitRegion::ItemEdgeEnd { item }
                 | HitRegion::ItemTitleBar { item }
@@ -2373,7 +2532,7 @@ impl TimelineView {
         local_row: f32,
         gesture: Option<&Value>,
     ) -> Option<Value> {
-        let current_hit = self.hit_test(local_col, local_row)?;
+        let current_hit = self.hit_test(local_col, local_row);
         let raw_time = self.time_at_col(local_col);
         let current_time = self.snap_time(raw_time);
         let current_resize_time = self.snap_resize_time(raw_time);
@@ -2381,6 +2540,16 @@ impl TimelineView {
         let current_lane = self.lane_at_row(local_row);
         let gesture_value = gesture?;
         let gesture = get_map(gesture_value)?;
+        // A marquee in progress must survive the pointer leaving this
+        // instance: with one widget instance per arrangement track, the
+        // vertical travel that names OTHER tracks is exactly the travel that
+        // leaves this lane's rect (region spec 4.2), and drag capture means
+        // no other instance will report it. Every other gesture still
+        // requires a hit, as before.
+        let is_marquee = matches!(gesture.get("kind"), Some(Value::Keyword(kind)) if kind == "marquee");
+        if current_hit.is_none() && !is_marquee {
+            return None;
+        }
         match gesture.get("kind") {
             Some(Value::Keyword(kind)) if kind == "move" => {
                 let anchor_id = gesture.get("anchor-id")?.clone();
@@ -2492,8 +2661,10 @@ impl TimelineView {
             Some(Value::Keyword(kind)) if kind == "marquee" => {
                 let start_time = as_number(gesture.get("time")?)?;
                 let start_lane = as_number(gesture.get("lane")?)? as usize;
+                let row_delta = marquee_row_delta(&gesture, local_row);
                 if (start_time - current_marquee_time).abs() < f64::EPSILON
                     && start_lane == current_lane
+                    && row_delta == 0.0
                 {
                     if marquee_from_item_body(&gesture) {
                         return None;
@@ -2502,18 +2673,17 @@ impl TimelineView {
                 }
                 let lane_a = start_lane.min(current_lane);
                 let lane_b = start_lane.max(current_lane);
+                let (time_a, time_b) = self.marquee_span(start_time, current_marquee_time);
                 Some(action_map(vec![
                     ("type", keyword(":marquee-select")),
-                    (
-                        "time-a",
-                        Value::Number(start_time.min(current_marquee_time)),
-                    ),
-                    (
-                        "time-b",
-                        Value::Number(start_time.max(current_marquee_time)),
-                    ),
+                    ("time-a", Value::Number(time_a)),
+                    ("time-b", Value::Number(time_b)),
                     ("lane-a", Value::Number(lane_a as f64)),
                     ("lane-b", Value::Number(lane_b as f64)),
+                    (
+                        "row-delta",
+                        Value::Number(marquee_row_delta(&gesture, local_row)),
+                    ),
                     ("mode", keyword(":replace")),
                 ]))
             }
@@ -2552,7 +2722,7 @@ impl TimelineView {
                 ("type", keyword(":set-cursor")),
                 ("time", Value::Number(current_time)),
             ])),
-            _ => match current_hit {
+            _ => match current_hit? {
                 HitRegion::ItemBody { item }
                 | HitRegion::ItemEdgeEnd { item }
                 | HitRegion::ItemTitleBar { item }
@@ -2773,8 +2943,14 @@ impl TimelineView {
             Some(Value::Keyword(kind)) if kind == "marquee" => {
                 let start_time = as_number(gesture.get("time")?)?;
                 let start_lane = as_number(gesture.get("lane")?)? as usize;
+                // Vertical travel counts as movement: a single-lane instance
+                // (one arrangement track lane) reports every cross-track drag
+                // as lane 0 -> lane 0, so without this a straight-down region
+                // sweep would read as a plain click (region spec 4.2/4.4).
+                let row_delta = marquee_row_delta(&gesture, local_row);
                 if (start_time - current_marquee_time).abs() < f64::EPSILON
                     && start_lane == current_lane
+                    && row_delta == 0.0
                 {
                     if marquee_from_item_body(&gesture) {
                         return None;
@@ -2783,18 +2959,17 @@ impl TimelineView {
                 }
                 let lane_a = start_lane.min(current_lane);
                 let lane_b = start_lane.max(current_lane);
+                let (time_a, time_b) = self.marquee_span(start_time, current_marquee_time);
                 Some(action_map(vec![
                     ("type", keyword(":finish-marquee-select")),
-                    (
-                        "time-a",
-                        Value::Number(start_time.min(current_marquee_time)),
-                    ),
-                    (
-                        "time-b",
-                        Value::Number(start_time.max(current_marquee_time)),
-                    ),
+                    ("time-a", Value::Number(time_a)),
+                    ("time-b", Value::Number(time_b)),
                     ("lane-a", Value::Number(lane_a as f64)),
                     ("lane-b", Value::Number(lane_b as f64)),
+                    (
+                        "row-delta",
+                        Value::Number(marquee_row_delta(&gesture, local_row)),
+                    ),
                     ("mode", keyword(":replace")),
                 ]))
             }
@@ -2922,7 +3097,13 @@ impl TimelineView {
                     ("ids", list_value(selected_ids)),
                 ]))
             }
-            KeyCode::Esc if !selected_ids.is_empty() => {
+            // Escape clears whatever is selected — items OR a region
+            // (docs/arrangement-region-editing-spec.md 4.4). Gating on items
+            // alone left a region highlight with no way to dismiss it, since
+            // an arrangement region names no items in this lane. Still gated
+            // on there being SOMETHING to clear, so Escape keeps falling
+            // through to its global binding when the lane holds no selection.
+            KeyCode::Esc if !selected_ids.is_empty() || self.selection_rect.is_some() => {
                 Some(action_map(vec![("type", keyword(":clear-selection"))]))
             }
             KeyCode::Char('p') => Some(action_map(vec![
@@ -3007,6 +3188,24 @@ impl TimelineView {
 /// background (docs/arrangement-region-editing-spec.md 3.1).
 fn marquee_from_item_body(gesture: &HashMap<String, Value>) -> bool {
     matches!(gesture.get("origin"), Some(Value::Keyword(origin)) if origin == "item-body")
+}
+
+/// Vertical travel of a `:marquee` gesture in cells: the pointer's current
+/// row minus the row the gesture began on, signed and **unclamped** — the
+/// pointer routinely leaves the instance rect, and drag capture keeps the
+/// events here (docs/arrangement-region-editing-spec.md 4.2). A host with one
+/// widget instance per track reconstructs the track span from this; a
+/// multi-lane host reads `lane-a`/`lane-b` instead and ignores it.
+///
+/// Both rows are already scroll-adjusted (`scroll_adjusted_row`), so the
+/// difference is free of any scroll the container did mid-drag.
+fn marquee_row_delta(gesture: &HashMap<String, Value>, local_row: f32) -> f64 {
+    // A gesture map without a start row cannot say how far the pointer
+    // travelled; report no travel rather than the raw row.
+    let Some(start_row) = gesture.get("row").and_then(as_number) else {
+        return 0.0;
+    };
+    local_row as f64 - start_row
 }
 
 fn vertical_scroll_passthrough(props: &HashMap<String, Value>) -> bool {
@@ -4089,6 +4288,187 @@ mod tests {
         );
     }
 
+    /// `:selection-rect-style :region` (region spec 4.4, Ableton arrangement):
+    /// the selection LIGHTS the lane rather than washing a translucent
+    /// marquee over the top of it. Empty lane background inside the span and
+    /// every covered clip's BODY take the selected-body colour, while the
+    /// clip's title bar keeps the clip colour — so the highlight reads as one
+    /// continuous band across clips and the gaps between them, and never
+    /// hides the clips behind a veil the way the marquee style would.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn region_selection_style_lights_the_lane_and_clip_bodies() {
+        const CLIP: crate::backend::Color = crate::backend::Color {
+            r: 0.9,
+            g: 0.2,
+            b: 0.4,
+            a: 1.0,
+        };
+        let props = |style: Option<&str>| {
+            let mut props = HashMap::from([
+                (
+                    "items".to_string(),
+                    list_value_raw(vec![map_value_raw(vec![
+                        ("id", number_value(1.0)),
+                        ("lane", number_value(0.0)),
+                        ("start", number_value(4.0)),
+                        ("end", number_value(12.0)),
+                    ])]),
+                ),
+                (
+                    "item-color".to_string(),
+                    list_value_raw(vec![
+                        number_value(CLIP.r as f64),
+                        number_value(CLIP.g as f64),
+                        number_value(CLIP.b as f64),
+                    ]),
+                ),
+                ("title-bar-height".to_string(), number_value(1.0)),
+                ("view-start".to_string(), number_value(0.0)),
+                ("view-duration".to_string(), number_value(16.0)),
+                ("header-height".to_string(), number_value(0.0)),
+                (
+                    "selection-rect".to_string(),
+                    map_value_raw(vec![
+                        ("time-a", number_value(0.0)),
+                        ("time-b", number_value(8.0)),
+                        ("lane-a", number_value(0.0)),
+                        ("lane-b", number_value(0.0)),
+                    ]),
+                ),
+            ]);
+            if let Some(style) = style {
+                props.insert("selection-rect-style".to_string(), keyword_value(style));
+            }
+            props
+        };
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 160.0,
+            height: 4.0,
+        };
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1920.0,
+            vp_h: 1080.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 12.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let build = |style: Option<&str>| {
+            let node = LayoutNode {
+                widget_id: 1,
+                stable_widget_id: None,
+                subtree_root_id: None,
+                parent_subtree_root_id: None,
+                stable_key: None,
+                widget_type: "timeline".to_string(),
+                rect,
+                props: props(style),
+                children: Vec::new(),
+                focusable: false,
+            };
+            build_metal_primitives(&node, viewport)
+        };
+        // Last quad of a given colour covering a point — i.e. what the eye
+        // actually sees there once everything has been painted.
+        let top_color_at = |primitives: &[MetalPrimitive], x: f32, y: f32| {
+            primitives
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    MetalPrimitive::Quad(quad)
+                        if quad.color.a >= 0.999
+                            && x >= quad.x
+                            && x < quad.x + quad.width
+                            && y >= quad.y
+                            && y < quad.y + quad.height =>
+                    {
+                        Some(quad.color)
+                    }
+                    _ => None,
+                })
+                .next_back()
+        };
+        let marquee_blue = |primitives: &[MetalPrimitive]| {
+            primitives.iter().any(|primitive| {
+                matches!(primitive, MetalPrimitive::Quad(quad)
+                    if (quad.color.r - 0.38).abs() < 0.001
+                        && (quad.color.g - 0.68).abs() < 0.001
+                        && (quad.color.b - 0.92).abs() < 0.001)
+            })
+        };
+
+        // Beats: the region covers 0..8, the clip covers 4..12, so beat 2 is
+        // bare lane inside the region, beat 6 is clip inside it, and beat 10
+        // is clip outside it.
+        let x_at = |beat: f32| rect.col + rect.width * (beat / 16.0);
+        let bar_y = 0.5;
+        let body_y = 3.0;
+
+        let region = build(Some("region"));
+        assert!(
+            !marquee_blue(&region),
+            "the region style must not wash the blue marquee over the lane"
+        );
+        assert_eq!(
+            top_color_at(&region, x_at(2.0), body_y),
+            Some(SELECTED_ITEM_BODY_COLOR),
+            "bare lane inside the region lights up"
+        );
+        assert_eq!(
+            top_color_at(&region, x_at(2.0), bar_y),
+            Some(SELECTED_ITEM_BODY_COLOR),
+            "with no clip there, the lit band is full lane height"
+        );
+        assert_eq!(
+            top_color_at(&region, x_at(6.0), body_y),
+            Some(SELECTED_ITEM_BODY_COLOR),
+            "a covered clip's BODY lights up in the same colour"
+        );
+        assert_eq!(
+            top_color_at(&region, x_at(6.0), bar_y),
+            Some(CLIP),
+            "but its title bar keeps the clip colour"
+        );
+        assert_eq!(
+            top_color_at(&region, x_at(10.0), body_y),
+            Some(CLIP),
+            "the part of the clip outside the region is untouched"
+        );
+
+        // The opaque fill would swallow the lane's grid, so the grid is
+        // redrawn over it: bar lines stay legible inside the selection, in
+        // the same dark wash a clip body uses for its own grid continuation.
+        let grid_over_region = region.iter().any(|primitive| {
+            matches!(primitive, MetalPrimitive::Quad(quad)
+                if quad.width < 0.2
+                    && quad.color.a < 0.5
+                    && quad.color.r < 0.05
+                    && quad.x > x_at(0.0)
+                    && quad.x < x_at(8.0))
+        });
+        assert!(
+            grid_over_region,
+            "grid lines must be redrawn on top of the region fill"
+        );
+
+        // Default style (piano roll, scene lane) is unchanged: a translucent
+        // blue wash with an outline, and no body relighting.
+        let marquee = build(None);
+        assert!(marquee_blue(&marquee), "the default style keeps the marquee");
+        assert_eq!(
+            top_color_at(&marquee, x_at(6.0), body_y),
+            Some(CLIP),
+            "the marquee style never repaints a clip body"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn metal_cursor_marker_starts_below_ruler_with_triangle_marker() {
@@ -4985,6 +5365,130 @@ mod tests {
             .expect("time-b");
         assert!((time_a - 2.4).abs() < 0.0001);
         assert!((time_b - 3.4).abs() < 0.0001);
+    }
+
+    /// A single-lane instance (one arrangement track lane) reports vertical
+    /// travel as `row-delta` in cells, signed and unclamped: drag capture
+    /// keeps every event in the originating lane, so the host reconstructs the
+    /// track span from this (region spec 4.2). `lane-a`/`lane-b` stay pinned
+    /// at 0 because the instance has exactly one lane.
+    fn single_lane_marquee_view(extra: Vec<(&str, Value)>) -> TimelineView {
+        let mut props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(4.0)),
+            ("header-height".to_string(), number_value(0.0)),
+            ("sidebar-width".to_string(), number_value(0.0)),
+            (
+                "time-ruler".to_string(),
+                map_value_raw(vec![
+                    ("mode", keyword_value("bars-beats")),
+                    ("beats-per-bar", number_value(4.0)),
+                ]),
+            ),
+        ]);
+        for (key, value) in extra {
+            props.insert(key.to_string(), value);
+        }
+        TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 128.0,
+                height: 3.0,
+            },
+        )
+    }
+
+    fn action_number(action: &Value, key: &str) -> f64 {
+        let Value::Map(map) = action else {
+            panic!("expected action map, got {action:?}");
+        };
+        map.get(key)
+            .and_then(|value| as_number(&value.borrow()))
+            .unwrap_or_else(|| panic!("action has no numeric :{key}"))
+    }
+
+    #[test]
+    fn marquee_reports_signed_unclamped_row_delta() {
+        let view = single_lane_marquee_view(vec![]);
+        let gesture = view.begin_gesture(32.0, 1.5).expect("marquee gesture");
+
+        // Downward drag, far past the instance's 3-row rect.
+        let down = view
+            .handle_pointer_drag(64.0, 9.5, Some(&gesture))
+            .expect("marquee action");
+        assert!((action_number(&down, "row-delta") - 8.0).abs() < 1e-9);
+        // One lane: the lane span cannot express the travel, only row-delta.
+        assert_eq!(action_number(&down, "lane-a"), 0.0);
+        assert_eq!(action_number(&down, "lane-b"), 0.0);
+
+        // Upward drag, above the top of the rect: negative and unclamped.
+        let up = view
+            .handle_pointer_drag(64.0, -4.5, Some(&gesture))
+            .expect("marquee action");
+        assert!((action_number(&up, "row-delta") + 6.0).abs() < 1e-9);
+
+        // The release payload carries the same travel.
+        let finish = view
+            .handle_pointer_up(64.0, 9.5, Some(&gesture))
+            .expect("finish marquee action");
+        assert!((action_number(&finish, "row-delta") - 8.0).abs() < 1e-9);
+    }
+
+    /// `:marquee-snap :grid` (region spec 4.3): the low edge floors and the
+    /// high edge ceils onto the zoom-adaptive ladder, so a sloppy drag still
+    /// selects whole grid cells. Hosts that pass nothing — the piano roll —
+    /// keep the raw pointer times.
+    #[test]
+    fn marquee_snap_grid_floors_min_and_ceils_max() {
+        let snapped =
+            single_lane_marquee_view(vec![("marquee-snap", keyword_value("grid"))]);
+        let grid = snapped.alignment_helper_grid_step();
+        assert_eq!(grid, 0.5, "fixture must sit on a known grid rung");
+
+        // 76.8 cells -> beat 2.4, 108.8 -> beat 3.4: neither is on a grid line.
+        let gesture = snapped.begin_gesture(76.8, 1.0).expect("marquee gesture");
+        let action = snapped
+            .handle_pointer_drag(108.8, 1.0, Some(&gesture))
+            .expect("marquee action");
+        assert!((action_number(&action, "time-a") - 2.0).abs() < 1e-9);
+        assert!((action_number(&action, "time-b") - 3.5).abs() < 1e-9);
+
+        // Dragging right-to-left snaps the same span: order is normalized
+        // before quantization.
+        let back = snapped.begin_gesture(108.8, 1.0).expect("marquee gesture");
+        let action = snapped
+            .handle_pointer_drag(76.8, 1.0, Some(&back))
+            .expect("marquee action");
+        assert!((action_number(&action, "time-a") - 2.0).abs() < 1e-9);
+        assert!((action_number(&action, "time-b") - 3.5).abs() < 1e-9);
+
+        // A vertical-only drag (no horizontal travel) would quantize to an
+        // empty span; it widens to the one cell the pointer is in.
+        let vertical = snapped.begin_gesture(64.0, 1.0).expect("marquee gesture");
+        let action = snapped
+            .handle_pointer_drag(64.0, 8.0, Some(&vertical))
+            .expect("marquee action");
+        assert!((action_number(&action, "time-a") - 2.0).abs() < 1e-9);
+        assert!((action_number(&action, "time-b") - 2.5).abs() < 1e-9);
+
+        // Without the prop, raw pointer times survive unchanged.
+        let raw = single_lane_marquee_view(vec![]);
+        let gesture = raw.begin_gesture(76.8, 1.0).expect("marquee gesture");
+        let action = raw
+            .handle_pointer_drag(108.8, 1.0, Some(&gesture))
+            .expect("marquee action");
+        assert!((action_number(&action, "time-a") - 2.4).abs() < 1e-4);
+        assert!((action_number(&action, "time-b") - 3.4).abs() < 1e-4);
     }
 
     #[test]
@@ -6061,6 +6565,179 @@ mod tests {
             gesture_kind(&without_bar.begin_gesture(8.0, 5.0).expect("body gesture")),
             "move"
         );
+    }
+
+    /// Pointer-down follows the same split: only the TITLE BAR selects the
+    /// clip. Pressing the body starts a region instead, so it must behave
+    /// like pressing empty lane space — clear the selection and park the edit
+    /// cursor — rather than selecting the whole clip out from under the drag
+    /// that is about to start (region spec 3.1/4.4).
+    #[test]
+    fn title_bar_selects_the_clip_but_the_body_clears_and_places_the_cursor() {
+        let action_type = |value: &Value| {
+            let Value::Map(map) = value else {
+                panic!("expected action map, got {value:?}");
+            };
+            match map.get("type").map(|cell| cell.borrow().clone()) {
+                Some(Value::Keyword(kind)) => kind,
+                other => panic!("expected an action type, got {other:?}"),
+            }
+        };
+        let with_bar = title_bar_view(Some(2.0));
+        assert_eq!(
+            action_type(&with_bar.handle_pointer_down(8.0, 1.0).expect("bar press")),
+            "select",
+            "the title bar is the clip-selection zone"
+        );
+        let body = with_bar.handle_pointer_down(8.0, 5.0).expect("body press");
+        assert_eq!(
+            action_type(&body),
+            "clear-selection",
+            "the body is a region surface: pressing it never selects the clip"
+        );
+        let Value::Map(map) = &body else {
+            panic!("expected action map");
+        };
+        assert!(
+            map.contains_key("time"),
+            "the body press still carries a time so the host can park the cursor"
+        );
+
+        // Without a title bar (piano roll) a body press selects, as always.
+        let without_bar = title_bar_view(None);
+        assert_eq!(
+            action_type(&without_bar.handle_pointer_down(8.0, 5.0).expect("body press")),
+            "select"
+        );
+    }
+
+    /// Escape dismisses a REGION, not just selected items (region spec 4.4).
+    /// An arrangement region names no items in the lane it covers, so gating
+    /// Escape on the item selection left the highlight stuck on screen. It
+    /// still declines Escape when the lane holds nothing, so the key keeps
+    /// falling through to its global binding.
+    #[test]
+    fn escape_clears_a_region_selection_not_just_selected_items() {
+        let escape = |view: &TimelineView| {
+            view.handle_key(WidgetKeyEvent {
+                code: KeyCode::Esc,
+                modifiers: KeyModifiers::empty(),
+            })
+        };
+        let action_type = |value: &Value| {
+            let Value::Map(map) = value else {
+                panic!("expected action map, got {value:?}");
+            };
+            match map.get("type").map(|cell| cell.borrow().clone()) {
+                Some(Value::Keyword(kind)) => kind,
+                other => panic!("expected an action type, got {other:?}"),
+            }
+        };
+
+        let mut props = HashMap::from([
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(1.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(12.0)),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(0.0)),
+        ]);
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 16.0,
+            height: 4.0,
+        };
+        assert!(
+            escape(&TimelineView::from_props(&props, rect)).is_none(),
+            "nothing selected: Escape falls through to its global binding"
+        );
+
+        // A region with no selected item still clears — this is the case that
+        // was stuck.
+        props.insert(
+            "selection-rect".to_string(),
+            map_value_raw(vec![
+                ("time-a", number_value(0.0)),
+                ("time-b", number_value(8.0)),
+                ("lane-a", number_value(0.0)),
+                ("lane-b", number_value(0.0)),
+            ]),
+        );
+        let action = escape(&TimelineView::from_props(&props, rect)).expect("region escape");
+        assert_eq!(action_type(&action), "clear-selection");
+
+        // And a selected item with no region clears, as it always has.
+        props.remove("selection-rect");
+        props.insert("selection".to_string(), list_value_raw(vec![number_value(1.0)]));
+        let action = escape(&TimelineView::from_props(&props, rect)).expect("item escape");
+        assert_eq!(action_type(&action), "clear-selection");
+    }
+
+    /// `:grid-density` divides the zoom-adaptive grid step, so a host can get
+    /// a finer grid — and finer `:grid` snapping — without zooming in. The
+    /// ladder rungs are powers of two, so the denser grid stays aligned to the
+    /// coarser one: bar lines never move, lines appear between them. Hosts
+    /// that pass nothing (the piano roll) keep the stock ladder exactly.
+    #[test]
+    fn grid_density_subdivides_the_ladder_without_moving_bar_lines() {
+        let step_for = |density: Option<f64>, view_duration: f64| {
+            let mut props = HashMap::from([
+                ("view-start".to_string(), number_value(0.0)),
+                ("view-duration".to_string(), number_value(view_duration)),
+                ("header-height".to_string(), number_value(0.0)),
+                (
+                    "time-ruler".to_string(),
+                    map_value_raw(vec![
+                        ("mode", keyword_value("bars-beats")),
+                        ("beats-per-bar", number_value(4.0)),
+                    ]),
+                ),
+            ]);
+            if let Some(density) = density {
+                props.insert("grid-density".to_string(), number_value(density));
+            }
+            let view = TimelineView::from_props(
+                &props,
+                Rect {
+                    row: 0.0,
+                    col: 0.0,
+                    width: 64.0,
+                    height: 4.0,
+                },
+            );
+            view.alignment_helper_grid_step()
+        };
+
+        for duration in [16.0, 32.0, 64.0, 128.0, 512.0] {
+            let stock = step_for(None, duration);
+            assert_eq!(
+                step_for(Some(1.0), duration),
+                stock,
+                "density 1 is the stock ladder"
+            );
+            assert_eq!(
+                step_for(Some(2.0), duration),
+                stock / 2.0,
+                "density 2 is exactly one rung finer at view {duration}"
+            );
+            // Every rung divides or multiplies the 4-beat bar, so bar lines
+            // survive at any density: the denser step still lands on beat 4.
+            let dense = step_for(Some(2.0), duration);
+            let ratio = 4.0 / dense;
+            assert!(
+                (ratio - ratio.round()).abs() < 1e-9 || (dense / 4.0).fract() < 1e-9,
+                "step {dense} must stay bar-aligned at view {duration}"
+            );
+        }
+        // Clamped to something sane rather than trusted blindly.
+        assert_eq!(step_for(Some(0.1), 64.0), step_for(None, 64.0));
     }
 
     /// docs/arrangement-region-editing-spec.md 3.2: `:width` on a dot is

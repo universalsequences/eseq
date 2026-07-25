@@ -1126,11 +1126,13 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
 
     runtime.register_native_with_docs(
         "seq-song-select-clip",
-        "(seq-song-select-clip track row-id)",
+        "(seq-song-select-clip track row-id [start end])",
         "Bind a track's device panel, monitor sound and take punch-in \
          template to the clip identified by `row-id` on `track` (takes spec \
-         16.2/16.6). Call with no arguments (or seq-song-deselect-clip) to \
-         fall back to the playing/scene source.",
+         16.2/16.6). With the clip's beat span, ALSO select that span as a \
+         one-track region (region spec 4.1) so the clip body lights up and \
+         copy/delete have a target. Call with no arguments (or \
+         seq-song-deselect-clip) to fall back to the playing/scene source.",
         move |args, ctx| {
             let (Some(Value::Number(track)), Some(Value::Number(row_id))) =
                 (args.first(), args.get(1))
@@ -1146,6 +1148,15 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
                 "row-id".to_string(),
                 Rc::new(RefCell::new(Value::Number(*row_id))),
             );
+            if let (Some(Value::Number(start)), Some(Value::Number(end))) =
+                (args.get(2), args.get(3))
+            {
+                payload.insert(
+                    "start".to_string(),
+                    Rc::new(RefCell::new(Value::Number(*start))),
+                );
+                payload.insert("end".to_string(), Rc::new(RefCell::new(Value::Number(*end))));
+            }
             ctx.enqueue_command(HostCommand::Custom {
                 name: "song-select-clip".to_string(),
                 payload: Value::Map(payload),
@@ -1162,6 +1173,57 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
         move |_args, ctx| {
             ctx.enqueue_command(HostCommand::Custom {
                 name: "song-deselect-clip".to_string(),
+                payload: Value::Nil,
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-set-region",
+        "(seq-song-set-region track-a track-b start end)",
+        "Select an arrangement REGION — the inclusive model-track span \
+         `track-a`..`track-b` over the half-open beat span `[start, end)` \
+         (region spec 4.1). Rust-owned, so it survives view switches; \
+         published as SEQ.song-region. A region names no single clip, so it \
+         clears the clip selection and releases the sound binding.",
+        move |args, ctx| {
+            let (
+                Some(Value::Number(track_a)),
+                Some(Value::Number(track_b)),
+                Some(Value::Number(start)),
+                Some(Value::Number(end)),
+            ) = (args.first(), args.get(1), args.get(2), args.get(3))
+            else {
+                return Err(
+                    "seq-song-set-region: expected track-a, track-b, start and end".into(),
+                );
+            };
+            let mut payload = HashMap::new();
+            for (key, value) in [
+                ("track-a", *track_a),
+                ("track-b", *track_b),
+                ("start", *start),
+                ("end", *end),
+            ] {
+                payload.insert(key.to_string(), Rc::new(RefCell::new(Value::Number(value))));
+            }
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-set-region".to_string(),
+                payload: Value::Map(payload),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "seq-song-clear-region",
+        "(seq-song-clear-region)",
+        "Clear the arrangement region selection (region spec 4.1): \
+         SEQ.song-region goes nil and every lane drops its region highlight.",
+        move |_args, ctx| {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-clear-region".to_string(),
                 payload: Value::Nil,
             });
             Ok(Value::Bool(true))
@@ -1674,6 +1736,9 @@ pub(crate) fn init_runtime(
                 ("song-edit-error", Value::Nil),
                 ("song-track-governed", Value::List(vec![])),
                 ("song-bound-clip", Value::Nil),
+                // Region selection (region spec 4.1): nil, or
+                // (track-a track-b start end).
+                ("song-region", Value::Nil),
                 ("song-rows", Value::List(vec![])),
                 ("song-lanes", Value::List(vec![])),
                 ("song-lane-events", Value::List(vec![])),

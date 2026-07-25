@@ -162,10 +162,15 @@ Set/cleared by natives `seq-song-set-region {track-a track-b start end}` /
 the keyboard seam (§5.3) and the primitives read it, and makes it survive
 buffer reloads like the bound clip does.
 
-Mutual exclusivity: setting a region clears clip selection and scene-row
-selection (and releases the sound binding — a region names no single clip,
-same rule as scene-lane selections, takes spec §16.11); selecting a clip or
-scene row clears the region.
+Mutual exclusivity, **as amended during Slice 2**: a free *marquee* region
+clears the clip and scene-row selections and releases the sound binding (it
+names no single clip, same rule as scene-lane selections, takes spec §16.11).
+A **clip selection is itself a one-clip region**: clicking a clip's title bar
+selects the clip AND sets the region to that clip's merged span on its track,
+keeping the binding (`select_song_clip_span` / `set_song_region_for_clip`).
+The span travels from the UI script because a timeline clip is the merged run
+of rows sharing a source, which only the lane projection knows. Deleting the
+clip, Escape, and a click on empty lane space clear both.
 
 ### 4.2 Capturing the drag across lanes
 
@@ -383,8 +388,23 @@ state, 4's region move depends on 3's `song_region_move`.
 - Clip body (below the bar) is a **selection surface**, not a move surface;
   move/resize live on the bar only. Plain body click = place edit cursor.
 - Region state is Rust-owned (`App::song_region_selection`), published as
-  `SEQ.song-region`; mutually exclusive with clip/scene-row selection;
-  setting it releases the sound binding.
+  `SEQ.song-region`. A MARQUEE region is mutually exclusive with
+  clip/scene-row selection and releases the sound binding; a clip selection
+  is a one-clip region and keeps its binding (§4.1 as amended).
+- The clip BODY is not a selection surface for the clip: pressing it clears
+  the selection, parks the edit cursor and starts a region. Only the title
+  bar selects the clip.
+- Region highlight is `:selection-rect-style :region`: an OPAQUE fill in the
+  selected-body colour over the lane background AND over each covered clip's
+  body (title bars keep the clip colour), with the grid redrawn on top. It
+  lights the lane rather than washing over it, so a gap and a clip body read
+  as one band. `:marquee` (default) is unchanged for the piano roll and the
+  scene lane.
+- Every arrangement lane carries the same `:time-ruler` and `:grid-density`
+  even though only the scene lane draws ruler chrome (gated on
+  `:header-height`): the ruler is the time BASE that picks the grid ladder
+  both the drawn lines and `:grid` snapping quantize to. Without it a lane
+  falls onto the seconds ladder and desyncs from the bars above.
 - Marquee times snap to the zoom-adaptive grid ladder (min down, max up).
 - Region operations are **new single-commit primitives** over one cloned
   `ProjectSong` (`paint_source_region` helper) — never a sequence of

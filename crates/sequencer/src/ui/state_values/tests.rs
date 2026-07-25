@@ -12711,6 +12711,9 @@
         for name in [
             "seq-song-select-clip",
             "seq-song-deselect-clip",
+            // Region selection (region spec 4.1).
+            "seq-song-set-region",
+            "seq-song-clear-region",
             "seq-sound-push-to-pattern",
             "seq-sound-apply-to-all-takes",
         ] {
@@ -12772,6 +12775,7 @@
                 ),
                 ("current-track", Value::Number(0.0)),
                 ("song-bound-clip", Value::Nil),
+                ("song-region", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_bool_list(&[false])),
                 ("track-mutes", test_bool_list(&[false])),
@@ -13944,6 +13948,7 @@
                 ("num-tracks", Value::Number(track_count as f64)),
                 ("current-track", Value::Number(0.0)),
                 ("song-bound-clip", Value::Nil),
+                ("song-region", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_repeated_bool_list(false, track_count)),
                 ("track-mutes", test_repeated_bool_list(false, track_count)),
@@ -19678,6 +19683,109 @@
         assert!(rows.is_empty());
     }
 
+    /// `SEQ.song-region` publish + diff
+    /// (docs/arrangement-region-editing-spec.md 4.1): the Rust-owned region
+    /// surfaces as `(track-a track-b start end)`, republishes only when it
+    /// actually moved, and goes back to nil on clear. Rust ownership is what
+    /// makes the highlight survive a view switch, so this seam — not a Lisp
+    /// defstate — is the source of truth.
+    #[test]
+    fn metal_seq_song_region_publishes_and_diffs() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        let state = sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![sequencer::sequencer::PatternSnapshot::new_default(1, &[])],
+            0,
+        );
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut test_app = sequencer::app::App::new(
+            std::sync::Arc::new(state),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        test_app.tracks = vec!["Track 1".to_string()];
+        test_app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+
+        let mut frame = SongFrameState::default();
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("binding read evaluates")
+                .expect("binding read returns a value")
+        };
+        assert_eq!(
+            read(&mut editor, "SEQ.song-region"),
+            Value::Nil,
+            "no region selected yet"
+        );
+
+        // Setting a region publishes the four-element rectangle.
+        test_app.set_song_region(sequencer::app::song_region::SongRegionSelection::new(
+            1, 3, 8.0, 24.0,
+        ));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        let Value::List(region) = read(&mut editor, "SEQ.song-region") else {
+            panic!("song-region must be a list once a region is selected");
+        };
+        let region: Vec<Value> = region.iter().map(|cell| cell.borrow().clone()).collect();
+        assert_eq!(
+            region,
+            vec![
+                Value::Number(1.0),
+                Value::Number(3.0),
+                Value::Number(8.0),
+                Value::Number(24.0),
+            ]
+        );
+
+        // Same region again: nothing to republish.
+        assert!(
+            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            "an unchanged region publishes nothing"
+        );
+
+        // Moving one edge republishes.
+        test_app.set_song_region(sequencer::app::song_region::SongRegionSelection::new(
+            1, 3, 8.0, 32.0,
+        ));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        let Value::List(region) = read(&mut editor, "SEQ.song-region") else {
+            panic!("song-region must still be a list");
+        };
+        assert_eq!(region[3].borrow().clone(), Value::Number(32.0));
+
+        // Clearing goes back to nil, and stays quiet afterwards.
+        test_app.clear_song_region();
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(read(&mut editor, "SEQ.song-region"), Value::Nil);
+        assert!(
+            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            "clearing an already-clear region publishes nothing"
+        );
+    }
+
     /// Lane-projection read surface for the arrangement timeline
     /// (docs/arrangement-timeline-ui-spec.md; song-mode-spec 5.5): `song-lanes`
     /// publishes the per-track clip spans derived from the committed song plus
@@ -20397,7 +20505,9 @@
         let lane = find_layout_node_by_widget_type(container, "timeline")
             .expect("track timeline instance");
         let click_col = lane.rect.col + lane.rect.width * (8.0 / 64.0);
-        let click_row = lane.rect.row + lane.rect.height * 0.5;
+        // Selecting a clip means clicking its TITLE BAR; the body below is a
+        // region-selection surface (region spec 3.1/4.4).
+        let click_row = lane.rect.row + 0.3;
         for kind in [
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
             crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
@@ -20573,7 +20683,9 @@
         // Click the middle of lane 5's clip AT ITS RENDERED (scrolled)
         // position: layout row minus the container's scroll offset.
         let click_col = lane5.rect.col + lane5.rect.width * (8.0 / 64.0);
-        let click_row = lane5.rect.row - offset + lane5.rect.height * 0.5;
+        // The title bar is the clip-selection zone; the body marquees a
+        // region instead (region spec 3.1/4.4).
+        let click_row = lane5.rect.row - offset + 0.3;
         let mouse = |kind, col: f32, row: f32| crossterm::event::MouseEvent {
             kind,
             column: col as u16,
@@ -21085,9 +21197,18 @@
             Some(0.0),
             "the composed seqv-track-header plays the sidebar role"
         );
-        assert!(
-            track_lane.props.get("time-ruler").is_none(),
-            "only the scene lane draws a ruler"
+        // Only the scene lane DRAWS a ruler — and what gates that is
+        // :header-height, asserted above, since every bit of ruler chrome
+        // lives inside the header. Track lanes still carry the same
+        // :time-ruler: it is the bar/beat time base that picks the grid
+        // ladder their lines and :grid snapping quantize to, so leaving it
+        // off dropped them onto the seconds ladder and desynced their grid
+        // from the ruler above (see
+        // metal_seq_arrangement_lane_grid_matches_the_ruler_at_every_zoom).
+        assert_eq!(
+            track_lane.props.get("time-ruler"),
+            scene_lane.props.get("time-ruler"),
+            "every lane shares the scene lane's bar/beat time base"
         );
         assert!(
             matches!(
@@ -21188,6 +21309,513 @@
         assert_eq!(
             read(&mut editor, "(get (nth (arrangement-scene-items) 1) :end)"),
             Value::Number(16.0)
+        );
+    }
+
+    /// Fixture for the region-selection tests: `tracks` lanes, the indices in
+    /// `collapsed` hidden, one full-width clip per visible lane, the view
+    /// showing beats 0..64.
+    fn arrangement_region_editor(tracks: usize, collapsed: &[usize]) -> eseqlisp::Editor {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let song_row = |id: f64, start: f64, scene: f64| {
+            map_value(vec![
+                ("id", Value::Number(id)),
+                ("start-beat", Value::Number(start)),
+                ("scene", Value::Number(scene)),
+                ("overrides", Value::List(vec![])),
+            ])
+        };
+        let lane_clip = |row_id: f64, start: f64, end: f64, pattern: Value| {
+            map_value(vec![
+                ("row-id", Value::Number(row_id)),
+                ("start-beat", Value::Number(start)),
+                ("end-beat", Value::Number(end)),
+                ("pattern-id", pattern),
+                ("from-override", Value::Bool(false)),
+            ])
+        };
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "num-tracks", Value::Number(tracks as f64));
+        rt.set_reactive(
+            "SEQ",
+            "track-ids",
+            test_number_list(&(0..tracks).map(|i| i as f64).collect::<Vec<_>>()),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-collapsed",
+            test_bool_list(
+                &(0..tracks)
+                    .map(|i| collapsed.contains(&i))
+                    .collect::<Vec<_>>(),
+            ),
+        );
+        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
+        rt.set_reactive("SEQ", "song-end-beat", Value::Number(64.0));
+        rt.set_reactive("SEQ", "song-rows", test_list(vec![song_row(0.0, 0.0, 0.0)]));
+        rt.set_reactive(
+            "SEQ",
+            "song-lanes",
+            Value::List(
+                (0..tracks)
+                    .map(|track| {
+                        // The LAST track stays bare (nil pattern renders no
+                        // item), so tests have empty lane background to click.
+                        let pattern = if track + 1 == tracks {
+                            Value::Nil
+                        } else {
+                            Value::Number(1.0)
+                        };
+                        Rc::new(RefCell::new(test_list(vec![lane_clip(
+                            0.0, 0.0, 64.0, pattern,
+                        )])))
+                    })
+                    .collect(),
+            ),
+        );
+        rt.run_reactive_cycle();
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(do (seq-open-arrangement) (set! arrangement-view-start 0) \
+                 (set! arrangement-view-duration 64))",
+            )
+            .expect("open arrangement view");
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(96, 40);
+        editor
+    }
+
+    /// The `arrangement-track-row-pitch` constant the region drag divides by
+    /// (docs/arrangement-region-editing-spec.md 4.2) must equal the ACTUAL
+    /// vertical distance between two rendered track rows. If the lane height
+    /// or the v-stack gap ever changes without the pitch following, a
+    /// cross-track sweep silently selects the wrong tracks — this is the
+    /// assertion that binds them.
+    #[test]
+    fn metal_seq_arrangement_region_row_pitch_matches_layout() {
+        let mut editor = arrangement_region_editor(4, &[]);
+        let layout = editor.widget_layout().expect("arrangement layout");
+        let lane = |key: &str| {
+            let container =
+                find_layout_node_by_stable_key(&layout, key).expect("track lane container");
+            find_layout_node_by_widget_type(container, "timeline")
+                .expect("timeline instance")
+                .rect
+                .row
+        };
+        let measured = lane("arrangement-track-lane-1") - lane("arrangement-track-lane-0");
+        let measured_next = lane("arrangement-track-lane-2") - lane("arrangement-track-lane-1");
+        assert!(
+            (measured - measured_next).abs() < 0.01,
+            "track rows must be evenly pitched ({measured} vs {measured_next})"
+        );
+        let Some(Value::Number(pitch)) = editor
+            .runtime_mut()
+            .eval_str("arrangement-track-row-pitch")
+            .expect("pitch evaluates")
+        else {
+            panic!("arrangement-track-row-pitch must be a number");
+        };
+        assert!(
+            (pitch - measured as f64).abs() < 0.01,
+            "arrangement-track-row-pitch ({pitch}) must match the rendered row \
+             pitch ({measured}); update the constant next to the lane heights"
+        );
+    }
+
+    /// Ordinal <-> track mapping for a cross-track region drag (region spec
+    /// 4.2). The widget reports vertical travel in CELLS from the originating
+    /// lane; the host divides by the row pitch to get a count of visible
+    /// track rows, steps that far through `seq-visible-track-indices`, clamps
+    /// to the visible range, and maps back to a MODEL track index. Collapsed
+    /// tracks are absent from that list, so a sweep skips straight over them.
+    #[test]
+    fn metal_seq_arrangement_region_maps_row_delta_to_visible_tracks() {
+        // Track 2 collapsed: visible order is 0, 1, 3, 4, 5.
+        let mut editor = arrangement_region_editor(6, &[2]);
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("expr evaluates")
+                .expect("expr returns a value")
+        };
+        assert_eq!(
+            read(&mut editor, "(seq-visible-track-indices)"),
+            test_number_list(&[0.0, 1.0, 3.0, 4.0, 5.0]),
+            "the collapsed track is absent from the visible order"
+        );
+        assert_eq!(
+            read(&mut editor, "(arrangement-visible-ordinal (seq-visible-track-indices) 3)"),
+            Value::Number(2.0),
+            "model track 3 is the THIRD visible row once track 2 collapses"
+        );
+        assert_eq!(
+            read(&mut editor, "(arrangement-visible-ordinal (seq-visible-track-indices) 2)"),
+            Value::Number(-1.0),
+            "a collapsed track has no visible ordinal"
+        );
+
+        // One row of travel down from track 1 lands on model track 3, not 2.
+        assert_eq!(
+            read(
+                &mut editor,
+                "(arrangement-region-other-track 1 arrangement-track-row-pitch)"
+            ),
+            Value::Number(3.0)
+        );
+        // Half a row rounds to the nearer row: still track 1.
+        assert_eq!(
+            read(
+                &mut editor,
+                "(arrangement-region-other-track 1 (* 0.4 arrangement-track-row-pitch))"
+            ),
+            Value::Number(1.0)
+        );
+        // Upward travel is signed.
+        assert_eq!(
+            read(
+                &mut editor,
+                "(arrangement-region-other-track 3 (* -2 arrangement-track-row-pitch))"
+            ),
+            Value::Number(0.0)
+        );
+        // Off the bottom clamps to the last visible track, not past it.
+        assert_eq!(
+            read(
+                &mut editor,
+                "(arrangement-region-other-track 1 (* 40 arrangement-track-row-pitch))"
+            ),
+            Value::Number(5.0)
+        );
+        // Off the top clamps to the first.
+        assert_eq!(
+            read(
+                &mut editor,
+                "(arrangement-region-other-track 4 (* -40 arrangement-track-row-pitch))"
+            ),
+            Value::Number(0.0)
+        );
+        // Missing :row-delta (a host that never sends one) means no travel.
+        assert_eq!(
+            read(&mut editor, "(arrangement-region-other-track 4 nil)"),
+            Value::Number(4.0)
+        );
+    }
+
+    /// End-to-end body-marquee (region spec 4.2/4.3/4.4): pressing a clip's
+    /// BODY and dragging down two lanes commits one region through
+    /// seq-song-set-region, grid-quantized, spanning the swept tracks — and
+    /// the intermediate frames paint the ghost highlight on every lane in
+    /// between, including ones with no clip under the pointer. A plain click
+    /// clears the region and parks the edit cursor.
+    #[test]
+    fn metal_seq_arrangement_body_drag_sweeps_a_cross_track_region() {
+        let mut editor = arrangement_region_editor(5, &[]);
+        let regions: Arc<Mutex<Vec<Vec<f64>>>> = Arc::new(Mutex::new(Vec::new()));
+        let cleared: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let sink = regions.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-song-set-region", move |args, _ctx| {
+                sink.lock().unwrap().push(
+                    args.iter()
+                        .map(|arg| match arg {
+                            Value::Number(value) => *value,
+                            other => panic!("region args must be numbers, got {other:?}"),
+                        })
+                        .collect(),
+                );
+                Ok(Value::Bool(true))
+            });
+        let clear_sink = cleared.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-song-clear-region", move |_args, _ctx| {
+                *clear_sink.lock().unwrap() += 1;
+                Ok(Value::Bool(true))
+            });
+
+        let layout = editor.widget_layout().expect("arrangement layout");
+        let lane_rect = |key: &str| {
+            let container =
+                find_layout_node_by_stable_key(&layout, key).expect("track lane container");
+            find_layout_node_by_widget_type(container, "timeline")
+                .expect("timeline instance")
+                .rect
+        };
+        let lane1 = lane_rect("arrangement-track-lane-1");
+        let lane3 = lane_rect("arrangement-track-lane-3");
+
+        let mouse = |kind, col: f32, row: f32| crossterm::event::MouseEvent {
+            kind,
+            column: col as u16,
+            row: row as u16,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let send = |editor: &mut eseqlisp::Editor, kind, col: f32, row: f32| {
+            editor.handle_mouse_precise(mouse(kind, col, row), 0, 0, 96, 40, col, row);
+            editor.refresh_runtime_side_effects();
+        };
+
+        // Press on the clip BODY (below the title bar), at beat ~9.
+        let press_col = lane1.col + lane1.width * (9.0 / 64.0);
+        let press_row = lane1.row + lane1.height - 0.3;
+        send(
+            &mut editor,
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            press_col,
+            press_row,
+        );
+        // Drag down into lane 3 and right to beat ~23.
+        let drag_col = lane1.col + lane1.width * (23.0 / 64.0);
+        let drag_row = press_row + (lane3.row - lane1.row);
+        send(
+            &mut editor,
+            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            drag_col,
+            drag_row,
+        );
+
+        // Mid-drag: the ghost paints on every swept lane, including lane 2,
+        // and NOT on lanes outside the sweep.
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("expr evaluates")
+                .expect("expr returns a value")
+        };
+        assert_ne!(
+            read(&mut editor, "(arrangement-region-for-track 2)"),
+            Value::Nil,
+            "the lane between the drag ends is highlighted too"
+        );
+        assert_eq!(
+            read(&mut editor, "(arrangement-region-for-track 4)"),
+            Value::Nil,
+            "lanes outside the sweep stay unhighlighted"
+        );
+        assert!(
+            regions.lock().unwrap().is_empty(),
+            "live drag frames must not commit — ghost only"
+        );
+
+        send(
+            &mut editor,
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            drag_col,
+            drag_row,
+        );
+
+        let committed = regions.lock().unwrap().clone();
+        assert_eq!(committed.len(), 1, "one region per gesture, got {committed:?}");
+        let region = &committed[0];
+        assert_eq!(region[0], 1.0, "the drag started on track 1");
+        assert_eq!(region[1], 3.0, "and swept down to track 3");
+        // Grid-quantized: the view shows 64 beats, so the ladder step divides
+        // the raw span outward rather than landing on the raw pointer beats.
+        assert!(region[2] <= 9.0 && region[2] >= 8.0, "start floors: {region:?}");
+        assert!(region[3] >= 23.0 && region[3] <= 24.0, "end ceils: {region:?}");
+        assert_eq!(
+            read(&mut editor, "arrangement-region-ghost"),
+            Value::Nil,
+            "the ghost clears on commit; the committed region is Rust-owned"
+        );
+
+        // A plain click on empty lane space clears the region and parks the
+        // edit cursor on that track (region spec 4.4).
+        *cleared.lock().unwrap() = 0;
+        let lane4 = lane_rect("arrangement-track-lane-4");
+        let click_col = lane4.col + lane4.width * (40.0 / 64.0);
+        let click_row = lane4.row + lane4.height * 0.5;
+        for kind in [
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            send(&mut editor, kind, click_col, click_row);
+        }
+        assert!(
+            *cleared.lock().unwrap() > 0,
+            "a zero-movement release clears the region"
+        );
+        assert_eq!(
+            read(&mut editor, "arrangement-cursor-track"),
+            Value::Number(4.0),
+            "the click parks the edit cursor on the clicked track"
+        );
+    }
+
+    /// Every lane must quantize to the SAME bar/beat grid the ruler labels
+    /// (docs/arrangement-region-editing-spec.md 4.3). A track lane draws no
+    /// ruler, but the `:time-ruler` prop is not ruler CHROME — it is the time
+    /// base that picks the zoom-adaptive grid ladder. Without it the lane
+    /// fell through to the seconds ladder (steps of 5 or 10 beats), so at
+    /// zoomed-out views its grid lines missed bar lines the ruler was
+    /// labelling and a region drag snapped to those wrong positions.
+    #[test]
+    fn metal_seq_arrangement_lane_grid_matches_the_ruler_at_every_zoom() {
+        let mut editor = arrangement_region_editor(5, &[]);
+        editor.set_layout_viewport(200, 60);
+        for duration in [8.0f64, 16.0, 24.0, 48.0, 96.0, 192.0, 256.0, 512.0] {
+            for start in [0.0f64, 6.0, 6.5, 31.0] {
+                editor
+                    .runtime_mut()
+                    .eval_str(&format!(
+                        "(do (set! arrangement-view-start {start}) \
+                         (set! arrangement-view-duration {duration}))"
+                    ))
+                    .expect("set the view");
+                editor.refresh_runtime_side_effects();
+                let layout = editor.widget_layout().expect("arrangement layout");
+                let lane = |key: &str| {
+                    find_layout_node_by_widget_type(
+                        find_layout_node_by_stable_key(&layout, key).expect("lane container"),
+                        "timeline",
+                    )
+                    .expect("timeline instance")
+                };
+                let (scene_step, _, labels) =
+                    eseqlisp::widget_render::timeline::debug_grid(lane("arrangement-scene-lane"));
+                let (track_step, track_lines, _) = eseqlisp::widget_render::timeline::debug_grid(
+                    lane("arrangement-track-lane-1"),
+                );
+                assert_eq!(
+                    scene_step, track_step,
+                    "lane and ruler must share one grid step \
+                     (view {start}..{}), got ruler {scene_step} vs lane {track_step}",
+                    start + duration
+                );
+                // Every labelled bar on the ruler has a grid line under it in
+                // the track lane, at the same x.
+                for (label_x, label) in &labels {
+                    assert!(
+                        track_lines
+                            .iter()
+                            .any(|line_x| (line_x - label_x).abs() < 0.05),
+                        "bar {label} is labelled at x {label_x} but the track lane \
+                         draws no grid line there (view {start}..{}, step {track_step})",
+                        start + duration
+                    );
+                }
+            }
+        }
+    }
+
+    /// Clicking a clip's TITLE BAR is both gestures at once: it binds the
+    /// track's sound to the clip and selects the clip's merged span as a
+    /// one-track region, so the body lights up exactly like a swept region
+    /// and copy/delete have a target (Ableton). The span travels with the
+    /// select because only the lane projection knows how rows merge into one
+    /// clip.
+    #[test]
+    fn metal_seq_arrangement_title_bar_click_selects_the_clip_as_a_region() {
+        let mut editor = arrangement_region_editor(3, &[]);
+        let selects: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = selects.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-song-select-clip", move |args, _ctx| {
+                sink.lock().unwrap().push(args.to_vec());
+                Ok(Value::Bool(true))
+            });
+        let cleared: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let clear_sink = cleared.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-song-clear-region", move |_args, _ctx| {
+                *clear_sink.lock().unwrap() += 1;
+                Ok(Value::Bool(true))
+            });
+        editor
+            .runtime_mut()
+            .register_native("seq-arrangement-action", |_args, _ctx| {
+                Ok(Value::String("recorded".to_string()))
+            });
+
+        let layout = editor.widget_layout().expect("arrangement layout");
+        let container = find_layout_node_by_stable_key(&layout, "arrangement-track-lane-1")
+            .expect("track lane container");
+        let lane = find_layout_node_by_widget_type(container, "timeline")
+            .expect("timeline instance")
+            .rect;
+        // The title bar is the top strip of the clip; the body below it is a
+        // region-selection surface instead (region spec 3.1).
+        let col = lane.col + lane.width * (12.0 / 64.0);
+        let row = lane.row + 0.3;
+        let mouse = |kind| crossterm::event::MouseEvent {
+            kind,
+            column: col as u16,
+            row: row as u16,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        for kind in [
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            editor.handle_mouse_precise(mouse(kind), 0, 0, 96, 40, col, row);
+            editor.refresh_runtime_side_effects();
+        }
+
+        let recorded = selects.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1, "one select per click, got {recorded:?}");
+        assert_eq!(
+            recorded[0],
+            vec![
+                Value::Number(1.0),
+                Value::Number(0.0),
+                // The fixture's clip covers the whole 64-beat song.
+                Value::Number(0.0),
+                Value::Number(64.0),
+            ],
+            "the clip's span rides along so the selection is also a region"
+        );
+
+        // The lane renders that region through the same per-lane prop a swept
+        // region uses, and only on the clicked track.
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("expr evaluates")
+                .expect("expr returns a value")
+        };
+        editor
+            .runtime_mut()
+            .set_reactive(
+                "SEQ",
+                "song-region",
+                test_number_list(&[1.0, 1.0, 0.0, 64.0]),
+            );
+        editor.runtime_mut().run_reactive_cycle();
+        assert_ne!(
+            read(&mut editor, "(arrangement-region-for-track 1)"),
+            Value::Nil,
+            "the clicked track lights its region"
+        );
+        assert_eq!(
+            read(&mut editor, "(arrangement-region-for-track 0)"),
+            Value::Nil,
+            "other tracks do not"
+        );
+
+        // Backspace deletes the clip, and the region goes with it: the
+        // selection pointed AT that clip, so leaving the highlight lit over
+        // now-empty lane would be selecting something that no longer exists.
+        editor.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Backspace,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        editor.refresh_runtime_side_effects();
+        assert!(
+            *cleared.lock().unwrap() > 0,
+            "deleting the selected clip clears its region"
+        );
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-lane-selection 1))"),
+            Value::Number(0.0),
+            "and drops the clip selection"
         );
     }
 
@@ -21934,6 +22562,7 @@
                 ("track-collapsed", test_bool_list(&[false, true, false])),
                 ("current-track", Value::Number(0.0)),
                 ("song-bound-clip", Value::Nil),
+                ("song-region", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_repeated_bool_list(false, 3)),
                 ("track-mutes", test_repeated_bool_list(false, 3)),
@@ -27406,6 +28035,7 @@
                 ("num-tracks", Value::Number(1.0)),
                 ("current-track", Value::Number(0.0)),
                 ("song-bound-clip", Value::Nil),
+                ("song-region", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
                 (
                     "record-armed",

@@ -20,6 +20,12 @@ pub struct TimeViewport {
     pub view_duration: f64,
     pub zoom_min_duration: f64,
     pub zoom_max_duration: f64,
+    /// Divides the zoom-adaptive grid step, so `2.0` gives twice as many grid
+    /// cells at every zoom level. The ladder rungs are powers of two, so a
+    /// density of 2 is exactly "one rung finer" and every rung stays aligned
+    /// to the coarser one it came from — bar lines never move, there are just
+    /// more lines between them. Hosts that want the stock ladder pass `1.0`.
+    pub grid_density: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -212,6 +218,9 @@ impl TimeViewport {
                 } else {
                     16.0
                 };
+                let step = step / self.grid_density.clamp(1.0, 8.0);
+                // Derived from the DIVIDED step so majors keep landing on the
+                // same absolute times (bar lines) however dense the grid is.
                 let major_every = if step < 1.0 {
                     (1.0_f64 / step).round()
                 } else {
@@ -242,6 +251,7 @@ impl TimeViewport {
                 } else {
                     10.0
                 };
+                let step = step / self.grid_density.clamp(1.0, 8.0);
                 let major_every = if step < 0.1 {
                     10.0
                 } else if step < 1.0 {
@@ -337,6 +347,7 @@ mod tests {
             view_duration: 16.0,
             zoom_min_duration: 8.0,
             zoom_max_duration: 128.0,
+            grid_density: 1.0,
         };
         let ruler = TimeRuler {
             mode: TimeRulerMode::BarsBeats { beats_per_bar: 4 },
@@ -369,6 +380,7 @@ mod tests {
             view_duration: 4.0,
             zoom_min_duration: 0.25,
             zoom_max_duration: 128.0,
+            grid_density: 1.0,
         };
         let closer = TimeViewport {
             view_duration: 1.0,
@@ -394,6 +406,7 @@ mod tests {
             view_duration: 0.25,
             zoom_min_duration: 0.001,
             zoom_max_duration: 128.0,
+            grid_density: 1.0,
         };
         let ruler = TimeRuler {
             mode: TimeRulerMode::Seconds,

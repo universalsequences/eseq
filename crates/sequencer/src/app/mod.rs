@@ -44,6 +44,7 @@ mod params;
 mod projects;
 pub mod song_capture;
 pub mod song_edit;
+pub mod song_region;
 pub mod sound_binding;
 pub mod take_edit;
 pub mod take_recording;
@@ -924,6 +925,13 @@ pub struct App {
     /// the sound-binding order. Timeline state, not view state: it survives
     /// view switches and transport and never decays implicitly.
     pub song_clip_selection: Option<sound_binding::SongClipSelection>,
+    /// Persistent arrangement REGION selection
+    /// (docs/arrangement-region-editing-spec.md 4.1) — a time x track
+    /// rectangle. Rust-owned for the same reason as the clip selection: it
+    /// survives view switches and buffer reloads, and the copy/paste/delete
+    /// primitives read it directly. Mutually exclusive with the clip and
+    /// scene-row selections.
+    pub song_region_selection: Option<song_region::SongRegionSelection>,
     /// Whether the arrangement view is on screen. The clip selection is
     /// DORMANT while it is not (takes spec 16.6): a take selected in the
     /// timeline must not keep owning the device panel after the user has
@@ -2276,6 +2284,7 @@ impl App {
             take_recording: None,
             record_arm_sync_pending: false,
             song_clip_selection: None,
+            song_region_selection: None,
             arrangement_view_visible: false,
             loaded_sound_binding: Vec::new(),
             sound_binding_monitored: Vec::new(),

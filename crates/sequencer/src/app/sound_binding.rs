@@ -570,6 +570,36 @@ impl App {
         Ok(())
     }
 
+    /// `select_song_clip` plus the region the clip occupies
+    /// (docs/arrangement-region-editing-spec.md 4.1, amended): a title-bar
+    /// click is BOTH gestures — it binds the track's sound to this clip and
+    /// selects the clip's span as a one-track region, so the body lights up
+    /// and copy/delete have something to act on. The span comes from the
+    /// timeline because a clip there is the MERGED run of rows sharing a
+    /// source, which only the lane projection knows. `None` (no clip under
+    /// the pointer) clears the region.
+    pub fn select_song_clip_span(
+        &mut self,
+        track: usize,
+        row_id: SongRowId,
+        span: Option<(f64, f64)>,
+    ) -> Result<(), String> {
+        self.select_song_clip(track, row_id)?;
+        // An empty lane is a deselect, not a selection: it must not leave a
+        // region highlighting a clip that is not there.
+        match span.filter(|_| self.song_clip_selection.is_some()) {
+            Some((start, end)) => {
+                self.set_song_region_for_clip(super::song_region::SongRegionSelection::new(
+                    track, track, start, end,
+                ));
+            }
+            None => {
+                self.clear_song_region();
+            }
+        }
+        Ok(())
+    }
+
     /// Auto-select a freshly committed take (16.3/16.6 cause 3) so
     /// post-record tweaks bind to what the performer just played.
     pub(crate) fn select_committed_take(&mut self, track: usize, take: TakeId) {
@@ -616,7 +646,7 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use std::sync::{Arc, Mutex};
@@ -680,7 +710,7 @@ mod tests {
     }
 
     /// One track, one scene, and a two-chunk take placed over the whole song.
-    fn app_with_take() -> (App, TakeId, PatternId, Vec<PatternId>) {
+    pub(crate) fn app_with_take() -> (App, TakeId, PatternId, Vec<PatternId>) {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
         state.replace_pattern_repository(vec![PatternSnapshot::new_default(1, &[])], 0);
         state.restore_current_pattern_from_repository().unwrap();

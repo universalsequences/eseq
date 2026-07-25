@@ -25,6 +25,12 @@
 ;; the status line and, because items derive from the committed song, the
 ;; view snaps back on its own.
 (defstate arrangement-ghost nil)
+;; Live region-drag preview (region spec 4.4): a transient
+;; {track-a track-b start end} updated per :marquee-select frame. The
+;; COMMITTED region lives in Rust (SEQ.song-region) so it survives view
+;; switches; this is only what the pointer is currently sweeping, and the
+;; ghost wins over the committed region while it is set.
+(defstate arrangement-region-ghost nil)
 
 (def arrangement-min-view-duration 4)
 (def arrangement-max-view-duration 1024)
@@ -34,6 +40,14 @@
 (def arrangement-header-height 1.6)
 (def arrangement-scene-lane-height 3.6)
 (def arrangement-track-lane-height 2.85)
+;; Vertical distance in CELLS between one track row's top and the next.
+;; Track rows stack in a :gap 0 v-stack (see the buffer composition below), so
+;; the pitch is exactly the lane height — no gap and no per-row chrome to add.
+;; A cross-track region drag converts the widget's `row-delta` (cells) into a
+;; count of tracks by dividing by this, so it MUST track the lane height and
+;; the v-stack gap; metal_seq_arrangement_region_row_pitch_matches_layout
+;; measures the rendered rows and fails if they ever drift apart.
+(def arrangement-track-row-pitch arrangement-track-lane-height)
 ;; Clip title-bar height in cells (region spec 3.1): the move/resize strip
 ;; above each clip's body. Fixed rather than proportional so clips read the
 ;; same at any lane height; tune by eye against the Ableton reference.
@@ -42,6 +56,14 @@
 ;; with the UI zoom like the lane heights above. 0 gives the square clips
 ;; every other timeline host draws.
 (def arrangement-clip-corner-radius 0.22)
+;; Divides the timeline's zoom-adaptive grid step: 2 means one ladder rung
+;; finer than the default at every zoom, so bar lines stay put and a line
+;; appears halfway between them. Both the drawn grid and :grid snapping
+;; (region marquee, clip resize) follow it, which is what lets you grab a
+;; half-bar without zooming all the way in. Every arrangement lane passes the
+;; same value or the ruler and the lanes would quantize differently; hosts
+;; that want the stock ladder (the piano roll) pass nothing.
+(def arrangement-grid-density 2)
 ;; Fixed width for the composed seqv-track-header column so every lane's time
 ;; axis starts at the same x; the scene lane leads with a spacer of the same
 ;; width (spec 4.2: the per-track sidebar role is played by the header).
@@ -503,6 +525,107 @@
       (list (nth SEQ.song-bound-clip 1))
       '())))
 
+;; ── Region selection (region spec 4) ───────────────────────────────────────
+
+;; Drag capture is per widget instance, so a cross-track marquee never reaches
+;; the lanes it sweeps over: the originating lane reports the pointer's
+;; VERTICAL TRAVEL (`:row-delta`, cells, signed and unclamped) and the host
+;; reconstructs the track span from it (spec 4.2).
+
+;; Position of a model track index within the currently visible tracks, or -1
+;; when it is collapsed away. Collapsed tracks are simply absent, so a region
+;; drag always spans visible tracks and never lands on a hidden one.
+(def arrangement-visible-ordinal (visible track)
+  (reduce |acc o| (if (= (nth visible o) track) o acc)
+    -1
+    (range 0 (len visible))))
+
+;; Ordinal -> model track index, clamped to the visible range so a drag that
+;; runs off the top or bottom of the arrangement selects out to the edge.
+(def arrangement-track-at-ordinal (visible ordinal)
+  (nth visible (max 0 (min (- (len visible) 1) ordinal))))
+
+;; The far end of a region drag that started in track `i`: convert the
+;; vertical travel to a count of track rows, step that many places through the
+;; visible order, and map back to a model index.
+(def arrangement-region-other-track (i row-delta)
+  (let ((visible (seq-visible-track-indices)))
+    (if (= (len visible) 0)
+      i
+      (let ((ordinal (arrangement-visible-ordinal visible i)))
+        (if (< ordinal 0)
+          i
+          (arrangement-track-at-ordinal visible
+            (+ ordinal (round (/ (or row-delta 0) arrangement-track-row-pitch)))))))))
+
+(def arrangement-region-from-event (i event)
+  (dict
+    :track-a i
+    :track-b (arrangement-region-other-track i (get event :row-delta))
+    :start (get event :time-a)
+    :end (get event :time-b)))
+
+;; Scene-lane marquees select the time span across EVERY visible track
+;; (spec 4.2): the scene lane spans the whole arrangement, so its vertical
+;; travel carries no track information.
+(def arrangement-region-all-tracks (event)
+  (let ((visible (seq-visible-track-indices)))
+    (if (= (len visible) 0)
+      nil
+      (dict
+        :track-a (nth visible 0)
+        :track-b (nth visible (- (len visible) 1))
+        :start (get event :time-a)
+        :end (get event :time-b)))))
+
+(def arrangement-region-commit (region)
+  (do
+    (set! arrangement-region-ghost nil)
+    (if (= region nil)
+      (seq-song-clear-region)
+      (seq-song-set-region
+        (get region :track-a) (get region :track-b)
+        (get region :start) (get region :end)))))
+
+;; Clicking a clip's title bar is BOTH gestures: it binds the track's sound to
+;; the clip AND selects the clip's span as a one-track region, so the body
+;; lights up exactly like a swept region does and copy/delete have a target
+;; (Ableton). The span travels with the select because a timeline clip is the
+;; MERGED run of rows sharing a source — only this projection knows it. A free
+;; marquee, which names no single clip, still releases the binding.
+(def arrangement-select-clip (i row-id)
+  (let ((clip (arrangement-find-track-clip i row-id)))
+    (if (= clip nil)
+      (seq-song-select-clip i row-id)
+      (seq-song-select-clip i row-id
+        (get clip :start-beat) (get clip :end-beat)))))
+
+;; Any other selection gesture drops the region: the two are mutually
+;; exclusive (spec 4.1). Clip selection additionally clears it Rust-side, so
+;; this is really about the in-flight ghost and the scene-row path.
+(def arrangement-region-clear ()
+  (do
+    (set! arrangement-region-ghost nil)
+    (seq-song-clear-region)))
+
+;; The rect one lane draws: the ghost while a drag is live, else the committed
+;; Rust-owned region, else nothing. Full lane height over [start, end) — the
+;; lane is single-lane, so lane-a/lane-b are always 0 (spec 4.4).
+(def arrangement-region-for-track (i)
+  (let ((ghost arrangement-region-ghost))
+    (if (not (= ghost nil))
+      (if (and (>= i (min (get ghost :track-a) (get ghost :track-b)))
+            (<= i (max (get ghost :track-a) (get ghost :track-b))))
+        (dict :time-a (get ghost :start) :time-b (get ghost :end)
+          :lane-a 0 :lane-b 0)
+        nil)
+      (if (= SEQ.song-region nil)
+        nil
+        (if (and (>= i (nth SEQ.song-region 0)) (<= i (nth SEQ.song-region 1)))
+          (dict :time-a (nth SEQ.song-region 2) :time-b (nth SEQ.song-region 3)
+            :lane-a 0 :lane-b 0)
+          nil)))))
+
 ;; ── Action handlers ────────────────────────────────────────────────────────
 
 ;; Lower one finished gesture to song primitives through the Rust translator
@@ -527,21 +650,31 @@
         (set! arrangement-selected-track -1)
         (set! arrangement-selection (get event :ids))
         ;; A scene row spans every track and names no single clip, so it
-        ;; releases the sound binding (takes spec 16.6 cause 2).
+        ;; releases the sound binding (takes spec 16.6 cause 2) — and, for the
+        ;; same reason, drops the region (region spec 4.1).
+        (arrangement-region-clear)
         (seq-song-deselect-clip)
         (set-arrangement-cursor (get event :time) -1))
       :clear-selection
       (do
         (set! arrangement-selection-rect nil)
         (set! arrangement-selection '())
+        (arrangement-region-clear)
         (seq-song-deselect-clip)
         (set-arrangement-cursor (get event :time) -1))
       :set-cursor
       (set-arrangement-cursor (get event :time) -1)
+      ;; A scene-lane marquee selects the time span across ALL visible tracks
+      ;; (region spec 4.2): the lane has no per-track geometry to sweep. The
+      ;; scene lane keeps its own dashed marquee echo while the drag is live.
       :marquee-select
-      (set! arrangement-selection-rect event)
+      (do
+        (set! arrangement-selection-rect event)
+        (set! arrangement-region-ghost (arrangement-region-all-tracks event)))
       :finish-marquee-select
-      (set! arrangement-selection-rect nil)
+      (do
+        (set! arrangement-selection-rect nil)
+        (arrangement-region-commit (arrangement-region-all-tracks event)))
       ;; Live drags: ghost only, never a primitive (spec 9.1).
       :move-items-absolute
       (set! arrangement-ghost
@@ -588,8 +721,13 @@
         (dict :type :finish-resize-content-length
           :length (get event :length)))
       :delete-items
-      (arrangement-edit-finish
-        (dict :type :delete-items :ids (get event :ids))))))
+      (do
+        ;; Removing rows re-times everything after them, so a region measured
+        ;; against the old song is stale — drop it with the selection.
+        (set! arrangement-selection '())
+        (arrangement-region-clear)
+        (arrangement-edit-finish
+          (dict :type :delete-items :ids (get event :ids)))))))
 
 ;; Track-lane clip editing (Ableton-style): select a clip, Backspace deletes
 ;; it, dragging its end edge resizes it — fewer loops leaves silence, more
@@ -636,6 +774,10 @@
 (def arrangement-track-delete (i ids)
   (do
     (set! arrangement-track-selection '())
+    ;; Deleting the clip deletes what the selection pointed at: the region
+    ;; goes with it, or the highlight would stay lit over empty lane (region
+    ;; spec 4.1 — a clip selection IS its region).
+    (arrangement-region-clear)
     (seq-song-deselect-clip)
     (map
       (lambda (row-id)
@@ -654,6 +796,9 @@
       (do
         (set! arrangement-selection '())
         (set! arrangement-selection-rect nil)
+        ;; A clip and a region are mutually exclusive (region spec 4.1); the
+        ;; Rust side drops the region too, this clears the in-flight ghost.
+        (set! arrangement-region-ghost nil)
         (set! arrangement-selected-track i)
         (set! arrangement-track-selection (get event :ids))
         ;; Selecting a clip is the explicit sound-binding gesture (takes
@@ -661,16 +806,26 @@
         ;; sound and take punch-in template. The binding lives in Rust so it
         ;; survives view switches and transport.
         (if (= (len (get event :ids)) 0)
-          (seq-song-deselect-clip)
-          (seq-song-select-clip i (nth (get event :ids) 0)))
+          (do (seq-song-deselect-clip) (seq-song-clear-region))
+          (arrangement-select-clip i (nth (get event :ids) 0)))
         (set-arrangement-cursor (get event :time) i))
+      ;; Degenerate zero-movement release, or a click on empty lane space:
+      ;; drop the region and park the edit cursor here, Ableton-style
+      ;; (region spec 4.4).
       :clear-selection
       (do
         (set! arrangement-track-selection '())
+        (arrangement-region-clear)
         (seq-song-deselect-clip)
         (set-arrangement-cursor (get event :time) i))
       :set-cursor
       (set-arrangement-cursor (get event :time) i)
+      ;; Cross-track region sweep (region spec 4.2/4.4): live frames update
+      ;; the ghost only; the release commits the Rust-owned region.
+      :marquee-select
+      (set! arrangement-region-ghost (arrangement-region-from-event i event))
+      :finish-marquee-select
+      (arrangement-region-commit (arrangement-region-from-event i event))
       ;; Live edge drag: ghost preview only (spec 9.1).
       :resize-item-absolute
       (set! arrangement-ghost
@@ -727,6 +882,7 @@
     :sidebar-width 0
     :header-height arrangement-header-height
     :time-ruler (dict :mode :bars-beats :beats-per-bar arrangement-beats-per-bar)
+    :grid-density arrangement-grid-density
     :title-bar-height arrangement-clip-title-bar-height
     :item-corner-radius arrangement-clip-corner-radius
     :item-color (list 0.52 0.56 0.62)
@@ -751,6 +907,9 @@
     :create-duration (* arrangement-beats-per-bar 4)
     :move-snap-mode :alignment-helper
     :resize-snap :grid
+    ;; Region drags quantize to the zoom-adaptive grid, min down / max up
+    ;; (region spec 4.3), so "grab exactly 4 bars" is a sloppy drag.
+    :marquee-snap :grid
     :snap-mode :floor
     :resize-snap-mode :alignment-helper
     :scroll-mode :smooth
@@ -770,6 +929,15 @@
     :item-corner-radius arrangement-clip-corner-radius
     :sidebar-width 0
     :header-height 0
+    ;; Track lanes draw NO ruler (:header-height 0 gates every bit of ruler
+    ;; chrome), but they still need the bar/beat time base: it is what picks
+    ;; the zoom-adaptive grid ladder that both the lane's grid lines and the
+    ;; :grid snapping (region marquee, clip resize) quantize to. Without it a
+    ;; lane falls back to the SECONDS ladder — steps like 5 or 10 beats — so
+    ;; its grid lines miss bar lines the ruler above is labelling, and a
+    ;; region drag snaps to those same wrong positions.
+    :time-ruler (dict :mode :bars-beats :beats-per-bar arrangement-beats-per-bar)
+    :grid-density arrangement-grid-density
     :focusable true
     :playhead-time (bind-seq "song-position-beats")
     :cursor-time (arrangement-lane-cursor-time i)
@@ -777,6 +945,13 @@
     :on-drop (lambda (event) (arrangement-drop-scene event))
     :items (arrangement-track-items i)
     :selection (arrangement-lane-selection i)
+    ;; Region highlight (region spec 4.4): the ghost while a drag is live,
+    ;; else the committed Rust-owned region. Empty lanes light up too — the
+    ;; region is a rectangle over time, not over clips. `:region` style lights
+    ;; the lane and each covered clip's BODY instead of washing a translucent
+    ;; marquee over the top of everything (Ableton).
+    :selection-rect (arrangement-region-for-track i)
+    :selection-rect-style :region
     :view-start arrangement-view-start
     :view-duration arrangement-view-duration
     :zoom-min-duration arrangement-min-view-duration
@@ -786,6 +961,7 @@
     :snap arrangement-snap
     :min-duration 1
     :resize-snap :grid
+    :marquee-snap :grid
     :snap-mode :floor
     :resize-snap-mode :alignment-helper
     :scroll-mode :smooth
