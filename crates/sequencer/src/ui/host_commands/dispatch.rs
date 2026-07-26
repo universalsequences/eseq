@@ -33,3 +33,22 @@ pub(crate) fn dispatch_custom_host_command(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sampler_range_batch_commands_are_registered_with_their_handler() {
+        for command in [
+            "set-instrument-param-batch",
+            "set-instrument-plock-batch",
+            "set-instrument-key-lock-batch",
+            "set-rack-slot-instrument-param-batch",
+            "set-rack-slot-instrument-plock-batch",
+        ] {
+            assert!(
+                super::super::rack::COMMANDS.contains(&command),
+                "{command} has an implementation in rack::handle and must be registered for dispatch"
+            );
+        }
+    }
+}
