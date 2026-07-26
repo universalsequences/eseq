@@ -598,6 +598,17 @@ impl SequencerState {
         self.pattern.arrangement.lock().unwrap().clone()
     }
 
+    /// Clear the authored arrangement and its compiled song together.
+    ///
+    /// Project topology teardown must use this before removing tracks. An
+    /// arrangement's lanes are indexed by track, so leaving the old lanes
+    /// installed while a replacement project's tracks are added makes the
+    /// first track registration look like destructive topology drift.
+    pub fn clear_committed_arrangement(&self) {
+        *self.pattern.arrangement.lock().unwrap() = None;
+        self.install_committed_song(None);
+    }
+
     /// Install `arrangement` and its compiled song together (spec 7).
     ///
     /// The arrangement is compiled against the **live** project scenes, which
@@ -613,16 +624,16 @@ impl SequencerState {
         &self,
         arrangement: Option<ProjectArrangement>,
     ) -> Result<(), String> {
-        let compiled = match &arrangement {
-            // Borrowed, not cloned: `capture_project_scenes` would copy every
-            // pattern pool on every arrangement edit.
-            Some(arrangement) => Some(
-                self.with_project_scenes(|scenes| compile_arrangement(arrangement, scenes))?,
-            ),
-            None => None,
+        let Some(arrangement) = arrangement else {
+            self.clear_committed_arrangement();
+            return Ok(());
         };
-        *self.pattern.arrangement.lock().unwrap() = arrangement;
-        self.install_committed_song(compiled);
+        // Borrowed, not cloned: `capture_project_scenes` would copy every
+        // pattern pool on every arrangement edit.
+        let compiled =
+            self.with_project_scenes(|scenes| compile_arrangement(&arrangement, scenes))?;
+        *self.pattern.arrangement.lock().unwrap() = Some(arrangement);
+        self.install_committed_song(Some(compiled));
         Ok(())
     }
 

@@ -939,12 +939,25 @@ impl From<ProjectBusChannel> for BusChannelState {
 }
 
 impl App {
+    /// Drop every piece of state whose identity belongs to the current
+    /// arrangement before the project's track topology is torn down.
+    ///
+    /// This must run before `clear_all_tracks`: new-track registration
+    /// reconciles committed arrangement lanes against the live topology and
+    /// must never see lanes from the project being replaced.
+    fn clear_project_arrangement_state(&mut self) {
+        self.state.clear_committed_arrangement();
+        self.use_arrangement = false;
+        self.song_capture_armed = false;
+        self.song_clip_selection = None;
+        self.song_region_selection = None;
+        self.song_edit_error = None;
+    }
+
     pub fn start_new_project(&mut self) {
         self.editor.pending_project_load = None;
         self.groups.clear();
-        self.state.set_committed_song(None);
-        self.use_arrangement = false;
-        self.song_capture_armed = false;
+        self.clear_project_arrangement_state();
 
         {
             let mut graph = self.graph_controller();
@@ -2473,6 +2486,7 @@ impl App {
                     pending.tick,
                     self.tracks.len()
                 );
+                self.clear_project_arrangement_state();
                 {
                     let mut graph = self.graph_controller();
                     graph.clear_all_tracks();

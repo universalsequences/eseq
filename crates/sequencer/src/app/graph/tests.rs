@@ -658,6 +658,74 @@
     }
 
     #[test]
+    fn loading_arranged_project_over_another_clears_old_arrangement_before_tracks() {
+        let graph = TestLiveGraph::new("arranged-project-reload-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_modulator_track()
+            .expect("add first source-project track");
+        app.graph_controller()
+            .add_modulator_track()
+            .expect("add second source-project track");
+        app.state
+            .set_committed_arrangement(Some(ProjectArrangement::new(2, 16.0)))
+            .expect("install source-project arrangement");
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos();
+        let project_name = format!(
+            "__test-arranged-project-reload-{}-{nonce}",
+            std::process::id()
+        );
+        let captured = app
+            .capture_project(&project_name)
+            .expect("arranged target project should capture");
+        let project_path = crate::project::save_project(&project_name, &captured)
+            .expect("arranged target project should save");
+        let _cleanup = TestProjectFile(project_path);
+
+        app.queue_project_load_named(&project_name)
+            .expect("arranged target project should queue");
+        for _ in 0..3 {
+            app.advance_pending_project_load()
+                .expect("target tracks should rebuild after clearing the old arrangement");
+        }
+
+        assert_eq!(app.tracks.len(), 2);
+        assert!(app.state.committed_arrangement().is_none());
+        assert!(app.state.committed_song().is_none());
+        assert!(
+            app.has_pending_project_load(),
+            "the target arrangement is installed later, during finalization"
+        );
+        app.editor.pending_project_load = None;
+        graph.process_block();
+    }
+
+    #[test]
+    fn new_project_clears_arrangement_state_before_removing_tracks() {
+        let graph = TestLiveGraph::new("new-project-arrangement-reset-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_modulator_track()
+            .expect("add source-project track");
+        app.state
+            .set_committed_arrangement(Some(ProjectArrangement::new(1, 16.0)))
+            .expect("install source-project arrangement");
+        app.use_arrangement = true;
+
+        app.start_new_project();
+
+        assert!(app.tracks.is_empty());
+        assert!(app.state.committed_arrangement().is_none());
+        assert!(app.state.committed_song().is_none());
+        assert!(!app.use_arrangement);
+        graph.process_block();
+    }
+
+    #[test]
     fn recorded_sampler_track_creation_undoes_and_redoes_with_stable_identity() {
         let graph = TestLiveGraph::new("track-creation-history-test");
         let mut app = test_app_with_track_count(&graph, 0);
