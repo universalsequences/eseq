@@ -200,18 +200,35 @@ so piano-roll's current usage is byte-for-byte unaffected:
 (dict :id ... :lane 0 :start 16 :end 32 :label "Verse" :color ...
   :kind :midi                          ; new — :midi | :audio | :scene
   :content (dict :dots (list (dict :offset 0.25 :value 0.6) ...)
-             :cycle 0.25))            ; new — :dots or :peaks payload;
+             :cycle 0.25
+             :phase 0.5))             ; new — :dots or :peaks payload;
                                        ; optional :cycle = fraction of the
-                                       ; item one repetition covers (0..1],
-                                       ; default 1 (no tiling)
+                                       ; item one repetition covers (>0);
+                                       ; optional :phase = source position
+                                       ; at the item start (0..1)
 ```
 
-A looping clip (a span longer than its pattern) declares `:cycle` =
-pattern-length / span; the widget tiles the dots at that period and draws a
-separator line per cycle boundary, so repeats read at a glance (both are
-skipped below a few px of per-cycle width). The widget still knows nothing
-about steps or timebases — the host computes the fraction. Out-of-range or
-malformed `:cycle` degrades to 1.
+A pattern clip declares `:cycle = pattern-length / span` and
+`:phase = offset-steps / pattern-steps`. `:cycle` may be below 1 (the pattern
+repeats) or above 1 (the clip shows only part of one pattern); `:phase`
+anchors that source window at the clip's left edge. The widget therefore
+keeps notes aligned through either-edge resizes instead of restarting or
+stretching the preview. It draws a separator at each visible cycle boundary;
+boundaries and dots are skipped below a few px of per-cycle width. The widget
+still knows nothing about steps or timebases — the host computes both
+ratios. Malformed `:cycle`/`:phase` values degrade to 1/0.
+
+Timeline item labels are styled by the optional widget props
+`:item-label-font-size` (points, default `10.5`) and `:item-label-color`
+(named or RGBA color, default `:black`). Both accept reactive bindings.
+Every label is hard-clipped to the visible item title bar (or item body when
+the title bar is disabled), so a long label cannot paint outside a short
+clip.
+
+The optional `:background-color` widget prop sets the lane background in
+both Metal and terminal rendering and accepts the same named/RGBA colors and
+reactive bindings. When absent, the timeline preserves its legacy lane
+defaults; the arrangement host passes its theme's `:buffer-bg`.
 
 parsed into:
 
@@ -467,7 +484,7 @@ priority order. None require stored-model changes; each is its own slice.
    transitions WITHOUT a pattern-epoch bump (the epoch stays untouched
    during playback so in-flight scheduled events are not dropped —
    spec 9's `bump_pattern_epoch: false` mirror contract).
-6. **Polish backlog** — scene-label width clipping/eliding on narrow
-   spans; an Ableton-style drop-hover insertion preview line while
-   dragging a scene pill; scene-lane vertical scroll pass-through to
-   the sibling track scroll container.
+6. **Polish backlog** — label eliding on narrow spans (labels are already
+   hard-clipped to their clip bounds); an Ableton-style drop-hover insertion
+   preview line while dragging a scene pill; scene-lane vertical scroll
+   pass-through to the sibling track scroll container.

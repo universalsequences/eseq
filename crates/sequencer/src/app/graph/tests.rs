@@ -3,7 +3,10 @@
     use crate::macro_engine::{MacroCurve, MacroKind, MacroMapping, MacroParamKey};
     use crate::process::ParamTarget;
     use crate::recorder::MasterRecorder;
-    use crate::sequencer::{default_empty_effect_chain, PatternSnapshot, SequencerState};
+    use crate::sequencer::{
+        default_empty_effect_chain, PatternSnapshot, ProjectArrangement, SceneEvent,
+        SequencerState,
+    };
     use crate::app::edit::{try_apply_command, EditOutcome};
     use crate::app::{AppCommand, AudioBuses};
     use std::path::PathBuf;
@@ -586,6 +589,71 @@
             ),
             Ok(EditOutcome::Applied(_))
         ));
+        graph.process_block();
+    }
+
+    #[test]
+    fn sampler_tracks_added_to_committed_arrangement_extend_and_stamp_their_lanes() {
+        let graph = TestLiveGraph::new("sampler-track-arrangement-lane-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(0, &[]),
+                PatternSnapshot::new_default(0, &[]),
+            ],
+            0,
+        );
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add first sampler track");
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add second sampler track");
+
+        let mut arrangement = ProjectArrangement::new(2, 16.0);
+        arrangement.scene_lane = vec![
+            SceneEvent {
+                start_beat: 0.0,
+                scene: 0,
+            },
+            SceneEvent {
+                start_beat: 4.0,
+                scene: 1,
+            },
+            SceneEvent {
+                start_beat: 8.0,
+                scene: 0,
+            },
+        ];
+        app.state
+            .set_committed_arrangement(Some(arrangement))
+            .expect("install the two-track arrangement");
+
+        let added = app
+            .graph_controller()
+            .add_blank_sampler_track()
+            .expect("add third sampler track to the arrangement");
+        let added_again = app
+            .graph_controller()
+            .add_blank_sampler_track()
+            .expect("add fourth sampler track to the arrangement");
+        assert_eq!(added, 2);
+        assert_eq!(added_again, 3);
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        assert_eq!(arrangement.track_lanes.len(), 4);
+        for track in [added, added_again] {
+            assert_eq!(
+                arrangement.track_lanes[track]
+                    .iter()
+                    .map(|clip| (clip.start_beat, clip.end_beat))
+                    .collect::<Vec<_>>(),
+                vec![(0.0, 4.0), (8.0, 16.0)]
+            );
+        }
+        assert!(
+            app.state.committed_song().is_some(),
+            "track registration recompiles the arrangement"
+        );
         graph.process_block();
     }
 

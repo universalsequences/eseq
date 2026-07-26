@@ -737,6 +737,71 @@ pub fn stamp_scene_clips(
     Ok(())
 }
 
+/// Append the arrangement lane for a newly appended project track and stamp
+/// every scene cell that already exists for that track.
+///
+/// Track creation grows `ProjectScenes` before it publishes the new topology.
+/// A committed arrangement must grow in the same operation: leaving the lane
+/// count behind makes the arrangement invalid and rejects every subsequent
+/// edit. The new lane follows the same visible-clip rule as scene stamping,
+/// but touches no existing lane. Bare scene cells remain honest gaps; a
+/// materialized cell becomes one clip for every matching scene span.
+///
+/// Preparation is transactional. Clip ids and phase offsets are computed
+/// before `arr` is changed, so allocator exhaustion or a topology mismatch
+/// leaves the committed arrangement untouched.
+pub fn append_scene_stamped_track_lane(
+    arr: &mut ProjectArrangement,
+    ctx: &dyn SongCompileContext,
+    track: usize,
+) -> Result<(), String> {
+    if arr.track_lanes.len() != track {
+        return Err(format!(
+            "Cannot append arrangement lane for track {}: the arrangement currently has {} \
+             track lane(s)",
+            track + 1,
+            arr.track_lanes.len()
+        ));
+    }
+
+    let prepared = arrangement_scene_spans(arr)
+        .into_iter()
+        .filter_map(|span| {
+            let pattern_id = ctx.song_scene_cell(span.scene, track)?;
+            let offset_steps =
+                advanced_pattern_offset(ctx, track, pattern_id, 0.0, span.start_beat);
+            Some((
+                span.start_beat,
+                span.end_beat,
+                pattern_id,
+                offset_steps,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let clip_count = u64::try_from(prepared.len())
+        .map_err(|_| "arrangement clip count exceeds the identity space".to_string())?;
+    let next_clip_id = arr
+        .next_clip_id
+        .checked_add(clip_count)
+        .ok_or_else(|| "arrangement clip identity space exhausted".to_string())?;
+
+    let lane = prepared
+        .into_iter()
+        .enumerate()
+        .map(|(index, (start_beat, end_beat, pattern_id, offset_steps))| ArrClip {
+            id: ClipId(arr.next_clip_id + index as u64),
+            start_beat,
+            end_beat,
+            pattern_id: Some(pattern_id),
+            take_id: None,
+            offset_steps,
+        })
+        .collect();
+    arr.next_clip_id = next_clip_id;
+    arr.track_lanes.push(lane);
+    Ok(())
+}
+
 /// One derived scene span for the UI read surface (spec 12): a scene EVENT
 /// plus the beat it runs to (the next event's start, else the arrangement
 /// end). One span per event and no more — this is the surface that makes the

@@ -52,6 +52,9 @@
 ;; above each clip's body. Fixed rather than proportional so clips read the
 ;; same at any lane height; tune by eye against the Ableton reference.
 (def arrangement-clip-title-bar-height 0.9)
+(def arrangement-clip-label-font-size 9)
+(def arrangement-clip-label-color '(rgba 0.2 0.2 0.2 1))
+(def arrangement-timeline-background-color :buffer-bg)
 ;; Clip corner radius in CELLS (GarageBand-style rounded clips), so it scales
 ;; with the UI zoom like the lane heights above. 0 gives the square clips
 ;; every other timeline host draws.
@@ -359,15 +362,25 @@
                   (/ (- end (get clip :start-beat)) step-beats))
                 :end-beat end))))))))
 
-;; One repetition's fraction of the clip span (widget :cycle key): a clip
-;; longer than the pattern tiles the preview per cycle with separator lines,
-;; DAW-style; a clip at or shorter than one cycle spans the whole item.
+;; One repetition's length relative to the clip span (widget :cycle key).
+;; This is deliberately allowed above 1: a clip shorter than its pattern
+;; shows only the source window it actually plays instead of squeezing the
+;; whole pattern into the clip.
 (def arrangement-clip-cycle (entry clip)
   (let ((span (- (get clip :end-beat) (get clip :start-beat)))
         (length-beats (get entry :length-beats)))
-    (if (and (> length-beats 0) (> span length-beats))
+    (if (and (> length-beats 0) (> span 0))
       (/ length-beats span)
       1)))
+
+(def arrangement-clip-phase (entry clip)
+  (if (= (get clip :take-id) nil)
+    (if (<= (get entry :num-steps) 0)
+      0
+      (/ (or (get clip :offset-steps) 0) (get entry :num-steps)))
+    ;; Take dots are already windowed and normalized to the exact played
+    ;; range below, so they start at phase zero and never repeat.
+    0))
 
 (def arrangement-clip-content (i clip)
   (let ((entry (if (= (get clip :take-id) nil)
@@ -393,25 +406,31 @@
             ;; Takes never loop (spec 11.3): one item, no repeat tiling.
             :cycle (if (= (get clip :take-id) nil)
                      (arrangement-clip-cycle entry clip)
-                     1)))))))
+                     1)
+            :phase (arrangement-clip-phase entry clip)))))))
 
 ;; Start-edge preview offset (spec 8): the commit re-stamps `offset-steps` so
-;; the surviving part keeps playing what it played there, so the preview must
-;; run the same arithmetic — otherwise a take's dots jump on release. Pattern
-;; clips draw their dots by cycle tiling and ignore the offset, so only takes
-;; need it.
+;; the surviving part keeps playing what it played there. Pattern offsets
+;; wrap; take offsets advance linearly and clamp at zero. The live preview
+;; must use the same rules or its dots jump when the gesture commits.
 (def arrangement-ghost-offset-steps (i clip new-start)
   (let ((entry (if (= (get clip :take-id) nil)
-                 nil
+                 (arrangement-lane-pattern-events i (get clip :pattern-id))
                  (arrangement-lane-take-events i (get clip :take-id)))))
     (if (or (= entry nil)
           (<= (get entry :num-steps) 0)
           (<= (get entry :length-beats) 0))
       (get clip :offset-steps)
       (let ((step-beats (/ (get entry :length-beats) (get entry :num-steps))))
-        (max 0
-          (+ (or (get clip :offset-steps) 0)
-            (/ (- new-start (get clip :start-beat)) step-beats)))))))
+        (let ((shifted (+ (or (get clip :offset-steps) 0)
+                         (/ (- new-start (get clip :start-beat)) step-beats))))
+          (if (= (get clip :take-id) nil)
+            ;; Euclidean wrap expressed with floor because Lisp `mod` is a
+            ;; signed remainder and a left-edge grow can make `shifted`
+            ;; negative.
+            (- shifted (* (get entry :num-steps)
+                         (floor (/ shifted (get entry :num-steps)))))
+            (max 0 shifted)))))))
 
 ;; Live resize ghost for a track clip: while the edge drag is in flight the
 ;; clip previews its new span; the finish action lowers to one clip resize.
@@ -443,6 +462,13 @@
 
 ;; Track-lane items (lane spec 12): the stored clips, and nothing else. A gap
 ;; between clips produces NO item — the lane really is silent there.
+(def arrangement-track-clip-label (clip)
+  (if (= (get clip :take-id) nil)
+    (str "Pattern " (get clip :pattern-id))
+    ;; Take ids are zero-based internally; their default user-facing names
+    ;; and every other take badge are one-based.
+    (str "Take " (+ (get clip :take-id) 1))))
+
 (def arrangement-track-clip-items (i)
   (map
     (lambda (raw)
@@ -461,6 +487,7 @@
                      (get clip :end-beat)
                      (get window :end-beat))))
           :kind :midi
+          :label (arrangement-track-clip-label clip)
           :content (arrangement-clip-content i clip)
           :color (arrangement-clip-color i))))
     (arrangement-track-clips i)))
@@ -803,6 +830,7 @@
     (match event.type
       :select
       (do
+        (seqv-select-track-for-edit i)
         (set! arrangement-selection '())
         (set! arrangement-selection-rect nil)
         ;; A clip and a region are mutually exclusive (region spec 4.1); the
@@ -823,12 +851,15 @@
       ;; (region spec 4.4).
       :clear-selection
       (do
+        (seqv-select-track-for-edit i)
         (set! arrangement-track-selection '())
         (arrangement-region-clear)
         (seq-song-deselect-clip)
         (set-arrangement-cursor (get event :time) i))
       :set-cursor
-      (set-arrangement-cursor (get event :time) i)
+      (do
+        (seqv-select-track-for-edit i)
+        (set-arrangement-cursor (get event :time) i))
       ;; Cross-track region sweep (region spec 4.2/4.4): live frames update
       ;; the ghost only; the release commits the Rust-owned region.
       :marquee-select
@@ -903,7 +934,10 @@
     :header-height arrangement-header-height
     :time-ruler (dict :mode :bars-beats :beats-per-bar arrangement-beats-per-bar)
     :grid-density arrangement-grid-density
+    :background-color arrangement-timeline-background-color
     :title-bar-height arrangement-clip-title-bar-height
+    :item-label-font-size arrangement-clip-label-font-size
+    :item-label-color arrangement-clip-label-color
     :item-corner-radius arrangement-clip-corner-radius
     :item-color (list 0.52 0.56 0.62)
     :loop-color (list 0.92 0.72 0.25)
@@ -945,7 +979,10 @@
     ;; Vertical scrolling belongs to the enclosing track scroll container;
     ;; horizontal deltas still pan the shared time axis.
     :scroll-passthrough :vertical
+    :background-color arrangement-timeline-background-color
     :title-bar-height arrangement-clip-title-bar-height
+    :item-label-font-size arrangement-clip-label-font-size
+    :item-label-color arrangement-clip-label-color
     :item-corner-radius arrangement-clip-corner-radius
     :sidebar-width 0
     :header-height 0
@@ -1003,7 +1040,12 @@
 (def arrangement-track-row (i)
   (box :width :fill :border-color :bg :border-width 2
     (h-stack :width :fill :gap 0.6 :align :start
-      (box :height :fill :width arrangement-header-width
+      (box
+        :key (str "arrangement-track-header-" i)
+        :height :fill :width arrangement-header-width
+        :selected (seqv-track-selected-binding i)
+        :background-color :buffer-bg
+        :selected-background-color :mixer-strip-selected-bg
         (seqv-track-header i))
       (arrangement-track-lane i))))
 

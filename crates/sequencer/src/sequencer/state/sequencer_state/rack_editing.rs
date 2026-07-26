@@ -1,6 +1,44 @@
 use super::super::*;
 
 impl SequencerState {
+    /// Repair the specific topology drift produced by tracks that were
+    /// appended without extending an already committed arrangement.
+    ///
+    /// Missing trailing lanes are unambiguous: project tracks are append-only
+    /// at creation time, so each missing lane belongs to the track at the same
+    /// index and can be stamped from that track's live scene cells. Extra
+    /// lanes are not repaired here because dropping authored clips would be
+    /// destructive. The repaired arrangement is compiled and installed as
+    /// one object, preserving the arrangement/song lockstep invariant.
+    pub(crate) fn reconcile_committed_arrangement_track_lanes(
+        &self,
+    ) -> Result<bool, String> {
+        let Some(mut arrangement) = self.committed_arrangement() else {
+            return Ok(false);
+        };
+        let track_count = self.with_project_scenes(SongProjectContext::song_track_count);
+        if arrangement.track_lanes.len() > track_count {
+            return Err(format!(
+                "Arrangement has {} track lane(s) but the project has {} track(s); extra \
+                 authored lanes cannot be removed automatically",
+                arrangement.track_lanes.len(),
+                track_count
+            ));
+        }
+        if arrangement.track_lanes.len() == track_count {
+            return Ok(false);
+        }
+
+        self.with_project_scenes(|scenes| {
+            for track in arrangement.track_lanes.len()..track_count {
+                append_scene_stamped_track_lane(&mut arrangement, scenes, track)?;
+            }
+            Ok::<(), String>(())
+        })?;
+        self.set_committed_arrangement(Some(arrangement))?;
+        Ok(true)
+    }
+
     fn default_track_pattern_data_for_track(
         track_count: usize,
         slot_descriptors: &[Vec<EffectDescriptor>],
@@ -33,6 +71,11 @@ impl SequencerState {
     /// lane empty everywhere the current scene doesn't play, and other
     /// scenes stay bare until the user puts content there.
     ///
+    /// If an arrangement is committed, this operation also appends its
+    /// first-class track lane and stamps that one materialized scene cell
+    /// across every matching scene span. The arrangement and its compiled
+    /// song are installed together before the new track count is published.
+    ///
     /// The single current-scene pattern is deliberate, not an oversight:
     /// device-value edits, track-creation history capture
     /// (`capture_track_instrument_pattern_state`), and the rack rebuild
@@ -47,7 +90,7 @@ impl SequencerState {
         track: usize,
         run_mode: CustomInstrumentRunMode,
         instrument: Option<(&EffectDescriptor, u32, u32, InstrumentType)>,
-    ) {
+    ) -> Result<(), String> {
         let Some(default_data) = Self::default_track_pattern_data_for_track(
             track_count,
             slot_descriptors,
@@ -55,15 +98,17 @@ impl SequencerState {
             run_mode,
             instrument,
         ) else {
-            return;
+            return Ok(());
         };
+        self.reconcile_committed_arrangement_track_lanes()?;
+        let mut arrangement = self.committed_arrangement();
         let mut scenes = self.pattern.scenes.lock().unwrap();
         while scenes.track_pools.len() < track_count {
             scenes.track_pools.push(TrackPatternPool::default());
             scenes.track_overrides.push(None);
         }
         if track >= scenes.track_pools.len() {
-            return;
+            return Ok(());
         }
         for scene_idx in 0..scenes.scenes.len() {
             while scenes.scenes[scene_idx].cells.len() < track_count {
@@ -80,11 +125,19 @@ impl SequencerState {
             }
         }
         drop(scenes);
-        if let Some(id) = materialized {
-            // Existing song rows referencing the current scene now resolve
-            // this lane; stamp captured free-run phase where needed.
+        if let Some(committed) = arrangement.as_mut() {
+            if committed.track_lanes.len() == track {
+                self.with_project_scenes(|scenes| {
+                    append_scene_stamped_track_lane(committed, scenes, track)
+                })?;
+                self.set_committed_arrangement(arrangement)?;
+            }
+        } else if let Some(id) = materialized {
+            // Legacy/direct row-model callers have no authored arrangement
+            // to extend. Preserve their free-run stamps.
             self.stamp_free_run_song_offsets_for_new_lane(track, current_scene, id);
         }
+        Ok(())
     }
 
     /// Seed `sample_id` onto every stored pattern of `track` that has never had

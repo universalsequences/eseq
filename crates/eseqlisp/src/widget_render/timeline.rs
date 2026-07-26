@@ -57,24 +57,30 @@ enum TimelineItemKind {
 /// Content drawn inside an item's rect. The widget stays dumb: dots and peak
 /// buckets are pre-normalized by the host; no musical or audio-decoding
 /// knowledge lives here. `cycle` is the fraction of the item span one
-/// repetition covers (0..1]; content repeats at that period with a separator
-/// line per boundary (a looping clip shows its cycles, DAW-style). 1.0 (the
-/// default) means the content spans the whole item — no tiling.
+/// repetition covers relative to the item. Values below 1 repeat; values
+/// above 1 mean the item shows only part of one cycle. `phase` is the source
+/// position at the item's left edge (0..1), so trims preserve the notes'
+/// absolute alignment instead of restarting or stretching the preview.
 #[derive(Clone)]
 enum TimelineItemContent {
-    Dots { dots: Vec<TimelineDot>, cycle: f64 },
+    Dots {
+        dots: Vec<TimelineDot>,
+        cycle: f64,
+        phase: f64,
+    },
     Peaks(Vec<PeakBucket>),
 }
 
 #[derive(Clone, Copy)]
 struct TimelineDot {
-    /// 0.0..1.0 within the item's [start, end).
+    /// 0.0..1.0 within one source-content cycle.
     offset: f64,
     /// 0.0..1.0 vertical placement within the item rect (1.0 = top).
     value: f64,
-    /// Note length as a fraction of the item's span, in the same normalized
-    /// axis as `offset` (docs/arrangement-region-editing-spec.md 3.2). `0`
-    /// (the default) draws the legacy point dot; anything larger draws a bar.
+    /// Note length as a fraction of one source-content cycle, in the same
+    /// normalized axis as `offset`
+    /// (docs/arrangement-region-editing-spec.md 3.2). `0` (the default)
+    /// draws the legacy point dot; anything larger draws a bar.
     width: f64,
 }
 
@@ -116,6 +122,9 @@ enum SidebarStyle {
 #[derive(Clone)]
 struct TimelineView {
     rect: Rect,
+    /// Optional host-selected lane background. When absent, the timeline
+    /// keeps its legacy per-lane defaults.
+    background_color: Option<crate::backend::Color>,
     header_height: f32,
     sidebar_width: f32,
     view_start: f64,
@@ -135,6 +144,8 @@ struct TimelineView {
     playhead_time: Option<f64>,
     cursor_time: Option<f64>,
     item_color: crate::backend::Color,
+    item_label_font_size: f32,
+    item_label_color: crate::backend::Color,
     loop_color: crate::backend::Color,
     sidebar_style: SidebarStyle,
     lane_scroll: f64,
@@ -297,7 +308,13 @@ impl WidgetDefinition for TimelineWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["playhead-time", "cursor-time"]
+        &[
+            "playhead-time",
+            "cursor-time",
+            "background-color",
+            "item-label-font-size",
+            "item-label-color",
+        ]
     }
 
     fn measure(
@@ -330,7 +347,15 @@ impl WidgetDefinition for TimelineWidget {
             let row = rect.row.round() as u16 + row_offset;
             for col_offset in 0..(rect.width.round() as u16) {
                 let col = rect.col.round() as u16 + col_offset;
-                buf.set(row, col, styled_cell(' ', theme::FG(), Some(theme::BG())));
+                buf.set(
+                    row,
+                    col,
+                    styled_cell(
+                        ' ',
+                        theme::FG(),
+                        Some(view.background_color.unwrap_or(theme::BG())),
+                    ),
+                );
             }
         }
 
@@ -381,11 +406,13 @@ impl WidgetDefinition for TimelineWidget {
             for col_offset in 0..(content.width.round() as u16) {
                 let col = content.col.round() as u16 + col_offset;
                 let lane = view.lane_at_row(row as f32);
-                let bg = if lane % 2 == 0 {
-                    theme::BLACK()
-                } else {
-                    theme::BG()
-                };
+                let bg = view.background_color.unwrap_or_else(|| {
+                    if lane % 2 == 0 {
+                        theme::BLACK()
+                    } else {
+                        theme::BG()
+                    }
+                });
                 buf.set(row, col, styled_cell(' ', theme::FG(), Some(bg)));
             }
         }
@@ -883,11 +910,13 @@ fn build_metal_primitives(
         }
         let lane = &view.lanes[lane_index];
         let sidebar_bg = lane.sidebar_bg.unwrap_or(theme::BLACK());
-        let grid_color = if sidebar_bg == theme::WHITE() {
-            crate::backend::Color::from_hex(0x16, 0x16, 0x18)
-        } else {
-            crate::backend::Color::from_hex(0x0d, 0x0d, 0x0f)
-        };
+        let grid_color = view.background_color.unwrap_or_else(|| {
+            if sidebar_bg == theme::WHITE() {
+                crate::backend::Color::from_hex(0x16, 0x16, 0x18)
+            } else {
+                crate::backend::Color::from_hex(0x0d, 0x0d, 0x0f)
+            }
+        });
         primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
             x: content.col,
             y: row_start,
@@ -1178,10 +1207,19 @@ fn build_metal_primitives(
             }));
         }
         // Labels live in the title bar when there is one; content (notes)
-        // draws in the body below it.
+        // draws in the body below it. The text run is explicitly scissored
+        // to the visible item/title-bar rect: proportional text has no
+        // intrinsic width constraint, and a short clip must never paint its
+        // label over the next clip or an empty part of the lane.
         let label_height = title_bar_height.unwrap_or(height);
         if let Some(label) = &item.label {
             if width >= 3.0 && label_height >= 0.85 {
+                primitives.push(MetalPrimitive::PushClipRect(Rect {
+                    row: y,
+                    col: x,
+                    width,
+                    height: label_height,
+                }));
                 primitives.push(MetalPrimitive::ProportionalText(
                     MetalProportionalTextPrimitive {
                         row: y + ((label_height - 0.80).max(0.0) * 0.5) - 0.02,
@@ -1189,12 +1227,13 @@ fn build_metal_primitives(
                         align_width: 0.0,
                         h_align: 0.0,
                         text: label.clone(),
-                        font_size: 10.5,
+                        font_size: view.item_label_font_size,
                         scale: 1.0,
-                        fg: theme::BLACK(),
+                        fg: view.item_label_color,
                         bg: item_color,
                     },
                 ));
+                primitives.push(MetalPrimitive::PopClipRect);
             }
         }
         let (content_rect, title_bar) = match title_bar_height {
@@ -1549,20 +1588,26 @@ fn push_item_content_primitives(
         return;
     }
     match &item.content {
-        Some(TimelineItemContent::Dots { dots, cycle }) => {
+        Some(TimelineItemContent::Dots { dots, cycle, phase }) => {
             let span = item.end - item.start;
             if span <= 0.0 {
                 return;
             }
-            let cycle = cycle.clamp(f64::EPSILON, 1.0);
-            let cycles = (1.0 / cycle).ceil().min(512.0) as usize;
-            let cycle_width_px = (width * viewport.cell_w) as f64 * cycle;
+            let cycle = cycle.max(f64::EPSILON);
+            let phase = phase.rem_euclid(1.0);
+            // Use the item's true time width, not its view-clipped rect, so
+            // density decisions remain stable while scrolling horizontally.
+            let item_width_px =
+                ((view.x_for_time(item.end) - view.x_for_time(item.start)).abs()
+                    * viewport.cell_w) as f64;
+            let cycle_width_px = item_width_px * cycle;
             let view_end = view.view_start + view.view_duration;
 
-            // Cycle separators: one line per repetition boundary, so a
-            // looping clip reads as its repeats (skipped when the cycles are
-            // too narrow to resolve).
-            if cycles > 1 && cycle_width_px >= 5.0 {
+            // Cycle separators: the first boundary is the remaining part of
+            // the source cycle after `phase`; later boundaries are one full
+            // cycle apart. This works for both repeating clips (`cycle < 1`)
+            // and a short clip that happens to cross one source boundary.
+            if cycle_width_px >= 5.0 {
                 let separator_color = crate::backend::Color {
                     r: 0.02,
                     g: 0.025,
@@ -1575,8 +1620,12 @@ fn push_item_content_primitives(
                     Some((bar_y, bar_height)) => (bar_y, (bar_height * 0.55).max(0.12)),
                     None => (y, height),
                 };
-                for index in 1..cycles {
-                    let time = item.start + span * cycle * index as f64;
+                for index in 0..512 {
+                    let offset = (1.0 - phase + index as f64) * cycle;
+                    if offset >= 1.0 {
+                        break;
+                    }
+                    let time = item.start + span * offset;
                     if time < view.view_start || time >= view_end || time >= item.end {
                         continue;
                     }
@@ -1603,11 +1652,17 @@ fn push_item_content_primitives(
                 b: 0.03,
                 a: 0.78,
             };
-            for index in 0..cycles {
+            // One partial source cycle can straddle the left edge, hence the
+            // extra iteration beyond the number of complete visible cycles.
+            let repetitions = (1.0 / cycle).ceil().min(512.0) as usize + 1;
+            for index in 0..repetitions {
                 for dot in dots {
-                    let offset = (index as f64 + dot.offset) * cycle;
+                    let offset = (dot.offset - phase + index as f64) * cycle;
+                    if offset < 0.0 {
+                        continue;
+                    }
                     if offset >= 1.0 {
-                        break;
+                        continue;
                     }
                     let time = item.start + offset * span;
                     if time < view.view_start || time >= view_end {
@@ -1621,7 +1676,7 @@ fn push_item_content_primitives(
                     // duration, never narrower than the legacy 3px dot and
                     // never painted past the item's end.
                     let quad_width = if dot.width > 0.0 {
-                        let end_offset = ((index as f64 + dot.offset + dot.width) * cycle).min(1.0);
+                        let end_offset = (offset + dot.width * cycle).min(1.0);
                         let end_x = view.x_for_time(item.start + end_offset * span);
                         (end_x - dot_x)
                             .max(dot_width)
@@ -1664,6 +1719,9 @@ impl TimelineView {
         let view_start = get_num(props, "view-start", 0.0).max(0.0);
         let mut view = Self {
             rect,
+            background_color: props
+                .get("background-color")
+                .and_then(theme::parse_color_value),
             header_height: get_num(props, "header-height", 1.0).max(0.0) as f32,
             sidebar_width: get_num(props, "sidebar-width", 0.0).max(0.0) as f32,
             view_start,
@@ -1684,6 +1742,8 @@ impl TimelineView {
             playhead_time: props.get("playhead-time").and_then(as_number),
             cursor_time: props.get("cursor-time").and_then(as_number),
             item_color: resolve_named_color(props, "item-color", theme::BLUE()),
+            item_label_font_size: get_num(props, "item-label-font-size", 10.5).max(1.0) as f32,
+            item_label_color: resolve_named_color(props, "item-label-color", theme::BLACK()),
             loop_color: resolve_named_color(props, "loop-color", theme::BLUE()),
             sidebar_style: get_sidebar_style(props),
             lane_scroll: get_num(props, "lane-scroll", 0.0).max(0.0),
@@ -3367,13 +3427,22 @@ fn parse_item_content(value: &Value) -> Option<TimelineItemContent> {
                 })
             })
             .collect();
-        // A malformed or out-of-range :cycle degrades to no tiling.
+        // `cycle` is the source-cycle length relative to the item. It may be
+        // above one when a short item shows only a source window.
         let cycle = map
             .get("cycle")
             .and_then(as_number)
-            .filter(|cycle| *cycle > 0.0 && *cycle <= 1.0)
+            .filter(|cycle| cycle.is_finite() && *cycle > 0.0)
             .unwrap_or(1.0);
-        return Some(TimelineItemContent::Dots { dots, cycle });
+        // `phase` is normalized rather than clamped so negative or >1 host
+        // values remain meaningful source positions.
+        let phase = map
+            .get("phase")
+            .and_then(as_number)
+            .filter(|phase| phase.is_finite())
+            .map(|phase| phase.rem_euclid(1.0))
+            .unwrap_or(0.0);
+        return Some(TimelineItemContent::Dots { dots, cycle, phase });
     }
     if let Some(Value::List(entries)) = map.get("peaks") {
         let peaks = entries
@@ -3635,7 +3704,7 @@ mod tests {
         assert!(items[0].content.is_none());
 
         assert_eq!(items[1].kind, Some(TimelineItemKind::Midi));
-        let Some(TimelineItemContent::Dots { dots, cycle }) = &items[1].content else {
+        let Some(TimelineItemContent::Dots { dots, cycle, phase }) = &items[1].content else {
             panic!("expected dots content");
         };
         assert_eq!(dots.len(), 2, "malformed dot entries are skipped");
@@ -3644,6 +3713,7 @@ mod tests {
         assert_eq!(dots[1].offset, 1.0, "offset clamps to 0..1");
         assert_eq!(dots[1].value, 0.0, "value clamps to 0..1");
         assert_eq!(*cycle, 1.0, "absent :cycle means content spans the item");
+        assert_eq!(*phase, 0.0, "absent :phase starts at the source beginning");
 
         assert_eq!(items[2].kind, Some(TimelineItemKind::Audio));
         let Some(TimelineItemContent::Peaks(peaks)) = &items[2].content else {
@@ -3655,12 +3725,12 @@ mod tests {
         assert!(items[3].content.is_none(), "malformed content parses to None");
     }
 
-    /// `:cycle` marks how much of the item one content repetition covers
-    /// (looping-clip visualization); out-of-range values degrade to 1.0.
+    /// `:cycle` is the source-cycle length relative to the item, so values
+    /// above one represent partial-cycle clips. `:phase` wraps into 0..1.
     #[test]
-    fn dots_content_parses_optional_cycle_fraction() {
-        let content_with_cycle = |cycle: Value| {
-            map_value_raw(vec![
+    fn dots_content_parses_optional_cycle_and_phase() {
+        let content_with_cycle = |cycle: Value, phase: Option<Value>| {
+            let mut entries = vec![
                 (
                     "dots",
                     list_value_raw(vec![map_value_raw(vec![
@@ -3669,21 +3739,41 @@ mod tests {
                     ])]),
                 ),
                 ("cycle", cycle),
-            ])
+            ];
+            if let Some(phase) = phase {
+                entries.push(("phase", phase));
+            }
+            map_value_raw(entries)
         };
-        let parsed_cycle = |value: Value| match parse_item_content(&content_with_cycle(value)) {
-            Some(TimelineItemContent::Dots { cycle, .. }) => cycle,
-            _ => panic!("expected dots content"),
+        let parsed = |cycle: Value, phase: Option<Value>| {
+            match parse_item_content(&content_with_cycle(cycle, phase)) {
+                Some(TimelineItemContent::Dots { cycle, phase, .. }) => (cycle, phase),
+                _ => panic!("expected dots content"),
+            }
         };
-        assert_eq!(parsed_cycle(number_value(0.25)), 0.25);
-        assert_eq!(parsed_cycle(number_value(1.0)), 1.0);
-        assert_eq!(parsed_cycle(number_value(0.0)), 1.0, "zero degrades");
-        assert_eq!(parsed_cycle(number_value(4.0)), 1.0, ">1 degrades");
-        assert_eq!(parsed_cycle(number_value(-0.5)), 1.0, "negative degrades");
+        assert_eq!(parsed(number_value(0.25), None), (0.25, 0.0));
         assert_eq!(
-            parsed_cycle(Value::String("junk".to_string())),
-            1.0,
-            "malformed degrades"
+            parsed(number_value(2.0), Some(number_value(0.75))),
+            (2.0, 0.75)
+        );
+        assert_eq!(
+            parsed(number_value(4.0), Some(number_value(-0.25))),
+            (4.0, 0.75)
+        );
+        assert_eq!(
+            parsed(number_value(0.0), None),
+            (1.0, 0.0),
+            "zero cycle degrades"
+        );
+        assert_eq!(
+            parsed(number_value(-0.5), None),
+            (1.0, 0.0),
+            "negative cycle degrades"
+        );
+        assert_eq!(
+            parsed(Value::String("junk".to_string()), None),
+            (1.0, 0.0),
+            "malformed values degrade"
         );
     }
 
@@ -4497,6 +4587,285 @@ mod tests {
             Some(CLIP),
             "the marquee style never repaints a clip body"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn item_label_is_scissored_to_its_visible_title_bar() {
+        let props = HashMap::from([
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(1.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(4.5)),
+                    (
+                        "label",
+                        Value::String("Pattern 123456789".to_string()),
+                    ),
+                ])]),
+            ),
+            (
+                "item-label-color".to_string(),
+                list_value_raw(vec![
+                    number_value(0.1),
+                    number_value(0.2),
+                    number_value(0.3),
+                ]),
+            ),
+            ("item-label-font-size".to_string(), number_value(13.0)),
+            ("title-bar-height".to_string(), number_value(1.0)),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(0.0)),
+        ]);
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 160.0,
+            height: 4.0,
+        };
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1920.0,
+            vp_h: 1080.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 12.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let node = LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "timeline".to_string(),
+            rect,
+            props,
+            children: Vec::new(),
+            focusable: false,
+        };
+
+        let primitives = build_metal_primitives(&node, viewport);
+        let label_run = primitives
+            .windows(3)
+            .find_map(|window| match window {
+                [
+                    MetalPrimitive::PushClipRect(clip),
+                    MetalPrimitive::ProportionalText(text),
+                    MetalPrimitive::PopClipRect,
+                ] if text.text == "Pattern 123456789" => Some((*clip, text)),
+                _ => None,
+            })
+            .expect("label bracketed by a clip rect");
+
+        // At 10 cells/beat, this half-beat clip is only five cells wide,
+        // much narrower than its label. The scissor is exactly the visible
+        // title bar, so the backend cuts the glyph run at the clip edge.
+        assert_eq!(
+            label_run.0,
+            Rect {
+                row: 0.0,
+                col: 40.0,
+                width: 5.0,
+                height: 1.0,
+            }
+        );
+        assert_eq!(label_run.1.font_size, 13.0);
+        assert_eq!(
+            label_run.1.fg,
+            crate::backend::Color {
+                r: 0.1,
+                g: 0.2,
+                b: 0.3,
+                a: 1.0,
+            }
+        );
+        assert!(
+            TIMELINE_WIDGET
+                .bindable_props()
+                .contains(&"item-label-font-size")
+        );
+        assert!(
+            TIMELINE_WIDGET
+                .bindable_props()
+                .contains(&"item-label-color")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn background_color_prop_styles_the_timeline_lane() {
+        let color = crate::backend::Color {
+            r: 0.12,
+            g: 0.16,
+            b: 0.22,
+            a: 1.0,
+        };
+        let props = HashMap::from([
+            (
+                "background-color".to_string(),
+                list_value_raw(vec![
+                    number_value(color.r as f64),
+                    number_value(color.g as f64),
+                    number_value(color.b as f64),
+                ]),
+            ),
+            ("header-height".to_string(), number_value(0.0)),
+        ]);
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 12.0,
+            height: 4.0,
+        };
+        let node = LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "timeline".to_string(),
+            rect,
+            props,
+            children: Vec::new(),
+            focusable: false,
+        };
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1920.0,
+            vp_h: 1080.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 12.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+
+        let primitives = build_metal_primitives(&node, viewport);
+        assert!(primitives.iter().any(|primitive| {
+            matches!(primitive, MetalPrimitive::Quad(quad)
+                if quad.x == rect.col
+                    && quad.y == rect.row
+                    && quad.width == rect.width
+                    && quad.height == rect.height
+                    && quad.color == color)
+        }));
+        assert!(
+            TIMELINE_WIDGET
+                .bindable_props()
+                .contains(&"background-color")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dot_content_phase_keeps_partial_cycle_notes_aligned() {
+        let dots = list_value_raw(vec![
+            map_value_raw(vec![
+                ("offset", number_value(0.0)),
+                ("value", number_value(0.1)),
+            ]),
+            map_value_raw(vec![
+                ("offset", number_value(0.25)),
+                ("value", number_value(0.2)),
+            ]),
+            map_value_raw(vec![
+                ("offset", number_value(0.5)),
+                ("value", number_value(0.7)),
+            ]),
+            map_value_raw(vec![
+                ("offset", number_value(0.75)),
+                ("value", number_value(0.8)),
+            ]),
+        ]);
+        let props = HashMap::from([
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(1.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(0.0)),
+                    ("end", number_value(2.0)),
+                    (
+                        "content",
+                        map_value_raw(vec![
+                            ("dots", dots),
+                            // A four-beat pattern inside a two-beat clip.
+                            ("cycle", number_value(2.0)),
+                            // The clip starts at source step 12 of 16.
+                            ("phase", number_value(0.75)),
+                        ]),
+                    ),
+                ])]),
+            ),
+            ("header-height".to_string(), number_value(0.0)),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(4.0)),
+        ]);
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 40.0,
+            height: 4.0,
+        };
+        let node = LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            parent_subtree_root_id: None,
+            subtree_root_id: None,
+            stable_key: None,
+            widget_type: "timeline".to_string(),
+            rect,
+            props,
+            children: Vec::new(),
+            focusable: false,
+        };
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1920.0,
+            vp_h: 1080.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 12.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+
+        let primitives = build_metal_primitives(&node, viewport);
+        let dot_color = crate::backend::Color {
+            r: 0.02,
+            g: 0.025,
+            b: 0.03,
+            a: 0.78,
+        };
+        let rendered = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                MetalPrimitive::Quad(quad) if quad.color == dot_color => {
+                    Some((quad.x, quad.y))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 2, "only the played source window is visible");
+        assert!((rendered[0].0 - 0.0).abs() < 0.001);
+        assert!((rendered[0].1 - 0.77).abs() < 0.001);
+        assert!((rendered[1].0 - 10.0).abs() < 0.001);
+        assert!((rendered[1].1 - 3.465).abs() < 0.001);
     }
 
     #[cfg(target_os = "macos")]

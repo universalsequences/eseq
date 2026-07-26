@@ -21035,12 +21035,15 @@
         rt.set_reactive(
             "SEQ",
             "song-lanes",
-            test_list(vec![test_list(vec![lane_clip(
-                0.0,
-                0.0,
-                16.0,
-                Value::Number(1.0),
-            )])]),
+            test_list(vec![test_list(vec![map_value([
+                ("clip-id", Value::Number(0.0)),
+                ("start-beat", Value::Number(0.0)),
+                ("end-beat", Value::Number(16.0)),
+                ("pattern-id", Value::Number(1.0)),
+                ("take-id", Value::Nil),
+                // Halfway through the pattern at the clip's left edge.
+                ("offset-steps", Value::Number(8.0)),
+            ])])]),
         );
         rt.set_reactive(
             "SEQ",
@@ -21061,6 +21064,10 @@
             read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :kind)"),
             Value::Keyword("midi".to_string())
         );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :label)"),
+            Value::String("Pattern 1".to_string())
+        );
         // A 16-beat clip over a 4-beat pattern loops 4 times: the content
         // declares the cycle fraction so the widget tiles the preview.
         assert_eq!(
@@ -21070,6 +21077,39 @@
             ),
             Value::Number(0.25)
         );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(get (get (nth (arrangement-track-items 0) 0) :content) :phase)"
+            ),
+            Value::Number(0.5),
+            "pattern preview phase comes from the clip's source offset"
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(arrangement-clip-cycle \
+                   (arrangement-lane-pattern-events 0 1) \
+                   (dict :start-beat 0 :end-beat 2))"
+            ),
+            Value::Number(2.0),
+            "a clip shorter than its pattern exposes a partial source cycle"
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(do \
+                   (set! arrangement-ghost \
+                     (dict :kind :track-resize :track 0 :clip-id 0 \
+                       :edge :start :time 3)) \
+                   (get (arrangement-track-ghost-clip \
+                          0 (nth (arrangement-track-clips 0) 0)) \
+                     :offset-steps))"
+            ),
+            Value::Number(4.0),
+            "live left-edge trim advances and wraps the pattern offset"
+        );
+        read(&mut editor, "(set! arrangement-ghost nil)");
         let dots = "(get (get (nth (arrangement-track-items 0) 0) :content) :dots)";
         assert_eq!(
             read(&mut editor, &format!("(len {dots})")),
@@ -21186,6 +21226,10 @@
             Value::Number(2.0),
             "two stored take clips, published verbatim"
         );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :label)"),
+            Value::String("Take 8".to_string())
+        );
         // Clip [0,10) clamps to the take end: 0 + 32 * 0.25 = 8.
         assert_eq!(
             read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :end)"),
@@ -21261,6 +21305,7 @@
             "scene-names",
             test_string_list(&["Intro", "Drop"]),
         );
+        rt.set_reactive("SEQ", "track-selected-0", Value::Bool(true));
         rt.run_reactive_cycle();
 
         editor
@@ -21335,9 +21380,23 @@
         assert_eq!(layout_prop_number(track_lane, "content-length"), Some(16.0));
 
         // The reused track header renders beside the lane.
+        let track_header =
+            find_layout_node_by_stable_key(&layout, "arrangement-track-header-0")
+                .expect("arrangement track header container");
+        assert_finite_nonzero_rect(track_header, "arrangement track header container");
+        assert_eq!(
+            layout_prop_bool(track_header, "selected"),
+            Some(true),
+            "the arrangement header uses the shared reactive track selection"
+        );
+        assert_eq!(
+            track_header.props.get("selected-background-color"),
+            Some(&Value::Keyword("mixer-strip-selected-bg".to_string())),
+            "the selected arrangement header uses the sequencer row theme color"
+        );
         assert!(
-            find_layout_node_by_stable_key(&layout, "seqv-track-header-0").is_some(),
-            "seqv-track-header is reused unchanged in the arrangement row"
+            find_layout_node_by_stable_key(track_header, "seqv-track-header-0").is_some(),
+            "seqv-track-header is reused unchanged inside the selected arrangement header"
         );
 
         // Shared-axis geometry: every lane spans the identical x-range, no
@@ -21482,6 +21541,90 @@
         editor.refresh_runtime_side_effects();
         editor.set_layout_viewport(96, 40);
         editor
+    }
+
+    #[test]
+    fn metal_seq_arrangement_header_and_timeline_click_select_the_track() {
+        let mut editor = arrangement_region_editor(2, &[]);
+        let selected_tracks: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = selected_tracks.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-set-track", move |args, _ctx| {
+                let Some(Value::Number(track)) = args.first() else {
+                    return Err("seq-set-track: expected track number".into());
+                };
+                sink.lock().unwrap().push(*track);
+                Ok(Value::Bool(true))
+            });
+
+        let layout = editor.widget_layout().expect("arrangement layout");
+        let header = find_layout_node_by_stable_key(&layout, "arrangement-track-header-1")
+            .expect("track header container");
+        let header_body = find_layout_node_by_stable_key(header, "seqv-track-header-1")
+            .expect("track header body");
+        let header_content = header_body.children.first().expect("track header content");
+        let header_body_bottom = header_body.rect.row + header_body.rect.height;
+        let header_content_bottom = header_content.rect.row + header_content.rect.height;
+        assert!(
+            header_content_bottom < header_body_bottom - 0.1,
+            "fixture needs exposed header-body space below the compact controls"
+        );
+        let lane = find_layout_node_by_widget_type(
+            find_layout_node_by_stable_key(&layout, "arrangement-track-lane-1")
+                .expect("track lane container"),
+            "timeline",
+        )
+        .expect("track timeline");
+
+        let click = |editor: &mut eseqlisp::Editor, col: f32, row: f32| {
+            for kind in [
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            ] {
+                editor.handle_mouse_precise(
+                    crossterm::event::MouseEvent {
+                        kind,
+                        column: col as u16,
+                        row: row as u16,
+                        modifiers: crossterm::event::KeyModifiers::NONE,
+                    },
+                    0,
+                    0,
+                    96,
+                    40,
+                    col,
+                    row,
+                );
+            }
+        };
+
+        // Hit the full-height header body's exposed lower area, outside its
+        // compact row of controls.
+        click(
+            &mut editor,
+            header_body.rect.col + header_body.rect.width * 0.5,
+            (header_content_bottom + header_body_bottom) * 0.5,
+        );
+        assert_eq!(
+            selected_tracks.lock().unwrap().last().copied(),
+            Some(1.0),
+            "the full pre-timeline header container selects its track"
+        );
+
+        selected_tracks.lock().unwrap().clear();
+        // The second lane is deliberately bare, so this is an empty timeline
+        // background click rather than a clip/title-bar hit.
+        click(
+            &mut editor,
+            lane.rect.col + lane.rect.width * 0.75,
+            lane.rect.row + lane.rect.height * 0.5,
+        );
+        assert_eq!(
+            selected_tracks.lock().unwrap().last().copied(),
+            Some(1.0),
+            "clicking empty timeline space selects its owning track"
+        );
     }
 
     /// The `arrangement-track-row-pitch` constant the region drag divides by
@@ -29222,6 +29365,181 @@
         assert_visible_inside(filter_body, filter_panel, "filter body");
         assert_visible_inside(sampler_label, sampler_header, "sampler title");
         assert_visible_inside(filter_label, filter_header, "filter title");
+    }
+
+    #[test]
+    fn metal_seq_sampler_waveform_drag_sets_sample_range() {
+        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let mut instrument = test_sampler_instrument_map(0);
+        instrument.insert(
+            "buffer".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                "test-sampler-waveform".to_string(),
+            ))),
+        );
+        instrument.insert(
+            "start-time".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.2))),
+        );
+        instrument.insert(
+            "start-time-field".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                sampler_selection_time_field(0, "start"),
+            ))),
+        );
+        instrument.insert(
+            "end-time".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.8))),
+        );
+        instrument.insert(
+            "end-time-field".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                sampler_selection_time_field(0, "end"),
+            ))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(160, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                (
+                    "track-instrument-types",
+                    test_string_list(&["sampler"]),
+                ),
+                ("compiling", Value::Bool(false)),
+                ("tp-gate", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(instrument)]),
+                ),
+                ("sampler-playhead", Value::Number(0.0)),
+                (
+                    sampler_selection_time_field(0, "start").as_str(),
+                    Value::Number(0.2),
+                ),
+                (
+                    sampler_selection_time_field(0, "end").as_str(),
+                    Value::Number(0.8),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("sampler panel layout");
+        let waveform = find_layout_node_by_widget_type(&layout, "waveform")
+            .expect("sampler waveform should render");
+        assert_finite_nonzero_rect(waveform, "sampler waveform");
+
+        let start_col = waveform.rect.col + waveform.rect.width * 0.2;
+        let end_col = waveform.rect.col + waveform.rect.width * 0.35;
+        let row = waveform.rect.row + waveform.rect.height * 0.6;
+        let pointer_event = |kind, col: f32, row: f32| crossterm::event::MouseEvent {
+            kind,
+            column: col.floor() as u16,
+            row: row.floor() as u16,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        editor.handle_mouse_precise(
+            pointer_event(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                start_col,
+                row,
+            ),
+            0,
+            0,
+            160,
+            18,
+            start_col,
+            row,
+        );
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "pointer down should only position the waveform cursor"
+        );
+        editor.handle_mouse_precise(
+            pointer_event(
+                crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+                end_col,
+                row,
+            ),
+            0,
+            0,
+            160,
+            18,
+            end_col,
+            row,
+        );
+
+        let commands = editor.drain_host_commands();
+        let [eseqlisp::host::HostCommand::Custom { name, payload }] = commands.as_slice() else {
+            panic!("waveform marker drag should emit one sampler parameter batch: {commands:?}");
+        };
+        assert_eq!(name, "set-instrument-param-batch");
+        assert_eq!(extract_usize_from_payload(payload, "track"), Some(0));
+        let Value::Map(payload) = payload else {
+            panic!("sampler parameter batch should have a map payload: {payload:?}");
+        };
+        let Some(updates) = payload.get("updates") else {
+            panic!("sampler parameter batch should contain updates: {payload:?}");
+        };
+        let Value::List(updates) = &*updates.borrow() else {
+            panic!("sampler parameter updates should be a list: {updates:?}");
+        };
+        let update = |index: usize| {
+            let Value::Map(update) = &*updates[index].borrow() else {
+                panic!("sampler parameter update should be a map");
+            };
+            (
+                update
+                    .get("param-idx")
+                    .map(|value| value.borrow().clone()),
+                update.get("value").map(|value| value.borrow().clone()),
+            )
+        };
+        let (start_param, start_value) = update(0);
+        let (end_param, end_value) = update(1);
+        assert_eq!(start_param, Some(Value::Number(2.0)));
+        assert!(
+            matches!(start_value, Some(Value::Number(value)) if (value - 35.0).abs() < 0.01),
+            "start marker should move to 35%: {start_value:?}"
+        );
+        assert_eq!(end_param, Some(Value::Number(3.0)));
+        assert_eq!(end_value, Some(Value::Number(80.0)));
     }
 
     #[test]

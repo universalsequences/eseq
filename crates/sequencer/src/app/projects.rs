@@ -1724,6 +1724,11 @@ impl App {
             &self.tracks,
             &self.graph.track_instrument_types,
         );
+        self.state
+            .reconcile_committed_arrangement_track_lanes()
+            .map_err(|error| {
+                format!("Could not reconcile arrangement tracks before save: {error}")
+            })?;
         self.save_current_bus_pattern();
 
         let bank = self.state.export_pattern_repository();

@@ -326,7 +326,7 @@ impl GraphController<'_> {
                 &self.app.graph.effect_descriptors,
                 track,
                 normalized_mode,
-            );
+            )?;
         if normalized_mode == CustomInstrumentRunMode::FreePatch {
             self.apply_free_patch_idle_voice(track)?;
         } else {

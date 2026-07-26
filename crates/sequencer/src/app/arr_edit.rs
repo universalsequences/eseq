@@ -44,6 +44,8 @@ impl App {
     /// The committed arrangement, or the standard "nothing to edit" error.
     fn require_arrangement(&self) -> Result<ProjectArrangement, String> {
         self.state
+            .reconcile_committed_arrangement_track_lanes()?;
+        self.state
             .committed_arrangement()
             .ok_or_else(|| "The project has no arrangement".to_string())
     }
@@ -849,6 +851,50 @@ mod tests {
         assert!(error.contains("references scene 10"), "{error}");
         assert_eq!(app.state.committed_arrangement(), Some(good));
         assert_eq!(app.state.committed_song(), song);
+    }
+
+    #[test]
+    fn arrangement_edit_repairs_lanes_missing_for_already_appended_tracks() {
+        let mut app = test_app();
+        let mut arrangement = ProjectArrangement::new(2, 16.0);
+        arrangement.scene_lane.push(SceneEvent {
+            start_beat: 8.0,
+            scene: 1,
+        });
+        app.state
+            .set_committed_arrangement(Some(arrangement))
+            .expect("two-track arrangement");
+
+        // Reproduce the regression state: project topology grew from two
+        // tracks to four while the committed arrangement stayed at two lanes.
+        app.state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(4, &[]),
+                PatternSnapshot::new_default(4, &[]),
+                PatternSnapshot::new_default(4, &[]),
+            ],
+            0,
+        );
+        app.tracks.extend(["Track 3".to_string(), "Track 4".to_string()]);
+        app.track_registry =
+            crate::sequencer::TrackRegistry::for_legacy_track_count(4).unwrap();
+
+        app.arr_set_loop(true)
+            .expect("the edit boundary repairs missing arrangement lanes");
+
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        assert_eq!(arrangement.track_lanes.len(), 4);
+        for track in 2..4 {
+            assert_eq!(
+                arrangement.track_lanes[track]
+                    .iter()
+                    .map(|clip| (clip.start_beat, clip.end_beat, clip.pattern_id))
+                    .collect::<Vec<_>>(),
+                vec![(0.0, 8.0, Some(1)), (8.0, 16.0, Some(2))]
+            );
+        }
+        assert!(arrangement.loop_enabled);
+        assert_song_matches_arrangement(&app);
     }
 
     /// The row model is compiled output, not an authoring path: installing a

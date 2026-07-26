@@ -724,6 +724,7 @@
   (let ((name (nth SEQ.track-names i)))
     (box :background "seqv-track-container"
       :padding 0.4
+      :on-click |x y r| (seqv-select-track-for-edit i)
       (h-stack :gap 0.4 :align :center
         (box
           :key (str "seqv-color-badge-" i)

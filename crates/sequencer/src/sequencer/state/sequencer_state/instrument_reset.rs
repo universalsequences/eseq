@@ -496,17 +496,17 @@ impl SequencerState {
         slot_descriptors: &[Vec<EffectDescriptor>],
         track: usize,
         run_mode: CustomInstrumentRunMode,
-    ) {
+    ) -> Result<(), String> {
         self.extend_all_pattern_snapshots_to_track(
             track_count,
             slot_descriptors,
             track,
             run_mode,
             None,
-        );
+        )?;
         let mut scenes = self.pattern.scenes.lock().unwrap();
         let Some(id) = scenes.effective_pattern_id(track) else {
-            return;
+            return Ok(());
         };
         if let Some(data) = scenes
             .track_pools
@@ -515,5 +515,6 @@ impl SequencerState {
         {
             data.instrument_run_mode = run_mode;
         }
+        Ok(())
     }
 }

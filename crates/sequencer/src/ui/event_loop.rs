@@ -1,6 +1,19 @@
 use crate::*;
 use eseqlisp::metal_backend::MetalBackend;
 
+type PendingPointerDrag = (crossterm::event::MouseEvent, (f32, f32));
+
+fn flush_pending_pointer_drag(
+    pending_drag: &mut Option<PendingPointerDrag>,
+    mut dispatch: impl FnMut(crossterm::event::MouseEvent, f32, f32),
+) -> bool {
+    let Some((mouse, (precise_col, precise_row))) = pending_drag.take() else {
+        return false;
+    };
+    dispatch(mouse, precise_col, precise_row);
+    true
+}
+
 /// The metal_seq event loop: input polling, gestures, async polling, and
 /// host-command dispatch, ending each iteration in the reactive tick.
 #[allow(clippy::too_many_lines)]
@@ -16,7 +29,7 @@ pub(crate) fn run_event_loop(
     let animation_frame_interval = Duration::from_secs_f64(1.0 / 60.0);
     let mut last_render_at = Instant::now() - idle_frame_interval;
     let mut stub_animation_cache = StubAnimationRenderCache::new();
-    let mut pending_drag: Option<(Event, (f32, f32))> = None;
+    let mut pending_drag: Option<PendingPointerDrag> = None;
     let mut sample_import_session: Option<SampleImportSession> = None;
     let mut scroll_accum_y: f32 = 0.0;
     let mut scroll_accum_x: f32 = 0.0;
@@ -748,10 +761,25 @@ pub(crate) fn run_event_loop(
                         mouse.kind,
                         crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left)
                     ) {
-                        pending_drag = Some((Event::Mouse(mouse), (precise_col, precise_row)));
+                        pending_drag = Some((mouse, (precise_col, precise_row)));
                     } else {
                         if matches!(mouse.kind, crossterm::event::MouseEventKind::Up(_)) {
-                            pending_drag = None;
+                            // The backend may deliver drag and release in the same
+                            // poll batch. Preserve their order instead of letting
+                            // release discard the final coalesced drag position.
+                            if flush_pending_pointer_drag(
+                                &mut pending_drag,
+                                |pending_mouse, pending_col, pending_row| {
+                                    editor.handle_tiled_mouse_precise(
+                                        pending_mouse,
+                                        pending_col,
+                                        pending_row,
+                                        0,
+                                    );
+                                },
+                            ) {
+                                backend.set_widget_cursor(editor.widget_cursor());
+                            }
                             pointer_released_this_loop = true;
                             pointer_is_down = false;
                         }
@@ -837,8 +865,12 @@ pub(crate) fn run_event_loop(
         // Flush the latest coalesced drag every loop iteration. Waiting for the
         // render boundary makes slider/knob drags feel stale and can drop the
         // final motion segment if mouse-up lands before the next frame.
-        if let Some((Event::Mouse(mouse), (precise_col, precise_row))) = pending_drag.take() {
-            editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
+        if flush_pending_pointer_drag(
+            &mut pending_drag,
+            |mouse, precise_col, precise_row| {
+                editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
+            },
+        ) {
             backend.set_widget_cursor(editor.widget_cursor());
         }
         ui_loop_stats.note_gestures(gestures_started.elapsed());
@@ -1850,4 +1882,33 @@ pub(crate) fn run_event_loop(
 
     let _ = backend.teardown();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    #[test]
+    fn pending_pointer_drag_is_dispatched_before_release_can_clear_it() {
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 17,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        };
+        let mut pending = Some((drag, (17.75, 4.25)));
+        let mut dispatched = Vec::new();
+
+        let flushed = flush_pending_pointer_drag(&mut pending, |mouse, col, row| {
+            dispatched.push((mouse.kind, col, row));
+        });
+
+        assert!(flushed);
+        assert!(pending.is_none());
+        assert_eq!(
+            dispatched,
+            vec![(MouseEventKind::Drag(MouseButton::Left), 17.75, 4.25)]
+        );
+    }
 }

@@ -5634,7 +5634,8 @@
             2,
             CustomInstrumentRunMode::Instrument,
             None,
-        );
+        )
+        .unwrap();
         let song = state.committed_song().expect("song");
         let lane = |idx: usize| {
             song.rows[idx]
@@ -5648,6 +5649,72 @@
         let stamped = lane(2).expect("off-grid scene 0 row is stamped");
         assert!((stamped.offset_steps - (9.3 * 4.0) % 16.0).abs() < 1e-9);
         assert_eq!(lane(3), None, "beat 12 is grid-aligned: no override");
+    }
+
+    #[test]
+    fn added_track_extends_committed_arrangement_and_stamps_its_scene_spans() {
+        let state = SequencerState::new(2, vec![vec![], vec![]]);
+        state.with_scenes_mut(|scenes| {
+            let snapshots = vec![
+                PatternSnapshot::new_default(2, &[]),
+                PatternSnapshot::new_default(2, &[]),
+            ];
+            *scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        });
+        let mut arrangement = ProjectArrangement::new(2, 16.0);
+        arrangement.scene_lane = vec![
+            SceneEvent {
+                start_beat: 0.0,
+                scene: 0,
+            },
+            SceneEvent {
+                start_beat: 4.7,
+                scene: 1,
+            },
+            SceneEvent {
+                start_beat: 9.3,
+                scene: 0,
+            },
+        ];
+        state
+            .set_committed_arrangement(Some(arrangement))
+            .expect("initial arrangement");
+
+        state
+            .extend_all_pattern_snapshots_to_track(
+                3,
+                &[],
+                2,
+                CustomInstrumentRunMode::Instrument,
+                None,
+            )
+            .expect("new track extends its arrangement lane");
+
+        let arrangement = state.committed_arrangement().expect("arrangement survives");
+        assert_eq!(
+            arrangement.track_lanes.len(),
+            3,
+            "the arrangement topology follows the project topology"
+        );
+        let lane = &arrangement.track_lanes[2];
+        assert_eq!(lane.len(), 2, "only the current scene's spans are stamped");
+        assert_eq!((lane[0].start_beat, lane[0].end_beat), (0.0, 4.7));
+        assert_eq!((lane[1].start_beat, lane[1].end_beat), (9.3, 16.0));
+        assert_eq!(lane[0].pattern_id, lane[1].pattern_id);
+        assert_eq!(lane[0].offset_steps, 0.0);
+        assert!(
+            (lane[1].offset_steps - (9.3 * 4.0) % 16.0).abs() < 1e-9,
+            "the later scene span keeps global free-run phase"
+        );
+        state.with_project_scenes(|scenes| {
+            arrangement
+                .validate(scenes)
+                .expect("the extended arrangement validates");
+        });
+        assert!(
+            state.committed_song().is_some(),
+            "the compiled song is rebuilt with the new lane"
+        );
     }
 
     #[test]
@@ -5670,7 +5737,8 @@
             2,
             CustomInstrumentRunMode::Instrument,
             None,
-        );
+        )
+        .unwrap();
         state.with_project_scenes(|scenes| {
             assert_eq!(
                 scenes.track_pools[2].patterns.len(),
