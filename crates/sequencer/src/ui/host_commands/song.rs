@@ -65,6 +65,9 @@ pub(super) const COMMANDS: &[&str] = &[
     "song-region-paste",
     "song-region-delete",
     "song-region-duplicate",
+    // Region move (region spec 6.2) needs no clipboard, so it runs with the
+    // other arrangement primitives in `run`.
+    "song-region-move",
     "sound-push-to-pattern",
     "sound-apply-to-all-takes",
 ];
@@ -341,7 +344,17 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             let clip_id = resolve_clip(map)?;
             let start_beat = require_number(map, "start-beat")?;
             app.arr_clip_move(clip_id, start_beat)?;
+            // The clip the selection names just moved, so its one-clip region
+            // moves with it (region spec 6.1).
+            app.refresh_song_region_for_clip(clip_id);
             Ok(format!("Moved clip {} to beat {start_beat}", clip_id.0))
+        }
+        // Rigid move of the whole selected rectangle (region spec 6.2): one
+        // primitive, one undo entry, and the region follows the move.
+        "song-region-move" => {
+            let map = payload_map(payload)?;
+            let delta_beats = require_number(map, "delta-beats")?;
+            app.song_region_move(delta_beats)
         }
         "arrangement-clip-resize" => {
             let map = payload_map(payload)?;

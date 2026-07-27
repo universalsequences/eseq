@@ -20405,6 +20405,119 @@
             assert_eq!(action_field(&recorded[11], "from-beat"), Value::Number(8.0));
             assert_eq!(action_field(&recorded[11], "start"), Value::Number(6.0));
         }
+
+        // ── Title-bar move (region spec 6) ────────────────────────────────
+        // Clip 2 still spans [8,12): nothing above mutated the reactive song.
+        // A drag with no region under it moves the ONE clip, rigidly — the
+        // ghost keeps the span's length and phase, and the release lowers to
+        // a single :clip-move.
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 20 :lane 0))",
+        );
+        assert_eq!(recorded.lock().unwrap().len(), 12, "live drags never commit");
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :start)"),
+            Value::Number(20.0),
+            "move ghost previews the clip's new start"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :end)"),
+            Value::Number(24.0),
+            "the move is rigid: the span keeps its length"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :finish-move-items :ids (list 2)))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 13);
+            assert_eq!(
+                action_field(&recorded[12], "type"),
+                Value::Keyword("clip-move".to_string())
+            );
+            assert_eq!(action_field(&recorded[12], "track"), Value::Number(0.0));
+            assert_eq!(action_field(&recorded[12], "clip-id"), Value::Number(2.0));
+            assert_eq!(action_field(&recorded[12], "start"), Value::Number(20.0));
+        }
+
+        // A finish whose ghost belongs to another lane commits nothing and
+        // still clears the ghost — a stale ghost is the failure mode this arm
+        // exists to prevent.
+        eval(
+            &mut editor,
+            "(do (arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 20 :lane 0)) \
+             (arrangement-track-action 1 (dict :type :finish-move-items :ids (list 2))))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        assert_eq!(recorded.lock().unwrap().len(), 13);
+
+        // A drag on a clip INSIDE the committed region moves the whole
+        // RECTANGLE instead (spec 6.2): the ghost is the region shifted by the
+        // drag delta, and the release carries only that delta.
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "song-region",
+            test_list(vec![
+                Value::Number(0.0),
+                Value::Number(0.0),
+                Value::Number(8.0),
+                Value::Number(12.0),
+                Value::Bool(false),
+            ]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 12 :lane 0))",
+        );
+        assert_eq!(
+            read(&mut editor, "(= (arrangement-ghost-kind) :region-move)"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            read(&mut editor, "(get arrangement-region-ghost :start)"),
+            Value::Number(12.0),
+            "the region ghost previews the shifted rectangle"
+        );
+        assert_eq!(
+            read(&mut editor, "(get arrangement-region-ghost :end)"),
+            Value::Number(16.0)
+        );
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :finish-move-items :ids (list 2)))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        assert_eq!(read(&mut editor, "arrangement-region-ghost"), Value::Nil);
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 14);
+            assert_eq!(
+                action_field(&recorded[13], "type"),
+                Value::Keyword("region-move".to_string())
+            );
+            assert_eq!(action_field(&recorded[13], "delta"), Value::Number(4.0));
+        }
+
+        // Dragging the rectangle off the front of the timeline clamps at beat
+        // 0 rather than lowering a delta the primitive would refuse.
+        eval(
+            &mut editor,
+            "(do (arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start -4 :lane 0)) \
+             (arrangement-track-action 0 (dict :type :finish-move-items :ids (list 2))))",
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 15);
+            assert_eq!(action_field(&recorded[14], "delta"), Value::Number(-8.0));
+        }
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "song-region", Value::Nil);
+        editor.runtime_mut().run_reactive_cycle();
     }
 
     /// One completed gesture is one undo entry: the translator's commands
@@ -20611,6 +20724,66 @@
                 .iter()
                 .any(|clip| clip.id == clip_id),
             "the deleted clip is gone from the timeline"
+        );
+
+        // A region move is one primitive too: the rectangle is Rust-owned, so
+        // the gesture carries only its delta (region spec 6.2). Region ops are
+        // rectangle surgery — the music is re-stamped as fresh clips, which is
+        // why this runs after the id-addressed gestures above.
+        let fresh = app
+            .arr_clip_create(
+                0,
+                2.0,
+                6.0,
+                sequencer::sequencer::LaneSource::Pattern(sequencer::sequencer::PatternId(2)),
+                0.0,
+            )
+            .expect("clip creates");
+        app.set_song_region(sequencer::app::song_region::SongRegionSelection::new(
+            0, 0, 2.0, 6.0,
+        ));
+        let song = app.state.committed_song().unwrap();
+        let arrangement = app.state.committed_arrangement().unwrap();
+        let action = map_value(vec![
+            ("type", Value::Keyword("region-move".to_string())),
+            ("delta", Value::Number(4.0)),
+        ]);
+        let commands = crate::arrangement_actions::arrangement_action_song_commands(
+            &action,
+            Some(&song),
+            Some(&arrangement),
+        )
+        .expect("region move translates");
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].0, "song-region-move");
+        let depth = app.history.undo_len();
+        apply(&mut app, &commands);
+        assert_eq!(
+            app.history.undo_len(),
+            depth + 1,
+            "a region move is one undo entry"
+        );
+        let lane = app.state.committed_arrangement().unwrap().track_lanes[0].clone();
+        assert!(
+            !lane.iter().any(|clip| clip.id == fresh),
+            "the rectangle was re-stamped, not the clip object"
+        );
+        assert!(
+            lane.iter()
+                .any(|clip| (clip.start_beat, clip.end_beat) == (6.0, 10.0)),
+            "the rectangle slid four beats right: {lane:?}"
+        );
+        assert!(
+            !lane
+                .iter()
+                .any(|clip| clip.start_beat < 6.0 && clip.end_beat > 2.0),
+            "and the beats it left are silent: {lane:?}"
+        );
+        assert_eq!(
+            app.song_region_selection
+                .map(|region| (region.start_beat, region.end_beat)),
+            Some((6.0, 10.0)),
+            "the highlight followed the move"
         );
     }
 

@@ -257,6 +257,16 @@ pub(crate) fn arrangement_action_song_commands(
                 ]),
             )])
         }
+        // Title-bar drag over a clip inside the selected region: one rigid
+        // REGION move (region spec 6.2). The rectangle itself is Rust-owned,
+        // so the gesture carries only the delta its ghost settled on.
+        "region-move" => {
+            let delta = require_beat(map, "delta")?;
+            Ok(vec![(
+                "song-region-move",
+                payload(vec![("delta-beats", Value::Number(delta))]),
+            )])
+        }
         // Track-lane Backspace: one clip delete. The span goes silent — the
         // clip is gone from the timeline (lane spec 6.2).
         "clip-delete" => {
@@ -526,6 +536,27 @@ mod tests {
         assert_eq!(commands[0].0, "arrangement-clip-move");
         assert_eq!(payload_number(&commands[0], "clip-id"), 5.0);
         assert_eq!(payload_number(&commands[0], "start-beat"), 24.0);
+    }
+
+    /// Region spec 6.2: the rectangle is Rust-owned, so a region move carries
+    /// only its delta — one primitive, one undo entry.
+    #[test]
+    fn region_move_lowers_to_one_song_region_move() {
+        let action = value_map(vec![
+            ("type", Value::Keyword("region-move".to_string())),
+            ("delta", Value::Number(-8.0)),
+        ]);
+        let commands = lower(&action).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].0, "song-region-move");
+        assert_eq!(payload_number(&commands[0], "delta-beats"), -8.0);
+
+        // A move with no delta is still a malformed gesture, not a zero.
+        let action = value_map(vec![(
+            "type",
+            Value::Keyword("region-move".to_string()),
+        )]);
+        assert!(lower(&action).is_err());
     }
 
     #[test]

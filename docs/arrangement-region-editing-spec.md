@@ -1,7 +1,11 @@
 # Arrangement Region Editing — Clip Hit Regions, Region Selection, Copy/Paste/Duplicate, Move
 
-Status: rev 2, 2026-07-26 — **slices 1-3 shipped; slice 4 (move) is the
-only outstanding work.** Rev 1 (2026-07-24) was written against the ROW
+Status: rev 3, 2026-07-27 — **all four slices shipped.** Slice 4 (move)
+landed on `arrangement-timeline`: `song_region_move` in `song_region.rs`, the
+`region-move` lowering case, the `:track-move` / `:region-move` ghosts in
+`arrangement.lisp`, and `:move-snap-mode :alignment-helper` on the track
+lanes. Rev 2 (2026-07-26) restated the spec over the lane model; rev 1
+(2026-07-24) was written against the ROW
 model; the arrangement has since been rewritten onto lanes and clips
 (`docs/arrangement-lane-model-spec.md`, all 6 phases landed), and slices 1-3
 shipped in both worlds — first as row surgery, then ported. This revision
@@ -34,7 +38,7 @@ Four slices, in dependency order:
    per-track cursor; Cmd-D duplicates the region in place, rippling what
    follows right. One undo entry each. **(shipped, then ported to clips)**
 4. **Move** — drag a clip by its title bar; if the clip is inside the
-   active region, the whole region moves in unison. **(outstanding — §6)**
+   active region, the whole region moves in unison. **(shipped)**
 
 Everything lowers to arrangement mutations through the lane-model primitives
 (`arr_edit.rs`, lane spec §8) or one-commit region primitives
@@ -458,7 +462,7 @@ partial ripple no longer converts anything into overrides, and no lane is
 silently cut off from later scene-cell edits. The only asymmetry left is
 whether the scene lane rides along.
 
-## 6. Slice 4 — move (the outstanding work)
+## 6. Slice 4 — move — SHIPPED
 
 Two gestures share one title-bar drag: moving **one clip** and moving the
 **selected region**. Both are rigid — `offset_steps` never changes, so the
@@ -466,12 +470,13 @@ moved music sounds identical, just later or earlier (takes spec §7.4).
 
 ### 6.1 Track-lane single clip
 
-Everything below the UI script already exists: `arrangement_actions.rs`
+Shipped as written below. Everything below the UI script already existed: `arrangement_actions.rs`
 lowers a `clip-move` action to the `arrangement-clip-move` host command, and
 `arr_clip_move(clip_id, new_start)` is a validated one-undo-entry primitive
 that lifts the clip, `occlude_span`s the destination (so it truncates
 whatever it lands on, like every other clip write), re-inserts it and raises
-`end_beat` if it now runs past. **Only the Lisp arm is missing:**
+`end_beat` if it now runs past. **Only the Lisp arm was missing, and it now exists
+(`arrangement-track-move-ghost` / `arrangement-track-move-finish`):**
 
 - `arrangement-track-action` stops discarding `:finish-move-items`
   (`arrangement.lisp:891-893`). Live `:move-items-absolute` sets an
@@ -503,7 +508,10 @@ and the release lowers to `song-region-move` with
 `delta = ghost-start - region-start`. Otherwise it is a plain single-clip
 move and the region clears, exactly as a clip `:select` does.
 
-`song_region_move(delta_beats)` is the one new primitive (§5.2). Over one
+`song_region_move(delta_beats)` is the one new primitive (§5.2), and it
+lifts the rectangle by calling `song_region_copy` — so a move follows copy's
+cut-and-restamp rule by construction, and `paste_clipboard` stamps the
+destination with an IDENTITY take map (a move clones nothing). Over one
 cloned arrangement, per track in the region:
 
 1. Collect the region's clips, cut at the region edges via `restamped_clip`
@@ -562,12 +570,12 @@ scene span's left edge *is* its event. Nothing further is owed here.
    all-tracks region ripples the scene lane and chains on repeat; **partial
    region leaves every unselected lane playing the same clips at the same
    beats**; take sources clone.
-4. **Move** (§6) — the remaining slice.
+4. **Move** (§6) — SHIPPED. Tests as listed:
    - `arrangement_actions.rs`: `clip-move` → exactly one
-     `arrangement-clip-move` command (exists); add a `region-move` →
-     `song-region-move` case with the delta.
+     `arrangement-clip-move` command; `region-move` → `song-region-move`
+     carrying the delta (`region_move_lowers_to_one_song_region_move`).
    - `arr_edit.rs`: `arr_clip_move` truncation + `end_beat` growth (exists).
-   - `song_region.rs`: new `song_region_move` tests — partially covered clip
+   - `song_region.rs`: `song_region_move` tests — partially covered clip
      moves only its covered part; the vacated rectangle is silent (no
      leftover trimmed fragments); an overlapping move (delta < region length)
      keeps everything it placed; scene-lane region moves its events and
@@ -581,8 +589,10 @@ scene span's left edge *is* its event. Nothing further is owed here.
      and the guard-failure path.
 
 Each slice is independently shippable; 3 and 4 both depend on 2's region
-state, 4's region move depends on the new `song_region_move` primitive
-(§5.2), which is the only model-side code slice 4 adds.
+state, 4's region move depends on the `song_region_move` primitive (§5.2),
+which is the only model-side code slice 4 added. The clip-move path also
+re-anchors the one-clip region through `App::refresh_song_region_for_clip`,
+called from the `arrangement-clip-move` host command.
 
 ## 8. Locked decisions
 
@@ -633,6 +643,9 @@ state, 4's region move depends on the new `song_region_move` primitive
 - Moves are phase-rigid: `start_beat` shifts, `offset_steps` preserved
   (takes spec §7.4).
 - The clipboard is the whole rectangle: gaps paste as silence.
+- A region move clears the SOURCE rectangle before writing the destination,
+  so a delta smaller than the region does not erase what it just placed; and
+  it never clones takes, so it is always a plain `EditPatch::Arrangement`.
 
 ## 9. Open questions
 
@@ -647,6 +660,7 @@ lane-height-scaled.
 - Whether the scene lane's marquee-to-all-tracks region should also drive
   scene-event selection simultaneously (Ableton merges these; we currently
   keep them exclusive).
-- Whether a region move should be allowed to cross the song end (today paste
-  extends `end_beat`; §6.2 follows paste, but Ableton's Cut Time/Paste Time
-  semantics may argue for clamping instead).
+- Whether a region move should be allowed to cross the song end. **Shipped
+  following paste**: a move past the end extends `end_beat` in the same entry
+  (`move_past_the_song_end_extends_it_in_the_same_entry`). Ableton's Cut
+  Time/Paste Time semantics may still argue for clamping instead.

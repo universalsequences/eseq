@@ -432,10 +432,24 @@
                          (floor (/ shifted (get entry :num-steps)))))
             (max 0 shifted)))))))
 
-;; Live resize ghost for a track clip: while the edge drag is in flight the
-;; clip previews its new span; the finish action lowers to one clip resize.
-;; Either edge drags — the start edge moves the phase anchor with it.
+;; Live move/resize ghost for a track clip. A move is RIGID (region spec 6.1 /
+;; takes spec 7.4): the span slides, its length and `offset-steps` do not
+;; change, so the preview draws the same music somewhere else.
+(def arrangement-track-move-ghost-clip (i clip)
+  (let ((new-start (max 0 (get arrangement-ghost :start))))
+    (dict
+      :clip-id (get clip :clip-id)
+      :start-beat new-start
+      :end-beat (+ new-start (- (get clip :end-beat) (get clip :start-beat)))
+      :pattern-id (get clip :pattern-id)
+      :take-id (get clip :take-id)
+      :offset-steps (get clip :offset-steps))))
+
 (def arrangement-track-ghost-clip (i clip)
+  (if (and (= (arrangement-ghost-kind) :track-move)
+        (= (get arrangement-ghost :track) i)
+        (= (get arrangement-ghost :clip-id) (get clip :clip-id)))
+    (arrangement-track-move-ghost-clip i clip)
   (if (and (= (arrangement-ghost-kind) :track-resize)
         (= (get arrangement-ghost :track) i)
         (= (get arrangement-ghost :clip-id) (get clip :clip-id)))
@@ -458,7 +472,7 @@
         :pattern-id (get clip :pattern-id)
         :take-id (get clip :take-id)
         :offset-steps (get clip :offset-steps)))
-    clip))
+    clip)))
 
 ;; Track-lane items (lane spec 12): the stored clips, and nothing else. A gap
 ;; between clips produces NO item — the lane really is silent there.
@@ -808,6 +822,72 @@
             (arrangement-track-resize-start-finish i clip time)
             (arrangement-track-resize-end-finish i clip time)))))))
 
+;; ── Clip / region move (region spec 6) ─────────────────────────────────────
+
+;; Does the committed region cover this clip? A title-bar drag on a clip
+;; INSIDE the region moves the whole rectangle; anything else moves the one
+;; clip and the region gives way, exactly as a plain clip click does.
+(def arrangement-clip-in-region? (i clip)
+  (if (or (= SEQ.song-region nil) (= clip nil))
+    false
+    (and (>= i (nth SEQ.song-region 0))
+      (<= i (nth SEQ.song-region 1))
+      (> (get clip :end-beat) (nth SEQ.song-region 2))
+      (< (get clip :start-beat) (nth SEQ.song-region 3)))))
+
+;; Live title-bar drag: ghost only, never a primitive (spec 9.1). Vertical
+;; travel is ignored — cross-track moves are invalid for the same per-track
+;; pattern-pool reason as cross-track paste (region spec 8), so the widget's
+;; :lane is dropped here.
+(def arrangement-track-move-ghost (i event)
+  (let ((clip (arrangement-find-track-clip i (get event :anchor-id))))
+    (if (= clip nil)
+      (set! arrangement-ghost nil)
+      (if (arrangement-clip-in-region? i clip)
+        ;; Region move: the ghost is the whole rectangle shifted by the drag
+        ;; delta, clamped so it can never run before beat 0 (the primitive
+        ;; rejects that rather than truncating the leading clips).
+        (let ((delta (max (- 0 (nth SEQ.song-region 2))
+                       (- (get event :start) (get clip :start-beat)))))
+          (do
+            (set! arrangement-ghost
+              (dict :kind :region-move :track i :delta delta))
+            (set! arrangement-region-ghost
+              (dict :track-a (nth SEQ.song-region 0)
+                :track-b (nth SEQ.song-region 1)
+                :start (+ (nth SEQ.song-region 2) delta)
+                :end (+ (nth SEQ.song-region 3) delta)
+                :scene-lane (nth SEQ.song-region 4)))))
+        (set! arrangement-ghost
+          (dict :kind :track-move :track i
+            :clip-id (get clip :clip-id)
+            :start (max 0 (get event :start))))))))
+
+;; Release: one primitive from the ghost's final values, and never a stale
+;; ghost on any path (including the guard failures).
+(def arrangement-track-move-finish (i)
+  (let ((kind (arrangement-ghost-kind))
+        (track (get arrangement-ghost :track)))
+    (if (and (= kind :region-move) (= track i))
+      (let ((delta (get arrangement-ghost :delta)))
+        (do
+          (set! arrangement-region-ghost nil)
+          (if (= delta 0)
+            (set! arrangement-ghost nil)
+            (arrangement-edit-finish (dict :type :region-move :delta delta)))))
+      (if (and (= kind :track-move) (= track i))
+        (let ((clip (arrangement-find-track-clip i (get arrangement-ghost :clip-id)))
+              (start (get arrangement-ghost :start)))
+          (do
+            (set! arrangement-ghost nil)
+            (if (or (= clip nil) (= start (get clip :start-beat)))
+              nil
+              (arrangement-clip-edit i clip
+                (dict :type :clip-move :start start)))))
+        (do
+          (set! arrangement-region-ghost nil)
+          (set! arrangement-ghost nil))))))
+
 (def arrangement-track-delete (i ids)
   (do
     (set! arrangement-track-selection '())
@@ -889,9 +969,12 @@
       (seq-song-region-copy)
       :paste-items
       (seq-song-region-paste (get event :time))
-      ;; Whole-clip moves are not lowered yet: never leave a stale ghost.
+      ;; Title-bar drag (region spec 6): one rigid clip move, or a move of the
+      ;; whole region when the dragged clip lies inside it.
+      :move-items-absolute
+      (arrangement-track-move-ghost i event)
       :finish-move-items
-      (set! arrangement-ghost nil))))
+      (arrangement-track-move-finish i))))
 
 ;; ── Scene drag-and-drop (Ableton-style, replaces the draw tool) ────────────
 ;; The transport scene pills are drag sources (:drag-type "transport-scene");
@@ -1030,6 +1113,9 @@
     :resize-snap :grid
     :marquee-snap :grid
     :snap-mode :floor
+    ;; A title-bar drag snaps the same way an edge drag does (region spec 6.3):
+    ;; the zoom-adaptive grid ladder plus neighbouring clip edges.
+    :move-snap-mode :alignment-helper
     :resize-snap-mode :alignment-helper
     :scroll-mode :smooth
     :on-action |event| (arrangement-track-action i event)))

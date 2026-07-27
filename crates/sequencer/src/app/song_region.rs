@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::sequencer::{
-    insert_clip_sorted, occlude_span, restamped_clip, ArrClip, LaneSource, ProjectArrangement,
-    ProjectScenes, TakeId, TrackPatternData,
+    insert_clip_sorted, occlude_span, restamped_clip, ArrClip, ClipId, LaneSource,
+    ProjectArrangement, ProjectScenes, TakeId, TrackPatternData,
 };
 
 use super::edit::finish_active_gesture;
@@ -450,6 +450,103 @@ impl App {
         ))
     }
 
+    /// Move the selected region rigidly by `delta_beats` (region spec 6.2):
+    /// the rectangle's clips are lifted, the source rectangle goes silent, and
+    /// they land `delta_beats` later or earlier with their `offset_steps`
+    /// untouched — so the moved music sounds identical, just somewhere else
+    /// (takes spec 7.4).
+    ///
+    /// The rectangle is lifted exactly the way copy lifts it: a clip the region
+    /// only partially covers moves only its covered part, cut at the edge and
+    /// re-anchored through `restamped_clip` (spec 8). Take sources are NOT
+    /// cloned — a move keeps referencing the very takes it always did — so this
+    /// is always a single `EditPatch::Arrangement` entry.
+    ///
+    /// Order matters: the source rectangle is cleared BEFORE the destination is
+    /// written, or an overlapping move (a delta smaller than the region) would
+    /// erase the clips it had just placed.
+    pub fn song_region_move(&mut self, delta_beats: f64) -> Result<String, String> {
+        self.require_song_edit_unlocked()?;
+        if !delta_beats.is_finite() {
+            return Err(format!(
+                "Region move delta must be a finite beat count (got {delta_beats})"
+            ));
+        }
+        let region = self
+            .song_region_selection
+            .ok_or_else(|| "No arrangement region is selected".to_string())?;
+        if delta_beats == 0.0 {
+            return Ok("The region did not move".to_string());
+        }
+        let dest_beat = region.start_beat + delta_beats;
+        if dest_beat < 0.0 {
+            // Never silently truncate the leading clips: the UI clamps the
+            // drag, so reaching here means a stale or synthetic gesture.
+            return Err(format!(
+                "Moving the region by {delta_beats} beats would push it before beat 0"
+            ));
+        }
+        let clipboard = self.song_region_copy()?;
+        let arrangement_before = self.state.committed_arrangement();
+        let Some(existing) = arrangement_before.clone() else {
+            return Err("The project has no song".to_string());
+        };
+        let len_beats = clipboard.len_beats;
+        let source_start = region.start_beat;
+        let source_end = source_start + len_beats;
+        let dest_end = dest_beat + len_beats;
+
+        // `paste_clipboard` resolves take sources through a clone map; a move
+        // clones nothing, so the map is the identity over the takes present.
+        let mut takes: HashMap<(usize, u64), TakeId> = HashMap::new();
+        for (track, spans) in &clipboard.tracks {
+            for span in spans {
+                if let LaneSource::Take(take) = span.source {
+                    takes.insert((*track, take.0), take);
+                }
+            }
+        }
+
+        let scenes = self.state.capture_project_scenes();
+        let build = (|| -> Result<ProjectArrangement, String> {
+            let mut arrangement = existing.clone();
+            // Like paste, a move that runs past the song end extends it inside
+            // the same commit (spec 5.2).
+            arrangement.end_beat = arrangement.end_beat.max(dest_end);
+            for (track, _) in &clipboard.tracks {
+                if *track >= arrangement.track_lanes.len() {
+                    continue;
+                }
+                occlude_span(&mut arrangement, &scenes, *track, source_start, source_end)?;
+            }
+            // A scene-lane region moves its scene events too, restoring what
+            // governed the vacated span's end so nothing after it changes.
+            if clipboard.scene_lane {
+                let tail_scene =
+                    Self::clear_scene_lane_span(&mut arrangement, source_start, source_end);
+                Self::restore_scene_tail(&mut arrangement, source_end, tail_scene);
+            }
+            // Destination second — it clears its own rectangle and stamps the
+            // lifted clips (and, for a scene-lane region, the scene events).
+            self.paste_clipboard(&mut arrangement, &scenes, &clipboard, dest_beat, &takes)?;
+            Ok(arrangement)
+        })();
+        self.commit_region_edit("Move region", arrangement_before, build, None)?;
+
+        // The highlight follows the move, so a repeated drag (or a Cmd-C right
+        // after one) addresses where the music now is.
+        self.set_song_region(SongRegionSelection::new_in_lane(
+            region.track_a,
+            region.track_b,
+            dest_beat,
+            dest_end,
+            region.scene_lane,
+        ));
+        Ok(format!(
+            "Moved beats {source_start}-{source_end} to {dest_beat}"
+        ))
+    }
+
     /// Mint the paste-time clones of every take source in the clipboard, once
     /// per `(track, take)` — a take clip split across several rows must land
     /// as ONE take, not one per row. Returns the pre-mutation scene state when
@@ -846,6 +943,33 @@ impl App {
         }
         self.song_region_selection = Some(region);
         true
+    }
+
+    /// Re-anchor the one-clip region onto a clip's CURRENT span (spec 6.1).
+    ///
+    /// A clip drag moves the object the selection names, so the highlight —
+    /// and with it copy/delete's target — has to follow it; otherwise a Cmd-C
+    /// straight after a move would lift the beats the clip just left. A no-op
+    /// unless `clip_id` is the selected clip and still exists.
+    pub fn refresh_song_region_for_clip(&mut self, clip_id: ClipId) -> bool {
+        let Some(selection) = self.song_clip_selection else {
+            return false;
+        };
+        if selection.clip_id != clip_id {
+            return false;
+        }
+        let Some(arrangement) = self.state.committed_arrangement() else {
+            return false;
+        };
+        let Some((track, clip)) = arrangement.find_clip(clip_id) else {
+            return false;
+        };
+        self.set_song_region_for_clip(SongRegionSelection::new(
+            track,
+            track,
+            clip.start_beat,
+            clip.end_beat,
+        ))
     }
 
     /// Clear the region (spec 4.1). Returns true when it actually changed.
@@ -1753,6 +1877,174 @@ mod tests {
             scene_lane(&app),
             vec![(0.0, 0), (12.0, 1)],
             "beat 0 survives; the tail scene is restored at the region end"
+        );
+    }
+
+    // --- move (spec 6.2) -------------------------------------------------
+
+    /// The headline contract: the rectangle plays identically somewhere else
+    /// and the beats it left go silent. Partially covered clips move only the
+    /// part the rectangle covered, phase-rigidly (`offset_steps` untouched).
+    #[test]
+    fn move_shifts_the_rectangle_and_vacates_the_source() {
+        let mut app = app_with_song();
+        // Deliberately cutting into the [0,4) and [4,8) clips, so the moved
+        // material is a boundary-cut fragment with a non-zero phase.
+        app.set_song_region(SongRegionSelection::new(0, 1, 2.0, 6.0));
+        let source: Vec<_> = (0..2).map(|track| window(&app, track, 2.0, 6.0)).collect();
+        let depth = app.history.undo_len();
+
+        app.song_region_move(10.0).expect("move succeeds");
+        assert_eq!(app.history.undo_len(), depth + 1, "exactly one undo entry");
+        for track in 0..2 {
+            assert_eq!(
+                window(&app, track, 12.0, 16.0),
+                source[track],
+                "track {track} plays the rectangle 10 beats later"
+            );
+            assert_eq!(
+                window(&app, track, 2.0, 6.0),
+                vec![(0.0, 4.0, LaneSource::Empty, 0.0)],
+                "track {track}'s source rectangle is SILENT — no trimmed leftovers"
+            );
+        }
+        // Phase rigidity at the stored-clip level: 2 beats into a 16-step,
+        // 4-beat pattern is 8 steps, and that offset rides along unchanged.
+        assert_eq!(
+            clips(&app, 0)
+                .into_iter()
+                .filter(|(start, _, _, _)| *start >= 12.0)
+                .collect::<Vec<_>>(),
+            vec![
+                (12.0, 14.0, LaneSource::Pattern(PatternId(1)), 8.0),
+                (14.0, 16.0, LaneSource::Pattern(PatternId(2)), 0.0),
+            ]
+        );
+        assert_eq!(
+            app.song_region_selection,
+            Some(SongRegionSelection::new(0, 1, 12.0, 16.0)),
+            "the highlight follows the move, so a repeated drag chains"
+        );
+
+        undo(&mut app);
+        for track in 0..2 {
+            assert_eq!(
+                window(&app, track, 2.0, 6.0),
+                source[track],
+                "one undo puts track {track} back"
+            );
+        }
+    }
+
+    /// A delta smaller than the region overlaps its own source: clearing the
+    /// source BEFORE writing the destination is what keeps the overlap from
+    /// erasing the clips the move just placed.
+    #[test]
+    fn an_overlapping_move_keeps_everything_it_placed() {
+        let mut app = app_with_song();
+        app.set_song_region(SongRegionSelection::new(0, 0, 4.0, 12.0));
+        let source = window(&app, 0, 4.0, 12.0);
+
+        app.song_region_move(4.0).expect("move succeeds");
+        assert_eq!(
+            window(&app, 0, 8.0, 16.0),
+            source,
+            "the whole rectangle survives the overlap"
+        );
+        assert_eq!(
+            window(&app, 0, 4.0, 8.0),
+            vec![(0.0, 4.0, LaneSource::Empty, 0.0)],
+            "only the part of the source the destination does not cover is vacated"
+        );
+    }
+
+    /// Move follows paste rather than Ableton's Cut Time: running past the
+    /// song end extends it, inside the same entry (spec 9's open question).
+    #[test]
+    fn move_past_the_song_end_extends_it_in_the_same_entry() {
+        let mut app = app_with_song();
+        app.set_song_region(SongRegionSelection::new(0, 0, 8.0, 16.0));
+        let source = window(&app, 0, 8.0, 16.0);
+        let depth = app.history.undo_len();
+
+        app.song_region_move(8.0).expect("move succeeds");
+        assert_eq!(app.history.undo_len(), depth + 1, "exactly one undo entry");
+        assert_eq!(
+            app.state.committed_arrangement().expect("arrangement").end_beat,
+            24.0
+        );
+        assert_eq!(window(&app, 0, 16.0, 24.0), source);
+    }
+
+    /// A move that would cross beat 0 is refused outright — never silently
+    /// truncated to what fits — and a zero delta writes nothing at all.
+    #[test]
+    fn move_rejects_a_delta_that_would_cross_beat_zero() {
+        let mut app = app_with_song();
+        app.set_song_region(SongRegionSelection::new(0, 1, 4.0, 12.0));
+        let before = app.state.committed_arrangement();
+        let depth = app.history.undo_len();
+
+        let error = app.song_region_move(-8.0).expect_err("crosses beat 0");
+        assert!(error.contains("before beat 0"), "{error}");
+        assert_eq!(app.state.committed_arrangement(), before, "nothing moved");
+
+        app.song_region_move(0.0).expect("a zero delta is not an error");
+        assert_eq!(app.history.undo_len(), depth, "and commits no entry");
+        assert_eq!(app.state.committed_arrangement(), before);
+    }
+
+    /// A SCENE-LANE region carries its scene events, restoring what governed
+    /// the vacated span's end so nothing after the move changes scene.
+    #[test]
+    fn a_scene_lane_region_move_carries_the_scene_events() {
+        let mut app = app_with_scene_change();
+        app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 8.0, 12.0, true));
+        app.song_region_move(4.0).expect("move succeeds");
+        assert_eq!(
+            scene_lane(&app),
+            vec![(0.0, 0), (12.0, 1)],
+            "the scene change moved with the rectangle"
+        );
+    }
+
+    /// A track-lane region of the same rectangle leaves the scene lane alone,
+    /// the same asymmetry copy/paste/delete already follow.
+    #[test]
+    fn a_track_lane_region_move_leaves_the_scene_lane_alone() {
+        let mut app = app_with_scene_change();
+        app.set_song_region(SongRegionSelection::new(0, 1, 8.0, 12.0));
+        app.song_region_move(4.0).expect("move succeeds");
+        assert_eq!(scene_lane(&app), vec![(0.0, 0), (8.0, 1)]);
+    }
+
+    /// Spec 6.1: dragging the SELECTED clip moves the object the selection
+    /// names, so its one-clip region follows — Cmd-C right after a move must
+    /// lift where the clip now is, not where it was.
+    #[test]
+    fn moving_the_selected_clip_carries_its_one_clip_region() {
+        let mut app = app_with_song();
+        let clip = clip_at(&app, 0, 4.0);
+        app.select_song_clip_span(0, clip, Some((4.0, 8.0)))
+            .expect("clip selects");
+        assert_eq!(
+            app.song_region_selection,
+            Some(SongRegionSelection::new(0, 0, 4.0, 8.0))
+        );
+
+        app.arr_clip_move(clip, 12.0).expect("clip moves");
+        assert!(app.refresh_song_region_for_clip(clip));
+        assert_eq!(
+            app.song_region_selection,
+            Some(SongRegionSelection::new(0, 0, 12.0, 16.0))
+        );
+
+        // Some other clip's move leaves the selection where it is.
+        let other = clip_at(&app, 1, 4.0);
+        assert!(!app.refresh_song_region_for_clip(other));
+        assert_eq!(
+            app.song_region_selection,
+            Some(SongRegionSelection::new(0, 0, 12.0, 16.0))
         );
     }
 }
