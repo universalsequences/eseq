@@ -123,6 +123,7 @@ pub(crate) struct PendingLaneContent {
 pub(crate) struct PendingTrackEventContent {
     track: usize,
     start_beat: f64,
+    pattern_id: u64,
     num_steps: usize,
     length_beats: f64,
     events: Vec<(f64, f64, f64, f64)>,
@@ -188,6 +189,7 @@ fn build_pending_content(
                 Some(PendingTrackEventContent {
                     track: *track,
                     start_beat: *start_beat,
+                    pattern_id: pattern.0,
                     num_steps,
                     length_beats: data.track_params.timebase.step_beats(num_steps)
                         * num_steps as f64,
@@ -268,6 +270,7 @@ fn build_song_pending_value(content: &PendingContent, head_beat: f64) -> Value {
             let mut map = HashMap::new();
             number_field(&mut map, "track", event.track as f64);
             number_field(&mut map, "start-beat", event.start_beat);
+            number_field(&mut map, "pattern-id", event.pattern_id as f64);
             number_field(&mut map, "num-steps", event.num_steps as f64);
             number_field(&mut map, "length-beats", event.length_beats);
             map.insert(
@@ -311,7 +314,11 @@ fn build_song_pending_value(content: &PendingContent, head_beat: f64) -> Value {
 /// Publish (or clear) the provisional capture surface (spec 3). Nothing is
 /// published while no capture take exists, which is also how every exit path
 /// clears it: stop, cancel and failure all drop `song_capture_take`.
-fn sync_song_pending(rt: &mut Runtime, app: &app::App, frame: &mut SongFrameState) -> bool {
+pub(crate) fn sync_song_pending(
+    rt: &mut Runtime,
+    app: &app::App,
+    frame: &mut SongFrameState,
+) -> bool {
     let Some(head) = app
         .pending_capture_active()
         .then(|| app.pending_capture_head_beat().unwrap_or(0.0))
@@ -606,7 +613,16 @@ pub(crate) fn build_song_bindings_snapshot(
     song: Option<&ProjectSong>,
 ) -> SongBindingsSnapshot {
     let mode = app.song_transport_mode.binding_str();
-    let position = app.state.song_position_beats();
+    // Capturing over an EMPTY song runs the plain session transport, so the
+    // song-playback position atomics are inactive and every arrangement lane
+    // drew its playhead pinned at beat 0. The capture's own record head is
+    // the same clock the launches and take notes are stamped on, so it is
+    // the honest fallback; capture ON TOP of song playback keeps the
+    // scheduler position, which `pending_capture_head_beat` clamps to anyway.
+    let position = app
+        .state
+        .song_position_beats()
+        .or_else(|| app.pending_capture_head_beat());
     let song_playing = app.song_transport_mode == SongTransportMode::SongPlayback;
     let (current_row, current_row_id) = match (song, position) {
         (Some(song), Some(beats)) if song_playing => match display_row_at_beat(song, beats) {

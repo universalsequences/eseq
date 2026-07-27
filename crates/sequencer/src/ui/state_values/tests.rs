@@ -20019,9 +20019,11 @@
         );
 
         // The revision gate: a frame with no new note and no new head
-        // quantum publishes nothing at all.
+        // quantum republishes nothing. Asserted at the `song-pending` seam
+        // itself — `sync_song_state` still reports dirty every frame during
+        // capture, because the render-rate playhead is moving.
         assert!(
-            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            !sync_song_pending(editor.runtime_mut(), &test_app, &mut frame),
             "a frame that recorded nothing must not republish the dots"
         );
 
@@ -20084,6 +20086,79 @@
             read(&mut editor, "SEQ.song-pending"),
             Value::Nil,
             "a FAILED capture clears the surface too"
+        );
+    }
+
+    /// Capturing over an EMPTY song is spliced from beat ZERO (the
+    /// `(None, _)` arm of the stop-commit), so the state capture STARTED in
+    /// really does become arrangement content from bar 1 — and the
+    /// provisional surface has to say so. Showing nothing until the first
+    /// scene change made a recording look like it began wherever the
+    /// performer first touched a launch button. The reverse case matters
+    /// just as much: with a committed song the splice starts at the first
+    /// launch, so seeding a beat-zero item would paint over an arrangement
+    /// the commit never touches.
+    #[test]
+    fn metal_seq_song_pending_seeds_beat_zero_only_for_a_whole_song_capture() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mut frame = SongFrameState::default();
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("binding read evaluates")
+                .expect("binding read returns a value")
+        };
+
+        // No committed song: the performer is the sole launch authority.
+        let mut empty = pending_capture_test_app();
+        empty.arr_clear().expect("clear the song");
+        empty.song_transport_play(true).expect("capture starts");
+        assert!(sync_song_state(editor.runtime_mut(), &empty, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(len (get SEQ.song-pending :scene-events))"),
+            Value::Number(1.0),
+            "the initial scene is drawn before any launch is performed"
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(get (nth (get SEQ.song-pending :scene-events) 0) :start-beat)"
+            ),
+            Value::Number(0.0)
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(get (nth (get SEQ.song-pending :track-events) 0) :start-beat)"
+            ),
+            Value::Number(0.0),
+            "...along with the clip it puts on the lane"
+        );
+        empty.song_capture_cancel().expect("cancel succeeds");
+
+        // With a committed song the splice starts at the first launch, so
+        // nothing is seeded at beat zero.
+        let mut over_song = pending_capture_test_app();
+        let mut frame = SongFrameState::default();
+        over_song.song_transport_play(true).expect("capture starts");
+        assert!(sync_song_state(
+            editor.runtime_mut(),
+            &over_song,
+            &mut frame,
+            true
+        ));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(len (get SEQ.song-pending :scene-events))"),
+            Value::Number(0.0),
+            "capture ON TOP of a song leaves the pre-existing arrangement to \
+             draw itself until the performer launches something"
+        );
+        assert_eq!(
+            read(&mut editor, "(len (get SEQ.song-pending :track-events))"),
+            Value::Number(0.0)
         );
     }
 
@@ -21970,6 +22045,7 @@
             map_value(vec![
                 ("track", Value::Number(0.0)),
                 ("start-beat", Value::Number(beat)),
+                ("pattern-id", Value::Number(3.0)),
                 ("num-steps", Value::Number(4.0)),
                 ("length-beats", Value::Number(1.0)),
                 (
@@ -22060,9 +22136,25 @@
             Value::Nil,
             "no id: there is no ClipId to name yet"
         );
+        // Real clip styling and labels: the preview looks like what it is
+        // about to become, and only the id is withheld.
         assert_eq!(
             read(&mut editor, &format!("(get {provisional} :label)")),
-            Value::Nil
+            Value::String("Take".to_string())
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get {provisional} :color)")),
+            read(&mut editor, "(arrangement-clip-color 0)"),
+            "provisional items wear the committed clips' own tint"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :label)"),
+            Value::String("Pattern 3".to_string())
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :label)"),
+            read(&mut editor, "(arrangement-scene-name 0)"),
+            "a captured launch is labelled with the scene it launched"
         );
         assert_eq!(
             read(
@@ -22103,6 +22195,28 @@
             read(&mut editor, "(get (nth (arrangement-scene-items) 2) :id)"),
             Value::Nil
         );
+
+        // The view can be scrolled out to the record head even when the
+        // committed song ends before it — clamping to `song-end-beat` alone
+        // pinned a whole-song capture at bar 1.
+        assert_eq!(
+            read(&mut editor, "(arrangement-scroll-extent)"),
+            Value::Number(16.0),
+            "the committed end still wins while it is the furthest content"
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "song-end-beat", Value::Number(0.0));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(arrangement-scroll-extent)"),
+            Value::Number(10.0),
+            "with no committed song the record head is the extent"
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
+        editor.runtime_mut().run_reactive_cycle();
 
         // Inert: the real clip selects, the provisional item does not.
         eval(

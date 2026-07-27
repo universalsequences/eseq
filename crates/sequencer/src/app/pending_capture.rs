@@ -91,6 +91,26 @@ impl App {
         });
         let mut scene_events = Vec::new();
         let mut track_events = Vec::new();
+        // The state capture STARTED in. It only becomes arrangement content
+        // when there is no committed song — the stop-commit then splices
+        // from beat zero rather than from the first launch — so drawing it
+        // otherwise would paint over the pre-existing arrangement with
+        // something the commit will never write.
+        if take.whole_song() {
+            let initial = take.initial();
+            scene_events.push((0.0, initial.scene));
+            for track in 0..self.tracks.len() {
+                let pattern = initial
+                    .overrides
+                    .iter()
+                    .find(|(over, _)| *over == track)
+                    .map(|(_, pattern)| *pattern)
+                    .or_else(|| self.state.scene_track_pattern_id(initial.scene, track));
+                if let Some(pattern) = pattern {
+                    track_events.push((0.0, track, pattern));
+                }
+            }
+        }
         for event in ordered {
             match &event.kind {
                 CaptureLaunchKind::Scene { scene, take_lanes } => {

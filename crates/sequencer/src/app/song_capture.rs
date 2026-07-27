@@ -81,6 +81,15 @@ pub struct SongCaptureTake {
     /// The resolved session state at capture start: the beat-zero row
     /// (spec 7.4.3).
     initial: CapturedSongState,
+    /// True when capture began with NO committed song. The stop-commit then
+    /// takes the `(None, _)` arm and splices from beat ZERO, so the initial
+    /// state really does become arrangement content from bar 1 — which is
+    /// what the provisional surface has to show
+    /// (docs/realtime-arrangement-feedback-spec.md 3.2). With a committed
+    /// song the splice starts at the first captured launch and everything
+    /// before it is the pre-existing arrangement, already drawn as committed
+    /// clips.
+    whole_song: bool,
     events: Vec<CaptureLaunchEvent>,
 }
 
@@ -91,6 +100,14 @@ impl SongCaptureTake {
 
     pub(crate) fn origin_beats(&self) -> f64 {
         self.origin_beats
+    }
+
+    pub(crate) fn initial(&self) -> &CapturedSongState {
+        &self.initial
+    }
+
+    pub(crate) fn whole_song(&self) -> bool {
+        self.whole_song
     }
 
     /// The launches captured so far, for the provisional read surface
@@ -224,14 +241,15 @@ impl App {
         // performer touches a lane, so the initial state starts untouched.
         // Recording from an empty song keeps the performer as sole
         // authority (every lane touched — the pre-spec whole-song capture).
-        let touched: std::collections::BTreeSet<usize> =
-            if self.state.committed_song().is_some() {
-                std::collections::BTreeSet::new()
-            } else {
-                (0..self.tracks.len()).collect()
-            };
+        let whole_song = self.state.committed_song().is_none();
+        let touched: std::collections::BTreeSet<usize> = if whole_song {
+            (0..self.tracks.len()).collect()
+        } else {
+            std::collections::BTreeSet::new()
+        };
         self.song_capture_take = Some(SongCaptureTake {
             origin_beats,
+            whole_song,
             initial: CapturedSongState {
                 start_beat: 0.0,
                 scene: scenes.current_scene,

@@ -78,8 +78,17 @@
 
 ;; ── Shared time axis (spec 5.1) ────────────────────────────────────────────
 
+;; The furthest beat there is anything to look at. While a capture runs the
+;; committed song end can still be BEHIND the recording (it is zero for a
+;; whole-song capture), and clamping the view to it pinned the arrangement at
+;; bar 1 with no way to scroll after the playhead. The record head is the
+;; honest extent for as long as the recording is the content; it reads 0 when
+;; no capture is running, so nothing else changes.
+(def arrangement-scroll-extent ()
+  (max SEQ.song-end-beat (arrangement-pending-head)))
+
 (def arrangement-max-view-start (duration)
-  (max 0 (- (+ SEQ.song-end-beat arrangement-view-padding) duration)))
+  (max 0 (- (+ (arrangement-scroll-extent) arrangement-view-padding) duration)))
 
 (def set-arrangement-view-start (start duration)
   (set! arrangement-view-start
@@ -557,9 +566,11 @@
 ;; the same items-for-drawing vs clips-for-editing split the ghost preview
 ;; uses (spec 3.4).
 
-;; Recording tint: the transport's record red, dark enough that the dots on
-;; top stay legible.
-(def arrangement-recording-color (list 0.74 0.24 0.28))
+;; Provisional items wear the SAME tint and labels as the committed clips
+;; they are about to become: a capture preview whose whole job is to show
+;; where the music is landing should not be a differently-coloured stand-in
+;; for it. What marks them as in-flight is that they are growing under the
+;; playhead, not a paint job.
 
 (def arrangement-pending-lanes ()
   (if (= SEQ.song-pending nil) '() (get SEQ.song-pending :lanes)))
@@ -596,8 +607,9 @@
       nil
       (dict :dots dots :cycle 1 :phase 0))))
 
-;; No :id and no :label — the two things that would make one addressable or
-;; make it read as a finished clip.
+;; No :id — the one thing that would make a provisional item addressable.
+;; The take has no TakeId until the stop-commit registers it, so the label
+;; cannot name a number yet.
 (def arrangement-pending-track-items (i)
   (map
     (lambda (lane)
@@ -606,8 +618,9 @@
         :start (get lane :start-beat)
         :end (get lane :end-beat)
         :kind :midi
+        :label "Take"
         :content (arrangement-pending-content lane)
-        :color arrangement-recording-color))
+        :color (arrangement-clip-color i)))
     (filter (lambda (lane) (= (get lane :track) i))
       (arrangement-pending-lanes))))
 
@@ -634,7 +647,7 @@
 
 ;; The span runs to the next launch on this lane, or to the record head while
 ;; it is still the last one.
-(def arrangement-pending-launch-item (index events)
+(def arrangement-pending-launch-item (i index events)
   (let ((event (nth events index)))
     (let ((start (get event :start-beat))
           (end (if (< (+ index 1) (len events))
@@ -647,21 +660,23 @@
           :start start
           :end end
           :kind :midi
+          :label (str "Pattern " (get event :pattern-id))
           :content (arrangement-pending-launch-content event (- end start))
-          :color arrangement-recording-color)))))
+          :color (arrangement-clip-color i))))))
 
 (def arrangement-pending-launch-items (i)
   (let ((events (arrangement-pending-track-events i)))
     (filter (lambda (item) (not (= item nil)))
-      (map (lambda (index) (arrangement-pending-launch-item index events))
+      (map (lambda (index) (arrangement-pending-launch-item i index events))
         (range 0 (len events))))))
 
 ;; A captured launch's provisional span runs to the next captured launch, or
 ;; to the record head while it is still the last one. A launch the head has
 ;; not passed yet has nothing to draw.
 (def arrangement-pending-scene-item (index events)
-  (let ((start (get (nth events index) :start-beat)))
-    (let ((end (if (< (+ index 1) (len events))
+  (let ((event (nth events index)))
+    (let ((start (get event :start-beat))
+          (end (if (< (+ index 1) (len events))
                  (get (nth events (+ index 1)) :start-beat)
                  (arrangement-pending-head))))
       (if (<= end start)
@@ -671,7 +686,8 @@
           :start start
           :end end
           :kind :scene
-          :color arrangement-recording-color)))))
+          :label (arrangement-scene-name (get event :scene))
+          :color (list 0.52 0.56 0.62))))))
 
 (def arrangement-pending-scene-items ()
   (let ((events (arrangement-pending-scene-events)))
