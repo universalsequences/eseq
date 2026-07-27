@@ -61,6 +61,27 @@ impl TakeRecordingSession {
             .any(|lane| lane.as_ref().is_some_and(|lane| lane.max_end_steps > 0.0))
     }
 
+    /// Borrowing view of the lanes that have punched in, for the provisional
+    /// read surface (docs/realtime-arrangement-feedback-spec.md 3.2). Lanes
+    /// with no content yet are omitted: a punched-in-but-silent lane has
+    /// nothing to draw.
+    pub(crate) fn pending_lane_views(&self) -> Vec<super::pending_capture::PendingCaptureLane<'_>> {
+        self.lanes
+            .iter()
+            .enumerate()
+            .filter_map(|(track, lane)| {
+                let lane = lane.as_ref().filter(|lane| lane.max_end_steps > 0.0)?;
+                Some(super::pending_capture::PendingCaptureLane {
+                    track,
+                    punch_in_beat: lane.punch_in_beat,
+                    step_beats: lane.step_beats,
+                    max_end_steps: lane.max_end_steps,
+                    chunks: &lane.chunks,
+                })
+            })
+            .collect()
+    }
+
     /// Drain the lanes that actually recorded content.
     pub(crate) fn into_pending(self) -> Vec<(usize, PendingTakeLane)> {
         self.lanes
@@ -479,6 +500,9 @@ impl App {
             .max_end_steps
             .max(step as f64 + 1.0)
             .max(step as f64 + f64::from(delay) + f64::from(duration_steps));
+        // One of the two writers of provisional content (spec 3.3): the
+        // `SEQ.song-pending` dots rebuild only when this moves.
+        self.pending_revision = self.pending_revision.wrapping_add(1);
         true
     }
 

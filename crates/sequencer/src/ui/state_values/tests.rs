@@ -19867,6 +19867,284 @@
         );
     }
 
+    /// Build a one-track app with a committed one-row song, ready to enter
+    /// arrangement capture (the fixture the two `song-pending` tests share).
+    fn pending_capture_test_app() -> sequencer::app::App {
+        let state = sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut test_app = sequencer::app::App::new(
+            std::sync::Arc::new(state),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        test_app.tracks = vec!["Track 1".to_string()];
+        test_app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        test_app
+            .arr_replace_rows(
+                vec![sequencer::app::song_edit::SongRowSpec {
+                    start_beat: 0.0,
+                    scene: 0,
+                    overrides: Vec::new(),
+                }],
+                32.0,
+                false,
+            )
+            .expect("song committed");
+        test_app.set_use_arrangement(true).expect("toggle while stopped");
+        test_app
+    }
+
+    /// Anchor the record clock at song beat zero and return the instant a
+    /// given beat falls on. The monotonic test clock cannot represent the
+    /// past, so presses are addressed as FUTURE instants from the anchor
+    /// (120 BPM: one beat = 0.5 s), exactly as `take_recording`'s own tests
+    /// do.
+    fn anchor_record_clock(app: &sequencer::app::App) -> std::time::Instant {
+        let now = std::time::Instant::now();
+        app.state.transport.record_clock.publish(0.0, now);
+        let anchor = now
+            .checked_add(std::time::Duration::from_millis(1))
+            .expect("anchor instant");
+        app.state.transport.record_clock.publish(0.0, anchor);
+        anchor
+    }
+
+    fn press_at_beats(anchor: std::time::Instant, beats: f64) -> std::time::Instant {
+        anchor
+            .checked_add(std::time::Duration::from_secs_f64(beats * 0.5))
+            .expect("press instant")
+    }
+
+    /// Provisional recording feedback, publish side
+    /// (docs/realtime-arrangement-feedback-spec.md 3.2/3.3): `SEQ.song-pending`
+    /// exists only while a capture take does. It appears on capture start,
+    /// gains a lane at punch-in, does NOT republish on a frame that recorded
+    /// nothing (the revision gate), and returns to nil on all three exit
+    /// paths — Stop, Cancel and a FAILED stop alike.
+    #[test]
+    fn metal_seq_song_pending_publishes_while_capturing_and_clears_on_every_exit() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mut test_app = pending_capture_test_app();
+        let mut frame = SongFrameState::default();
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("binding read evaluates")
+                .expect("binding read returns a value")
+        };
+
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "SEQ.song-pending"),
+            Value::Nil,
+            "nothing is published while no capture runs"
+        );
+
+        // ── Stop ──────────────────────────────────────────────────────────
+        test_app.song_transport_play(true).expect("capture starts");
+        assert!(test_app.pending_capture_active());
+        assert!(
+            sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            "entering capture publishes the surface"
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(len (get SEQ.song-pending :lanes))"),
+            Value::Number(0.0),
+            "no lane until a track punches in"
+        );
+
+        let anchor = anchor_record_clock(&test_app);
+        let revision = test_app.pending_revision;
+        let song_revision = test_app.state.committed_song_revision();
+        assert!(test_app.take_record_note(0, press_at_beats(anchor, 4.0), 60.0, 4.0));
+        assert!(
+            test_app.pending_revision > revision,
+            "a recorded note is one of the two pending-content writers"
+        );
+        assert_eq!(
+            test_app.state.committed_song_revision(),
+            song_revision,
+            "and it rides its OWN counter: nothing is committed yet"
+        );
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(len (get SEQ.song-pending :lanes))"),
+            Value::Number(1.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (get SEQ.song-pending :lanes) 0) :track)"),
+            Value::Number(0.0)
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(get (nth (get SEQ.song-pending :lanes) 0) :start-beat)"
+            ),
+            Value::Number(4.0),
+            "the span starts at the punch-in beat"
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(len (get (nth (get SEQ.song-pending :lanes) 0) :events))"
+            ),
+            Value::Number(1.0),
+            "the recorded note is drawable content"
+        );
+
+        // The revision gate: a frame with no new note and no new head
+        // quantum publishes nothing at all.
+        assert!(
+            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            "a frame that recorded nothing must not republish the dots"
+        );
+
+        test_app.song_transport_stop().expect("stop commits");
+        assert!(!test_app.pending_capture_active());
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "SEQ.song-pending"),
+            Value::Nil,
+            "Stop replaces the provisional items with the committed clips"
+        );
+        assert!(
+            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            "and it stays cleared without republishing"
+        );
+
+        // ── Cancel ────────────────────────────────────────────────────────
+        test_app.song_transport_play(true).expect("capture restarts");
+        let anchor = anchor_record_clock(&test_app);
+        assert!(test_app.take_record_note(0, press_at_beats(anchor, 2.0), 60.0, 2.0));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_ne!(read(&mut editor, "SEQ.song-pending"), Value::Nil);
+        test_app.song_capture_cancel().expect("cancel succeeds");
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "SEQ.song-pending"),
+            Value::Nil,
+            "Cancel makes the provisional items vanish"
+        );
+
+        // ── Failure ───────────────────────────────────────────────────────
+        // A lost notice fails the stop-commit (spec 10.3): the take is
+        // discarded, so the surface must clear on this path too.
+        test_app.song_transport_play(true).expect("capture restarts");
+        let anchor = anchor_record_clock(&test_app);
+        assert!(test_app.take_record_note(0, press_at_beats(anchor, 2.0), 60.0, 2.0));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_ne!(read(&mut editor, "SEQ.song-pending"), Value::Nil);
+        for _ in 0..300 {
+            test_app.state.song_playback().push_notice(
+                sequencer::sequencer::SongPlaybackNotice::Ended {
+                    end_beat: 0.0,
+                    end_sample: 0,
+                },
+            );
+        }
+        let failure = test_app.song_transport_stop();
+        assert!(
+            test_app.song_capture_failed,
+            "the flooded notice channel must fail the commit, got {failure:?}"
+        );
+        assert!(!test_app.pending_capture_active());
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "SEQ.song-pending"),
+            Value::Nil,
+            "a FAILED capture clears the surface too"
+        );
+    }
+
+    /// Capture round trip (spec 6 item 1): what the provisional item drew is
+    /// what the commit produced — the lane's provisional span equals the
+    /// committed take clip's span after Stop. Feedback that lied about where
+    /// the recording landed would be worse than no feedback.
+    #[test]
+    fn metal_seq_song_pending_span_matches_the_committed_clip_after_stop() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mut test_app = pending_capture_test_app();
+        let mut frame = SongFrameState::default();
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("binding read evaluates")
+                .expect("binding read returns a value")
+        };
+
+        test_app.song_transport_play(true).expect("capture starts");
+        let anchor = anchor_record_clock(&test_app);
+        // Punch in at beat 4, last note at beat 6 running 4 steps (1 beat).
+        assert!(test_app.take_record_note(0, press_at_beats(anchor, 4.0), 60.0, 4.0));
+        assert!(test_app.take_record_note(0, press_at_beats(anchor, 6.0), 64.0, 4.0));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        let lane = "(nth (get SEQ.song-pending :lanes) 0)";
+        let provisional_start = read(&mut editor, &format!("(get {lane} :start-beat)"));
+        let provisional_end = read(&mut editor, &format!("(get {lane} :end-beat)"));
+        assert_eq!(provisional_start, Value::Number(4.0));
+        assert_eq!(
+            provisional_end,
+            Value::Number(7.0),
+            "punch-in 4 + 12 steps of 0.25 beats"
+        );
+
+        test_app.song_transport_stop().expect("stop commits");
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        // The take clip is spliced INTO the scene clip that covered the lane,
+        // so the lane now holds [0,4), the take, and the remainder.
+        let takes = "(filter (lambda (clip) (not (= (get clip :take-id) nil))) \
+                      (nth SEQ.song-lanes 0))";
+        assert_eq!(
+            read(&mut editor, &format!("(len {takes})")),
+            Value::Number(1.0),
+            "the capture committed exactly one take clip"
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {takes} 0) :start-beat)")),
+            provisional_start,
+            "the committed clip starts where the provisional item did"
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {takes} 0) :end-beat)")),
+            provisional_end,
+            "...and ends where it did"
+        );
+    }
+
     /// `SEQ.song-region` publish + diff
     /// (docs/arrangement-region-editing-spec.md 4.1): the Rust-owned region
     /// surfaces as `(track-a track-b start end)`, republishes only when it
@@ -21609,6 +21887,276 @@
         assert_eq!(
             read(&mut editor, &format!("(get (nth {dots2} 1) :offset)")),
             Value::Number(0.9375)
+        );
+    }
+
+    /// Provisional capture content
+    /// (docs/realtime-arrangement-feedback-spec.md 3.4): while a capture
+    /// runs, `SEQ.song-pending` composes extra items into each lane AFTER the
+    /// committed clips, drawn through the committed clips' own dot pipeline.
+    /// They are inert: no id, no label, absent from `arrangement-track-clips`
+    /// (the gesture source of truth), and a `:select` on one selects nothing.
+    #[test]
+    fn metal_seq_arrangement_pending_capture_items_render_but_are_inert() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let recorded: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = recorded.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-arrangement-action", move |args, _ctx| {
+                sink.lock().unwrap().push(args.first().cloned().unwrap_or(Value::Nil));
+                Ok(Value::String("recorded".to_string()))
+            });
+
+        // One committed clip on track 0 over [0,4) — the thing that IS
+        // addressable, so the inertness assertions below are not vacuous.
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
+        rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
+        rt.set_reactive(
+            "SEQ",
+            "scene-spans",
+            test_list(vec![scene_span(0.0, 16.0, 0.0)]),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "song-lanes",
+            test_list(vec![test_list(vec![lane_clip(
+                0.0,
+                0.0,
+                4.0,
+                Value::Number(1.0),
+            )])]),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "song-lane-events",
+            build_song_lane_events_value(&[vec![LanePatternEvents {
+                pattern_id: 1,
+                take_id: None,
+                num_steps: 16,
+                length_beats: 4.0,
+                events: vec![(0.0, 0.0, 1.0, 1.0)],
+            }]]),
+        );
+        // A capture in flight: track 0 punched in at beat 4 and the record
+        // head has reached beat 10; two launches captured, at 0 and 8.
+        // The recorded content (12 steps of 0.25 beats = 3 beats) is SHORTER
+        // than the drawn span, which is what pins the dots to their real
+        // positions instead of stretching them across the growing rect.
+        let pending_lane = map_value(vec![
+            ("track", Value::Number(0.0)),
+            ("start-beat", Value::Number(4.0)),
+            ("end-beat", Value::Number(10.0)),
+            ("num-steps", Value::Number(12.0)),
+            ("length-beats", Value::Number(3.0)),
+            (
+                "events",
+                test_list(vec![
+                    test_number_list(&[0.0, 0.0, 1.0, 1.0]),
+                    test_number_list(&[12.0, 12.0, 1.0, 1.0]),
+                ]),
+            ),
+        ]);
+        let scene_event = |beat: f64, scene: f64| {
+            map_value(vec![
+                ("start-beat", Value::Number(beat)),
+                ("scene", Value::Number(scene)),
+            ])
+        };
+        // The clips those launches put on track 0: a 4-step pattern (1 beat)
+        // at beat 0, replaced by another at beat 8.
+        let track_event = |beat: f64| {
+            map_value(vec![
+                ("track", Value::Number(0.0)),
+                ("start-beat", Value::Number(beat)),
+                ("num-steps", Value::Number(4.0)),
+                ("length-beats", Value::Number(1.0)),
+                (
+                    "events",
+                    test_list(vec![test_number_list(&[0.0, 0.0, 1.0, 1.0])]),
+                ),
+            ])
+        };
+        rt.set_reactive(
+            "SEQ",
+            "song-pending",
+            map_value(vec![
+                ("origin-beat", Value::Number(0.0)),
+                ("head-beat", Value::Number(10.0)),
+                ("lanes", test_list(vec![pending_lane])),
+                (
+                    "scene-events",
+                    test_list(vec![scene_event(0.0, 0.0), scene_event(8.0, 1.0)]),
+                ),
+                (
+                    "track-events",
+                    test_list(vec![track_event(0.0), track_event(8.0)]),
+                ),
+            ]),
+        );
+        rt.run_reactive_cycle();
+
+        let eval = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .unwrap_or_else(|error| panic!("{expr}: {error:?}"))
+        };
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            eval(editor, expr).expect("expr returns a value")
+        };
+
+        // Drawn: the committed clip, then the two launch clips, then the
+        // recorded take on top — the order the stop-commit paints them in.
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-track-items 0))"),
+            Value::Number(4.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-track-clips 0))"),
+            Value::Number(1.0),
+            "the gesture source of truth still holds only the stored clip"
+        );
+        // Launch clips: the first runs to the next launch, the second to the
+        // record head, and each tiles its pattern over its own span.
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :start)"),
+            Value::Number(0.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :end)"),
+            Value::Number(8.0)
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(get (get (nth (arrangement-track-items 0) 1) :content) :cycle)"
+            ),
+            Value::Number(1.0 / 8.0),
+            "a 1-beat pattern repeats 8 times across an 8-beat launch span"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 2) :end)"),
+            Value::Number(10.0),
+            "the last launch on the lane runs to the record head"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 2) :id)"),
+            Value::Nil
+        );
+        let provisional = "(nth (arrangement-track-items 0) 3)";
+        assert_eq!(
+            read(&mut editor, &format!("(get {provisional} :start)")),
+            Value::Number(4.0)
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get {provisional} :end)")),
+            Value::Number(10.0),
+            "the span grows to the record head"
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get {provisional} :id)")),
+            Value::Nil,
+            "no id: there is no ClipId to name yet"
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get {provisional} :label)")),
+            Value::Nil
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                &format!("(len (get (get {provisional} :content) :dots))")
+            ),
+            Value::Number(2.0),
+            "recorded notes draw through the committed dot pipeline"
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                &format!("(get (nth (get (get {provisional} :content) :dots) 1) :offset)")
+            ),
+            Value::Number(0.5),
+            "dots normalize over the DRAWN span (24 steps), so a note at step \
+             12 stays at its real position as the item grows to the head — \
+             normalizing over the recorded length would stretch it to the end"
+        );
+
+        // Scene lane: one committed span plus the two captured launches, the
+        // last running to the record head.
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-scene-items))"),
+            Value::Number(3.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :end)"),
+            Value::Number(8.0),
+            "a captured launch runs to the next one"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 2) :end)"),
+            Value::Number(10.0),
+            "the last captured launch runs to the record head"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 2) :id)"),
+            Value::Nil
+        );
+
+        // Inert: the real clip selects, the provisional item does not.
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :select :ids (list 0) :time 1))",
+        );
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-lane-selection 0))"),
+            Value::Number(1.0),
+            "a stored clip still selects — the guard is not over-broad"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :select :ids (list nil) :time 5))",
+        );
+        assert_eq!(
+            read(&mut editor, "arrangement-track-selection"),
+            Value::List(vec![]),
+            "selecting a provisional item selects nothing"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :select :ids (list nil) :time 5))",
+        );
+        assert_eq!(
+            read(&mut editor, "arrangement-selection"),
+            Value::List(vec![]),
+            "the same holds in the scene lane"
+        );
+
+        // ...and no gesture on one can reach a primitive.
+        let before = recorded.lock().unwrap().len();
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :delete-items :ids (list nil)))",
+        );
+        eval(
+            &mut editor,
+            "(do (arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id nil :ids (list nil) :start 12)) \
+             (arrangement-track-action 0 (dict :type :finish-move-items)))",
+        );
+        eval(
+            &mut editor,
+            "(do (arrangement-track-action 0 (dict :type :resize-item-absolute :id nil :ids (list nil) :edge :end :time 14)) \
+             (arrangement-track-action 0 (dict :type :finish-resize-items :id nil :ids (list nil))))",
+        );
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :delete-items :ids (list nil)))",
+        );
+        assert_eq!(
+            recorded.lock().unwrap().len(),
+            before,
+            "provisional content lowers to no primitive on any gesture"
         );
     }
 

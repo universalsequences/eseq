@@ -43,6 +43,7 @@ mod graph;
 mod hooks;
 mod params;
 mod projects;
+pub mod pending_capture;
 pub mod song_capture;
 pub mod song_edit;
 pub mod song_region;
@@ -930,6 +931,15 @@ pub struct App {
     /// spec 8): armed-track note input retargets into detached pending
     /// chunks here; the capture stop-commit registers them as takes.
     pub(crate) take_recording: Option<take_recording::TakeRecordingSession>,
+    /// Change counter for PROVISIONAL capture content
+    /// (docs/realtime-arrangement-feedback-spec.md 3.3): bumped by the
+    /// writers of pending take notes and captured launches, and by nothing
+    /// else. `SEQ.song-pending` rebuilds its dots only when this moves, so a
+    /// recording never invalidates the committed-lane caches per note. It is
+    /// deliberately neither `committed_song_revision` (nothing is committed
+    /// yet) nor `pool_content_revision` (slice 3's counter, for COMMITTED
+    /// pool edits).
+    pub pending_revision: u64,
     /// Set after project load: the loaded per-track record-arm flags in
     /// `graph.record_armed` must be pushed INTO the UI-shared arm vector
     /// (the per-tick sync runs the other way).
@@ -2302,6 +2312,7 @@ impl App {
             song_capture_error: None,
             song_edit_error: None,
             take_recording: None,
+            pending_revision: 0,
             record_arm_sync_pending: false,
             song_clip_selection: None,
             song_region_selection: None,

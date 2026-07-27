@@ -2033,6 +2033,11 @@ pub(crate) fn init_runtime(
                 ("song-lanes", Value::List(vec![])),
                 ("scene-spans", Value::List(vec![])),
                 ("song-lane-events", Value::List(vec![])),
+                // Provisional arrangement-capture content
+                // (docs/realtime-arrangement-feedback-spec.md 3.2): nil
+                // unless a capture is running. Inert — no ids, so no gesture
+                // can address it.
+                ("song-pending", Value::Nil),
                 ("scene-names", Value::List(vec![])),
                 ("num-steps", Value::Number(PAGE_SIZE as f64)),
                 ("num-tracks", Value::Number(track_count as f64)),

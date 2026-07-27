@@ -175,6 +175,23 @@ active and cleared on every exit path (stop, cancel, failure):
   :scene-events (list {:start-beat b :scene s}) }
 ```
 
+As built (2026-07-27), two refinements to that shape:
+
+- Lanes and launches carry **raw events**, not `:dots` —
+  `{:num-steps :length-beats :events ((time transpose velocity duration)...)}`,
+  the same shape `song-lane-events` publishes — so the view normalizes them
+  through the committed clips' own `arrangement-windowed-dots` pipeline
+  instead of a second one. A take lane's dots window over the DRAWN span, not
+  the recorded length: the item grows to the head while the notes stay put,
+  and normalizing over the content would stretch the same dots wider every
+  frame.
+- A fourth key, `:track-events (list {:track i :start-beat b ...})`, carries
+  what each captured launch put on each TRACK lane: a clip launch's own
+  override, and a captured scene change expanded to the scene's cell pattern
+  on every lane it claims (take lanes excluded, matching `consolidate`).
+  Without it a captured scene change drew in the scene lane while the clips
+  it implies — the ones the splice actually writes — stayed invisible.
+
 Sourced from `TakeRecordingSession` (the pending lanes' `punch_in_beat`,
 `step_beats`, `chunks`, `max_end_steps`) and the capture's
 `CaptureLaunchEvent` list. Both live on `App`, on the control thread, so this

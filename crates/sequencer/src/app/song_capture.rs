@@ -88,6 +88,16 @@ impl SongCaptureTake {
     pub(crate) fn event_count(&self) -> usize {
         self.events.len()
     }
+
+    pub(crate) fn origin_beats(&self) -> f64 {
+        self.origin_beats
+    }
+
+    /// The launches captured so far, for the provisional read surface
+    /// (docs/realtime-arrangement-feedback-spec.md 3.2).
+    pub(crate) fn events(&self) -> &[CaptureLaunchEvent] {
+        &self.events
+    }
 }
 
 /// Consolidate a take into the final row states (spec 10.4): stable-sort by
@@ -285,6 +295,8 @@ impl App {
             beat: (audible_beats - take.origin_beats).max(0.0),
             kind,
         });
+        // The second writer of provisional content (spec 3.3).
+        self.pending_revision = self.pending_revision.wrapping_add(1);
     }
 
     /// Observe a manual CLIP launch (the mixer clip grid's per-track
@@ -310,6 +322,10 @@ impl App {
                 overrides: vec![(track, pattern_id)],
             },
         });
+        // Same event list as `record_song_capture_launch`, so the same
+        // counter: leaving it out would freeze the provisional surface after
+        // a manual clip launch.
+        self.pending_revision = self.pending_revision.wrapping_add(1);
     }
 
     /// Stop-commit (spec 7.4.7/10.4, lane spec 9): decompose the consolidated

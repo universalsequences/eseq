@@ -195,17 +195,22 @@
     (range 0 (len SEQ.scene-spans))))
 
 (def arrangement-scene-items ()
-  (if (= (arrangement-ghost-kind) :create)
-    (append (arrangement-scene-row-items)
-      (list (dict
-              :id :ghost-create
-              :lane 0
-              :start (get arrangement-ghost :start)
-              :end (get arrangement-ghost :end)
-              :kind :scene
-              :label (arrangement-scene-name (or SEQ.current-pattern 0))
-              :color (list 0.72 0.76 0.82))))
-    (arrangement-scene-row-items)))
+  (append
+    (if (= (arrangement-ghost-kind) :create)
+      (append (arrangement-scene-row-items)
+        (list (dict
+                :id :ghost-create
+                :lane 0
+                :start (get arrangement-ghost :start)
+                :end (get arrangement-ghost :end)
+                :kind :scene
+                :label (arrangement-scene-name (or SEQ.current-pattern 0))
+                :color (list 0.72 0.76 0.82))))
+      (arrangement-scene-row-items))
+    ;; Launches captured so far, filling in the scene lane as you perform
+    ;; (realtime feedback spec 3.1). Defined below with the rest of the
+    ;; provisional surface.
+    (arrangement-pending-scene-items)))
 
 ;; Song end, with the content-length drag ghost applied so the end marker
 ;; previews in every lane while dragging (spec 9.3).
@@ -254,6 +259,21 @@
   (let ((matches (filter (lambda (clip) (= (get clip :clip-id) clip-id))
                    (arrangement-track-clips i))))
     (if (> (len matches) 0) (nth matches 0) nil)))
+
+;; The ids from a :select that name a REAL stored clip. Provisional recording
+;; items (realtime feedback spec 3.4) carry no id, so selecting one selects
+;; nothing — and every other gesture already resolves through
+;; arrangement-find-track-clip, which cannot match them either.
+(def arrangement-real-clip-ids (i ids)
+  (filter (lambda (id) (not (= (arrangement-find-track-clip i id) nil))) ids))
+
+;; Same guard for the scene lane, whose item ids are scene-event start beats.
+(def arrangement-real-scene-ids (ids)
+  (filter (lambda (id)
+            (> (len (filter (lambda (span) (= (get span :start-beat) id))
+                      SEQ.scene-spans))
+              0))
+    ids))
 
 ;; ── MIDI content flattening (spec 7.1) ─────────────────────────────────────
 ;; SEQ.song-lane-events carries, per track, raw (time transpose velocity)
@@ -528,8 +548,144 @@
           :color (arrangement-clip-color i))))
     (arrangement-track-clips i)))
 
+;; ── Provisional capture content (realtime feedback spec 3) ────────────────
+;; SEQ.song-pending is the recording IN FLIGHT: the pending take lanes and
+;; the launches captured so far, published only while arrangement capture is
+;; running and cleared on stop, cancel and failure alike. Its items are drawn
+;; and never edited — provisional content has no clip id yet, so it appears
+;; nowhere in arrangement-track-clips and no gesture can resolve one. That is
+;; the same items-for-drawing vs clips-for-editing split the ghost preview
+;; uses (spec 3.4).
+
+;; Recording tint: the transport's record red, dark enough that the dots on
+;; top stay legible.
+(def arrangement-recording-color (list 0.74 0.24 0.28))
+
+(def arrangement-pending-lanes ()
+  (if (= SEQ.song-pending nil) '() (get SEQ.song-pending :lanes)))
+
+(def arrangement-pending-scene-events ()
+  (if (= SEQ.song-pending nil) '() (get SEQ.song-pending :scene-events)))
+
+;; The record head, which every provisional span grows toward.
+(def arrangement-pending-head ()
+  (if (= SEQ.song-pending nil) 0 (get SEQ.song-pending :head-beat)))
+
+;; Provisional lanes carry RAW events in the same shape SEQ.song-lane-events
+;; uses, so they go through the committed clips' dot pipeline unchanged.
+;;
+;; The window is the item's OWN span, not the recorded content's length: the
+;; item grows to the record head while the notes stay put, so normalizing over
+;; the content would stretch the same dots across an ever-wider rect (they
+;; would snap back on every new note and creep apart again in between). A take
+;; never loops, so this is one cycle at phase 0 and the span past the last
+;; note is honestly empty.
+(def arrangement-pending-span-steps (lane)
+  (let ((num-steps (max 1 (get lane :num-steps)))
+        (length-beats (get lane :length-beats)))
+    (if (<= length-beats 0)
+      num-steps
+      (let ((step-beats (/ length-beats num-steps)))
+        (max 1
+          (/ (- (get lane :end-beat) (get lane :start-beat)) step-beats))))))
+
+(def arrangement-pending-content (lane)
+  (let ((dots (arrangement-windowed-dots lane 0
+                (arrangement-pending-span-steps lane))))
+    (if (= (len dots) 0)
+      nil
+      (dict :dots dots :cycle 1 :phase 0))))
+
+;; No :id and no :label — the two things that would make one addressable or
+;; make it read as a finished clip.
+(def arrangement-pending-track-items (i)
+  (map
+    (lambda (lane)
+      (dict
+        :lane 0
+        :start (get lane :start-beat)
+        :end (get lane :end-beat)
+        :kind :midi
+        :content (arrangement-pending-content lane)
+        :color arrangement-recording-color))
+    (filter (lambda (lane) (= (get lane :track) i))
+      (arrangement-pending-lanes))))
+
+;; ── Provisional launch clips ──────────────────────────────────────────────
+;; What each captured launch put on a TRACK lane: a clip-launched pattern, or
+;; the scene's cell pattern on every lane a captured scene change claimed.
+;; These are the clips the stop-commit will write, so they preview the same
+;; way — a looping pattern tiled over its span.
+
+(def arrangement-pending-track-events (i)
+  (filter (lambda (event) (= (get event :track) i))
+    (if (= SEQ.song-pending nil) '() (get SEQ.song-pending :track-events))))
+
+(def arrangement-pending-launch-content (event span)
+  (let ((dots (arrangement-pattern-dots event))
+        (length-beats (get event :length-beats)))
+    (if (= (len dots) 0)
+      nil
+      (dict :dots dots
+        :cycle (if (and (> length-beats 0) (> span 0))
+                 (/ length-beats span)
+                 1)
+        :phase 0))))
+
+;; The span runs to the next launch on this lane, or to the record head while
+;; it is still the last one.
+(def arrangement-pending-launch-item (index events)
+  (let ((event (nth events index)))
+    (let ((start (get event :start-beat))
+          (end (if (< (+ index 1) (len events))
+                 (get (nth events (+ index 1)) :start-beat)
+                 (arrangement-pending-head))))
+      (if (<= end start)
+        nil
+        (dict
+          :lane 0
+          :start start
+          :end end
+          :kind :midi
+          :content (arrangement-pending-launch-content event (- end start))
+          :color arrangement-recording-color)))))
+
+(def arrangement-pending-launch-items (i)
+  (let ((events (arrangement-pending-track-events i)))
+    (filter (lambda (item) (not (= item nil)))
+      (map (lambda (index) (arrangement-pending-launch-item index events))
+        (range 0 (len events))))))
+
+;; A captured launch's provisional span runs to the next captured launch, or
+;; to the record head while it is still the last one. A launch the head has
+;; not passed yet has nothing to draw.
+(def arrangement-pending-scene-item (index events)
+  (let ((start (get (nth events index) :start-beat)))
+    (let ((end (if (< (+ index 1) (len events))
+                 (get (nth events (+ index 1)) :start-beat)
+                 (arrangement-pending-head))))
+      (if (<= end start)
+        nil
+        (dict
+          :lane 0
+          :start start
+          :end end
+          :kind :scene
+          :color arrangement-recording-color)))))
+
+(def arrangement-pending-scene-items ()
+  (let ((events (arrangement-pending-scene-events)))
+    (filter (lambda (item) (not (= item nil)))
+      (map (lambda (index) (arrangement-pending-scene-item index events))
+        (range 0 (len events))))))
+
+;; Committed clips first, provisional content on top (spec 3.4). Recorded
+;; takes last of all: the stop-commit paints them OVER whatever the launches
+;; put on the lane, so the preview stacks the same way.
 (def arrangement-track-items (i)
-  (arrangement-track-clip-items i))
+  (append (arrangement-track-clip-items i)
+    (append (arrangement-pending-launch-items i)
+      (arrangement-pending-track-items i))))
 
 ;; Selection prop for one track lane: only the owning track shows its ids.
 ;; The bound clip (takes spec 16.6) is Rust-side persistent timeline state,
@@ -684,7 +840,9 @@
         (set! arrangement-selection-rect nil)
         (set! arrangement-track-selection '())
         (set! arrangement-selected-track -1)
-        (set! arrangement-selection (get event :ids))
+        ;; Provisional captured launches carry no id (realtime feedback spec
+        ;; 3.4), so only real scene events can enter the selection.
+        (set! arrangement-selection (arrangement-real-scene-ids (get event :ids)))
         ;; A scene span covers every track and names no single clip, so it
         ;; releases the sound binding (takes spec 16.6 cause 2) — and, for the
         ;; same reason, drops the region (region spec 4.1).
@@ -779,8 +937,12 @@
         ;; measured against the old lane — drop them with it.
         (set! arrangement-selection '())
         (arrangement-region-clear)
-        (arrangement-edit-finish
-          (dict :type :delete-items :ids (get event :ids))))
+        ;; A provisional captured launch has no id, so a delete aimed at one
+        ;; resolves to nothing and never reaches a primitive.
+        (let ((ids (arrangement-real-scene-ids (get event :ids))))
+          (if (= (len ids) 0)
+            nil
+            (arrangement-edit-finish (dict :type :delete-items :ids ids)))))
       ;; A scene-lane marquee selects the span across every track, so its
       ;; clipboard keys drive the same region commands (region spec 5.3).
       :copy-items
@@ -955,23 +1117,27 @@
     (arrangement-view-action event)
     (match event.type
       :select
-      (do
-        (seqv-select-track-for-edit i)
-        (set! arrangement-selection '())
-        (set! arrangement-selection-rect nil)
-        ;; A clip and a region are mutually exclusive (region spec 4.1); the
-        ;; Rust side drops the region too, this clears the in-flight ghost.
-        (set! arrangement-region-ghost nil)
-        (set! arrangement-selected-track i)
-        (set! arrangement-track-selection (get event :ids))
-        ;; Selecting a clip is the explicit sound-binding gesture (takes
-        ;; spec 16.2/16.6): it re-binds this track's device panel, monitor
-        ;; sound and take punch-in template. The binding lives in Rust so it
-        ;; survives view switches and transport.
-        (if (= (len (get event :ids)) 0)
-          (do (seq-song-deselect-clip) (seq-song-clear-region))
-          (arrangement-select-clip i (nth (get event :ids) 0)))
-        (set-arrangement-cursor (get event :time) i))
+      ;; Only ids that name a stored clip survive: a provisional recording
+      ;; item has none, so clicking one selects nothing (realtime feedback
+      ;; spec 3.4).
+      (let ((ids (arrangement-real-clip-ids i (get event :ids))))
+        (do
+          (seqv-select-track-for-edit i)
+          (set! arrangement-selection '())
+          (set! arrangement-selection-rect nil)
+          ;; A clip and a region are mutually exclusive (region spec 4.1); the
+          ;; Rust side drops the region too, this clears the in-flight ghost.
+          (set! arrangement-region-ghost nil)
+          (set! arrangement-selected-track i)
+          (set! arrangement-track-selection ids)
+          ;; Selecting a clip is the explicit sound-binding gesture (takes
+          ;; spec 16.2/16.6): it re-binds this track's device panel, monitor
+          ;; sound and take punch-in template. The binding lives in Rust so it
+          ;; survives view switches and transport.
+          (if (= (len ids) 0)
+            (do (seq-song-deselect-clip) (seq-song-clear-region))
+            (arrangement-select-clip i (nth ids 0)))
+          (set-arrangement-cursor (get event :time) i)))
       ;; Degenerate zero-movement release, or a click on empty lane space:
       ;; drop the region and park the edit cursor here, Ableton-style
       ;; (region spec 4.4).

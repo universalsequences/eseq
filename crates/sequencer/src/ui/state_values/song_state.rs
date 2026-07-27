@@ -79,6 +79,270 @@ pub(crate) struct SongFrameState {
     /// pool content without touching either the committed-song revision or
     /// the pattern epoch, so the dots need this third key to refresh.
     pub(crate) prev_pool_content_revision: Option<u64>,
+    /// Provisional capture content (spec 3.3), rebuilt only when
+    /// `App::pending_revision` moves. `None` means the last frame saw no
+    /// active capture — the whole `SEQ.song-pending` block is skipped then,
+    /// so an idle frame pays one boolean.
+    pub(crate) cached_pending: Option<PendingContent>,
+    pub(crate) prev_pending_revision: Option<u64>,
+    /// The QUANTIZED record head last published, the span half of the
+    /// surface: it moves on the position cadence, not per frame.
+    pub(crate) prev_pending_head: Option<f64>,
+}
+
+/// Display grain of the record head (spec 3.3): the head advances every
+/// frame, so it is floored to this grid before it can force a publish. A
+/// 16th note at 4/4 — the finest step timebase any lane records on, so a
+/// provisional clip still grows one step at a time.
+const PENDING_HEAD_QUANTUM: f64 = 0.25;
+
+/// One pending take lane's flattened content, the expensive half of
+/// `SEQ.song-pending`.
+#[derive(Clone, PartialEq)]
+pub(crate) struct PendingLaneContent {
+    track: usize,
+    punch_in_beat: f64,
+    step_beats: f64,
+    /// Where the committed clip would END if capture stopped right now:
+    /// `P + ceil(max_end_steps) * step_beats`, the stop-commit's own punch-out
+    /// formula (`register_pending_takes`). The drawn span never falls short of
+    /// this, so the feedback always contains the music it recorded — and after
+    /// a Stop taken at the last note's end the two spans are identical
+    /// (spec 6 item 1, round trip).
+    content_end_beat: f64,
+    num_steps: usize,
+    length_beats: f64,
+    events: Vec<(f64, f64, f64, f64)>,
+}
+
+/// One captured launch's effect on one track lane: the pattern it put there,
+/// flattened for drawing. The clip's END is not here — it runs to the next
+/// launch on the lane, or to the record head, which moves without the
+/// content changing.
+#[derive(Clone, PartialEq)]
+pub(crate) struct PendingTrackEventContent {
+    track: usize,
+    start_beat: f64,
+    num_steps: usize,
+    length_beats: f64,
+    events: Vec<(f64, f64, f64, f64)>,
+}
+
+/// The provisional surface's content, keyed by `App::pending_revision`.
+#[derive(Clone, PartialEq, Default)]
+pub(crate) struct PendingContent {
+    origin_beat: f64,
+    lanes: Vec<PendingLaneContent>,
+    scene_events: Vec<(f64, usize)>,
+    track_events: Vec<PendingTrackEventContent>,
+}
+
+/// Flatten the borrowed capture state into owned, publishable content. Runs
+/// only on a frame where `pending_revision` moved.
+fn build_pending_content(
+    app: &app::App,
+    pending: sequencer::app::pending_capture::PendingCapture<'_>,
+) -> PendingContent {
+    let lanes = pending
+        .lanes
+        .iter()
+        .map(|lane| {
+            // The stop-commit's `total_len_steps` (takes spec 8.5): the drawn
+            // content and the committed take cover the same steps.
+            let total_len = lane.max_end_steps.ceil().max(1.0) as usize;
+            let mut events = Vec::new();
+            for (chunk_idx, chunk) in lane.chunks.iter().enumerate() {
+                let base = chunk_idx * sequencer::sequencer::MAX_STEPS;
+                let limit = total_len
+                    .saturating_sub(base)
+                    .min(sequencer::sequencer::MAX_STEPS);
+                if limit == 0 || events.len() >= LANE_PATTERN_EVENT_CAP {
+                    break;
+                }
+                flatten_pattern_events(chunk, base as f64, limit, &mut events);
+            }
+            events.truncate(LANE_PATTERN_EVENT_CAP);
+            PendingLaneContent {
+                track: lane.track,
+                punch_in_beat: lane.punch_in_beat,
+                step_beats: lane.step_beats,
+                content_end_beat: lane.punch_in_beat + total_len as f64 * lane.step_beats,
+                num_steps: total_len,
+                length_beats: total_len as f64 * lane.step_beats,
+                events,
+            }
+        })
+        .collect();
+    // The clips a captured launch put on the track lanes, flattened from the
+    // pool patterns they name.
+    let track_events = app.state.with_project_scenes(|scenes| {
+        pending
+            .track_events
+            .iter()
+            .filter_map(|(start_beat, track, pattern)| {
+                let data = scenes.track_pools.get(*track)?.get(*pattern)?;
+                let num_steps = data.track_params.num_steps.max(1);
+                let mut events = Vec::new();
+                flatten_pattern_events(data, 0.0, num_steps, &mut events);
+                events.truncate(LANE_PATTERN_EVENT_CAP);
+                Some(PendingTrackEventContent {
+                    track: *track,
+                    start_beat: *start_beat,
+                    num_steps,
+                    length_beats: data.track_params.timebase.step_beats(num_steps)
+                        * num_steps as f64,
+                    events,
+                })
+            })
+            .collect()
+    });
+    PendingContent {
+        origin_beat: pending.origin_beat,
+        lanes,
+        scene_events: pending.scene_events,
+        track_events,
+    }
+}
+
+/// `song-pending` value (spec 3.2). Lanes carry RAW events, not dots: the
+/// view normalizes them through the same `arrangement-windowed-dots`
+/// pipeline the committed clips use, so provisional and committed content
+/// are drawn by one code path. Nothing here carries an id — provisional
+/// content is inert (spec 7).
+fn build_song_pending_value(content: &PendingContent, head_beat: f64) -> Value {
+    let lanes = content
+        .lanes
+        .iter()
+        .map(|lane| {
+            // The growing edge, floored to the lane's own step so the span
+            // advances a step at a time; never shorter than the music it
+            // already holds.
+            let grown = if lane.step_beats > 0.0 {
+                lane.punch_in_beat
+                    + ((head_beat - lane.punch_in_beat) / lane.step_beats)
+                        .floor()
+                        .max(0.0)
+                        * lane.step_beats
+            } else {
+                lane.punch_in_beat
+            };
+            let mut map = HashMap::new();
+            number_field(&mut map, "track", lane.track as f64);
+            number_field(&mut map, "start-beat", lane.punch_in_beat);
+            number_field(&mut map, "end-beat", grown.max(lane.content_end_beat));
+            number_field(&mut map, "num-steps", lane.num_steps as f64);
+            number_field(&mut map, "length-beats", lane.length_beats);
+            map.insert(
+                "events".to_string(),
+                Rc::new(RefCell::new(Value::List(
+                    lane.events
+                        .iter()
+                        .map(|(time, transpose, velocity, duration)| {
+                            Rc::new(RefCell::new(Value::List(vec![
+                                Rc::new(RefCell::new(Value::Number(*time))),
+                                Rc::new(RefCell::new(Value::Number(*transpose))),
+                                Rc::new(RefCell::new(Value::Number(*velocity))),
+                                Rc::new(RefCell::new(Value::Number(*duration))),
+                            ])))
+                        })
+                        .collect(),
+                ))),
+            );
+            Rc::new(RefCell::new(Value::Map(map)))
+        })
+        .collect();
+    let scene_events = content
+        .scene_events
+        .iter()
+        .map(|(start_beat, scene)| {
+            let mut map = HashMap::new();
+            number_field(&mut map, "start-beat", *start_beat);
+            number_field(&mut map, "scene", *scene as f64);
+            Rc::new(RefCell::new(Value::Map(map)))
+        })
+        .collect();
+    let track_events = content
+        .track_events
+        .iter()
+        .map(|event| {
+            let mut map = HashMap::new();
+            number_field(&mut map, "track", event.track as f64);
+            number_field(&mut map, "start-beat", event.start_beat);
+            number_field(&mut map, "num-steps", event.num_steps as f64);
+            number_field(&mut map, "length-beats", event.length_beats);
+            map.insert(
+                "events".to_string(),
+                Rc::new(RefCell::new(Value::List(
+                    event
+                        .events
+                        .iter()
+                        .map(|(time, transpose, velocity, duration)| {
+                            Rc::new(RefCell::new(Value::List(vec![
+                                Rc::new(RefCell::new(Value::Number(*time))),
+                                Rc::new(RefCell::new(Value::Number(*transpose))),
+                                Rc::new(RefCell::new(Value::Number(*velocity))),
+                                Rc::new(RefCell::new(Value::Number(*duration))),
+                            ])))
+                        })
+                        .collect(),
+                ))),
+            );
+            Rc::new(RefCell::new(Value::Map(map)))
+        })
+        .collect();
+    let mut map = HashMap::new();
+    number_field(&mut map, "origin-beat", content.origin_beat);
+    number_field(&mut map, "head-beat", head_beat);
+    map.insert(
+        "lanes".to_string(),
+        Rc::new(RefCell::new(Value::List(lanes))),
+    );
+    map.insert(
+        "scene-events".to_string(),
+        Rc::new(RefCell::new(Value::List(scene_events))),
+    );
+    map.insert(
+        "track-events".to_string(),
+        Rc::new(RefCell::new(Value::List(track_events))),
+    );
+    Value::Map(map)
+}
+
+/// Publish (or clear) the provisional capture surface (spec 3). Nothing is
+/// published while no capture take exists, which is also how every exit path
+/// clears it: stop, cancel and failure all drop `song_capture_take`.
+fn sync_song_pending(rt: &mut Runtime, app: &app::App, frame: &mut SongFrameState) -> bool {
+    let Some(head) = app
+        .pending_capture_active()
+        .then(|| app.pending_capture_head_beat().unwrap_or(0.0))
+    else {
+        if frame.prev_pending_revision.is_none() {
+            return false;
+        }
+        rt.set_reactive("SEQ", "song-pending", Value::Nil);
+        frame.cached_pending = None;
+        frame.prev_pending_revision = None;
+        frame.prev_pending_head = None;
+        return true;
+    };
+    let head = (head / PENDING_HEAD_QUANTUM).floor().max(0.0) * PENDING_HEAD_QUANTUM;
+    let revision = app.pending_revision;
+    let content_changed = frame.prev_pending_revision != Some(revision);
+    if content_changed {
+        frame.cached_pending = app.with_pending_capture(|pending| build_pending_content(app, pending));
+        frame.prev_pending_revision = Some(revision);
+    }
+    if !content_changed && frame.prev_pending_head == Some(head) {
+        return false;
+    }
+    let content = frame.cached_pending.clone().unwrap_or_default();
+    rt.set_reactive(
+        "SEQ",
+        "song-pending",
+        build_song_pending_value(&content, head),
+    );
+    frame.prev_pending_head = Some(head);
+    true
 }
 
 /// Flattened preview events for one pool pattern referenced by a track's
@@ -599,6 +863,9 @@ pub(crate) fn sync_song_state(
         frame.prev_pattern_epoch = Some(pattern_epoch);
         frame.prev_pool_content_revision = Some(pool_content_revision);
     }
+    // Provisional capture content (spec 3): its own revision, never the
+    // committed one — a recording must not invalidate the lane caches above.
+    dirty |= sync_song_pending(rt, app, frame);
     let next = build_song_bindings_snapshot(app, frame.cached_song.as_ref());
     let prev = frame.prev.as_ref();
     macro_rules! publish_on_change {
