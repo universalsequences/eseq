@@ -74,6 +74,11 @@ pub(crate) struct SongFrameState {
     /// pattern epoch changes — not per frame.
     pub(crate) cached_lane_events: Option<Vec<Vec<LanePatternEvents>>>,
     pub(crate) prev_pattern_epoch: Option<u64>,
+    /// Pool-content revision at the last lane-events rebuild
+    /// (docs/realtime-arrangement-feedback-spec.md 5.2): a step edit moves
+    /// pool content without touching either the committed-song revision or
+    /// the pattern epoch, so the dots need this third key to refresh.
+    pub(crate) prev_pool_content_revision: Option<u64>,
 }
 
 /// Flattened preview events for one pool pattern referenced by a track's
@@ -568,7 +573,14 @@ pub(crate) fn sync_song_state(
         .transport
         .pattern_epoch
         .load(std::sync::atomic::Ordering::Relaxed);
-    if lanes_changed || frame.prev_pattern_epoch != Some(pattern_epoch) {
+    // A step edit moves neither the projection nor the epoch (the epoch is
+    // scene-launch scale and a per-note bump would stampede unrelated
+    // caches — spec 5.2), so pool content carries its own revision.
+    let pool_content_revision = app.state.pool_content_revision();
+    if lanes_changed
+        || frame.prev_pattern_epoch != Some(pattern_epoch)
+        || frame.prev_pool_content_revision != Some(pool_content_revision)
+    {
         let events = match frame.cached_lanes.as_ref() {
             Some(lanes) => app
                 .state
@@ -585,6 +597,7 @@ pub(crate) fn sync_song_state(
             dirty = true;
         }
         frame.prev_pattern_epoch = Some(pattern_epoch);
+        frame.prev_pool_content_revision = Some(pool_content_revision);
     }
     let next = build_song_bindings_snapshot(app, frame.cached_song.as_ref());
     let prev = frame.prev.as_ref();

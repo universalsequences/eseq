@@ -19715,6 +19715,158 @@
         assert!(lanes.is_empty());
     }
 
+    /// Note edit-through, visible half
+    /// (docs/realtime-arrangement-feedback-spec.md 5.2): a step edit moves
+    /// `pool_content_revision` and the lane dots rebuild off it — with no
+    /// committed-song revision change and no `pattern_epoch` bump (the
+    /// mirror invariant). An edit to a pattern no lane resolves still opens
+    /// the gate, and the existing value-diff is what suppresses the publish.
+    #[test]
+    fn metal_seq_song_lane_events_refresh_on_a_pool_content_edit() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        let state = sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut test_app = sequencer::app::App::new(
+            std::sync::Arc::new(state),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        test_app.tracks = vec!["Track 1".to_string()];
+        test_app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        // The song plays scene 0 only, so the lanes reference exactly one
+        // pool pattern: scene 1's is edited later as the "no lane resolves"
+        // case.
+        test_app
+            .arr_replace_rows(
+                vec![sequencer::app::song_edit::SongRowSpec {
+                    start_beat: 0.0,
+                    scene: 0,
+                    overrides: Vec::new(),
+                }],
+                8.0,
+                false,
+            )
+            .expect("song committed");
+
+        let mut frame = SongFrameState::default();
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("binding read evaluates")
+                .expect("binding read returns a value")
+        };
+        let before = read(&mut editor, "SEQ.song-lane-events");
+        let Value::List(entries) = &before else {
+            panic!("song-lane-events must be a list");
+        };
+        assert!(
+            !entries.is_empty(),
+            "the fixture's lane must reference a pool pattern, or this test is vacuous"
+        );
+
+        let song_revision = test_app.state.committed_song_revision();
+        let pool_revision = test_app.state.pool_content_revision();
+        let pattern_epoch = test_app
+            .state
+            .transport
+            .pattern_epoch
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        sequencer::app::edit::try_apply_command(
+            &mut test_app,
+            sequencer::app::AppCommand::ToggleStep { track: 0, step: 3 },
+        )
+        .expect("step edit applies");
+
+        assert!(
+            test_app.state.pool_content_revision() > pool_revision,
+            "the step commit moves pool content"
+        );
+        assert_eq!(
+            test_app.state.committed_song_revision(),
+            song_revision,
+            "a note edit is not a song edit"
+        );
+        assert_eq!(
+            test_app
+                .state
+                .transport
+                .pattern_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            pattern_epoch,
+            "step commits must never bump the pattern epoch (song_transport invariant)"
+        );
+
+        assert!(
+            sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            "the dots rebuild off the pool-content revision alone"
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        let after = read(&mut editor, "SEQ.song-lane-events");
+        assert_ne!(after, before, "the edited note reaches the timeline");
+
+        // An edit to a pattern no lane resolves: scene 1's pattern. The gate
+        // opens (pool content moved), the value-diff keeps it off the wire.
+        test_app.state.launch_scene(
+            1,
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[sequencer::sequencer::InstrumentType::Sampler],
+        );
+        // The launch bumps the pattern epoch, so the gate opens and the dots
+        // are recollected — identically, so nothing is published.
+        sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true);
+        editor.runtime_mut().run_reactive_cycle();
+        let unrelated_before = read(&mut editor, "SEQ.song-lane-events");
+        assert_eq!(unrelated_before, after, "a scene launch changes no dots here");
+
+        let pool_revision = test_app.state.pool_content_revision();
+        sequencer::app::edit::try_apply_command(
+            &mut test_app,
+            sequencer::app::AppCommand::ToggleStep { track: 0, step: 5 },
+        )
+        .expect("step edit applies");
+        assert!(
+            test_app.state.pool_content_revision() > pool_revision,
+            "the gate opens even for a pattern no lane resolves"
+        );
+        sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true);
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "SEQ.song-lane-events"),
+            unrelated_before,
+            "no lane resolves the edited pattern, so nothing is republished"
+        );
+    }
+
     /// `SEQ.song-region` publish + diff
     /// (docs/arrangement-region-editing-spec.md 4.1): the Rust-owned region
     /// surfaces as `(track-a track-b start end)`, republishes only when it

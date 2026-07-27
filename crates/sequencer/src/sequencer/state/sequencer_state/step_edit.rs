@@ -1548,6 +1548,10 @@ impl SequencerState {
                 .ok_or_else(|| "live track target no longer exists".to_string())?
                 .set_num_steps(num_steps);
         }
+        // The lane dots project pool content, so a length change has to move
+        // the pool-content revision (spec 5.2) — nothing else the commit
+        // touches gates that rebuild.
+        self.bump_pool_content_revision();
         Ok(is_effective)
     }
 
@@ -1613,6 +1617,11 @@ impl SequencerState {
                 .ok_or_else(|| "live p-lock variant registry is missing".to_string())?;
             *registry = variant_registry.clone();
         }
+        // Every step edit — live, undo and redo — funnels through here, so
+        // this is the one place the arrangement's note dots can learn that
+        // pool content moved (spec 5.2). The pool is written whether or not
+        // the pattern is effective, so the bump is unconditional too.
+        self.bump_pool_content_revision();
         Ok(is_effective)
     }
 

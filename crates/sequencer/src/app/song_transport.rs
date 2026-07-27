@@ -1032,6 +1032,217 @@ mod tests {
         assert_eq!(app.state.drain_song_playback_notices().len(), 1);
     }
 
+    // ---------------------------------------------------------------
+    // Note edit-through (docs/realtime-arrangement-feedback-spec.md 5)
+    // ---------------------------------------------------------------
+
+    /// The same three-row song, but every row explicitly empties track 0, so
+    /// no row resolves the pattern a step edit lands on.
+    fn app_with_song_resolving_no_pattern() -> App {
+        let mut app = test_app();
+        let empty_row = |start_beat: f64, scene: usize| SongRowSpec {
+            start_beat,
+            scene,
+            overrides: vec![crate::sequencer::ProjectSongTrackOverride::new(0, None)],
+        };
+        app.arr_replace_rows(
+            vec![empty_row(0.0, 0), empty_row(4.0, 1), empty_row(8.0, 2)],
+            16.0,
+            false,
+        )
+        .expect("arr_replace_rows succeeds");
+        app
+    }
+
+    fn playing_song_app(mut app: App) -> App {
+        app.set_use_arrangement(true).expect("toggle while stopped");
+        app.song_transport_play(false).expect("song playback starts");
+        // Drop the Start command so later drains see only edit-through work.
+        app.state.song_playback().drain_commands();
+        app
+    }
+
+    /// The `Refresh` songs queued for the scheduler since the last drain.
+    fn drained_refreshes(app: &App) -> Vec<std::sync::Arc<crate::sequencer::RuntimeSong>> {
+        app.state
+            .song_playback()
+            .drain_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                crate::sequencer::SongPlaybackCommand::Refresh { song } => Some(song),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Slice 3's whole premise: the refreshed rows must be accepted by the
+    /// scheduler's cheap content path, which only swaps when row layout is
+    /// identical.
+    fn assert_swaps_in_place(
+        before: &std::sync::Arc<crate::sequencer::RuntimeSong>,
+        refreshed: &std::sync::Arc<crate::sequencer::RuntimeSong>,
+    ) {
+        let mut runtime = crate::sequencer::SongPlaybackRuntime::new(
+            std::sync::Arc::clone(before),
+            0.0,
+            1.0,
+        )
+        .expect("song playback runtime");
+        assert!(
+            runtime.replace_song_in_place(std::sync::Arc::clone(refreshed)),
+            "a note/geometry edit must not move row layout: the Refresh has to swap in place"
+        );
+    }
+
+    fn toggle_step(app: &mut App, step: usize) {
+        crate::app::edit::try_apply_command(app, crate::app::AppCommand::ToggleStep { track: 0, step })
+            .expect("step edit applies");
+    }
+
+    /// 5.1: a step commit on a pattern the playing song resolves ends with a
+    /// `Refresh` whose swap succeeds — and it does that WITHOUT touching the
+    /// committed song (5.2: the dots ride pool content, not the song).
+    #[test]
+    fn a_step_edit_during_song_playback_refreshes_the_scheduler_rows() {
+        let mut app = playing_song_app(app_with_song());
+        let before = app.active_runtime_song.clone().expect("active song");
+        let song_revision = app.state.committed_song_revision();
+        let pool_revision = app.state.pool_content_revision();
+
+        toggle_step(&mut app, 3);
+
+        let refreshes = drained_refreshes(&app);
+        assert_eq!(refreshes.len(), 1, "one commit, one refresh");
+        assert_swaps_in_place(&before, &refreshes[0]);
+        assert!(
+            app.active_runtime_song
+                .as_ref()
+                .is_some_and(|song| std::sync::Arc::ptr_eq(song, &refreshes[0])),
+            "the control side keeps the rows it handed the scheduler"
+        );
+        assert!(
+            app.state.pool_content_revision() > pool_revision,
+            "the lane dots key off pool content"
+        );
+        assert_eq!(
+            app.state.committed_song_revision(),
+            song_revision,
+            "a note edit is not a song edit"
+        );
+        app.song_transport_stop().unwrap();
+    }
+
+    /// 5.1: a `PatternGeometry` length change keeps row layout identical too —
+    /// the song's beat math comes from the arrangement, not the pattern
+    /// length — so it rides the same `Refresh`, not a rebuild.
+    #[test]
+    fn a_pattern_length_change_during_song_playback_still_swaps_via_refresh() {
+        let mut app = playing_song_app(app_with_song());
+        let before = app.active_runtime_song.clone().expect("active song");
+        let pool_revision = app.state.pool_content_revision();
+
+        crate::app::edit::try_apply_command(
+            &mut app,
+            crate::app::AppCommand::SetTrackNumSteps { track: 0, n: 7 },
+        )
+        .expect("length change applies");
+
+        let refreshes = drained_refreshes(&app);
+        assert_eq!(refreshes.len(), 1, "one geometry commit, one refresh");
+        assert_swaps_in_place(&before, &refreshes[0]);
+        assert!(app.state.pool_content_revision() > pool_revision);
+        app.song_transport_stop().unwrap();
+    }
+
+    /// 5.1: the `affected` check is what keeps this cheap — an edit to a
+    /// pattern no row resolves must not preflight at all.
+    #[test]
+    fn a_step_edit_no_row_resolves_never_preflights() {
+        let mut app = playing_song_app(app_with_song_resolving_no_pattern());
+        assert!(
+            app.active_runtime_song
+                .as_ref()
+                .expect("active song")
+                .rows
+                .iter()
+                .all(|row| row.resolved_pattern_ids[0].is_none()),
+            "fixture must leave track 0 unresolved on every row"
+        );
+        let pool_revision = app.state.pool_content_revision();
+
+        toggle_step(&mut app, 3);
+
+        assert!(
+            drained_refreshes(&app).is_empty(),
+            "no row uses this pattern, so nothing is re-preflighted"
+        );
+        assert!(
+            app.state.pool_content_revision() > pool_revision,
+            "the pool still changed: the dots refresh even when the song ignores it"
+        );
+        app.song_transport_stop().unwrap();
+    }
+
+    /// 5.1: undo and redo ride the same seam, so a step edit reverted during
+    /// playback un-sounds where it was heard — and moves the dots back.
+    #[test]
+    fn undo_and_redo_of_a_step_edit_refresh_the_rows_and_the_dots() {
+        let mut app = playing_song_app(app_with_song());
+        let before = app.active_runtime_song.clone().expect("active song");
+        toggle_step(&mut app, 3);
+        app.state.song_playback().drain_commands();
+
+        for replay in ["undo", "redo"] {
+            let pool_revision = app.state.pool_content_revision();
+            let outcome = match replay {
+                "undo" => crate::app::edit::undo(&mut app),
+                _ => crate::app::edit::redo(&mut app),
+            };
+            assert!(
+                matches!(outcome, crate::app::history::HistoryReplay::Applied(_)),
+                "{replay} applies: {outcome:?}"
+            );
+            let refreshes = drained_refreshes(&app);
+            assert_eq!(refreshes.len(), 1, "{replay} refreshes the rows once");
+            assert_swaps_in_place(&before, &refreshes[0]);
+            assert!(
+                app.state.pool_content_revision() > pool_revision,
+                "{replay} moves pool content, so the dots rebuild"
+            );
+        }
+        app.song_transport_stop().unwrap();
+    }
+
+    /// 5.1 / 7: no coalescing beyond the gesture deferral. With a gesture
+    /// open, the replay parks the invalidation in
+    /// `pending_song_row_invalidation` and the commit's own gesture close
+    /// flushes it — exactly one preflight, never two.
+    #[test]
+    fn a_step_edit_under_an_open_gesture_flushes_one_invalidation_at_gesture_end() {
+        use crate::app::history::{ActiveGesture, GestureId, MergeKey};
+
+        let mut app = playing_song_app(app_with_song());
+        let before = app.active_runtime_song.clone().expect("active song");
+        app.history
+            .begin_gesture(ActiveGesture {
+                id: GestureId(1),
+                merge_key: MergeKey::new("device-drag"),
+            })
+            .expect("gesture starts");
+
+        toggle_step(&mut app, 3);
+
+        let refreshes = drained_refreshes(&app);
+        assert_eq!(refreshes.len(), 1, "one flush, not one per replay");
+        assert_swaps_in_place(&before, &refreshes[0]);
+        assert!(
+            app.pending_song_row_invalidation.is_none(),
+            "the deferred slot is drained by the gesture close, not left dangling"
+        );
+        assert!(app.history.active_gesture().is_none());
+        app.song_transport_stop().unwrap();
+    }
+
     /// Start arrangement capture on an app whose rendered-beat clock is 0.
     fn start_capture(app: &mut App) {
         app.set_use_arrangement(true).expect("toggle while stopped");

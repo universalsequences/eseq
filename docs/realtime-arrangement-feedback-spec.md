@@ -1,14 +1,15 @@
 # Realtime Arrangement Feedback — Recording You Can See, Editing While It Plays
 
-Status: rev 2, 2026-07-27 — **design, nothing built.** Raised while testing
-clip move (`docs/arrangement-region-editing-spec.md` §6): edits and recordings
-only become visible when they commit, which for arrangement capture means
-*after you stop*. This spec covers the three halves of full realtime feedback:
-seeing recorded material as it is recorded, editing the arrangement while it
-plays, and step-sequencer note edits reaching the playing song and the
-timeline. Rev 2 adds slice 3 (note edit-through) after tracing the step-commit
-path and finding the "content edit-through already exists" claim covered
-device edits only.
+Status: rev 3, 2026-07-27 — **design, nothing built; all questions resolved.**
+Raised while testing clip move (`docs/arrangement-region-editing-spec.md` §6):
+edits and recordings only become visible when they commit, which for
+arrangement capture means *after you stop*. This spec covers the three halves
+of full realtime feedback: seeing recorded material as it is recorded, editing
+the arrangement while it plays, and step-sequencer note edits reaching the
+playing song and the timeline. Rev 2 added slice 3 (note edit-through) after
+tracing the step-commit path and finding the "content edit-through already
+exists" claim covered device edits only. Rev 3 resolves the open questions
+(§9) — notably cutting incremental capture commit.
 
 Related: `docs/song-mode-spec.md` (§7 transport authority, §9/§10 runtime and
 row transitions, §13 the mode machine), `docs/arrangement-lane-model-spec.md`
@@ -28,8 +29,8 @@ row transitions, §13 the mode machine), `docs/arrangement-lane-model-spec.md`
 
 ## 1. Summary
 
-Four slices. 1 and 3 are independently shippable; 2 is the model/scheduler
-work; 4 is optional.
+Three slices. 1 and 3 are independently shippable; 2 is the model/scheduler
+work.
 
 1. **Recording feedback** — while arrangement capture runs, the pending takes
    and the launches captured so far render as **provisional** items in the
@@ -48,9 +49,11 @@ work; 4 is optional.
    visible (the timeline's note dots gain a pool-content revision so they
    refresh without a committed-song change). Independent of slice 2: step
    edits never went through the song-edit lock.
-4. **Incremental capture commit** — long takes commit per chunk rather than
-   only at Stop, so a 5-minute recording is not one all-or-nothing entry.
-   Open (§9); the other slices do not depend on it.
+
+A fourth slice — **incremental capture commit** (per-chunk commits during a
+long take) — was considered and **rejected** (§9): slice 1's provisional
+feedback removes the flying-blind problem, and the atomic stop-commit's
+ownership of the whole `[P, Q)` splice is worth keeping simple.
 
 ## 2. Current facts (verified 2026-07-27)
 
@@ -366,7 +369,6 @@ separate, clip-addressed gesture and stays out of scope.
      to a pattern no lane resolves publishes nothing (value-diff holds).
    - Gesture-coalesced step edits flush one invalidation at gesture end
      (`pending_song_row_invalidation` path).
-4. **Incremental capture commit** (§9) — only if taken.
 
 ## 7. Proposed decisions
 
@@ -390,6 +392,13 @@ separate, clip-addressed gesture and stays out of scope.
   `pattern_epoch` (mirror invariant) and never the committed song revision.
 - Take-governed lanes stay pointer-blocked in the Seq grid; ordinary and
   latched lanes are editable and, after slice 3, audible.
+- Every commit refreshes the scheduler's rows **even when every affected lane
+  is latched**: the refresh is inaudible there (the lookahead merge masks it)
+  but the rows are already correct the moment Back-to-Song releases the
+  latch. No latch-aware special case anywhere in the commit path.
+- No coalescing up front for `Rebuild` or slice 3's per-click preflight —
+  device edits already pay this cost at gesture end; measure before adding a
+  per-tick latest-wins flush (the deferred slot already models it).
 
 ## 8. Why this is worth doing
 
@@ -405,24 +414,29 @@ edit, writes the right pool pattern — and the song ignores it until the next
 full restart. An edit that is 90% plumbed and 0% audible reads as a bug, not
 a limitation.
 
-## 9. Open questions
+## 9. Resolved questions (2026-07-27)
 
-- **Incremental capture commit.** Committing per chunk gives crash safety and
-  a visible, undoable trail, but changes capture from one atomic entry into
-  many — and the stop-commit's splice semantics (takes spec §8.5) assume it
-  owns `[P, Q)` at the end. Worth it, or is slice 1's feedback enough?
-- **Editing during capture.** §4.1 keeps it locked. Is there a subset (edits
-  strictly outside the punch region) worth allowing, or does that just move
-  the race?
-- **Latched lanes.** A track under manual override (takes spec §10) already
-  ignores the song's authority. Should an edit to a latched lane's clips
-  refresh at all, or wait for Back to Song?
-- **Rebuild rate.** A commit per gesture is fine; a live-coded script that
-  rewrites the arrangement in a loop is not. Does `Rebuild` need coalescing
-  (one per frame, latest wins) or is the bounded command channel's back
-  pressure enough? The same question applies to slice 3's per-click
-  `preflight_runtime_song`: measure before adding the per-tick coalescer.
-- **Take clip note editing.** Slice 3 deliberately keeps take-governed lanes
-  blocked in the Seq grid. The DAW-complete version is a clip-addressed edit
-  (select the clip, edit its chunk patterns) — which chunk a step lands in is
-  the only new question, since device writes already fan out across chunks.
+All open questions from rev 1/2 were resolved with the user; the outcomes are
+folded into §7 and recorded here with their reasoning.
+
+- **Incremental capture commit — REJECTED.** Slice 1's provisional feedback
+  removes the flying-blind problem that motivated it; per-chunk commits would
+  break the stop-commit's ownership of the whole `[P, Q)` splice (takes spec
+  §8.5) for crash-safety no one has asked for yet. Capture stays one atomic
+  undo entry.
+- **Editing during capture — stays fully locked.** The punch region grows as
+  you record, so "edits strictly outside it" is a moving target and the
+  carve-out only relocates the race. Capture sessions are short; the narrowed
+  error message (§4.1) is the whole fix.
+- **Latched lanes — always refresh.** An edit affecting only latched lanes
+  still re-preflights and swaps rows. Inaudible now (lookahead merge), correct
+  at Back-to-Song, zero special cases.
+- **Rebuild/preflight rate — ship without coalescing, measure first.** Device
+  edits already re-preflight at gesture end without complaint. If a
+  live-coded arrangement-rewriting loop objects in profiling, add a per-tick
+  latest-wins flush on the `pending_song_row_invalidation` pattern.
+- **Take clip note editing — deferred to a follow-up spec.** Take-governed
+  lanes stay pointer-blocked in the Seq grid. The clip-addressed version
+  (select a take clip, edit its chunk patterns; which chunk a step lands in
+  is the only new question, since device writes already fan out) is its own
+  design and must not gate realtime feedback.

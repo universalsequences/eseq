@@ -80,6 +80,7 @@ impl SequencerState {
                 song: Mutex::new(None),
                 arrangement: Mutex::new(None),
                 song_revision: AtomicU64::new(0),
+                pool_content_revision: AtomicU64::new(0),
                 current_pattern: AtomicU32::new(0),
                 num_patterns: AtomicU32::new(1),
                 timebase_plocks: (0..MAX_TRACKS).map(|_| TimebasePLockData::new()).collect(),
@@ -653,6 +654,21 @@ impl SequencerState {
     /// code keys song-derived rebuild work off it (docs/song-mode-spec.md 12).
     pub fn committed_song_revision(&self) -> u64 {
         self.pattern.song_revision.load(Ordering::Acquire)
+    }
+
+    /// Monotonic counter bumped on every pool step/geometry write. UI code
+    /// that projects pool CONTENT (the arrangement lane dots) keys its
+    /// rebuild off it, so a note edit refreshes the timeline without a
+    /// committed-song change and without touching `pattern_epoch`
+    /// (docs/realtime-arrangement-feedback-spec.md 5.2).
+    pub fn pool_content_revision(&self) -> u64 {
+        self.pattern.pool_content_revision.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn bump_pool_content_revision(&self) {
+        self.pattern
+            .pool_content_revision
+            .fetch_add(1, Ordering::Release);
     }
 
     /// Run `f` against the live project scenes without cloning them. Read-only

@@ -5774,6 +5774,133 @@
         })
     }
 
+    /// Note edit-through (docs/realtime-arrangement-feedback-spec.md 5.1):
+    /// a step edit to the pattern the SOUNDING row resolves is audible inside
+    /// that row. `replace_song_in_place` swaps the row `Arc`s and the
+    /// lookahead reads `row_snapshot(row)` per chunk, so steps ahead of the
+    /// playhead change while the row itself is never re-entered — no
+    /// retrigger, no clock disturbance — and the edit survives the loop wrap.
+    #[test]
+    fn song_step_edit_reaches_the_sounding_row_without_re_entering_it() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            // One 8-beat row looping on itself: the 4-beat scene-0 pattern
+            // (transpose 1) tiles twice per pass.
+            song_mode_commit(&state, vec![song_mode_row(0, 0.0, 0, Vec::new())], 8.0, true);
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let base = state.publish_scheduler_snapshot();
+            let samples_per_quarter = 48_000.0 * 60.0 / base.transport.bpm as f64;
+            let loop_samples = (8.0 * samples_per_quarter) as u64;
+
+            let queue = Box::new(ScheduledEventQueue::<128>::new());
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler.song = Some(
+                crate::sequencer::SongPlaybackRuntime::new(runtime, 0.0, samples_per_quarter)
+                    .expect("song playback runtime"),
+            );
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime = None;
+            let block = 4_800_usize;
+            let mut scheduled_until = 0_u64;
+            let mut rendered = 0_u64;
+            let mut triggers: Vec<ObservedTrigger> = Vec::new();
+            let mut applied: Vec<crate::sequencer::AudibleSongRowApplied> = Vec::new();
+            // The edit lands one beat in, while the row is sounding.
+            let edit_at = samples_per_quarter as u64;
+            let mut edited = false;
+            let mut edit_horizon = 0_u64;
+
+            while rendered < loop_samples * 2 {
+                let result = schedule_playing_lookahead(
+                    &mut scheduler,
+                    &state,
+                    &base,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    base.transport.pattern_epoch,
+                    rendered,
+                    (block * 4) as u64,
+                    48_000,
+                    block,
+                    samples_per_quarter,
+                    scheduled_until,
+                    false,
+                    false,
+                );
+                scheduled_until = result.scheduled_until_sample;
+                triggers.extend(observed_triggers(queue.as_ref()));
+                applied.extend(song_row_applied(&state.drain_song_playback_notices()));
+                rendered += block as u64;
+
+                if !edited && rendered >= edit_at {
+                    // The performer edits the pool pattern the sounding row
+                    // resolved, then the control thread re-preflights and
+                    // hands the rows over — the production `Refresh` path.
+                    state.with_scenes_mut(|scenes| {
+                        let id = scenes.scenes[0].cells[0].expect("scene 0 cell");
+                        let data = scenes.track_pools[0].get_mut(id).expect("pool pattern");
+                        for step in 0..16 {
+                            data.step_data[step][StepParam::Transpose.index()] = 7.0;
+                        }
+                    });
+                    let refreshed = state.preflight_runtime_song().expect("re-preflight");
+                    assert!(
+                        scheduler
+                            .song
+                            .as_mut()
+                            .expect("song runtime")
+                            .replace_song_in_place(refreshed),
+                        "a note edit keeps row layout identical, so the swap must succeed"
+                    );
+                    edited = true;
+                    // Everything already scheduled keeps the old content.
+                    edit_horizon = scheduled_until;
+                }
+            }
+
+            let track0: Vec<&ObservedTrigger> =
+                triggers.iter().filter(|event| event.track == 0).collect();
+            assert!(
+                track0
+                    .iter()
+                    .filter(|event| event.sample_time < edit_horizon)
+                    .all(|event| event.transpose == 1.0),
+                "already-scheduled steps must not be rewritten: {track0:#?}"
+            );
+            let after: Vec<&&ObservedTrigger> = track0
+                .iter()
+                .filter(|event| event.sample_time >= edit_horizon)
+                .collect();
+            assert!(
+                !after.is_empty() && after.iter().all(|event| event.transpose == 7.0),
+                "steps ahead of the playhead in the SOUNDING row carry the edit: {track0:#?}"
+            );
+            assert!(
+                after
+                    .iter()
+                    .any(|event| event.sample_time >= loop_samples),
+                "the edit must survive the loop wrap: {track0:#?}"
+            );
+
+            // The row is never re-entered off a boundary: only the initial
+            // application and the loop wraps apply it, all at beat zero.
+            assert!(
+                applied.iter().all(|record| record.row_ordinal == 0
+                    && record.effective_beat.abs() < 1e-9),
+                "no retrigger: rows apply only at their own start ({applied:?})"
+            );
+            let wraps = applied.iter().filter(|record| record.wrapped).count();
+            assert_eq!(
+                applied.len(),
+                wraps + 1,
+                "one initial application plus one per wrap ({applied:?})"
+            );
+        });
+    }
+
     #[test]
     fn preflight_expands_take_rows_at_chunk_boundaries_and_take_end() {
         let (state, _) = song_mode_fixture();

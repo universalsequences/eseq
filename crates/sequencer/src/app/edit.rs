@@ -5171,15 +5171,29 @@ fn fan_out_device_values_to_take_chunks(
     }
     // Edit-through (16.7): the playing song's prebuilt rows cloned this
     // pattern at preflight and would otherwise keep the pre-edit sound.
-    // Re-preflighting is far too heavy for every frame of a knob drag, and
-    // the audible row already heard the value through the direct engine
-    // push — so a drag defers to its gesture end.
-    if app.history.active_gesture().is_some() {
-        app.pending_song_row_invalidation = Some((target.track, target.pattern));
-    } else {
-        app.invalidate_song_rows_for_pattern(target.track, target.pattern);
-    }
+    invalidate_song_rows_for_edit(app, target.track, target.pattern);
     Ok(())
+}
+
+/// Edit-through for a pool pattern the playing song may resolve: re-preflight
+/// the rows so everything the playhead has not reached becomes correct
+/// (takes spec 16.7 for device edits,
+/// docs/realtime-arrangement-feedback-spec.md 5.1 for note edits).
+///
+/// Re-preflighting is far too heavy for every frame of a knob drag, and the
+/// audible row already heard a device value through the direct engine push —
+/// so while a gesture is open this defers to its end through
+/// `pending_song_row_invalidation` (flushed in `finish_active_gesture`).
+fn invalidate_song_rows_for_edit(
+    app: &mut App,
+    track: usize,
+    pattern: crate::sequencer::PatternId,
+) {
+    if app.history.active_gesture().is_some() {
+        app.pending_song_row_invalidation = Some((track, pattern));
+    } else {
+        app.invalidate_song_rows_for_pattern(track, pattern);
+    }
 }
 
 fn device_command_changes_key_locks(cmd: &AppCommand) -> bool {
@@ -6622,11 +6636,31 @@ pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, 
     }
 }
 
+/// Replay a step patch and drive note edit-through (spec 5.1): the scheduler
+/// plays preflight-cloned row snapshots, so publishing the live track alone
+/// leaves the edit inaudible for the rest of the song. This seam is the commit
+/// tail for a step edit AND the undo/redo replay, so both drive the same
+/// refresh. A note edit never moves row layout, so the existing `Refresh`
+/// command carries it — `replace_song_in_place`'s identity check passes.
 fn replay_step_patch(
     app: &mut App,
     patch: &StepCellsPatch,
     mode: ApplyMode,
 ) -> Result<MutationEffects, EditError> {
+    let (track, effects) = replay_step_patch_cells(app, patch, mode)?;
+    invalidate_song_rows_for_edit(app, track, patch.target.pattern);
+    Ok(effects)
+}
+
+/// The cells half alone, returning the resolved track index. A geometry patch
+/// replays this directly so the row refresh happens once, AFTER the pattern
+/// length has moved too — a preflight between the two halves would clone a
+/// half-applied pattern.
+fn replay_step_patch_cells(
+    app: &mut App,
+    patch: &StepCellsPatch,
+    mode: ApplyMode,
+) -> Result<(usize, MutationEffects), EditError> {
     let track = app
         .track_registry
         .index_of(patch.target.track)
@@ -6663,7 +6697,7 @@ fn replay_step_patch(
     if publish_scheduler {
         app.state.publish_scheduler_track(track);
     }
-    Ok(MutationEffects { publish_scheduler })
+    Ok((track, MutationEffects { publish_scheduler }))
 }
 
 fn replay_pattern_geometry_patch(
@@ -6686,7 +6720,7 @@ fn replay_pattern_geometry_patch(
             ));
         }
     };
-    let step_effects = replay_step_patch(app, &patch.cells, mode)?;
+    let (_, step_effects) = replay_step_patch_cells(app, &patch.cells, mode)?;
     let geometry_publish = match app
         .state
         .restore_pattern_num_steps_no_publish(track, patch.target.pattern, num_steps)
@@ -6698,7 +6732,7 @@ fn replay_pattern_geometry_patch(
                 ApplyMode::Redo => ApplyMode::Undo,
                 ApplyMode::UserEdit | ApplyMode::ProjectLoad => unreachable!(),
             };
-            return match replay_step_patch(app, &patch.cells, rollback_mode) {
+            return match replay_step_patch_cells(app, &patch.cells, rollback_mode) {
                 Ok(_) => Err(EditError::ReplayFailed(error)),
                 Err(rollback_error) => Err(EditError::ReplayFailed(format!(
                     "{error}; restoring pattern cells also failed: {rollback_error:?}"
@@ -6709,6 +6743,10 @@ fn replay_pattern_geometry_patch(
     if geometry_publish && !step_effects.publish_scheduler {
         app.state.publish_scheduler_snapshot();
     }
+    // A length change keeps row layout identical too — the song's beat math
+    // comes from the arrangement, not the pattern length — so it rides the
+    // same content refresh as a note edit (spec 5.1).
+    invalidate_song_rows_for_edit(app, track, patch.target.pattern);
     Ok(MutationEffects {
         publish_scheduler: step_effects.publish_scheduler || geometry_publish,
     })

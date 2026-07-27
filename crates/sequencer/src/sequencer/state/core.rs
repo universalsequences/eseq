@@ -32,6 +32,14 @@ pub struct PatternState {
     /// can rebuild song-derived reactive values (`song-rows`) only when the
     /// song actually changed (docs/song-mode-spec.md 12).
     pub(super) song_revision: AtomicU64,
+    /// Bumped on every pool step/geometry write (the
+    /// `restore_pattern_*_no_publish` funnel every step edit, undo and redo
+    /// passes through). Per-frame UI code that projects POOL CONTENT — the
+    /// arrangement lane dots — keys its rebuild off this
+    /// (docs/realtime-arrangement-feedback-spec.md 5.2). Deliberately not
+    /// `pattern_epoch`: that epoch drives scene-launch-scale resyncs and a
+    /// per-note bump would stampede unrelated caches.
+    pub(super) pool_content_revision: AtomicU64,
     pub(super) current_pattern: AtomicU32,
     pub(super) num_patterns: AtomicU32,
     pub timebase_plocks: Vec<TimebasePLockData>,
