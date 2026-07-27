@@ -1258,18 +1258,13 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
                 return true;
             }
             _ if is_plain_tab_shortcut(key) => {
-                if patcher_handles_plain_tab(editor) {
-                    return false;
-                }
                 let _ = if let Some(callable) = editor
                     .runtime_mut()
-                    .global_value("seq-toggle-current-track-expanded-main")
+                    .global_value("seq-toggle-arrangement")
                 {
                     editor.runtime_mut().invoke(callable, vec![])
                 } else {
-                    editor
-                        .runtime_mut()
-                        .eval_str("(seq-toggle-current-track-expanded-main)")
+                    editor.runtime_mut().eval_str("(seq-toggle-arrangement)")
                 };
                 editor.refresh_runtime_side_effects();
                 return true;
@@ -2436,7 +2431,7 @@ mod live_keyboard_tests {
                 r#"
                 (defstate tab-target "")
                 (def seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
-                (def seq-toggle-current-track-expanded-main () (set! tab-target "expand"))
+                (def seq-toggle-arrangement () (set! tab-target "arrangement"))
                 (def seq-toggle-piano-roll-placement () (set! tab-target "placement"))
                 (def seq-toggle-mixer-panel () (set! tab-target "mixer"))
                 "#,
@@ -2458,7 +2453,7 @@ mod live_keyboard_tests {
         ));
         assert_eq!(
             editor.runtime_mut().eval_str("tab-target").unwrap(),
-            Some(eseqlisp::vm::Value::String("expand".to_string()))
+            Some(eseqlisp::vm::Value::String("arrangement".to_string()))
         );
 
         assert!(handle_metal_command_shortcut(

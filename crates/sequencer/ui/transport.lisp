@@ -372,6 +372,58 @@
           (sdf/rounded-rect 0.08 0.34 0.03))
         (material :color panel-col)))))
 
+(defwidget session-view-icon
+  :width 2.8 :height 1.4
+  :paint-margin 0.5
+  :state (active)
+  :shader
+  (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
+      (muted-col (rgba 0.25 0.25 0.27 1.0))
+      (bg-col (if (= active 1) :mixer-strip-selected-bg :transparent))
+      (line-col (if (= active 1) fg-col muted-col)))
+    (sdf/layer
+      (sdf/fill
+        (sdf/rounded-rect width height 0.4)
+        (material :color bg-col))
+      (sdf/fill
+        (sdf/translate -0.34 0.22
+          (sdf/rounded-rect 0.09 0.42 0.03))
+        (material :color line-col))
+      (sdf/fill
+        (sdf/translate 0.0 0.08
+          (sdf/rounded-rect 0.09 0.56 0.03))
+        (material :color line-col))
+      (sdf/fill
+        (sdf/translate 0.34 -0.08
+          (sdf/rounded-rect 0.09 0.72 0.03))
+        (material :color line-col)))))
+
+(defwidget arrangement-view-icon
+  :width 2.8 :height 1.4
+  :paint-margin 0.5
+  :state (active)
+  :shader
+  (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
+      (muted-col (rgba 0.25 0.25 0.27 1.0))
+      (bg-col (if (= active 1) :mixer-strip-selected-bg :transparent))
+      (line-col (if (= active 1) fg-col muted-col)))
+    (sdf/layer
+      (sdf/fill
+        (sdf/rounded-rect width height 0.4)
+        (material :color bg-col))
+      (sdf/fill
+        (sdf/translate -0.20 -0.32
+          (sdf/rounded-rect 0.54 0.08 0.03))
+        (material :color line-col))
+      (sdf/fill
+        (sdf/translate -0.08 0.0
+          (sdf/rounded-rect 0.66 0.08 0.03))
+        (material :color line-col))
+      (sdf/fill
+        (sdf/translate 0.04 0.32
+          (sdf/rounded-rect 0.78 0.08 0.03))
+        (material :color line-col)))))
+
 (defwidget transport-tool-chip-bg
   :width 1 :height 1
   :state (active)
@@ -823,4 +875,18 @@
                 :font-size 12
                 
                 :color (if (> SEQ.num-patterns 1) :white :dark-gray)
-                :bg :transparent))))))))
+                :bg :transparent)))))))
+
+    ;; Session and arrangement are app views, not tabs in the main buffer.
+    ;; This spacer keeps the view pair against the transport's right edge.
+    (box :width 0 :flex 1)
+    (subtree :key "transport-session-view-button"
+      (session-view-icon
+        :on-click |x y r| (seq-show-sequencer-main)
+        :style transport-icon-style
+        :active (if (seq-arrangement-view?) 0 1)))
+    (subtree :key "transport-arrangement-view-button"
+      (arrangement-view-icon
+        :on-click |x y r| (seq-open-arrangement)
+        :style transport-icon-style
+        :active (if (seq-arrangement-view?) 1 0)))))

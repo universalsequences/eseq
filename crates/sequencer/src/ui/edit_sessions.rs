@@ -952,7 +952,6 @@ pub(super) fn key_should_reveal_sequencer_track(key: &crossterm::event::KeyEvent
         (key.code, key.modifiers),
         (KeyCode::Up, KeyModifiers::NONE)
             | (KeyCode::Down, KeyModifiers::NONE)
-            | (KeyCode::Tab, KeyModifiers::NONE)
     )
 }
 
