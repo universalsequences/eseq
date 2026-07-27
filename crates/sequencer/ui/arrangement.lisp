@@ -70,7 +70,7 @@
 ;; Fixed width for the composed seqv-track-header column so every lane's time
 ;; axis starts at the same x; the scene lane leads with a spacer of the same
 ;; width (spec 4.2: the per-track sidebar role is played by the header).
-(def arrangement-header-width 26)
+(def arrangement-header-width 26.5)
 
 (def arrangement-event-num (event key fallback)
   (let ((value (get event key)))
@@ -445,11 +445,33 @@
       :take-id (get clip :take-id)
       :offset-steps (get clip :offset-steps))))
 
+;; Region move: every clip the dragged RECTANGLE covers slides with it, in
+;; every lane the rectangle spans — the rect ghost alone shows where the music
+;; will land but not what lands there.
+(def arrangement-region-ghost-covers? (i clip)
+  (and (= (arrangement-ghost-kind) :region-move)
+    (>= i (get arrangement-ghost :track-a))
+    (<= i (get arrangement-ghost :track-b))
+    (> (get clip :end-beat) (get arrangement-ghost :start))
+    (< (get clip :start-beat) (get arrangement-ghost :end))))
+
+(def arrangement-region-ghost-clip (i clip)
+  (let ((delta (get arrangement-ghost :delta)))
+    (dict
+      :clip-id (get clip :clip-id)
+      :start-beat (+ (get clip :start-beat) delta)
+      :end-beat (+ (get clip :end-beat) delta)
+      :pattern-id (get clip :pattern-id)
+      :take-id (get clip :take-id)
+      :offset-steps (get clip :offset-steps))))
+
 (def arrangement-track-ghost-clip (i clip)
   (if (and (= (arrangement-ghost-kind) :track-move)
         (= (get arrangement-ghost :track) i)
         (= (get arrangement-ghost :clip-id) (get clip :clip-id)))
     (arrangement-track-move-ghost-clip i clip)
+  (if (arrangement-region-ghost-covers? i clip)
+    (arrangement-region-ghost-clip i clip)
   (if (and (= (arrangement-ghost-kind) :track-resize)
         (= (get arrangement-ghost :track) i)
         (= (get arrangement-ghost :clip-id) (get clip :clip-id)))
@@ -472,7 +494,7 @@
         :pattern-id (get clip :pattern-id)
         :take-id (get clip :take-id)
         :offset-steps (get clip :offset-steps)))
-    clip)))
+    clip))))
 
 ;; Track-lane items (lane spec 12): the stored clips, and nothing else. A gap
 ;; between clips produces NO item — the lane really is silent there.
@@ -824,9 +846,7 @@
 
 ;; ── Clip / region move (region spec 6) ─────────────────────────────────────
 
-;; Does the committed region cover this clip? A title-bar drag on a clip
-;; INSIDE the region moves the whole rectangle; anything else moves the one
-;; clip and the region gives way, exactly as a plain clip click does.
+;; Does the committed region cover this clip?
 (def arrangement-clip-in-region? (i clip)
   (if (or (= SEQ.song-region nil) (= clip nil))
     false
@@ -834,6 +854,26 @@
       (<= i (nth SEQ.song-region 1))
       (> (get clip :end-beat) (nth SEQ.song-region 2))
       (< (get clip :start-beat) (nth SEQ.song-region 3)))))
+
+;; ...and does it reach BEYOND it — another track, or more time?
+;;
+;; This is what separates the two title-bar gestures. Selecting a clip makes
+;; its own span a one-clip region (spec 4.1), and the widget selects before it
+;; drags, so "the region covers this clip" is true of every single-clip drag:
+;; testing only that would turn every move into a region move, previewed as a
+;; bare rectangle instead of the clip itself. A rectangle that is exactly the
+;; dragged clip IS the clip, so it moves as one.
+(def arrangement-region-beyond-clip? (i clip)
+  (if (or (= SEQ.song-region nil) (= clip nil))
+    false
+    (or (< (nth SEQ.song-region 0) i)
+      (> (nth SEQ.song-region 1) i)
+      (< (nth SEQ.song-region 2) (get clip :start-beat))
+      (> (nth SEQ.song-region 3) (get clip :end-beat)))))
+
+(def arrangement-clip-drags-region? (i clip)
+  (and (arrangement-clip-in-region? i clip)
+    (arrangement-region-beyond-clip? i clip)))
 
 ;; Live title-bar drag: ghost only, never a primitive (spec 9.1). Vertical
 ;; travel is ignored — cross-track moves are invalid for the same per-track
@@ -843,15 +883,21 @@
   (let ((clip (arrangement-find-track-clip i (get event :anchor-id))))
     (if (= clip nil)
       (set! arrangement-ghost nil)
-      (if (arrangement-clip-in-region? i clip)
+      (if (arrangement-clip-drags-region? i clip)
         ;; Region move: the ghost is the whole rectangle shifted by the drag
         ;; delta, clamped so it can never run before beat 0 (the primitive
-        ;; rejects that rather than truncating the leading clips).
+        ;; rejects that rather than truncating the leading clips). It carries
+        ;; the SOURCE rectangle too, so every covered lane can preview its own
+        ;; clips sliding with it.
         (let ((delta (max (- 0 (nth SEQ.song-region 2))
                        (- (get event :start) (get clip :start-beat)))))
           (do
             (set! arrangement-ghost
-              (dict :kind :region-move :track i :delta delta))
+              (dict :kind :region-move :track i :delta delta
+                :track-a (nth SEQ.song-region 0)
+                :track-b (nth SEQ.song-region 1)
+                :start (nth SEQ.song-region 2)
+                :end (nth SEQ.song-region 3)))
             (set! arrangement-region-ghost
               (dict :track-a (nth SEQ.song-region 0)
                 :track-b (nth SEQ.song-region 1)
@@ -1073,9 +1119,9 @@
     :item-label-color arrangement-clip-label-color
     :item-corner-radius arrangement-clip-corner-radius
     ;; Device-pixel notch shape for track clips.
-    :loop-notch-width 5
-    :loop-notch-height 10
-    :loop-notch-corner-radius 5
+    :loop-notch-width 2
+    :loop-notch-height 5
+    :loop-notch-corner-radius 8
     :loop-notch-smoothing 5
     :sidebar-width 0
     :header-height 0
@@ -1135,7 +1181,7 @@
 ;; fixed content and the flexed lane measures ~zero wide.
 (def arrangement-track-row (i)
   (box :width :fill :border-color :bg :border-width 2
-    (h-stack :width :fill :gap 0.6 :align :start
+    (h-stack :width :fill :align :start
       (box
         :key (str "arrangement-track-header-" i)
         :height :fill :width arrangement-header-width
@@ -1172,7 +1218,7 @@
       (arrangement-empty-banner))
     (arrangement-error-banner)
     (box :width :fill
-      (h-stack :width :fill :gap 0.6 :align :start
+      (h-stack :width :fill :align :start
         (box :key "arrangement-scene-header-spacer"
           :width arrangement-header-width :height arrangement-scene-lane-height
           :bg :transparent)

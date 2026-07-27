@@ -499,14 +499,25 @@ whatever it lands on, like every other clip write), re-inserts it and raises
 
 ### 6.2 Region move
 
-If the dragged clip lies inside the active region (its track within
-`[track_a, track_b]` and its span intersecting `[start_beat, end_beat)`), the
-gesture moves the **region**: the ghost is the region rectangle shifted by
-the drag delta, rendered through the same per-lane `:selection-rect`
-derivation (`arrangement-region-for-track`) with the ghost offset applied,
-and the release lowers to `song-region-move` with
-`delta = ghost-start - region-start`. Otherwise it is a plain single-clip
-move and the region clears, exactly as a clip `:select` does.
+If the dragged clip lies inside the active region **and that region reaches
+beyond it** — another track, or more time (`arrangement-clip-drags-region?`) —
+the gesture moves the **region**. The "reaches beyond" half is load-bearing:
+selecting a clip makes its own span a one-clip region (§4.1) and the widget
+selects before it drags, so "the region covers this clip" is true of *every*
+single-clip drag; testing only that turns every move into a region move,
+previewed as a bare rectangle instead of the clip itself. A rectangle that is
+exactly the dragged clip IS the clip, and moves as one. Otherwise it is a
+plain single-clip move and the region gives way, exactly as a clip `:select`
+does.
+
+For a real region grab the ghost is the region rectangle shifted by the drag
+delta, rendered through the same per-lane `:selection-rect` derivation
+(`arrangement-region-for-track`) with the ghost offset applied, and **every
+clip the rectangle covers, in every lane it spans, previews the same slide**
+(`arrangement-region-ghost-covers?` / `arrangement-region-ghost-clip`): the
+rect alone shows where the music will land but not what lands there. The
+release lowers to `song-region-move` with
+`delta = ghost-start - region-start`.
 
 `song_region_move(delta_beats)` is the one new primitive (§5.2), and it
 lifts the rectangle by calling `song_region_copy` — so a move follows copy's
@@ -657,6 +668,15 @@ Resolved: title-bar height is a fixed cell constant,
 `arrangement-clip-title-bar-height 0.9` (`arrangement.lisp:54`), not
 lane-height-scaled.
 
+- **How a multi-clip rectangle gets grabbed.** A title-bar press narrows the
+  region to the clicked clip (`select_song_clip_span`, §4.1 as amended), so by
+  the time the drag frames arrive the rectangle is usually the one clip and
+  §6.2's region branch does not fire. `song_region_move` is fully built and
+  tested; what is missing is a gesture that reliably reaches it. Options: let
+  a press whose clip lies INSIDE a larger region bind the sound without
+  collapsing the rectangle (Ableton: clicking inside a selection keeps it),
+  or put the region grab on a modifier. Until then a region move is reachable
+  only when the press does not narrow (e.g. a programmatic region).
 - Whether the scene lane's marquee-to-all-tracks region should also drive
   scene-event selection simultaneously (Ableton merges these; we currently
   keep them exclusive).

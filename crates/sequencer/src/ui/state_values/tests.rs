@@ -20454,17 +20454,19 @@
         assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
         assert_eq!(recorded.lock().unwrap().len(), 13);
 
-        // A drag on a clip INSIDE the committed region moves the whole
-        // RECTANGLE instead (spec 6.2): the ghost is the region shifted by the
-        // drag delta, and the release carries only that delta.
+        // A drag on a clip inside a region that reaches BEYOND it moves the
+        // whole RECTANGLE instead (spec 6.2): the ghost is the region shifted
+        // by the drag delta, every covered clip previews the slide, and the
+        // release carries only that delta. (A region equal to the dragged
+        // clip's own span is just the clip — that is the branch above.)
         editor.runtime_mut().set_reactive(
             "SEQ",
             "song-region",
             test_list(vec![
                 Value::Number(0.0),
                 Value::Number(0.0),
-                Value::Number(8.0),
-                Value::Number(12.0),
+                Value::Number(4.0),
+                Value::Number(16.0),
                 Value::Bool(false),
             ]),
         );
@@ -20479,12 +20481,23 @@
         );
         assert_eq!(
             read(&mut editor, "(get arrangement-region-ghost :start)"),
-            Value::Number(12.0),
+            Value::Number(8.0),
             "the region ghost previews the shifted rectangle"
         );
         assert_eq!(
             read(&mut editor, "(get arrangement-region-ghost :end)"),
-            Value::Number(16.0)
+            Value::Number(20.0)
+        );
+        // ...and so does every clip the rectangle covers: clip 0 spans [0,8)
+        // and clip 2 spans [8,12), both intersect [4,16), both slide by 4.
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :start)"),
+            Value::Number(4.0),
+            "a covered clip previews the slide, not just the rectangle"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :start)"),
+            Value::Number(12.0)
         );
         eval(
             &mut editor,
@@ -20512,7 +20525,11 @@
         {
             let recorded = recorded.lock().unwrap();
             assert_eq!(recorded.len(), 15);
-            assert_eq!(action_field(&recorded[14], "delta"), Value::Number(-8.0));
+            assert_eq!(
+                action_field(&recorded[14], "delta"),
+                Value::Number(-4.0),
+                "the rectangle starts at beat 4, so it can slide 4 beats at most"
+            );
         }
         editor
             .runtime_mut()
