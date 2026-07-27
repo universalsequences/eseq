@@ -106,6 +106,13 @@ pub enum SongPlaybackCommand {
     Start {
         song: Arc<RuntimeSong>,
         start_beat: f64,
+        /// Arrangement capture (docs/song-mode-spec.md 7.4): the song end is
+        /// NOT a stopping point while recording. The runtime holds the last
+        /// row past `end_beat` instead of ending, so a take that grooves
+        /// past the old song length is not cut off and committed there; the
+        /// stop-commit extends `end_beat` to the Stop beat. Looping songs
+        /// are unaffected — they already never end.
+        open_ended: bool,
     },
     /// Re-preflighted rows for the song already playing (takes spec 16.7):
     /// swapped in place, keeping the cursor. Ignored if the row layout moved.
@@ -122,6 +129,9 @@ pub struct SongPositionShared {
     active: AtomicBool,
     ended: AtomicBool,
     loop_enabled: AtomicBool,
+    /// Capture is running past the song end, so the position must not clamp
+    /// there (it would pin every lane's playhead at the old end marker).
+    open_ended: AtomicBool,
     anchor_sample: AtomicU64,
     anchor_beat_bits: AtomicU64,
     samples_per_quarter_bits: AtomicU64,
@@ -136,6 +146,7 @@ impl Default for SongPositionShared {
             active: AtomicBool::new(false),
             ended: AtomicBool::new(false),
             loop_enabled: AtomicBool::new(false),
+            open_ended: AtomicBool::new(false),
             anchor_sample: AtomicU64::new(0),
             anchor_beat_bits: AtomicU64::new(0.0_f64.to_bits()),
             samples_per_quarter_bits: AtomicU64::new(0.0_f64.to_bits()),
@@ -182,6 +193,8 @@ impl SongPositionShared {
         let beats = anchor_beat + delta / samples_per_quarter;
         if self.loop_enabled.load(Ordering::Relaxed) && end_beat > 0.0 {
             Some(beats.rem_euclid(end_beat))
+        } else if self.open_ended.load(Ordering::Relaxed) {
+            Some(beats.max(0.0))
         } else {
             Some(beats.clamp(0.0, end_beat))
         }
@@ -194,6 +207,7 @@ impl SongPositionShared {
         samples_per_quarter: f64,
         end_beat: f64,
         loop_enabled: bool,
+        open_ended: bool,
         row_ordinal: usize,
         row_id: SongRowId,
     ) {
@@ -205,6 +219,7 @@ impl SongPositionShared {
         self.end_beat_bits
             .store(end_beat.to_bits(), Ordering::Relaxed);
         self.loop_enabled.store(loop_enabled, Ordering::Relaxed);
+        self.open_ended.store(open_ended, Ordering::Relaxed);
         self.current_row.store(row_ordinal as u64, Ordering::Relaxed);
         self.current_row_id.store(row_id.0, Ordering::Relaxed);
         self.ended.store(false, Ordering::Relaxed);
@@ -342,6 +357,8 @@ pub struct SongPlaybackRuntime {
     clock_beat_offset: f64,
     started: bool,
     ended: bool,
+    /// See `SongPlaybackCommand::Start::open_ended`.
+    open_ended: bool,
 }
 
 impl SongPlaybackRuntime {
@@ -391,11 +408,19 @@ impl SongPlaybackRuntime {
             clock_beat_offset: start_beat,
             started: false,
             ended: false,
+            open_ended: false,
         })
     }
 
     pub fn song(&self) -> &Arc<RuntimeSong> {
         &self.song
+    }
+
+    /// Opt this runtime out of the song-end stop (spec 7.4). Set by the
+    /// scheduler right after `new` when the `Start` command came from
+    /// arrangement capture, so `new`'s validation contract is unchanged.
+    pub fn set_open_ended(&mut self, open_ended: bool) {
+        self.open_ended = open_ended;
     }
 
     /// Swap in a re-preflighted song without disturbing the cursor (takes
@@ -460,6 +485,7 @@ impl SongPlaybackRuntime {
             self.samples_per_quarter,
             self.song.end_beat,
             self.song.loop_enabled,
+            self.open_ended,
             self.row,
             row.id,
         );
@@ -538,6 +564,19 @@ impl SongPlaybackRuntime {
                     }));
                     self.publish_position(mailbox, at_sample, 0.0);
                     continue;
+                }
+                if self.open_ended {
+                    // Recording past the old song end (spec 7.4): the last
+                    // row simply keeps playing. `song_beat` runs past
+                    // `end_beat` from here, so this branch is re-entered
+                    // every chunk and must schedule a full block rather than
+                    // loop.
+                    return SongChunkPlan::Schedule {
+                        frames: block,
+                        row: self.row,
+                        row_changed,
+                        wrapped,
+                    };
                 }
                 self.ended = true;
                 mailbox.push_notice(SongPlaybackNotice::Ended {

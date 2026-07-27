@@ -5777,6 +5777,80 @@
     /// Note edit-through (docs/realtime-arrangement-feedback-spec.md 5.1):
     /// a step edit to the pattern the SOUNDING row resolves is audible inside
     /// that row. `replace_song_in_place` swaps the row `Arc`s and the
+    /// Arrangement capture is OPEN-ENDED (docs/song-mode-spec.md 7.4): the
+    /// song end is not a stopping point while recording. A take that grooves
+    /// past the old song length used to be cut off there and committed —
+    /// `Ended` reaches `handle_song_playback_ended`, which for capture calls
+    /// the stop-COMMIT. Open-ended, the last row simply keeps playing and
+    /// the stop-commit extends `end_beat` to the Stop beat. Plain song
+    /// playback still ends exactly as before.
+    #[test]
+    fn open_ended_capture_plays_past_the_song_end_instead_of_ending() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            // Two rows, song ending at beat 8, NOT looping.
+            song_mode_commit(
+                &state,
+                vec![
+                    song_mode_row(0, 0.0, 0, Vec::new()),
+                    song_mode_row(1, 4.0, 1, Vec::new()),
+                ],
+                8.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            let samples_per_quarter = 24_000.0;
+            let mailbox = state.song_playback();
+
+            // Drive `next_chunk` from beat zero out past the song end. One
+            // beat per call, so the end boundary is crossed on the ninth.
+            let drive = |open_ended: bool| -> (Vec<bool>, usize) {
+                let mut playback = crate::sequencer::SongPlaybackRuntime::new(
+                    Arc::clone(&runtime),
+                    0.0,
+                    samples_per_quarter,
+                )
+                .expect("song playback runtime");
+                playback.set_open_ended(open_ended);
+                let mut ended = Vec::new();
+                for beat in 0..12 {
+                    let plan = playback.next_chunk(
+                        (beat as f64 * samples_per_quarter) as u64,
+                        beat as f64,
+                        samples_per_quarter as usize,
+                        mailbox,
+                    );
+                    ended.push(matches!(plan, crate::sequencer::SongChunkPlan::Ended));
+                }
+                let end_notices = mailbox
+                    .drain_notices()
+                    .iter()
+                    .filter(|notice| {
+                        matches!(notice, crate::sequencer::SongPlaybackNotice::Ended { .. })
+                    })
+                    .count();
+                (ended, end_notices)
+            };
+
+            let (ended, end_notices) = drive(true);
+            assert!(
+                ended.iter().all(|ended| !ended),
+                "open-ended capture must never stop at the song end: {ended:?}"
+            );
+            assert_eq!(
+                end_notices, 0,
+                "an Ended notice is what tears the capture down and commits it"
+            );
+
+            let (ended, end_notices) = drive(false);
+            assert!(
+                ended.iter().any(|ended| *ended),
+                "plain song playback still ends at the song end"
+            );
+            assert_eq!(end_notices, 1);
+        });
+    }
+
     /// lookahead reads `row_snapshot(row)` per chunk, so steps ahead of the
     /// playhead change while the row itself is never re-entered — no
     /// retrigger, no clock disturbance — and the edit survives the loop wrap.

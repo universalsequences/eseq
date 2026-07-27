@@ -560,17 +560,25 @@ impl SequencerState {
     /// pass `start_beat = 0.0` (spec 10.1). The scheduler installs the song
     /// and owns every subsequent row transition; callers start the transport
     /// separately (Slice B).
+    /// `open_ended` opts out of the song-end stop for arrangement capture
+    /// (docs/song-mode-spec.md 7.4): recording must not be cut off and
+    /// committed at the old song length.
     pub fn start_song_playback(
         &self,
         song: Arc<RuntimeSong>,
         start_beat: f64,
+        open_ended: bool,
     ) -> Result<(), String> {
         // Validate eagerly so the caller gets the error, not the scheduler.
         // The nominal samples-per-quarter only has to be positive here; the
         // scheduler rebuilds the runtime with its real tempo mapping.
         SongPlaybackRuntime::new(Arc::clone(&song), start_beat, 1.0)?;
         self.song_playback
-            .send_command(SongPlaybackCommand::Start { song, start_beat })
+            .send_command(SongPlaybackCommand::Start {
+                song,
+                start_beat,
+                open_ended,
+            })
     }
 
     /// Hand the scheduler re-preflighted rows for the song already playing

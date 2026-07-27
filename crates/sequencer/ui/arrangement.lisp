@@ -223,10 +223,14 @@
 
 ;; Song end, with the content-length drag ghost applied so the end marker
 ;; previews in every lane while dragging (spec 9.3).
+;; While a capture runs past the old song end the marker follows the record
+;; head: that IS where the song will end once the take commits (the splice
+;; extends `end_beat` to the Stop beat), so leaving it behind would draw the
+;; recording as if it fell outside the song.
 (def arrangement-content-length ()
   (if (= (arrangement-ghost-kind) :end)
     (get arrangement-ghost :length)
-    SEQ.song-end-beat))
+    (arrangement-scroll-extent)))
 
 ;; The model rejects an end at/before the last scene change (spec 9.3); the
 ;; widget clamp mirrors that boundary.

@@ -69,7 +69,11 @@ pub fn spawn_scheduler_thread(
                 // row snapshots immediately.
                 for command in state.song_playback().drain_commands() {
                     match command {
-                        crate::sequencer::SongPlaybackCommand::Start { song, start_beat } => {
+                        crate::sequencer::SongPlaybackCommand::Start {
+                            song,
+                            start_beat,
+                            open_ended,
+                        } => {
                             let samples_per_quarter =
                                 sample_rate as f64 * 60.0 / snapshot.transport.bpm.max(1) as f64;
                             match crate::sequencer::SongPlaybackRuntime::new(
@@ -77,7 +81,8 @@ pub fn spawn_scheduler_thread(
                                 start_beat,
                                 samples_per_quarter,
                             ) {
-                                Ok(runtime) => {
+                                Ok(mut runtime) => {
+                                    runtime.set_open_ended(open_ended);
                                     lookahead_state.song = Some(runtime);
                                     queue.clear();
                                     lookahead_state.clock.reset();

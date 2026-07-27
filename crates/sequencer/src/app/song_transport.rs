@@ -240,7 +240,11 @@ impl App {
             // performer is the sole launch authority.
             self.begin_song_capture_take();
             if self.state.committed_song().is_some() {
-                if let Err(error) = self.start_song_playback_from_zero() {
+                // Open-ended (spec 7.4): the song end is not a stopping
+                // point while recording. Grooving past the old song length
+                // must extend the arrangement, not cut the take off and
+                // commit it there.
+                if let Err(error) = self.start_song_playback_from_zero(true) {
                     self.discard_song_capture_take();
                     return Err(error);
                 }
@@ -251,7 +255,7 @@ impl App {
             self.set_song_transport_mode(SongTransportMode::ArrangementCapture);
             return Ok(SongTransportMode::ArrangementCapture);
         }
-        self.start_song_playback_from_zero()?;
+        self.start_song_playback_from_zero(false)?;
         Ok(SongTransportMode::SongPlayback)
     }
 
@@ -259,7 +263,7 @@ impl App {
     /// save the live session into the current scene, preflight, apply row
     /// zero (with an epoch bump — the transport is stopped), hand the song to
     /// the scheduler, then start the transport.
-    fn start_song_playback_from_zero(&mut self) -> Result<(), String> {
+    fn start_song_playback_from_zero(&mut self, open_ended: bool) -> Result<(), String> {
         if !self.state.save_current_pattern_snapshot(
             self.tracks.len(),
             &self.graph.track_buffer_ids,
@@ -284,7 +288,7 @@ impl App {
         let _ = self.state.quantized_launches().cancel_all();
         self.apply_song_row_control(row0.scene, &row0.overrides, true)?;
         self.state
-            .start_song_playback(Arc::clone(&song), 0.0)
+            .start_song_playback(Arc::clone(&song), 0.0, open_ended)
             .map_err(|error| format!("Song playback could not start: {error}"))?;
         self.active_runtime_song = Some(song);
         self.song_mirrored_row = Some(0);
