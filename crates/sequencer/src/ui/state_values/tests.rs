@@ -16231,6 +16231,106 @@
     }
 
     #[test]
+    fn metal_seq_transport_view_buttons_switch_to_wide_arrangement_layout() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let transport_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*transport*")
+            .expect("transport buffer should exist")
+            .id;
+        editor.set_active_buffer(transport_id);
+        editor.set_layout_viewport(200, 8);
+
+        let session_layout = editor.widget_layout().expect("session transport layout");
+        let session_button =
+            find_layout_node_by_stable_key(&session_layout, "transport-session-view-button")
+                .expect("session view button");
+        let arrangement_button =
+            find_layout_node_by_stable_key(&session_layout, "transport-arrangement-view-button")
+                .expect("arrangement view button");
+        assert_finite_nonzero_rect(session_button, "transport-session-view-button");
+        assert_finite_nonzero_rect(arrangement_button, "transport-arrangement-view-button");
+        assert!(
+            session_button.rect.col < arrangement_button.rect.col,
+            "session must precede arrangement at the transport's right edge"
+        );
+        assert!(
+            session_layout.rect.col + session_layout.rect.width
+                - (arrangement_button.rect.col + arrangement_button.rect.width)
+                < 1.0,
+            "arrangement button should be pinned to the transport's right edge: root={:?}, button={:?}",
+            session_layout.rect,
+            arrangement_button.rect
+        );
+        assert_eq!(layout_prop_number(session_button, "active"), Some(1.0));
+        assert_eq!(layout_prop_number(arrangement_button, "active"), Some(0.0));
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-open-arrangement)")
+            .expect("switch to arrangement");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("seq-main-view").unwrap(),
+            Some(Value::Keyword("arrangement".to_string()))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*sequencer*".to_string())),
+            "arrangement mode should be independent from session tab selection"
+        );
+        let arrangement_tiles = collect_tile_buffer_names(&editor);
+        assert!(
+            arrangement_tiles.contains(&"*arrangement*".to_string()),
+            "arrangement view should own the main panel: {arrangement_tiles:?}"
+        );
+        for hidden in ["*sequencer*", "*step*", "*track*"] {
+            assert!(
+                !arrangement_tiles.contains(&hidden.to_string()),
+                "wide arrangement layout should hide {hidden}: {arrangement_tiles:?}"
+            );
+        }
+        assert!(
+            tile_tabs_for_buffer(&editor, "*arrangement*").is_empty(),
+            "arrangement must not render as a tabbed sequencer tile"
+        );
+
+        let arrangement_transport_layout =
+            editor.widget_layout().expect("arrangement transport layout");
+        let session_button = find_layout_node_by_stable_key(
+            &arrangement_transport_layout,
+            "transport-session-view-button",
+        )
+        .expect("session view button after switch");
+        let arrangement_button = find_layout_node_by_stable_key(
+            &arrangement_transport_layout,
+            "transport-arrangement-view-button",
+        )
+        .expect("arrangement view button after switch");
+        assert_eq!(layout_prop_number(session_button, "active"), Some(0.0));
+        assert_eq!(layout_prop_number(arrangement_button, "active"), Some(1.0));
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-show-sequencer-main)")
+            .expect("return to session");
+        editor.refresh_runtime_side_effects();
+        let session_tiles = collect_tile_buffer_names(&editor);
+        for visible in ["*sequencer*", "*step*", "*track*"] {
+            assert!(
+                session_tiles.contains(&visible.to_string()),
+                "session layout should restore {visible}: {session_tiles:?}"
+            );
+        }
+        assert!(
+            !session_tiles.contains(&"*arrangement*".to_string()),
+            "session layout should remove the arrangement tile: {session_tiles:?}"
+        );
+    }
+
+    #[test]
     fn metal_seq_track_panel_lays_out_timebase_and_mute_group_dropdowns() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.refresh_runtime_side_effects();
@@ -25927,13 +26027,10 @@
     }
 
     #[test]
-    fn metal_seq_plain_tab_on_visible_sequencer_keeps_tile_tree_stable() {
+    fn metal_seq_plain_tab_toggles_session_and_arrangement_layouts() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut editor = full_grid_editor_for_scroll_tests();
-        set_full_grid_track_count(&mut editor, 10, 16);
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
         let sequencer_id = editor
             .buffers
             .iter()
@@ -25942,62 +26039,74 @@
             .id;
         editor.set_active_buffer(sequencer_id);
         editor.set_layout_viewport(180, 44);
-        let initial_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
-        let initial_layout = initial_frame
-            .widget_layout
-            .as_ref()
-            .expect("initial sequencer layout should build");
-        assert_eq!(
-            count_stable_key_prefix(initial_layout, "seqv-expanded-step-slider-"),
-            0,
-            "fixture should start with compact sequencer rows"
-        );
-
-        let tile_ids_before = editor.tile_root.leaf_ids();
-        let active_tile_before = editor.active_tile;
-        let state = Arc::new(SequencerState::new(10, vec![]));
+        let state = Arc::new(SequencerState::new(1, vec![]));
         let current_track = Arc::new(AtomicUsize::new(0));
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
         let step_clipboard = Arc::new(Mutex::new(None));
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
 
         assert!(
             handle_metal_command_shortcut(
                 &mut editor,
-                &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                &tab,
                 &state,
                 &current_track,
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should be handled by the sequencer shortcut path"
+            "plain Tab should switch to arrangement"
         );
+        let arrangement_tiles = collect_tile_buffer_names(&editor);
+        assert!(
+            arrangement_tiles.contains(&"*arrangement*".to_string()),
+            "plain Tab should install the arrangement tile: {arrangement_tiles:?}"
+        );
+        for hidden in ["*sequencer*", "*step*", "*track*"] {
+            assert!(
+                !arrangement_tiles.contains(&hidden.to_string()),
+                "plain Tab arrangement mode should hide {hidden}: {arrangement_tiles:?}"
+            );
+        }
 
-        assert_eq!(
-            editor.tile_root.leaf_ids(),
-            tile_ids_before,
-            "plain Tab on an already-visible sequencer must not rebuild the whole tile tree"
+        assert!(
+            handle_metal_command_shortcut(
+                &mut editor,
+                &tab,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "second plain Tab should return to session"
         );
-        assert_eq!(
-            editor.active_tile, active_tile_before,
-            "plain Tab should keep focus in the existing sequencer tile"
-        );
+        let session_tiles = collect_tile_buffer_names(&editor);
+        for visible in ["*sequencer*", "*step*", "*track*"] {
+            assert!(
+                session_tiles.contains(&visible.to_string()),
+                "second plain Tab should restore {visible}: {session_tiles:?}"
+            );
+        }
+    }
 
-        editor.runtime_mut().run_reactive_cycle();
+    fn toggle_current_track_expanded_for_layout_test(
+        editor: &mut eseqlisp::Editor,
+        _key: &crossterm::event::KeyEvent,
+        _state: &Arc<SequencerState>,
+        _current_track: &Arc<AtomicUsize>,
+        _selected_steps: &Arc<Mutex<HashSet<usize>>>,
+        _step_clipboard: &Arc<
+            Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>,
+        >,
+    ) -> bool {
+        let _ = editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-current-track-expanded-main)");
         editor.refresh_runtime_side_effects();
-        let expanded_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
-        let expanded_layout = expanded_frame
-            .widget_layout
-            .as_ref()
-            .expect("expanded sequencer layout should build");
-        assert_eq!(
-            count_stable_key_prefix(expanded_layout, "seqv-expanded-step-slider-"),
-            PAGE_SIZE,
-            "plain Tab should still expand the current track row"
-        );
+        true
     }
 
     #[test]
-    fn metal_seq_plain_tab_handler_updates_layout_without_extra_reactive_cycle() {
+    fn metal_seq_expanded_track_command_updates_layout_without_extra_reactive_cycle() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -26030,7 +26139,7 @@
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -26038,7 +26147,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should be handled by the sequencer shortcut path"
+            "expanded-track command should be handled"
         );
         let expanded_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
         let expanded_layout = expanded_frame
@@ -26048,11 +26157,11 @@
         assert_eq!(
             count_stable_key_prefix(expanded_layout, "seqv-expanded-step-slider-"),
             PAGE_SIZE,
-            "plain Tab handler should make the next rendered frame expanded without relying on inspect or another reactive pass"
+            "expanded-track command should affect the next frame without another reactive pass"
         );
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -26060,7 +26169,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "second plain Tab should collapse the current sequencer row"
+            "second expanded-track command should collapse the current row"
         );
         let collapsed_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
         let collapsed_layout = collapsed_frame
@@ -26070,12 +26179,12 @@
         assert_eq!(
             count_stable_key_prefix(collapsed_layout, "seqv-expanded-step-slider-"),
             0,
-            "second plain Tab handler should make the next rendered frame compact without relying on inspect or another reactive pass"
+            "collapse command should affect the next frame without another reactive pass"
         );
     }
 
     #[test]
-    fn metal_seq_plain_tab_non_first_track_partial_layout_matches_full_layout_after_collapse() {
+    fn metal_seq_non_first_track_partial_layout_matches_full_layout_after_collapse() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -26105,7 +26214,7 @@
         let _ = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -26113,7 +26222,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should expand the third sequencer row"
+            "expanded-track command should expand the third sequencer row"
         );
         let expanded_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
         let expanded_layout = expanded_frame
@@ -26127,7 +26236,7 @@
         );
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -26135,7 +26244,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should collapse the third sequencer row"
+            "second expanded-track command should collapse the third sequencer row"
         );
         let collapsed_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
         let collapsed_layout = collapsed_frame
@@ -26257,7 +26366,7 @@
     }
 
     #[test]
-    fn metal_seq_plain_tab_collapse_marks_removed_expanded_widgets_dirty() {
+    fn metal_seq_expanded_track_collapse_marks_removed_widgets_dirty() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -26294,7 +26403,7 @@
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -26302,7 +26411,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should expand the current sequencer row"
+            "expanded-track command should expand the current sequencer row"
         );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -26344,7 +26453,7 @@
         );
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -26352,7 +26461,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should collapse the current sequencer row"
+            "second expanded-track command should collapse the current sequencer row"
         );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -26399,7 +26508,7 @@
     }
 
     #[test]
-    fn metal_seq_tiled_plain_tab_collapse_marks_resized_row_dirty() {
+    fn metal_seq_tiled_expanded_track_collapse_marks_resized_row_dirty() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let sequencer_tile =
@@ -26446,7 +26555,7 @@
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -26454,7 +26563,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should expand the current sequencer row"
+            "expanded-track command should expand the current sequencer row"
         );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -26480,7 +26589,7 @@
         );
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -26488,7 +26597,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should collapse the current sequencer row"
+            "second expanded-track command should collapse the current sequencer row"
         );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -26627,7 +26736,7 @@
     }
 
     #[test]
-    fn metal_seq_tiled_plain_tab_single_track_reveal_keeps_row_height_tight() {
+    fn metal_seq_tiled_single_track_expand_collapse_keeps_row_height_tight() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let sequencer_tile =
@@ -26686,7 +26795,7 @@
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -26694,7 +26803,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should expand the only sequencer row"
+            "expanded-track command should expand the only sequencer row"
         );
         editor.ensure_widget_stable_key_visible_in_buffer_named(
             "*sequencer*",
@@ -26718,7 +26827,7 @@
         );
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -26726,7 +26835,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "second plain Tab should collapse the only sequencer row"
+            "second expanded-track command should collapse the only sequencer row"
         );
         editor.ensure_widget_stable_key_visible_in_buffer_named(
             "*sequencer*",
@@ -26753,7 +26862,7 @@
         );
         assert!(
             (collapsed_row.rect.height - initial_row_height).abs() < 0.001,
-            "single-track collapse should restore the compact row height after the real Tab reveal path, initial={} collapsed={}",
+            "single-track collapse should restore the compact row height, initial={} collapsed={}",
             initial_row_height,
             collapsed_row.rect.height
         );
@@ -26862,7 +26971,7 @@
 
     #[test]
     #[ignore = "performance benchmark; run with --ignored --nocapture"]
-    fn metal_seq_plain_tab_expand_current_track_perf_10_tracks() {
+    fn metal_seq_expand_current_track_perf_10_tracks() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         #[derive(Clone)]
@@ -26942,7 +27051,7 @@
 
             let command_start = std::time::Instant::now();
             assert!(
-                handle_metal_command_shortcut(
+                toggle_current_track_expanded_for_layout_test(
                     &mut editor,
                     &tab,
                     &state,
@@ -26950,7 +27059,7 @@
                     &selected_steps,
                     &step_clipboard,
                 ),
-                "plain Tab should be handled by the sequencer shortcut path"
+                "expanded-track command should be handled"
             );
             let command_ms = command_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -26972,11 +27081,11 @@
             let layout = frame
                 .widget_layout
                 .as_ref()
-                .expect("plain Tab expand/collapse should keep sequencer layout renderable");
+                .expect("expanded-track command should keep sequencer layout renderable");
             assert!(
                 count_stable_key_prefix(layout, "seqv-expanded-step-slider-") == 0
                     || count_stable_key_prefix(layout, "seqv-expanded-step-slider-") == PAGE_SIZE,
-                "plain Tab should collapse to zero sliders or expand exactly one page of sliders"
+                "command should collapse to zero sliders or expand exactly one page of sliders"
             );
 
             if iteration > warmup_iterations {
@@ -26993,7 +27102,7 @@
         }
 
         println!(
-            "plain Tab current-track expand perf: {track_count} tracks, {step_count} steps, viewport {viewport_width}x{viewport_height}, {} measured iterations after {} warmups",
+            "current-track expand perf: {track_count} tracks, {step_count} steps, viewport {viewport_width}x{viewport_height}, {} measured iterations after {} warmups",
             measured_iterations, warmup_iterations
         );
         summarize(

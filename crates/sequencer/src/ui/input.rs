@@ -63,10 +63,6 @@ pub(crate) fn focused_widget_captures_text_input(editor: &Editor) -> bool {
     focused_widget_matches(editor, widget_captures_text_input)
 }
 
-fn patcher_handles_plain_tab(editor: &Editor) -> bool {
-    editor.patcher_source_tab_available()
-}
-
 fn widget_type_captures_text_input(widget_type: &str) -> bool {
     matches!(widget_type, "text-input" | "textbox")
 }
@@ -265,22 +261,6 @@ fn focused_samples_search_should_hand_off_to_tree(
             crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Down
         )
         && focused_widget_is(editor, "sbrowser-search-input", "text-input")
-}
-
-fn sample_browser_tab_shortcut_available(
-    editor: &Editor,
-    key: &crossterm::event::KeyEvent,
-) -> bool {
-    editor.minibuffer_prompt().is_none()
-        && editor.prompt_text().is_none()
-        && editor.active_buffer().name == "*samples*"
-        && matches!(
-            (key.code, key.modifiers),
-            (
-                crossterm::event::KeyCode::Tab,
-                crossterm::event::KeyModifiers::NONE
-            )
-        )
 }
 
 fn sample_browser_search_shortcut(key: &crossterm::event::KeyEvent) -> bool {
@@ -1123,22 +1103,6 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         return focus_samples_browser_active_tree(editor);
     }
 
-    if sample_browser_tab_shortcut_available(editor, key) {
-        let refocus_tree = editor
-            .focused_widget_node()
-            .is_some_and(|node| node.widget_type == "tree");
-        let refocus_search = focused_widget_is(editor, "sbrowser-search-input", "text-input");
-        let _ = editor.runtime_mut().eval_str("(sbrowser-next-tab)");
-        editor.refresh_runtime_side_effects();
-        if refocus_tree {
-            let _ = focus_samples_browser_active_tree(editor);
-        } else if refocus_search {
-            let _ = editor.focus_widget_by_stable_key("sbrowser-search-input", Some("text-input"));
-        }
-        editor.mark_needs_redraw();
-        return true;
-    }
-
     if handle_arrangement_region_shortcut(editor, key) {
         editor.refresh_runtime_side_effects();
         editor.mark_needs_redraw();
@@ -1871,6 +1835,9 @@ mod live_keyboard_tests {
                 (defstate sbrowser-tab "samples")
                 (defstate sbrowser-filter "")
                 (defstate sbrowser-modified-label "")
+                (defstate main-view-toggle-count 0)
+                (def seq-toggle-arrangement ()
+                  (set! main-view-toggle-count (+ main-view-toggle-count 1)))
                 (def sbrowser-active-tree-key ()
                   (if (= sbrowser-tab "samples") "samples-tab-tree" "instruments-tab-tree"))
                 (def sbrowser-next-tab ()
@@ -2137,7 +2104,7 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn sample_browser_tab_cycles_tabs_and_refocuses_tree() {
+    fn sample_browser_tree_does_not_override_global_tab_view_toggle() {
         let mut editor = sample_browser_keyboard_editor();
         let (state, current_track, selected_steps, step_clipboard) = empty_command_state();
         assert!(handle_metal_command_shortcut(
@@ -2168,13 +2135,17 @@ mod live_keyboard_tests {
 
         assert_eq!(
             editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
-            Some(Value::String("instruments".to_string()))
+            Some(Value::String("samples".to_string())),
+            "plain Tab should no longer cycle browser-local tabs"
         );
-        let focused = editor
-            .focused_widget_node()
-            .expect("tab cycling from a tree should focus the next tab tree");
-        assert_eq!(focused.widget_type, "tree");
-        assert_eq!(focused.stable_key.as_deref(), Some("instruments-tab-tree"));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("main-view-toggle-count")
+                .unwrap(),
+            Some(Value::Number(1.0)),
+            "plain Tab should route to the app-level session/arrangement toggle"
+        );
     }
 
     #[test]
@@ -2572,7 +2543,7 @@ mod live_keyboard_tests {
     }
 
     #[test]
-    fn plain_tab_expands_current_track_even_with_focused_sequencer_widget() {
+    fn plain_tab_toggles_arrangement_even_with_focused_sequencer_widget() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
         let transport_id =
             editor.open_scratch_buffer_with_mode("*transport*", "", BufferMode::ESeqLisp);
@@ -2597,10 +2568,8 @@ mod live_keyboard_tests {
                     :view-start 0
                     :view-duration 16
                     :on-action |e| e))
-                (def seqv-toggle-current-track-expanded ()
-                  (set! tab-target "expanded"))
-                (def seq-toggle-current-track-expanded-main ()
-                  (set! tab-target "expanded-main"))
+                (def seq-toggle-arrangement ()
+                  (set! tab-target "arrangement"))
                 (def seq-toggle-mixer-panel ()
                   (set! tab-target "mixer"))
                 "#,
@@ -2670,13 +2639,13 @@ mod live_keyboard_tests {
 
         assert_eq!(
             editor.runtime_mut().eval_str("tab-target").unwrap(),
-            Some(eseqlisp::vm::Value::String("expanded-main".to_string())),
-            "plain Tab should expand the selected sequencer track even when a sequencer widget has focus"
+            Some(eseqlisp::vm::Value::String("arrangement".to_string())),
+            "plain Tab should toggle the app view even when a sequencer widget has focus"
         );
     }
 
     #[test]
-    fn plain_tab_in_focused_patcher_is_left_for_editor_source_toggle() {
+    fn plain_tab_toggles_arrangement_even_with_focused_patcher() {
         let path = std::env::temp_dir().join(format!(
             "eseq-focused-patcher-tab-{}.lisp",
             std::time::SystemTime::now()
@@ -2694,7 +2663,7 @@ mod live_keyboard_tests {
             .eval_str(&format!(
                 r#"
                 (defstate tab-target "")
-                (def seq-toggle-current-track-expanded-main () (set! tab-target "expand"))
+                (def seq-toggle-arrangement () (set! tab-target "arrangement"))
                 (effect
                   (patcher
                     :height 10
@@ -2735,7 +2704,7 @@ mod live_keyboard_tests {
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
 
         assert!(
-            !handle_metal_command_shortcut(
+            handle_metal_command_shortcut(
                 &mut editor,
                 &tab,
                 &state,
@@ -2743,35 +2712,11 @@ mod live_keyboard_tests {
                 &selected_steps,
                 &step_clipboard,
             ),
-            "metal_seq must not consume Tab while the patcher owns the focused widget"
+            "plain Tab should remain an app-level view toggle while a patcher is focused"
         );
         assert_eq!(
             editor.runtime_mut().eval_str("tab-target").unwrap(),
-            Some(eseqlisp::vm::Value::String("".to_string()))
-        );
-
-        editor.handle_key(tab);
-
-        assert_eq!(
-            editor.active_buffer().name,
-            "*scratch*",
-            "Tab should keep the patcher tile active instead of switching to the source buffer"
-        );
-        assert_eq!(editor.tile_root.leaf_count(), 2);
-        assert!(
-            editor.tile_root.leaf_ids().into_iter().any(|tile_id| {
-                editor
-                    .tile_root
-                    .find_leaf(tile_id)
-                    .and_then(|leaf| editor.buffers.get(leaf.buffer_idx))
-                    .is_some_and(|buffer| {
-                        buffer.name
-                            == eseqlisp::widget_render::patcher::emitted_source_buffer_name(
-                                &path.to_string_lossy(),
-                            )
-                    })
-            }),
-            "source buffer should be visible in a sibling tile"
+            Some(eseqlisp::vm::Value::String("arrangement".to_string()))
         );
     }
 

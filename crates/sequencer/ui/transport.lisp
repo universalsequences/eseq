@@ -605,7 +605,7 @@
 ;; ── Transport layout ──
 
 (effect-buffer "*transport*"
-  (h-stack :gap 0.5 :padding 0.5 :align :center
+  (h-stack :width :fill :gap 0.5 :padding 0.5 :align :center
     
     (subtree :key "transport-samples-sidebar-button"
       (samples-sidebar-icon
@@ -875,7 +875,7 @@
                 :font-size 12
                 
                 :color (if (> SEQ.num-patterns 1) :white :dark-gray)
-                :bg :transparent)))))))
+                :bg :transparent))))))
 
     ;; Session and arrangement are app views, not tabs in the main buffer.
     ;; This spacer keeps the view pair against the transport's right edge.

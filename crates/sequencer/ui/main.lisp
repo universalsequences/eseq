@@ -160,12 +160,16 @@
       (list :buf buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25))))
 
 (def seq-refresh-step-tabs-if-present ()
-  (do
-    (set-window-tabs-for "*sequencer*" (seq-main-step-tabs))
-    (clear-window-tabs-for "*arrangement*")
-    (for-each
-      (lambda (tab) (set-window-tabs-for (seq-step-tab-buffer tab) (seq-main-step-tabs)))
-      seq-registered-step-tabs)))
+  (let ((tabs (seq-main-step-tabs)))
+    (do
+      (if (> (len tabs) 1)
+        (do
+          (set-window-tabs-for "*sequencer*" tabs)
+          (for-each
+            (lambda (tab) (set-window-tabs-for (seq-step-tab-buffer tab) tabs))
+            seq-registered-step-tabs))
+        (clear-window-tabs-for "*sequencer*"))
+      (clear-window-tabs-for "*arrangement*"))))
 
 (def seq-register-step-sequencer-tab (label buffer)
   (do
@@ -215,7 +219,9 @@
         (do
           (set! step-panel-buffer buffer)
           (set! remembered-step-panel-buffer buffer)
-          (seq-switch-main-view :session)
+          (set! seq-main-view :session)
+          (set-window-buffer buffer)
+          (seq-refresh-current-layout)
           (seq-refresh-step-tabs-if-present)
           true))
       false)))
