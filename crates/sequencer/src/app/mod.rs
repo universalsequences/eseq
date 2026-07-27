@@ -246,10 +246,22 @@ struct PendingProjectLoad {
     name: String,
     tick: usize,
     project: crate::project::ProjectFile,
+    sample_assets: HashMap<PathBuf, ProjectSampleAsset>,
     built_patterns: Vec<crate::sequencer::PatternSnapshot>,
     built_bus_patterns: Vec<Vec<BusPatternSnapshot>>,
     fallback_samples: usize,
     phase: PendingProjectLoadPhase,
+}
+
+/// Immutable audio asset interned for the lifetime of one pending project load.
+///
+/// Scene patterns and take chunks store buffer references; they must never
+/// decode or allocate another graph buffer for the same canonical WAV path.
+#[derive(Clone, Debug)]
+struct ProjectSampleAsset {
+    buffer_id: i32,
+    sample_rate: u32,
+    decoded_name: String,
 }
 
 #[derive(Clone)]

@@ -1,12 +1,24 @@
 # Arrangement Region Editing — Clip Hit Regions, Region Selection, Copy/Paste/Duplicate, Move
 
-Status: mini implementation spec, 2026-07-24
-Related: `docs/arrangement-timeline-ui-spec.md` (§9, §11 items 2/4),
+Status: rev 2, 2026-07-26 — **slices 1-3 shipped; slice 4 (move) is the
+only outstanding work.** Rev 1 (2026-07-24) was written against the ROW
+model; the arrangement has since been rewritten onto lanes and clips
+(`docs/arrangement-lane-model-spec.md`, all 6 phases landed), and slices 1-3
+shipped in both worlds — first as row surgery, then ported. This revision
+restates §2, §5, §6, §7 and §8 in lane-model terms so the remaining slice can
+be built from this document without cross-reading the row-model history.
+
+Related: `docs/arrangement-lane-model-spec.md` (§6 model, §8 primitives,
+§12 read surfaces — **authoritative** where this spec and it disagree),
+`docs/arrangement-timeline-ui-spec.md` (§9, §11 items 2/4),
 `docs/takes-and-additive-arrangement-recording-spec.md` (§7.4),
 `crates/eseqlisp/src/widget_render/timeline.rs`,
 `crates/sequencer/ui/arrangement.lisp`,
 `crates/sequencer/src/ui/arrangement_actions.rs`,
-`crates/sequencer/src/app/song_edit.rs`, `crates/sequencer/src/app/take_edit.rs`
+`crates/sequencer/src/app/arr_edit.rs`,
+`crates/sequencer/src/app/song_region.rs`,
+`crates/sequencer/src/sequencer/arrangement.rs`,
+`crates/sequencer/src/app/take_edit.rs`
 
 ## 1. Summary
 
@@ -14,68 +26,103 @@ Four slices, in dependency order:
 
 1. **Ableton clip anatomy** — every clip gets a title bar (move/resize zone,
    hover cursors) and a body (region-selection surface); notes render with
-   real durations instead of 3px dots.
+   real durations instead of 3px dots. **(shipped)**
 2. **Region selection** — click-drag on clip bodies / background selects a
    time × track rectangle, across multiple tracks, quantized to the
-   zoom-adaptive grid.
+   zoom-adaptive grid. **(shipped)**
 3. **Copy / paste / duplicate** — region → clipboard → paste at the
    per-track cursor; Cmd-D duplicates the region in place, rippling what
-   follows right. One undo entry each.
+   follows right. One undo entry each. **(shipped, then ported to clips)**
 4. **Move** — drag a clip by its title bar; if the clip is inside the
-   active region, the whole region moves in unison.
+   active region, the whole region moves in unison. **(outstanding — §6)**
 
-Everything lowers to song-model mutations through new one-commit region
-primitives; no parallel mutation path.
+Everything lowers to arrangement mutations through the lane-model primitives
+(`arr_edit.rs`, lane spec §8) or one-commit region primitives
+(`song_region.rs`); no parallel mutation path.
 
-## 2. Current facts (verified 2026-07-24)
+## 2. Current facts (re-verified against the lane model, 2026-07-26)
 
-- Hit regions: `HitRegion::{Header, ContentLengthEnd, Sidebar, Background,
-  ItemBody, ItemEdgeEnd}` (`timeline.rs:155-163`); `hit_test`
-  (`timeline.rs:1691-1740`). **No start edge, no title-bar zone.** End
-  handle is `clamp(width*0.24, 1.25, 4.0)` cells + 0.75 slop.
-- Cursors are pull-based: `WidgetDefinition::cursor` (`timeline.rs:499-507`,
-  enum `widget_render/mod.rs:405-411`), polled by
-  `editor/widget_interaction.rs:745-769`, mapped to winit in
-  `ui/metal_backend.rs:3609-3619`. Today only `EwResize` on
-  `ItemEdgeEnd`/`ContentLengthEnd`.
-- Pointer + `ItemBody` begins a `:move` gesture (`timeline.rs:1749-1769`);
-  Pointer + `Background` begins `:marquee` (`timeline.rs:1789-1793`).
-  Marquee emits `:marquee-select` per frame (`1988-2012`) and
-  `:finish-marquee-select` on release (`2265-2289`); times are raw/unsnapped
-  (`1903`, `2246`). `:selection-rect` is a host-fed prop (`2646-2654`,
-  rendered `855-903`).
-- **Drag capture is per-instance** (`captures_drag`, `timeline.rs:509-511`):
-  once a drag starts in one lane instance, other lanes never see events. A
-  cross-track marquee must be reconstructed host-side.
+**Widget (shipped in slice 1, unchanged by the lane rewrite — the widget
+never knew about rows or clips, only items):**
+
+- Hit regions now include `ItemTitleBar` and `ItemEdgeStart` alongside
+  `ItemBody`/`ItemEdgeEnd`, gated on the `:title-bar-height` prop (`0` =
+  piano-roll behavior). Containment wins over edge slop, so abutting clips
+  hit-test deterministically (§3.1, commit `bbd2576b`).
+- `WidgetCursor::Move` exists and is returned for `ItemTitleBar`.
+- Pointer + `ItemTitleBar` begins the `:move` gesture; pointer + `ItemBody`
+  (title bar active) or `Background` begins `:marquee`. Marquee emits
+  `:marquee-select` per frame and `:finish-marquee-select` on release, both
+  carrying the unclamped `row-delta` (§4.2); `:marquee-snap :grid` quantizes
+  the emitted times to the zoom-adaptive ladder.
+- **Drag capture is per-instance** (`captures_drag`): once a drag starts in
+  one lane instance, other lanes never see events. A cross-track marquee is
+  reconstructed host-side, and the same will hold for a cross-lane move ghost.
+- `:selection-rect` + `:selection-rect-style :region` render the region
+  highlight per lane; the move gesture still emits `:move-items-absolute`
+  live and `:finish-move-items` on release.
+- Notes carry real durations end to end: `flatten_pattern_events` publishes
+  `(time transpose velocity duration)`, `arrangement-windowed-dots` emits
+  `:width`, `TimelineDot` draws a bar.
 - Each arrangement track lane is one single-lane widget instance; the track
-  index lives only in the `:on-action` closure
-  (`arrangement.lisp:762`, `arrangement-track-action i event`, from
-  `(each (seq-visible-track-indices) |i| …)` at `:819`).
-- Track-lane `:finish-move-items` is discarded (`arrangement.lisp:660-662`).
-  Lowering table: `arrangement_actions.rs:100-254`; `track-paint` at
-  `:208-245` carries explicit `:track`.
-- `song-track-paint` is **pattern-only** (`song_edit.rs:618` hard-codes
-  `take_id: None`). Take-aware row surgery exists privately as
-  `paint_take_region` (`take_edit.rs:522-586`).
-- No generic multi-command undo transaction. One-entry compound commits are
-  done by mutating a cloned model then a single `history.commit` with
-  `EditPatch::Song` / `EditPatch::Composite` — template:
-  `song_region_to_take` (`take_edit.rs:317-400`).
-- Note durations exist in the model (`step_data[step][StepParam::Duration]`,
-  `chord_snapshot.durations` — `sequencer/data.rs:1154-1158`) but
-  `flatten_pattern_events` (`ui/state_values/song_state.rs:96-136`) publishes
-  only `(time transpose velocity)`; `TimelineDot` (`timeline.rs:69-75`) is
-  point-only, drawn as a fixed 3px quad (`timeline.rs:1144-1145`).
-- Widget already emits `:copy-items {ids}` / `:paste-items {time}` on
-  Cmd-C/V (`timeline.rs:2336-2360`); the arrangement ignores them.
-  `arrangement-cursor-time` / `arrangement-cursor-track`
-  (`arrangement.lisp:10-14`) were built as the paste target.
-- Zoom-adaptive snap already exists: `:resize-snap :grid` →
-  `TimeViewport::grid_step` ladder (`time_view.rs:189-245`);
-  `cursor_snap_time` (`timeline.rs:1599-1602`) uses the same view-derived
-  grid.
+  index lives only in the `:on-action` closure (`arrangement-track-action i
+  event`, from `(each (seq-visible-track-indices) |i| …)`).
 
-## 3. Slice 1 — clip anatomy (widget)
+**Model (post-lane-rewrite — this is what rev 1 got wrong):**
+
+- There is no row surgery any more. `ProjectSong` rows are a *compiled*
+  playback artifact; the stored, edited object is `ProjectArrangement`
+  (`sequencer/arrangement.rs`): `scene_lane: Vec<SceneEvent>` +
+  `track_lanes: Vec<Vec<ArrClip>>`, each `ArrClip` a first-class object with
+  a `ClipId`, a half-open span, a mandatory source, and `offset_steps`.
+- `song_edit.rs`'s `song-track-paint` / `song_track_paint_anchored` /
+  `paint_take_region` and the `paint_source_region` helper rev 1 planned to
+  extract **are gone**. Their replacements are the lane primitives in
+  `arr_edit.rs` (lane spec §8): `arr_clip_create/delete/clear_span/move/
+  resize/split/set_source`, `arr_scene_event_insert/set/move/remove`,
+  `arr_set_end/loop`, `arr_replace/clear`. Every one commits a single
+  `EditPatch::Arrangement(ArrangementStructurePatch)` (whole-object memento)
+  and ends with validate → recompile → `set_committed_song`.
+- The shared span surgery lives in `sequencer/arrangement.rs` as free
+  functions the primitives and the region ops both call:
+  `occlude_span(arrangement, scenes, track, start, end)` (remove/trim/split
+  whatever a write lands on), `insert_clip_sorted`, and
+  `restamped_clip(scenes, track, clip, beat)` (re-anchor a clip to a cut,
+  re-stamping `offset_steps` by the split rule; `None` when nothing is left
+  to play, e.g. past a take's end).
+- **Silence is the absence of a clip** (lane spec §6.2). There is no
+  explicit-empty override and no scene backdrop: clearing a span stores
+  nothing. Every clipboard/region op below is stated in those terms.
+- Region state and the clipboard live in `app/song_region.rs`, already
+  clip-native: `SongRegionSelection { track_a, track_b, start_beat, end_beat,
+  scene_lane }`, `ArrangementClipboard`, and
+  `song_region_copy/paste/duplicate/delete`. `song_region_move` **does not
+  exist** — it is the one primitive slice 4 still needs.
+- Gestures address real model objects (lane spec §12): a scene-lane item's
+  id IS its scene event's start beat; a track-lane item's id is its
+  `clip-id`. `arrangement_actions.rs` lowers `clip-resize` →
+  `arrangement-clip-resize` and **already lowers `clip-move` →
+  `arrangement-clip-move`** (naming track + clip-id + start-beat). What is
+  missing is the Lisp side: `arrangement-track-action`'s
+  `:finish-move-items` arm still just clears the ghost
+  (`arrangement.lisp:891-893`).
+- Start-edge resize **shipped with the lane model**: both edges lower to the
+  one `arr_clip_resize` primitive (`arrangement-track-resize-start-finish` /
+  `-end-finish`), which re-stamps `offset_steps` on a left trim and clamps
+  takes on the right. Rev 1's §6 bullet planning it is obsolete.
+- No generic multi-command undo transaction. One-entry compound commits are
+  done by mutating a cloned model then a single `history.commit` —
+  `EditPatch::Arrangement`, or `EditPatch::Composite([SceneStructure,
+  Arrangement])` when takes were cloned (`commit_region_edit`,
+  `song_region.rs:662-723`).
+- Zoom-adaptive snap: `:resize-snap :grid` / `:marquee-snap :grid` →
+  `TimeViewport::grid_step` ladder (`time_view.rs`); track lanes carry the
+  same `:time-ruler` as the scene lane so they pick the bars ladder.
+
+## 3. Slice 1 — clip anatomy (widget) — SHIPPED
+
+Widget-only; the lane rewrite did not touch it. Kept as the record of what
+the props mean.
 
 ### 3.1 Title bar prop
 
@@ -145,21 +192,28 @@ Changes:
   wide × ~3px tall at the dot's y, clipped to the item rect. Lenient parse
   in `parse_item_content` (`:2602-2637`).
 
-Ships alone with zero behavior change to editing: title-bar move/resize
-still lower to the existing paths (scene `song-row-move`, track resize),
-and body-marquee events are ignored by the host until Slice 2.
+Shipped alone with zero behavior change to editing: title-bar move/resize
+still lowered to whatever paths existed then, and body-marquee events were
+ignored by the host until Slice 2. (Those paths are now
+`arrangement-scene-move` and `arrangement-clip-resize`.)
 
-## 4. Slice 2 — cross-track region selection
+## 4. Slice 2 — cross-track region selection — SHIPPED
 
 ### 4.1 State: Rust-owned, like the bound clip
 
 ```rust
-// app/mod.rs, alongside song_clip_selection
+// app/song_region.rs, alongside song_clip_selection
 pub struct SongRegionSelection {
     pub track_a: usize,   // inclusive, model track indices
     pub track_b: usize,   // inclusive
     pub start_beat: f64,
     pub end_beat: f64,    // exclusive
+    /// Set only when the marquee was swept in the SCENE lane. The rectangle
+    /// is identical either way (a scene sweep spans every track); this bit is
+    /// what tells the region ops to carry the scene EVENTS too (lane spec §8).
+    /// Added by the lane rewrite — a track-lane marquee that happens to cover
+    /// every track still never touches the scene lane.
+    pub scene_lane: bool,
 }
 pub song_region_selection: Option<SongRegionSelection>,
 ```
@@ -172,14 +226,16 @@ the keyboard seam (§5.3) and the primitives read it, and makes it survive
 buffer reloads like the bound clip does.
 
 Mutual exclusivity, **as amended during Slice 2**: a free *marquee* region
-clears the clip and scene-row selections and releases the sound binding (it
+clears the clip and scene-event selections and releases the sound binding (it
 names no single clip, same rule as scene-lane selections, takes spec §16.11).
 A **clip selection is itself a one-clip region**: clicking a clip's title bar
-selects the clip AND sets the region to that clip's merged span on its track,
+selects the clip AND sets the region to that clip's span on its track,
 keeping the binding (`select_song_clip_span` / `set_song_region_for_clip`).
-The span travels from the UI script because a timeline clip is the merged run
-of rows sharing a source, which only the lane projection knows. Deleting the
-clip, Escape, and a click on empty lane space clear both.
+The span still travels from the UI script, though under the lane model it is
+just the stored clip's own `[start_beat, end_beat)` — rev 1 needed the script
+because a timeline clip was then a merged run of rows sharing a source, which
+only the lane projection knew. Deleting the clip, Escape, and a click on
+empty lane space clear both.
 
 ### 4.2 Capturing the drag across lanes
 
@@ -230,7 +286,7 @@ Arrangement lanes pass it; piano-roll doesn't.
   passes a full-height rect over `[start, end)` iff its track is inside the
   (ghost-else-committed) region. No new widget rendering path.
 
-## 5. Slice 3 — copy / paste
+## 5. Slice 3 — copy / paste — SHIPPED (restated over clips)
 
 ### 5.1 Clipboard
 
@@ -248,26 +304,32 @@ pub struct ArrangementClipboard {
     /// 0.0 = paste exactly where told.
     pub snap_beats: f64,
     /// Absolute model track index → spans, rel_start/rel_end in beats
-    /// relative to the copied region start. Gaps are implicit (paste
-    /// silences them — the clipboard is the whole rectangle). A track that
-    /// was silent throughout still travels, with no spans, so paste silences
-    /// its destination.
+    /// relative to the copied region start. One entry per CLIP the region
+    /// intersects; a lane gap contributes nothing, because a gap is silence
+    /// and paste must reproduce it. A track with no clips at all still
+    /// travels, with no spans, so paste clears its destination.
     pub tracks: Vec<(usize, Vec<ClipboardSpan>)>,
+    /// Scene lane, carried only for a scene-lane region (lane spec §8):
+    /// `(rel_beat, scene)` per event inside the span, led by an entry at
+    /// rel 0 restating the scene governing the span's start.
+    pub scene_lane: bool,
+    pub scene_events: Vec<(f64, usize)>,
 }
 pub struct ClipboardSpan {
     pub rel_start: f64,
     pub rel_end: f64,
-    pub source: LaneSource,      // Pattern | Take (Empty spans are omitted)
+    pub source: LaneSource,      // Pattern | Take (a stored clip always has one)
     pub offset_steps: f64,       // source offset AT rel_start (advanced if
                                  // the copy boundary cut into a clip)
 }
 ```
 
-Copy reads the committed song's `project_lanes` (`song.rs:437`) clipped to
-the region; a clip cut by the region boundary stores its offset advanced to
-the cut point (same math as `split_row_state` / `advanced_offset`,
-`song_edit.rs:403-470`) so the pasted result plays the identical slice.
-Copy is read-only — no history entry.
+Copy reads the committed **arrangement's** `track_lanes` clipped to the
+region (`arrangement_clip_spans_in`); a clip the boundary cuts into is
+re-anchored through `restamped_clip`, the compiler's own split rule, so the
+fragment plays the identical slice wherever it lands. A cut that leaves
+nothing playable (a take past its end) contributes no span. Copy is
+read-only — no history entry.
 
 **Locked: paste is same-track, time-shift only.** Sources are per-track
 pool ids, so re-targeting tracks would require cloning pattern data into
@@ -277,12 +339,14 @@ This covers the actual workflow — grab bars 5–9, paste at bar 33.
 
 **Locked: pattern sources paste as references, take sources paste as
 copies.** Pattern clips are already shared views (scene cells reference
-pool patterns; multiple rows referencing one pattern is the model's normal
+pool patterns; many clips referencing one pattern is the model's normal
 state), so a pasted pattern clip references the same id. A take, though, is
 one recorded performance — the planned double-click-to-piano-roll editing
 of a take clip must edit only *that* clip, so paste **clones the take**:
-mint a new `TakeId`, deep-copy every chunk pattern into the track's pool
-(`TrackPatternPool::insert`), name it after the source ("Take 2 copy").
+mint a new `TakeId` over freshly registered chunk patterns on the same track
+(`clone_take_for_paste` → `register_track_take`), named after the source
+("Take 2 copy"). Clones are minted once per `(track, take)`, so a take split
+across several clips lands as ONE take.
 The clipboard still stores the source `TakeId` (validated at paste time,
 skipped if since deleted — cheap given no-silent-GC keeps takes alive);
 each paste mints a fresh clone. Deleting a pasted region orphans its clone
@@ -290,46 +354,56 @@ like any other take (takes spec §6.4).
 
 ### 5.2 Primitives (one commit each)
 
-All in `app/song_edit.rs` / a new `app/song_region.rs`, all following the
-`song_region_to_take` template (`take_edit.rs:317-400`): clone the
-committed song, do every row splice in memory, validate, single
-`commit_song_edit`-style entry. All reject while song edits are locked
-(`require_song_edit_unlocked`, `song_edit.rs:124`).
+All in `app/song_region.rs`: clone the committed **arrangement**, do every
+clip edit in memory, install through `set_committed_arrangement` (which
+validates and recompiles), commit one entry via `commit_region_edit` —
+`EditPatch::Arrangement`, or `EditPatch::Composite([SceneStructure,
+Arrangement])` when takes were cloned (scenes first, ordering per
+`song_region_to_take`). Any failure rolls the take clones back and leaves the
+committed arrangement untouched. All reject while song edits are locked
+(`require_song_edit_unlocked`).
 
-First, **generalize the paint helper**: extract the shared row surgery of
-`song_track_paint_anchored` (`song_edit.rs:507-651`) and `paint_take_region`
-(`take_edit.rs:522-586`) into one internal
-`paint_source_region(song, track, start, end, source: LaneSource,
-anchor_beat, anchor_offset_steps)` operating on a `&mut ProjectSong`
-*without* committing. Both existing entry points become thin wrappers; the
-region primitives call it N times on one clone. This also fixes the latent
-gap that `song-track-paint` can't paint takes.
+Rev 1 planned a `paint_source_region` helper extracted from the row painters.
+The lane rewrite deleted all of them; the region ops now compose the same two
+free functions the clip primitives use — `occlude_span` to clear/trim a
+destination span and `insert_clip_sorted` to drop a clip in, with
+`restamped_clip` for any cut. **A region op is clip surgery on a lane, not a
+row splice, and it never normalizes anything afterwards.**
 
-- `song_region_paste(dest_beat)` — for every clipboard track: paint
-  explicit-empty over `[dest, dest+len)`, then each span's source with its
-  stored offset (anchor = its pasted start); take spans first clone the
-  take per §5.1 and paint the clone's id. Extend the song end first if
-  `dest+len > end_beat` (inside the same commit — the region primitives are
-  single-entry by construction, unlike the two-entry `finish-create-item`
-  path). Commits `EditPatch::Song` when no takes were cloned, else
-  `EditPatch::Composite([SceneStructure, Song])` (ordering per
-  `song_region_to_take`, `take_edit.rs:390-398`) — still one undo entry.
-  Label "Paste region".
-- `song_region_delete()` — explicit-empty paint over the region per track.
-  Label "Delete region". (This also gives multi-track Backspace.)
+- `song_region_paste(clipboard, dest_beat)` — per clipboard track:
+  `occlude_span` over `[dest, dest+len)` (paste is the op that *does*
+  truncate, lane spec §8), then insert each stored span as a clip with a
+  fresh `ClipId`, its stored offset, anchored at its pasted start. Take spans
+  paste their clone (§5.1); a since-deleted take source is skipped, not an
+  error. `end_beat` is raised to `dest+len` first, inside the same commit.
+  A scene-lane clipboard also stamps its events (§5.3 below). Label
+  "Paste region".
+- `song_region_delete()` — `occlude_span` over the region per track: the
+  clips go away and the span is **silent**, nothing revealed underneath. A
+  scene-lane region additionally removes the scene changes inside it and
+  restores the scene governing the region's end. Label "Delete region".
+  (This is also multi-track Backspace.)
 - `song_region_duplicate()` — copy the region and ripple-insert it directly
   after itself; see §5.4. Label "Duplicate region".
-- `song_region_move(delta_beats)` — delete source rectangle + repaint at
-  the shifted position on one clone (content moves **rigidly**: sources and
-  offsets preserved, takes spec §7.4). Move never clones takes — it
-  relocates the same clip instances. Label "Move region". Also reused for
-  single-clip move (§6).
+- `song_region_move(delta_beats)` — **not yet built; slice 4 (§6).** Lift the
+  region's clips off their lanes, `occlude_span` the vacated rectangle and
+  the destination rectangle, re-insert the lifted clips shifted by `delta`
+  on one clone. Content moves **rigidly**: sources and `offset_steps`
+  preserved (takes spec §7.4), so only `start_beat`/`end_beat` change. Move
+  never clones takes — it relocates the same clip instances. Label
+  "Move region".
 
-Host commands `song-region-copy/paste/delete/duplicate/move` registered in
-`host_commands/song.rs` (command list `:13-38`); copy/paste additionally
-need the clipboard handle, so they follow the piano-roll pattern of being
-applied in the UI-side host-command layer (`history_commands.rs:712-760`)
-where `LoopCtx` is in scope.
+Scene-lane handling is shared by paste and delete: `clear_scene_lane_span`
+(never removing the mandatory event at 0.0) returns the scene that governed
+the span's end, and `restore_scene_tail` re-inserts it if the edit changed
+it — so a scene-lane region op is local to its rectangle and nothing after it
+moves. A move of a scene-lane region must run the same pair on both
+rectangles.
+
+Host commands `song-region-copy/paste/delete/duplicate` are registered as
+natives (`ui/natives.rs`) and applied in the UI-side host-command layer where
+`LoopCtx` (and so the clipboard handle) is in scope; `song-region-move` joins
+them.
 
 ### 5.3 Keyboard seam
 
@@ -344,8 +418,8 @@ directly:
   tiny `seq-song-set-arr-cursor`), floored to the clipboard's snap.
 - **Cmd-D**: active region → `song-region-duplicate` (§5.4). Consumed only
   when a region exists, so it never shadows the mixer's Cmd-D.
-- **Backspace**: active region → `song-region-delete`; else existing
-  clip/row deletion paths unchanged. Only a MARQUEE region takes the key
+- **Backspace**: active region → `song-region-delete`; else the existing
+  clip-delete path (`arr_clip_delete`) unchanged. Only a MARQUEE region takes the key
   (region set, `song_clip_selection` empty); a clip click's one-clip region
   keeps falling through to the existing clip-delete path.
 
@@ -362,89 +436,153 @@ after itself at `insert = region.end_beat`, pushing what follows right by
 sources clone exactly as paste's do (§5.1) — a duplicated take is its own
 performance.
 
-**Only the SELECTED tracks move.** Two mechanisms, chosen by whether the
-region covers every track, with the same audible contract:
+**Only the SELECTED tracks ripple.** One mechanism now — `ripple_lane_right`
+per lane — with the scope chosen by the region:
 
-| selection | mechanism | why |
+| selection | scope | why |
 |---|---|---|
-| every track | shift the song ROWS at/after `insert` right by `len` | rows are the shared time boundaries, so moving them moves every lane at once and the song stays **scene-resolved** — no override churn. The "insert 4 bars into my song" gesture. |
-| some tracks | re-paint just those lanes' tails `len` beats later | rows stay put, so untouched lanes keep playing at the beats they always did. |
+| every track, or a SCENE-LANE sweep | every lane's clips **and** the scene events at/after `insert` slide right | the whole timeline opens up: the "insert 4 bars into my song" gesture. A scene sweep is by definition whole-timeline — it carries the scene lane, so the ripple must move it. |
+| some tracks | just those lanes' clips slide | the scene lane and every other lane stay exactly where they were, still playing at the beats they always did. |
 
-The partial path reads each rippled lane's spans from `insert` to the song
-end **before** any mutation (silence included — a gap that slides right must
-leave silence behind it, not the clip it used to sit beside), boundary-cut
-offsets advanced per §5.1, then re-stamps each span at `+len` with the offset
-it had at its own start. Both paths leave exactly `[insert, insert+len)`
-vacated on the rippled lanes, which the duplicate then fills through the same
-`paint_clipboard` helper paste uses.
+`ripple_lane_right` splits a clip straddling `insert` first (via
+`restamped_clip`, so the moving half carries the phase it had at the
+boundary and a tail with nothing left to play is simply dropped), then adds
+`len` to every clip at or after the boundary. Both scopes leave exactly
+`[insert, insert+len)` vacated on the rippled lanes, which the duplicate then
+fills through the same `paste_clipboard` helper paste uses, and both grow
+`end_beat` by `len`.
 
-**Locked: partial ripple detaches the rippled lanes from scene resolution.**
-Once a lane's content sits `len` beats off the rows' scenes it cannot be
-scene-derived any more, so its tail becomes explicit overrides and later
-scene-cell edits stop reaching it. This is inherent, not an implementation
-shortcut — and it is exactly why the all-tracks case earns its own
-row-shifting path rather than being folded into the general one.
+The row model's caveat here is **gone**: there is nothing to detach from.
+Clips are the stored truth and resolve on their own (lane spec §6.2), so a
+partial ripple no longer converts anything into overrides, and no lane is
+silently cut off from later scene-cell edits. The only asymmetry left is
+whether the scene lane rides along.
 
-Untouched lanes are not left alone by accident: the partial path inserts new
-row boundaries under them, which is safe only because every split goes
-through `split_row_state` (phase-transparent — same music, more rows). Both
-paths grow the song by `len`, so every lane gains that much new time at the
-end, governed by whatever it was playing at the boundary; existing material
-is untouched.
+## 6. Slice 4 — move (the outstanding work)
 
-## 6. Slice 4 — move
+Two gestures share one title-bar drag: moving **one clip** and moving the
+**selected region**. Both are rigid — `offset_steps` never changes, so the
+moved music sounds identical, just later or earlier (takes spec §7.4).
 
-- **Track-lane single clip**: `arrangement-track-action` stops discarding
-  `:finish-move-items` (`arrangement.lisp:660-662`). Live `:move-items-absolute`
-  drives the existing `:move` ghost (`arrangement-ghost`, `:kind :move`,
-  drawn via `arrangement-track-ghost-clip`, `arrangement.lisp:429-441`);
-  finish lowers to `song_region_move` with region = the merged clip's span
-  on that one track and `delta = ghost-start - clip-start`. Vertical
-  (`lane`) components are ignored — cross-track moves are invalid for the
-  same pool-locality reason as cross-track paste (locked; the widget's
-  lane-offset is clamped to 0 by the host).
-- **Region move**: if the dragged clip lies inside the active region
-  (its track within `[track_a, track_b]` and span intersecting
-  `[start, end)`), the gesture moves the **region**: ghost = the region
-  rect shifted by the drag delta (rendered through the same per-lane
-  `:selection-rect` derivation with the ghost offset applied), finish →
-  `song_region_move(delta)`. Otherwise it's a plain single-clip move and
-  the region clears.
-- **Move snapping**: the title-bar drag inherits the existing
-  `:move-snap-mode :alignment-helper` behavior the scene lane already uses
-  (`arrangement.lisp` scene props) — add it to the track-lane props.
-- **Start-edge resize lowering** (enabled by §3.1): scene lane →
-  `song-row-move` of the row itself; track lane → one anchored paint:
-  shrink = explicit-empty over `[old_start, new_start)`; grow = the clip's
-  source over `[new_start, old_start)` with the clip's existing
-  anchor/offset (trim-head semantics, takes spec §7.4; take offsets clamp
-  at 0 per §6.3). Both ride `song-track-paint`-style lowering in
-  `arrangement_actions.rs` — no new primitive.
+### 6.1 Track-lane single clip
+
+Everything below the UI script already exists: `arrangement_actions.rs`
+lowers a `clip-move` action to the `arrangement-clip-move` host command, and
+`arr_clip_move(clip_id, new_start)` is a validated one-undo-entry primitive
+that lifts the clip, `occlude_span`s the destination (so it truncates
+whatever it lands on, like every other clip write), re-inserts it and raises
+`end_beat` if it now runs past. **Only the Lisp arm is missing:**
+
+- `arrangement-track-action` stops discarding `:finish-move-items`
+  (`arrangement.lisp:891-893`). Live `:move-items-absolute` sets an
+  `arrangement-ghost` of a new kind `:track-move` carrying
+  `{:track i :clip-id (get event :anchor-id) :start (get event :start)}`,
+  previewed by `arrangement-track-ghost-clip` alongside the existing
+  `:track-resize` case (which already rewrites a clip's rendered span from
+  the ghost).
+- On `:finish-move-items`, guard the ghost the way the resize arm does
+  (`(= (arrangement-ghost-kind) :track-move)` **and** same `:track`), then
+  `arrangement-clip-edit i clip (dict :type :clip-move :start ghost-start)`.
+  A start equal to the clip's own start commits nothing; a negative start
+  clamps to 0. Clear the ghost on every path — a stale ghost is the failure
+  mode the current arm was written to avoid.
+- Vertical (`lane`) components are ignored: cross-track moves are invalid for
+  the same per-track-pool reason as cross-track paste (locked). The host
+  clamps the widget's lane offset to 0.
+- The moved clip stays selected, and its one-clip region (§4.1) is re-set to
+  the new span so a following Cmd-C/Backspace addresses where it now is.
+
+### 6.2 Region move
+
+If the dragged clip lies inside the active region (its track within
+`[track_a, track_b]` and its span intersecting `[start_beat, end_beat)`), the
+gesture moves the **region**: the ghost is the region rectangle shifted by
+the drag delta, rendered through the same per-lane `:selection-rect`
+derivation (`arrangement-region-for-track`) with the ghost offset applied,
+and the release lowers to `song-region-move` with
+`delta = ghost-start - region-start`. Otherwise it is a plain single-clip
+move and the region clears, exactly as a clip `:select` does.
+
+`song_region_move(delta_beats)` is the one new primitive (§5.2). Over one
+cloned arrangement, per track in the region:
+
+1. Collect the region's clips, cut at the region edges via `restamped_clip`
+   (a partially covered clip moves only the part inside the rectangle — the
+   region is a rectangle over time, not a set of whole clips, and this is the
+   same rule copy already follows).
+2. `occlude_span` the **source** rectangle, so the vacated span goes silent
+   rather than leaving the trimmed remainders of what moved.
+3. `occlude_span` the **destination** rectangle `[start+delta, end+delta)`,
+   then `insert_clip_sorted` each collected clip shifted by `delta` with a
+   fresh `ClipId` and its offset untouched.
+4. Raise `end_beat` if the destination runs past it; reject a delta that
+   would push the rectangle below beat 0 (clamp at the UI, error in the
+   primitive — never silently truncate the leading clips).
+5. When the region carries the scene lane, move its events the same way:
+   `clear_scene_lane_span` + `restore_scene_tail` on both rectangles, never
+   moving the mandatory event at 0.0.
+
+Order matters: source clearing must precede destination clearing, or an
+overlapping move (delta smaller than the region length) erases what it just
+placed. One `commit_region_edit` entry, `EditPatch::Arrangement` — move never
+clones takes, so it is never composite.
+
+After the commit the region selection follows the move (like duplicate's
+does), so repeated drags chain.
+
+### 6.3 Move snapping
+
+The title-bar drag takes the `:move-snap-mode :alignment-helper` behavior the
+scene lane already uses — add it to the track-lane props next to the existing
+`:resize-snap-mode :alignment-helper`, so a clip snaps to the same zoom-
+adaptive ladder its edges already resize to and to neighbouring clip edges.
+
+### 6.4 Already done (was in rev 1's slice 4)
+
+Start-edge resize lowering landed with the lane model: both edges lower to
+`arr_clip_resize`, which re-stamps `offset_steps` by the split rule on a left
+trim (and runs it backwards when growing left) and clamps takes on the right.
+The scene lane's start-edge drag lowers to `arrangement-scene-move`, since a
+scene span's left edge *is* its event. Nothing further is owed here.
 
 ## 7. Phasing & tests
 
-1. **Clip anatomy + durations** (§3) — widget-only + read-surface field.
+1. **Clip anatomy + durations** (§3) — SHIPPED. Widget-only + read-surface field.
    Tests: `hit_test` unit tests for the three bar zones and both handles
    at `title-bar-height` 0 and >0; parse test for dot `:width`; existing
    piano-roll layout tests must be untouched (title bar off).
-2. **Region selection** (§4) — `row-delta` emission test; Lisp
+2. **Region selection** (§4) — SHIPPED. `row-delta` emission test; Lisp
    ordinal↔track mapping test (UI-script pattern); `SEQ.song-region`
-   publish/diff in `state_values` tests; exclusivity with clip/row
+   publish/diff in `state_values` tests; exclusivity with clip/scene-event
    selection + binding release.
-3. **Copy/paste/delete/duplicate** (§5) — `paint_source_region` extraction
-   must keep `song_edit.rs` + `take_edit.rs` suites green; new tests: copy
-   clips a boundary-cut clip with advanced offset; paste reproduces
-   `project_lanes` of the source region shifted; paste-over extends song end
-   in one undo entry; undo restores in one step. Duplicate: all-tracks region
-   ripples the rows and chains on repeat; **partial region leaves every
-   unselected lane playing the same spans at the same beats**; take sources
-   clone.
-4. **Move** (§6) — `arrangement_actions.rs` lowering tests (single move →
-   one command; region move; start-edge shrink/grow); phase-rigidity test
-   (moved clip's audible content identical, offsets preserved).
+3. **Copy/paste/delete/duplicate** (§5) — SHIPPED. Tests live in
+   `song_region.rs`: copy of a boundary-cut clip carries the advanced offset;
+   paste reproduces the source rectangle's clips shifted; paste-over extends
+   `end_beat` in one undo entry; undo restores in one step. Duplicate:
+   all-tracks region ripples the scene lane and chains on repeat; **partial
+   region leaves every unselected lane playing the same clips at the same
+   beats**; take sources clone.
+4. **Move** (§6) — the remaining slice.
+   - `arrangement_actions.rs`: `clip-move` → exactly one
+     `arrangement-clip-move` command (exists); add a `region-move` →
+     `song-region-move` case with the delta.
+   - `arr_edit.rs`: `arr_clip_move` truncation + `end_beat` growth (exists).
+   - `song_region.rs`: new `song_region_move` tests — partially covered clip
+     moves only its covered part; the vacated rectangle is silent (no
+     leftover trimmed fragments); an overlapping move (delta < region length)
+     keeps everything it placed; scene-lane region moves its events and
+     restores the tail scene; negative delta rejected; one undo entry that
+     restores in one step.
+   - Phase rigidity: the moved clips' `offset_steps` are byte-identical
+     before and after, at both the clip and region level.
+   - UI-script test (`ui/tests.rs` pattern): a `:move-items-absolute` then
+     `:finish-move-items` on a track lane emits one `clip-move` action with
+     the ghost's start, and leaves `arrangement-ghost` nil on both the commit
+     and the guard-failure path.
 
 Each slice is independently shippable; 3 and 4 both depend on 2's region
-state, 4's region move depends on 3's `song_region_move`.
+state, 4's region move depends on the new `song_region_move` primitive
+(§5.2), which is the only model-side code slice 4 adds.
 
 ## 8. Locked decisions
 
@@ -454,7 +592,7 @@ state, 4's region move depends on 3's `song_region_move`.
   move/resize live on the bar only. Plain body click = place edit cursor.
 - Region state is Rust-owned (`App::song_region_selection`), published as
   `SEQ.song-region`. A MARQUEE region is mutually exclusive with
-  clip/scene-row selection and releases the sound binding; a clip selection
+  clip/scene-event selection and releases the sound binding; a clip selection
   is a one-clip region and keeps its binding (§4.1 as amended).
 - The clip BODY is not a selection surface for the clip: pressing it clears
   the selection, parks the edit cursor and starts a region. Only the title
@@ -472,14 +610,20 @@ state, 4's region move depends on 3's `song_region_move`.
   falls onto the seconds ladder and desyncs from the bars above.
 - Marquee times snap to the zoom-adaptive grid ladder (min down, max up).
 - Region operations are **new single-commit primitives** over one cloned
-  `ProjectSong` (`paint_source_region` helper) — never a sequence of
-  existing host commands (which would multiply undo entries).
+  `ProjectArrangement` (composing `occlude_span` / `insert_clip_sorted` /
+  `restamped_clip`) — never a sequence of existing host commands (which would
+  multiply undo entries).
 - Paste and move are time-shift only; cross-track re-targeting is deferred
   (per-track pattern pools).
-- Duplicate (Cmd-D) is a ripple insert after the region and moves **only the
-  selected tracks**; an all-tracks region shifts the song rows (scene
-  structure preserved), a partial one re-paints just those lanes' tails
-  (which detaches them from scene resolution). §5.4.
+- Duplicate (Cmd-D) is a ripple insert after the region and ripples **only the
+  selected tracks**; an all-tracks region (or a scene-lane sweep) also slides
+  the scene events, a partial one leaves the scene lane and every unselected
+  lane untouched. §5.4.
+- A region op is a rectangle over time, not a set of whole clips: a clip the
+  rectangle only partially covers is cut at the edge and re-anchored through
+  `restamped_clip`. Copy, duplicate's ripple and move all share this rule.
+- Clearing a span stores nothing — silence is the absence of a clip (lane
+  spec §6.2). Rev 1's explicit-empty overrides no longer exist.
 - Paste floors its destination to the copied rectangle's grid, capped at one
   bar; duplicate does not snap (it lands exactly at the region end).
 - Same-track paste **references** pattern sources (linked, like scene
@@ -496,8 +640,13 @@ Resolved: `Cmd-D` duplicate rode along in Slice 3 — but not as "paste
 immediately after", which would have overwritten what follows. It is a
 ripple insert, §5.4.
 
-- Title-bar height value: fixed cell constant vs scaling with lane height —
-  pick during Slice 1 by eye against the Ableton reference shots.
+Resolved: title-bar height is a fixed cell constant,
+`arrangement-clip-title-bar-height 0.9` (`arrangement.lisp:54`), not
+lane-height-scaled.
+
 - Whether the scene lane's marquee-to-all-tracks region should also drive
-  scene-row selection simultaneously (Ableton merges these; we currently
+  scene-event selection simultaneously (Ableton merges these; we currently
   keep them exclusive).
+- Whether a region move should be allowed to cross the song end (today paste
+  extends `end_beat`; §6.2 follows paste, but Ableton's Cut Time/Paste Time
+  semantics may argue for clamping instead).

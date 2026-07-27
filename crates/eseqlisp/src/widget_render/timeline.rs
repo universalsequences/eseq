@@ -160,6 +160,13 @@ struct TimelineView {
     /// what the piano roll passes — reproduces the pre-title-bar behavior
     /// exactly: no title-bar zone, no start-edge handle, body drags move.
     title_bar_height: f32,
+    /// Pixel dimensions, corner radius, and smooth-difference blend width for
+    /// paired rounded-rectangle repeat notches cut into an item's top and
+    /// bottom edges. Width or height `0` restores the legacy title-bar tick.
+    loop_notch_width_px: f32,
+    loop_notch_height_px: f32,
+    loop_notch_corner_radius_px: f32,
+    loop_notch_smoothing_px: f32,
     scroll_viewport_height: Option<f32>,
     snap: f64,
     resize_snap: f64,
@@ -1067,6 +1074,13 @@ fn build_metal_primitives(
             height,
         });
         let title_bar_height = title_bar_height.map(|bottom| bottom - y);
+        let (content_rect, title_bar) = match title_bar_height {
+            Some(bar_height) => (
+                (x, y + bar_height, width, height - bar_height),
+                Some((y, bar_height)),
+            ),
+            None => ((x, y, width, height), None),
+        };
         // Selection is a fill change, not a border: the body lights up while
         // the title bar keeps the clip color (Ableton's selected clip).
         let selected = view.item_selected(item);
@@ -1079,6 +1093,24 @@ fn build_metal_primitives(
         // like every other timeline dimension.
         let radius_cells = view.item_corner_radius;
         let radius_px = radius_cells * viewport.cell_h;
+        let loop_notch_centers = if title_bar_height.is_some() {
+            item_cycle_separator_xs(&view, item, viewport)
+        } else {
+            Vec::new()
+        };
+        let loop_notch_dimensions =
+            item_loop_notch_dimensions(&view, item, viewport);
+        let outer_notches = (!loop_notch_centers.is_empty())
+            .then_some(ItemEdgeNotches {
+                centers: &loop_notch_centers,
+                top_y: y,
+                bottom_y: y + height,
+                width_px: loop_notch_dimensions.width_px,
+                height_px: loop_notch_dimensions.height_px,
+                corner_radius_px: loop_notch_dimensions.corner_radius_px,
+                smoothing_px: loop_notch_dimensions.smoothing_px,
+            })
+            .filter(|notches| notches.width_px > 0.0 && notches.height_px > 0.0);
         // Fills are built from the item's TRUE span and then clipped to the
         // visible content, not from the view-clamped rect: an item scrolled
         // partly off-screen must be CUT at the viewport edge, not redrawn as
@@ -1088,14 +1120,13 @@ fn build_metal_primitives(
         // rounded item is outlined by drawing the border colour at the item's
         // own bounds and insetting the fill inside it — never by inflating,
         // which would push the clip into the neighbouring lane. Square items
-        // keep the four edge quads (below).
+        // keep the four edge quads (below), except notched clips: their border
+        // must follow the same compound SDF around each concave cutout.
         let mut fill_rect = fill_rect;
-        if radius_px > 0.0 {
-            let thickness = item_border_thickness(
-                width,
-                height,
-                selected_border(selected, title_bar_height),
-            );
+        let thickness =
+            item_border_thickness(width, height, selected_border(selected, title_bar_height));
+        let compound_outline = radius_px > 0.0 || outer_notches.is_some();
+        if compound_outline {
             if thickness > 0.0 {
                 push_item_fill(
                     &mut primitives,
@@ -1108,6 +1139,7 @@ fn build_metal_primitives(
                     viewport,
                     radius_px,
                     clip,
+                    outer_notches,
                 );
                 fill_rect = Rect {
                     row: fill_rect.row + thickness,
@@ -1117,6 +1149,13 @@ fn build_metal_primitives(
                 };
             }
         }
+        let fill_notches = outer_notches.map(|notches| ItemEdgeNotches {
+            width_px: notches.width_px + thickness * viewport.cell_w * 2.0,
+            height_px: notches.height_px + thickness * viewport.cell_h * 2.0,
+            corner_radius_px: notches.corner_radius_px
+                + thickness * viewport.cell_w.min(viewport.cell_h),
+            ..notches
+        });
         push_item_fill(
             &mut primitives,
             fill_rect,
@@ -1124,6 +1163,7 @@ fn build_metal_primitives(
             viewport,
             radius_px,
             clip,
+            fill_notches,
         );
         // Region highlight over a clip: relight the fill across the part of
         // the clip the region covers, using the same rounded geometry (so the
@@ -1140,6 +1180,7 @@ fn build_metal_primitives(
                     viewport,
                     radius_px,
                     region_clip,
+                    fill_notches,
                 );
             }
         }
@@ -1159,6 +1200,7 @@ fn build_metal_primitives(
                 viewport,
                 radius_px,
                 clip,
+                fill_notches,
             );
             let bar_bottom = y + bar_height;
             primitives.extend(bar_primitives.into_iter().filter_map(|primitive| {
@@ -1188,16 +1230,18 @@ fn build_metal_primitives(
         }
         // Faint grid continuation inside the clip body (DAW convention): the
         // background grid stays legible through items without competing with
-        // their content.
+        // their content. The title bar is deliberately excluded so the label
+        // remains a clean visual band; loop boundaries are now part of the
+        // title bar's compound SDF instead.
         for &(grid_x, is_major) in &grid_lines {
             if grid_x <= x + 0.1 || grid_x >= x + width - 0.1 {
                 continue;
             }
             primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
                 x: grid_x - 0.0625,
-                y,
+                y: content_rect.1,
                 width: 0.125,
-                height,
+                height: content_rect.3,
                 color: crate::backend::Color {
                     r: 0.02,
                     g: 0.025,
@@ -1236,19 +1280,13 @@ fn build_metal_primitives(
                 primitives.push(MetalPrimitive::PopClipRect);
             }
         }
-        let (content_rect, title_bar) = match title_bar_height {
-            Some(bar_height) => (
-                (x, y + bar_height, width, height - bar_height),
-                Some((y, bar_height)),
-            ),
-            None => ((x, y, width, height), None),
-        };
         push_item_content_primitives(
             &mut primitives,
             &view,
             item,
             content_rect,
             title_bar,
+            outer_notches.is_some(),
             viewport,
         );
         item_rects.push((
@@ -1257,12 +1295,13 @@ fn build_metal_primitives(
             width,
             height,
             selected_border(selected, title_bar_height),
+            outer_notches.is_some(),
             timeline_hover_edge_for(node.widget_id, &item.id),
         ));
     }
 
     let item_radius = view.item_corner_radius;
-    for (x, y, width, height, selected, resize_hovered) in item_rects {
+    for (x, y, width, height, selected, notched, resize_hovered) in item_rects {
         let thickness = item_border_thickness(width, height, selected);
         if thickness <= 0.0 {
             continue;
@@ -1274,7 +1313,7 @@ fn build_metal_primitives(
         };
         // Rounded items were already outlined under their fill, in the loop
         // above; only the square ones get edge quads here.
-        if item_radius <= 0.0 {
+        if item_radius <= 0.0 && !notched {
             primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
                 x,
                 y,
@@ -1327,6 +1366,7 @@ fn build_metal_primitives(
                 viewport,
                 item_radius * viewport.cell_h,
                 (content.col, content.col + content.width),
+                None,
             );
         }
     }
@@ -1432,6 +1472,310 @@ const ITEM_CORNER_ROWS_MAX: usize = 24;
 /// whatever is already beneath the clip.
 #[cfg(target_os = "macos")]
 fn push_item_fill(
+    primitives: &mut Vec<MetalPrimitive>,
+    rect: Rect,
+    color: crate::backend::Color,
+    viewport: super::WidgetViewport,
+    radius_px: f32,
+    clip: (f32, f32),
+    edge_notches: Option<ItemEdgeNotches<'_>>,
+) {
+    let Some(edge_notches) = edge_notches.filter(|notches| {
+        !notches.centers.is_empty() && notches.width_px > 0.0 && notches.height_px > 0.0
+    })
+    else {
+        push_plain_item_fill(primitives, rect, color, viewport, radius_px, clip);
+        return;
+    };
+
+    let influence_cells =
+        (edge_notches.width_px * 0.5 + edge_notches.smoothing_px + 1.0)
+            / viewport.cell_w.max(0.0001);
+    let visible_left = rect.col.max(clip.0);
+    let visible_right = (rect.col + rect.width).min(clip.1);
+    if visible_right <= visible_left {
+        return;
+    }
+
+    let mut zones: Vec<(f32, f32)> = edge_notches
+        .centers
+        .iter()
+        .map(|center| {
+            (
+                (center - influence_cells).max(visible_left),
+                (center + influence_cells).min(visible_right),
+            )
+        })
+        .filter(|(left, right)| right > left)
+        .collect();
+    zones.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut merged_zones: Vec<(f32, f32)> = Vec::new();
+    for zone in zones {
+        match merged_zones.last_mut() {
+            Some(last) if zone.0 <= last.1 => last.1 = last.1.max(zone.1),
+            _ => merged_zones.push(zone),
+        }
+    }
+
+    let mut cursor = visible_left;
+    for (left, right) in merged_zones {
+        if left > cursor {
+            push_plain_item_fill(
+                primitives,
+                rect,
+                color,
+                viewport,
+                radius_px,
+                (cursor, left),
+            );
+        }
+        push_smooth_notched_item_fill_zone(
+            primitives,
+            rect,
+            color,
+            viewport,
+            radius_px,
+            (left, right),
+            edge_notches,
+        );
+        cursor = right;
+    }
+    if cursor < visible_right {
+        push_plain_item_fill(
+            primitives,
+            rect,
+            color,
+            viewport,
+            radius_px,
+            (cursor, visible_right),
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn sdf_smooth_max(a: f32, b: f32, smoothing: f32) -> f32 {
+    if smoothing <= f32::EPSILON {
+        return a.max(b);
+    }
+    let h = (0.5 + 0.5 * (a - b) / smoothing).clamp(0.0, 1.0);
+    b + (a - b) * h + smoothing * h * (1.0 - h)
+}
+
+#[cfg(target_os = "macos")]
+fn rounded_rect_sdf_px(
+    x: f32,
+    y: f32,
+    rect: Rect,
+    viewport: super::WidgetViewport,
+    radius_px: f32,
+) -> f32 {
+    let left = rect.col * viewport.cell_w;
+    let right = (rect.col + rect.width) * viewport.cell_w;
+    let top = rect.row * viewport.cell_h;
+    let bottom = (rect.row + rect.height) * viewport.cell_h;
+    let half_width = (right - left) * 0.5;
+    let half_height = (bottom - top) * 0.5;
+    let radius = radius_px.min(half_width).min(half_height).max(0.0);
+    let qx = (x - (left + right) * 0.5).abs() - half_width + radius;
+    let qy = (y - (top + bottom) * 0.5).abs() - half_height + radius;
+    qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius
+}
+
+#[cfg(target_os = "macos")]
+fn smooth_notched_item_sdf_px(
+    x: f32,
+    y: f32,
+    rect: Rect,
+    viewport: super::WidgetViewport,
+    radius_px: f32,
+    notches: ItemEdgeNotches<'_>,
+) -> f32 {
+    let shape = rounded_rect_sdf_px(x, y, rect, viewport, radius_px);
+    let top_y = notches.top_y * viewport.cell_h;
+    let bottom_y = notches.bottom_y * viewport.cell_h;
+    // Separator centres are time-ordered. Because every cutout has the same
+    // dimensions, the nearest x centre also owns the nearest rounded rect;
+    // binary search keeps dense repeated clips from turning contour sampling
+    // quadratic.
+    let x_cells = x / viewport.cell_w;
+    let insertion = notches
+        .centers
+        .partition_point(|center| *center < x_cells);
+    let horizontal_distance = [
+        insertion.checked_sub(1),
+        (insertion < notches.centers.len()).then_some(insertion),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|index| (x - notches.centers[index] * viewport.cell_w).abs())
+    .fold(f32::INFINITY, f32::min);
+    let vertical_distance = (y - top_y).abs().min((y - bottom_y).abs());
+    let half_width = notches.width_px * 0.5;
+    let half_height = notches.height_px * 0.5;
+    let corner_radius = notches
+        .corner_radius_px
+        .min(half_width)
+        .min(half_height)
+        .max(0.0);
+    let qx = horizontal_distance - half_width + corner_radius;
+    let qy = vertical_distance - half_height + corner_radius;
+    let cutout =
+        qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - corner_radius;
+    sdf_smooth_max(shape, -cutout, notches.smoothing_px)
+}
+
+#[cfg(target_os = "macos")]
+fn sdf_vertical_boundary(
+    x: f32,
+    start: f32,
+    end: f32,
+    step: f32,
+    mut distance: impl FnMut(f32, f32) -> f32,
+) -> Option<f32> {
+    if distance(x, start) <= 0.0 {
+        return Some(start);
+    }
+    let mut outside_y = start;
+    let steps = ((end - start).abs() / step).ceil() as usize;
+    for index in 1..=steps {
+        let inside_y = if end >= start {
+            (start + index as f32 * step).min(end)
+        } else {
+            (start - index as f32 * step).max(end)
+        };
+        let inside_distance = distance(x, inside_y);
+        if inside_distance <= 0.0 {
+            let mut outside = outside_y;
+            let mut inside = inside_y;
+            for _ in 0..8 {
+                let middle = (outside + inside) * 0.5;
+                if distance(x, middle) <= 0.0 {
+                    inside = middle;
+                } else {
+                    outside = middle;
+                }
+            }
+            return Some(inside);
+        }
+        outside_y = inside_y;
+        if (inside_y - end).abs() <= f32::EPSILON {
+            break;
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn push_coverage_quad_px(
+    primitives: &mut Vec<MetalPrimitive>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    color: crate::backend::Color,
+    coverage: f32,
+    viewport: super::WidgetViewport,
+) {
+    if width <= 0.0 || height <= 0.0 || coverage <= 0.0 {
+        return;
+    }
+    primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+        x: x / viewport.cell_w,
+        y: y / viewport.cell_h,
+        width: width / viewport.cell_w,
+        height: height / viewport.cell_h,
+        color: crate::backend::Color {
+            a: color.a * coverage.clamp(0.0, 1.0),
+            ..color
+        },
+    }));
+}
+
+#[cfg(target_os = "macos")]
+fn push_smooth_notched_item_fill_zone(
+    primitives: &mut Vec<MetalPrimitive>,
+    rect: Rect,
+    color: crate::backend::Color,
+    viewport: super::WidgetViewport,
+    radius_px: f32,
+    zone: (f32, f32),
+    notches: ItemEdgeNotches<'_>,
+) {
+    let cell_w = viewport.cell_w.max(0.0001);
+    let cell_h = viewport.cell_h.max(0.0001);
+    let left_px = zone.0 * cell_w;
+    let right_px = zone.1 * cell_w;
+    let top_px = rect.row * cell_h;
+    let bottom_px = (rect.row + rect.height) * cell_h;
+    let first_column = left_px.floor() as i32;
+    let last_column = right_px.ceil() as i32;
+    for column in first_column..last_column {
+        let x0 = (column as f32).max(left_px);
+        let x1 = (column as f32 + 1.0).min(right_px);
+        if x1 <= x0 {
+            continue;
+        }
+        let sample_x = (x0 + x1) * 0.5;
+        let distance = |x, y| {
+            smooth_notched_item_sdf_px(x, y, rect, viewport, radius_px, notches)
+        };
+        let Some(shape_top) =
+            sdf_vertical_boundary(sample_x, top_px - 2.0, bottom_px, 0.5, distance)
+        else {
+            continue;
+        };
+        let Some(shape_bottom) =
+            sdf_vertical_boundary(sample_x, bottom_px + 2.0, shape_top, 0.5, distance)
+        else {
+            continue;
+        };
+        if shape_bottom <= shape_top {
+            continue;
+        }
+
+        let solid_top = shape_top.ceil();
+        let solid_bottom = shape_bottom.floor();
+        if solid_top > shape_top {
+            push_coverage_quad_px(
+                primitives,
+                x0,
+                shape_top.floor(),
+                x1 - x0,
+                1.0,
+                color,
+                solid_top - shape_top,
+                viewport,
+            );
+        }
+        if solid_bottom > solid_top {
+            push_coverage_quad_px(
+                primitives,
+                x0,
+                solid_top,
+                x1 - x0,
+                solid_bottom - solid_top,
+                color,
+                1.0,
+                viewport,
+            );
+        }
+        if shape_bottom > solid_bottom {
+            push_coverage_quad_px(
+                primitives,
+                x0,
+                solid_bottom,
+                x1 - x0,
+                1.0,
+                color,
+                shape_bottom - solid_bottom,
+                viewport,
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn push_plain_item_fill(
     primitives: &mut Vec<MetalPrimitive>,
     rect: Rect,
     color: crate::backend::Color,
@@ -1566,6 +1910,122 @@ const SELECTED_ITEM_BODY_COLOR: crate::backend::Color = crate::backend::Color {
 #[cfg(target_os = "macos")]
 const ITEM_CONTENT_MIN_WIDTH_PX: f32 = 14.0;
 
+/// Loop boundaries in title-barred arrangement clips are cut into both clip
+/// edges instead of painted as rules. Tall rounded rectangles centred on the
+/// top and bottom edges leave paired slot-like bites; smooth SDF subtraction
+/// rounds their transition into the straight edge.
+#[cfg(target_os = "macos")]
+const LOOP_NOTCH_WIDTH_PX: f32 = 5.0;
+
+#[cfg(target_os = "macos")]
+const LOOP_NOTCH_HEIGHT_PX: f32 = 12.0;
+
+#[cfg(target_os = "macos")]
+const LOOP_NOTCH_CORNER_RADIUS_PX: f32 = 2.5;
+
+#[cfg(target_os = "macos")]
+const LOOP_NOTCH_SMOOTHING_PX: f32 = 1.6;
+
+/// A repeat notch may consume at most this fraction of one on-screen source
+/// cycle. The Lisp width remains the zoomed-in maximum; below that size every
+/// dimension and smoothing scale together so the slot keeps its proportions.
+#[cfg(target_os = "macos")]
+const LOOP_NOTCH_MAX_CYCLE_WIDTH_FRACTION: f32 = 0.20;
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+struct ItemEdgeNotches<'a> {
+    centers: &'a [f32],
+    top_y: f32,
+    bottom_y: f32,
+    width_px: f32,
+    height_px: f32,
+    corner_radius_px: f32,
+    smoothing_px: f32,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ItemLoopNotchDimensions {
+    width_px: f32,
+    height_px: f32,
+    corner_radius_px: f32,
+    smoothing_px: f32,
+}
+
+#[cfg(target_os = "macos")]
+fn item_cycle_separator_xs(
+    view: &TimelineView,
+    item: &TimelineItem,
+    viewport: super::WidgetViewport,
+) -> Vec<f32> {
+    let Some(TimelineItemContent::Dots { cycle, phase, .. }) = &item.content else {
+        return Vec::new();
+    };
+    let span = item.end - item.start;
+    if span <= 0.0 {
+        return Vec::new();
+    }
+    let cycle = cycle.max(f64::EPSILON);
+    let phase = phase.rem_euclid(1.0);
+    if item_cycle_width_px(view, item, viewport).is_none_or(|width| width < 5.0) {
+        return Vec::new();
+    }
+    let view_end = view.view_start + view.view_duration;
+    let mut separators = Vec::new();
+    for index in 0..512 {
+        let offset = (1.0 - phase + index as f64) * cycle;
+        if offset >= 1.0 {
+            break;
+        }
+        let time = item.start + span * offset;
+        if time < view.view_start || time >= view_end || time >= item.end {
+            continue;
+        }
+        separators.push(view.x_for_time(time));
+    }
+    separators
+}
+
+#[cfg(target_os = "macos")]
+fn item_cycle_width_px(
+    view: &TimelineView,
+    item: &TimelineItem,
+    viewport: super::WidgetViewport,
+) -> Option<f32> {
+    let Some(TimelineItemContent::Dots { cycle, .. }) = &item.content else {
+        return None;
+    };
+    let item_width_px =
+        (view.x_for_time(item.end) - view.x_for_time(item.start)).abs() * viewport.cell_w;
+    Some(item_width_px * cycle.max(f64::EPSILON) as f32)
+}
+
+#[cfg(target_os = "macos")]
+fn item_loop_notch_dimensions(
+    view: &TimelineView,
+    item: &TimelineItem,
+    viewport: super::WidgetViewport,
+) -> ItemLoopNotchDimensions {
+    let width = item_cycle_width_px(view, item, viewport)
+        .map(|cycle_width_px| {
+            view.loop_notch_width_px
+                .min(cycle_width_px * LOOP_NOTCH_MAX_CYCLE_WIDTH_FRACTION)
+        })
+        .unwrap_or(view.loop_notch_width_px);
+    let scale = if view.loop_notch_width_px > f32::EPSILON {
+        width / view.loop_notch_width_px
+    } else {
+        0.0
+    };
+    ItemLoopNotchDimensions {
+        width_px: width,
+        height_px: view.loop_notch_height_px * scale,
+        corner_radius_px: view.loop_notch_corner_radius_px * scale,
+        smoothing_px: view.loop_notch_smoothing_px * scale,
+    }
+}
+
 /// Draw an item's `content` payload as additional quads clipped to the item's
 /// on-screen rect (docs/arrangement-timeline-ui-spec.md 7.3). `rect` is the
 /// already view-clipped rect from `metal_item_rect`; dot x positions come
@@ -1581,6 +2041,7 @@ fn push_item_content_primitives(
     item: &TimelineItem,
     rect: (f32, f32, f32, f32),
     title_bar: Option<(f32, f32)>,
+    loop_notches_enabled: bool,
     viewport: super::WidgetViewport,
 ) {
     let (x, y, width, height) = rect;
@@ -1601,35 +2062,26 @@ fn push_item_content_primitives(
                 ((view.x_for_time(item.end) - view.x_for_time(item.start)).abs()
                     * viewport.cell_w) as f64;
             let cycle_width_px = item_width_px * cycle;
-            let view_end = view.view_start + view.view_duration;
 
             // Cycle separators: the first boundary is the remaining part of
             // the source cycle after `phase`; later boundaries are one full
             // cycle apart. This works for both repeating clips (`cycle < 1`)
             // and a short clip that happens to cross one source boundary.
-            if cycle_width_px >= 5.0 {
+            if cycle_width_px >= 5.0 && (title_bar.is_none() || !loop_notches_enabled) {
                 let separator_color = crate::backend::Color {
                     r: 0.02,
                     g: 0.025,
                     b: 0.03,
                     a: 0.42,
                 };
-                // A tick off the top of the title bar when there is one, a
-                // full-height rule otherwise (piano roll / bar-less hosts).
+                // Bar-less hosts keep the full-height repeat rule. Setting a
+                // title-barred host's notch radius to zero restores its short
+                // legacy tick, making the new shape fully live-tunable.
                 let (separator_y, separator_height) = match title_bar {
                     Some((bar_y, bar_height)) => (bar_y, (bar_height * 0.55).max(0.12)),
                     None => (y, height),
                 };
-                for index in 0..512 {
-                    let offset = (1.0 - phase + index as f64) * cycle;
-                    if offset >= 1.0 {
-                        break;
-                    }
-                    let time = item.start + span * offset;
-                    if time < view.view_start || time >= view_end || time >= item.end {
-                        continue;
-                    }
-                    let line_x = view.x_for_time(time);
+                for line_x in item_cycle_separator_xs(view, item, viewport) {
                     primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
                         x: line_x - 0.0625,
                         y: separator_y,
@@ -1665,7 +2117,9 @@ fn push_item_content_primitives(
                         continue;
                     }
                     let time = item.start + offset * span;
-                    if time < view.view_start || time >= view_end {
+                    if time < view.view_start
+                        || time >= view.view_start + view.view_duration
+                    {
                         continue;
                     }
                     let dot_x = view
@@ -1753,6 +2207,30 @@ impl TimelineView {
                 .map(|height| height.max(0.2) as f32),
             item_corner_radius: get_num(props, "item-corner-radius", 0.0).max(0.0) as f32,
             title_bar_height: get_num(props, "title-bar-height", 0.0).max(0.0) as f32,
+            loop_notch_width_px: get_num(
+                props,
+                "loop-notch-width",
+                LOOP_NOTCH_WIDTH_PX as f64,
+            )
+            .clamp(0.0, 64.0) as f32,
+            loop_notch_height_px: get_num(
+                props,
+                "loop-notch-height",
+                LOOP_NOTCH_HEIGHT_PX as f64,
+            )
+            .clamp(0.0, 64.0) as f32,
+            loop_notch_corner_radius_px: get_num(
+                props,
+                "loop-notch-corner-radius",
+                LOOP_NOTCH_CORNER_RADIUS_PX as f64,
+            )
+            .clamp(0.0, 64.0) as f32,
+            loop_notch_smoothing_px: get_num(
+                props,
+                "loop-notch-smoothing",
+                LOOP_NOTCH_SMOOTHING_PX as f64,
+            )
+            .clamp(0.0, 64.0) as f32,
             scroll_viewport_height: props
                 .get("scroll-viewport-height")
                 .and_then(as_number)
@@ -4586,6 +5064,217 @@ mod tests {
             top_color_at(&marquee, x_at(6.0), body_y),
             Some(CLIP),
             "the marquee style never repaints a clip body"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn title_barred_clip_cuts_paired_rounded_rect_loop_notches_around_its_body_grid() {
+        const CLIP: crate::backend::Color = crate::backend::Color {
+            r: 0.9,
+            g: 0.45,
+            b: 0.15,
+            a: 1.0,
+        };
+        let props = HashMap::from([
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(1.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(12.0)),
+                    (
+                        "content",
+                        map_value_raw(vec![
+                            ("dots", list_value_raw(Vec::new())),
+                            ("cycle", number_value(0.25)),
+                        ]),
+                    ),
+                ])]),
+            ),
+            (
+                "item-color".to_string(),
+                list_value_raw(vec![
+                    number_value(CLIP.r as f64),
+                    number_value(CLIP.g as f64),
+                    number_value(CLIP.b as f64),
+                ]),
+            ),
+            ("title-bar-height".to_string(), number_value(1.0)),
+            ("loop-notch-width".to_string(), number_value(5.0)),
+            ("loop-notch-height".to_string(), number_value(12.0)),
+            ("loop-notch-corner-radius".to_string(), number_value(2.5)),
+            ("loop-notch-smoothing".to_string(), number_value(1.6)),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(0.0)),
+        ]);
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 160.0,
+            height: 4.0,
+        };
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1920.0,
+            vp_h: 1080.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 12.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let mut node = LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "timeline".to_string(),
+            rect,
+            props,
+            children: Vec::new(),
+            focusable: false,
+        };
+
+        let primitives = build_metal_primitives(&node, viewport);
+        let normal_view = TimelineView::from_props(&node.props, rect);
+        let normal_dimensions =
+            item_loop_notch_dimensions(&normal_view, &normal_view.items[0], viewport);
+        assert_eq!(
+            normal_dimensions,
+            ItemLoopNotchDimensions {
+                width_px: 5.0,
+                height_px: 12.0,
+                corner_radius_px: 2.5,
+                smoothing_px: 1.6,
+            }
+        );
+        let zoomed_out_rect = Rect {
+            width: 16.0,
+            ..rect
+        };
+        let zoomed_out_view = TimelineView::from_props(&node.props, zoomed_out_rect);
+        let zoomed_out_dimensions =
+            item_loop_notch_dimensions(&zoomed_out_view, &zoomed_out_view.items[0], viewport);
+        assert!(
+            (zoomed_out_dimensions.width_px - 4.0).abs() < 0.001
+                && (zoomed_out_dimensions.height_px - 9.6).abs() < 0.001
+                && (zoomed_out_dimensions.corner_radius_px - 2.0).abs() < 0.001
+                && (zoomed_out_dimensions.smoothing_px - 1.28).abs() < 0.001,
+            "a 20px loop cycle should cap notch width at 20% and scale every dimension together: \
+             {zoomed_out_dimensions:?}"
+        );
+        let clip_grid_lines: Vec<_> = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                MetalPrimitive::Quad(quad)
+                    if quad.width == 0.125
+                        && (quad.color.r - 0.02).abs() < f32::EPSILON
+                        && (quad.color.g - 0.025).abs() < f32::EPSILON
+                        && (quad.color.b - 0.03).abs() < f32::EPSILON
+                        && quad.color.a < 0.3 =>
+                {
+                    Some(quad)
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            !clip_grid_lines.is_empty(),
+            "the clip should contain at least one continued grid line"
+        );
+        assert!(
+            clip_grid_lines
+                .iter()
+                .all(|line| line.y == 1.0 && line.height == 3.0),
+            "continued grid lines must cover only the body below the one-cell title bar"
+        );
+        let clip_fill_covers = |primitives: &[MetalPrimitive], x: f32, y: f32| {
+            primitives.iter().any(|primitive| {
+                matches!(primitive, MetalPrimitive::Quad(quad)
+                    if quad.color == CLIP
+                        && x >= quad.x
+                        && x < quad.x + quad.width
+                        && y >= quad.y
+                        && y < quad.y + quad.height)
+            })
+        };
+        // The first repeat boundary is beat 6 => x 60 in this ten-cells/beat
+        // fixture. Its tall rounded rect is centred on y 0, leaving a narrow
+        // slot-like bite while the title bar remains solid beside and below.
+        assert!(
+            !clip_fill_covers(&primitives, 60.0, 0.10),
+            "the smooth loop notch must remove the title-bar fill at its centre"
+        );
+        assert!(
+            clip_fill_covers(&primitives, 60.0, 0.40),
+            "the notch must remain shallow enough to preserve the title bar below it"
+        );
+        assert!(
+            clip_fill_covers(&primitives, 60.8, 0.10),
+            "the title bar must remain filled beside the notch"
+        );
+        assert!(
+            !clip_fill_covers(&primitives, 60.0, 3.90),
+            "the paired smooth loop notch must remove the bottom-edge fill"
+        );
+        assert!(
+            clip_fill_covers(&primitives, 60.0, 3.60),
+            "the bottom notch must remain shallow enough to preserve the clip body above it"
+        );
+        assert!(
+            !primitives.iter().any(|primitive| {
+                matches!(primitive, MetalPrimitive::Quad(quad)
+                    if quad.width == 0.125
+                        && (quad.color.a - 0.42).abs() < f32::EPSILON)
+            }),
+            "title-barred clips replace the old repeat rule with the cutout"
+        );
+
+        node.props
+            .insert("loop-notch-width".to_string(), number_value(8.0));
+        node.props
+            .insert("loop-notch-height".to_string(), number_value(18.0));
+        node.props.insert(
+            "loop-notch-corner-radius".to_string(),
+            number_value(3.0),
+        );
+        node.props
+            .insert("loop-notch-smoothing".to_string(), number_value(3.0));
+        let tuned = build_metal_primitives(&node, viewport);
+        assert!(
+            !clip_fill_covers(&tuned, 60.0, 0.40),
+            "reevaluated Lisp props must deepen the rendered notch"
+        );
+        assert!(
+            !clip_fill_covers(&tuned, 60.0, 3.60),
+            "the same reevaluated height must deepen the bottom notch"
+        );
+        let tuned_view = TimelineView::from_props(&node.props, rect);
+        assert_eq!(tuned_view.loop_notch_width_px, 8.0);
+        assert_eq!(tuned_view.loop_notch_height_px, 18.0);
+        assert_eq!(tuned_view.loop_notch_corner_radius_px, 3.0);
+        assert_eq!(tuned_view.loop_notch_smoothing_px, 3.0);
+
+        node.props
+            .insert("loop-notch-width".to_string(), number_value(0.0));
+        let legacy_ticks = build_metal_primitives(&node, viewport);
+        assert!(
+            legacy_ticks.iter().any(|primitive| {
+                matches!(primitive, MetalPrimitive::Quad(quad)
+                    if quad.width == 0.125
+                        && (quad.color.a - 0.42).abs() < f32::EPSILON
+                        && quad.y == 0.0
+                        && quad.height == 0.55)
+            }),
+            "a zero width must restore the original short title-bar repeat ticks"
         );
     }
 

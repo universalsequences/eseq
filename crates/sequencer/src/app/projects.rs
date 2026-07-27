@@ -23,7 +23,9 @@ use super::fx_chain::{FxChainLocator, FxGraphEditBatch};
 use super::graph::{
     RackCustomBuildSpec, RackSamplerBuildSpec, RackSlotBuildSpec, RackSlotInstrumentBuildSpec,
 };
-use super::{App, BusChannelState, InputMode, Region, SidebarMode, SidebarTab};
+use super::{
+    App, BusChannelState, InputMode, ProjectSampleAsset, Region, SidebarMode, SidebarTab,
+};
 
 pub(super) fn resolve_live_macro_target(
     state: &crate::sequencer::SequencerState,
@@ -1223,6 +1225,7 @@ impl App {
             name: name.to_string(),
             tick: 0,
             project,
+            sample_assets: std::collections::HashMap::new(),
             built_patterns: Vec::new(),
             built_bus_patterns: Vec::new(),
             fallback_samples: 0,
@@ -1233,6 +1236,35 @@ impl App {
 
     pub fn has_pending_project_load(&self) -> bool {
         self.editor.pending_project_load.is_some()
+    }
+
+    fn load_project_sample_asset(
+        &mut self,
+        sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,
+        wav_path: &Path,
+    ) -> Result<ProjectSampleAsset, String> {
+        // Canonical paths collapse relative, absolute, and symlinked references
+        // before any decode, graph allocation, or analyzer submission occurs.
+        let canonical_path = wav_path.canonicalize().map_err(|error| {
+            format!(
+                "Failed to resolve sample '{}': {error}",
+                wav_path.display()
+            )
+        })?;
+        if let Some(asset) = sample_assets.get(&canonical_path) {
+            return Ok(asset.clone());
+        }
+
+        let loaded =
+            crate::instruments::sampler::load_wav_buffer(self.graph.lg.0, &canonical_path)?;
+        self.submit_sample_analysis(&loaded);
+        let asset = ProjectSampleAsset {
+            buffer_id: loaded.buffer_id,
+            sample_rate: loaded.sample_rate,
+            decoded_name: loaded.name,
+        };
+        sample_assets.insert(canonical_path, asset.clone());
+        Ok(asset)
     }
 
     pub fn advance_pending_project_load(&mut self) -> Result<(), String> {
@@ -2519,11 +2551,27 @@ impl App {
                                 "project-load: add sampler track index={} path={}",
                                 track_idx, sample_path
                             );
-                            self.graph_controller()
-                                .add_track(Path::new(sample_path))
+                            let sample_path = Path::new(sample_path);
+                            let asset = self
+                                .load_project_sample_asset(
+                                    &mut pending.sample_assets,
+                                    sample_path,
+                                )
                                 .map_err(|error| {
-                                    format!("Failed to load sample '{}': {error}", sample_path)
+                                    format!(
+                                        "Failed to load sample '{}': {error}",
+                                        sample_path.display()
+                                    )
                                 })?;
+                            let track_name =
+                                crate::sample_db::display_title_for_sample_path(sample_path)
+                                    .unwrap_or_else(|| asset.decoded_name.clone());
+                            self.graph_controller().add_track_from_sample(
+                                sample_path,
+                                asset.buffer_id,
+                                asset.sample_rate,
+                                track_name,
+                            )?;
                         }
                         ProjectTrackKind::Custom { instrument_name } => {
                             eprintln!(
@@ -2579,20 +2627,20 @@ impl App {
                                                     slot_idx + 1
                                                 )
                                             })?;
-                                        let loaded = crate::instruments::sampler::load_wav_buffer(
-                                            self.graph.lg.0,
-                                            Path::new(sample_path),
-                                        )
-                                        .map_err(|error| {
-                                            format!(
-                                                "Failed to load rack sample '{}' for track {} slot {}: {}",
-                                                sample_path,
-                                                track_idx + 1,
-                                                slot_idx + 1,
-                                                error
+                                        let asset = self
+                                            .load_project_sample_asset(
+                                                &mut pending.sample_assets,
+                                                Path::new(sample_path),
                                             )
-                                        })?;
-                                        self.submit_sample_analysis(&loaded);
+                                            .map_err(|error| {
+                                                format!(
+                                                    "Failed to load rack sample '{}' for track {} slot {}: {}",
+                                                    sample_path,
+                                                    track_idx + 1,
+                                                    slot_idx + 1,
+                                                    error
+                                                )
+                                            })?;
                                         let sample_name = slot
                                             .sample_name
                                             .clone()
@@ -2600,16 +2648,16 @@ impl App {
                                                 saved_pattern_slot
                                                     .and_then(|slot| slot.sample_name.clone())
                                             })
-                                            .unwrap_or_else(|| loaded.name.clone());
+                                            .unwrap_or_else(|| asset.decoded_name.clone());
                                         self.register_loaded_sample_path(
                                             &sample_name,
-                                            loaded.buffer_id,
+                                            asset.buffer_id,
                                             PathBuf::from(sample_path),
                                         );
                                         prepared_sources.push(PreparedRackSlotSource::Sampler(
                                             RackSamplerBuildSpec {
-                                                buffer_id: loaded.buffer_id,
-                                                sample_rate: loaded.sample_rate,
+                                                buffer_id: asset.buffer_id,
+                                                sample_rate: asset.sample_rate,
                                                 sample_name,
                                             },
                                         ));
@@ -2871,6 +2919,7 @@ impl App {
                     let (snapshot, bus_patterns, fallback_count) = self
                         .project_pattern_into_snapshot(
                             pending.project.patterns[pattern_idx].clone(),
+                            &mut pending.sample_assets,
                         )?;
                     pending.built_patterns.push(snapshot);
                     pending.built_bus_patterns.push(bus_patterns);
@@ -2894,7 +2943,10 @@ impl App {
         Ok(())
     }
 
-    fn finish_project_load(&mut self, pending: super::PendingProjectLoad) -> Result<(), String> {
+    fn finish_project_load(
+        &mut self,
+        mut pending: super::PendingProjectLoad,
+    ) -> Result<(), String> {
         eprintln!(
             "project-load: finish start name={} tracks={} built_patterns={} fallback_samples={}",
             pending.name,
@@ -2959,7 +3011,10 @@ impl App {
                 let mut chunk_data = Vec::with_capacity(take.chunks.len());
                 for chunk in take.chunks {
                     let (snapshot, _, fallback_count) =
-                        self.project_pattern_into_snapshot(chunk)?;
+                        self.project_pattern_into_snapshot(
+                            chunk,
+                            &mut pending.sample_assets,
+                        )?;
                     let data = snapshot.track_pattern_data(track).ok_or_else(|| {
                         format!(
                             "Take '{}' chunk is missing lane data for track {}",
@@ -2967,7 +3022,7 @@ impl App {
                             track + 1
                         )
                     })?;
-                    let _ = fallback_count;
+                    pending.fallback_samples += fallback_count;
                     chunk_data.push(data);
                 }
                 takes.push((take.id, take.name, take.total_len_steps, chunk_data));
@@ -3360,9 +3415,10 @@ impl App {
             .collect()
     }
 
-    fn project_pattern_into_snapshot(
+    pub(super) fn project_pattern_into_snapshot(
         &mut self,
         pattern: ProjectPattern,
+        sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,
     ) -> Result<(PatternSnapshot, Vec<BusPatternSnapshot>, usize), String> {
         let num_tracks = self.tracks.len();
         let mut sample_ids = Vec::with_capacity(num_tracks);
@@ -3380,6 +3436,14 @@ impl App {
                     .cloned()
                     .unwrap_or_default();
 
+                // Full-width take chunks only populate their owning lane. Empty
+                // sampler lanes are intentionally unbound, not missing assets
+                // to be replaced with an arbitrary file from the sample tree.
+                if saved_path.is_none() && saved_name.trim().is_empty() {
+                    sample_ids.push((-1, String::new(), self.graph.sample_rate));
+                    continue;
+                }
+
                 let resolved_path = saved_path
                     .as_ref()
                     .filter(|path| path.exists())
@@ -3393,34 +3457,36 @@ impl App {
                                 .cloned()
                                 .or_else(|| self.resolve_sample_path_by_name(&saved_name))
                         }
-                    })
-                    .or_else(|| self.first_available_sample_path());
+                    });
 
                 let Some(path_buf) = resolved_path else {
+                    let reference = saved_path
+                        .as_ref()
+                        .map(|path| format!("path '{}'", path.display()))
+                        .unwrap_or_else(|| format!("name '{saved_name}'"));
                     return Err(format!(
-                        "Couldn't recover sample for track {} and no fallback samples exist",
-                        track_idx + 1
+                        "Couldn't resolve saved sample {reference} for track {}",
+                        track_idx + 1,
                     ));
                 };
-                let loaded = crate::instruments::sampler::load_wav_buffer(self.graph.lg.0, &path_buf).map_err(
-                    |error| {
+                let asset = self
+                    .load_project_sample_asset(sample_assets, &path_buf)
+                    .map_err(|error| {
                         format!(
                             "Failed to load sample '{}' for track {}: {}",
                             path_buf.display(),
                             track_idx + 1,
                             error
                         )
-                    },
-                )?;
-                self.submit_sample_analysis(&loaded);
-                let buffer_id = loaded.buffer_id;
-                let sample_rate = loaded.sample_rate;
+                    })?;
+                let buffer_id = asset.buffer_id;
+                let sample_rate = asset.sample_rate;
                 let sample_name = crate::sample_db::display_title_for_sample_path(&path_buf)
                     .or_else(|| {
                         let saved_name = saved_name.trim();
                         (!saved_name.is_empty()).then(|| saved_name.to_string())
                     })
-                    .unwrap_or(loaded.name);
+                    .unwrap_or(asset.decoded_name);
                 if saved_path.as_ref() != Some(&path_buf) {
                     fallback_count += 1;
                 }
@@ -3725,33 +3791,6 @@ impl App {
         refresh_neural_output_override_param_ids(&mut snapshot);
 
         Ok((snapshot, bus_patterns, fallback_count))
-    }
-
-    fn first_available_sample_path(&self) -> Option<PathBuf> {
-        fn walk(dir: &Path) -> Option<PathBuf> {
-            let mut entries: Vec<_> = std::fs::read_dir(dir)
-                .ok()?
-                .filter_map(Result::ok)
-                .collect();
-            entries.sort_by_key(|entry| entry.file_name());
-            for entry in entries {
-                let path = entry.path();
-                if path.is_dir() {
-                    if let Some(found) = walk(&path) {
-                        return Some(found);
-                    }
-                } else if path
-                    .extension()
-                    .map(|ext| ext.to_ascii_lowercase() == "wav")
-                    .unwrap_or(false)
-                {
-                    return Some(path);
-                }
-            }
-            None
-        }
-
-        walk(Path::new("samples"))
     }
 
     pub fn push_all_restored_defaults(&mut self) {

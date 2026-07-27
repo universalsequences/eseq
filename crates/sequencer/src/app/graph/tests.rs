@@ -9,7 +9,7 @@
     };
     use crate::app::edit::{try_apply_command, EditOutcome};
     use crate::app::{AppCommand, AudioBuses};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Arc, Mutex};
 
     fn topology_test_slot(
@@ -156,6 +156,24 @@
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
         }
+    }
+
+    fn write_test_wav(path: &Path) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 44_100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).expect("create test WAV");
+        for frame in 0..256 {
+            let phase = frame as f32 / 256.0;
+            let sample = (phase * std::f32::consts::TAU).sin();
+            writer
+                .write_sample((sample * i16::MAX as f32) as i16)
+                .expect("write test WAV sample");
+        }
+        writer.finalize().expect("finalize test WAV");
     }
 
     impl TestLiveGraph {
@@ -699,6 +717,117 @@
         assert!(
             app.has_pending_project_load(),
             "the target arrangement is installed later, during finalization"
+        );
+        app.editor.pending_project_load = None;
+        graph.process_block();
+    }
+
+    #[test]
+    fn project_load_reuses_one_sample_buffer_across_tracks_patterns_and_take_chunks() {
+        let graph = TestLiveGraph::new("project-sample-pool-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos();
+        let sample_path = std::env::temp_dir().join(format!(
+            "eseq-project-sample-pool-{}-{nonce}.wav",
+            std::process::id()
+        ));
+        write_test_wav(&sample_path);
+        let _sample_cleanup = TestProjectFile(sample_path.clone());
+
+        app.graph_controller()
+            .add_track(&sample_path)
+            .expect("add first source-project sampler track");
+        app.graph_controller()
+            .add_track(&sample_path)
+            .expect("add second source-project sampler track");
+
+        let project_name = format!(
+            "__test-project-sample-pool-{}-{nonce}",
+            std::process::id()
+        );
+        let mut project = app
+            .capture_project(&project_name)
+            .expect("sample-pool project should capture");
+        project.patterns.push(project.patterns[0].clone());
+        let mut take_chunk = project.patterns[0].clone();
+        take_chunk.sample_paths[1] = None;
+        take_chunk.sample_names[1].clear();
+        project.take_pools = vec![
+            crate::project::ProjectTrackTakePool {
+                takes: vec![crate::project::ProjectTake {
+                    id: 0,
+                    name: "Take 1".to_string(),
+                    total_len_steps: 64,
+                    chunks: vec![take_chunk],
+                }],
+                next_take_id: 1,
+            },
+            crate::project::ProjectTrackTakePool::default(),
+        ];
+        let project_path = crate::project::save_project(&project_name, &project)
+            .expect("sample-pool project should save");
+        let _project_cleanup = TestProjectFile(project_path);
+
+        app.queue_project_load_named(&project_name)
+            .expect("sample-pool project should queue");
+        for _ in 0..64 {
+            if app
+                .editor
+                .pending_project_load
+                .as_ref()
+                .is_some_and(|pending| pending.built_patterns.len() == 2)
+            {
+                break;
+            }
+            app.advance_pending_project_load()
+                .expect("sample-pool project should build its patterns");
+        }
+        let pending = app
+            .editor
+            .pending_project_load
+            .as_ref()
+            .expect("project should remain pending before finalization");
+        assert_eq!(
+            pending.sample_assets.len(),
+            1,
+            "all track and pattern references should share one loaded asset"
+        );
+        let shared_buffer_id = app.graph.track_buffer_ids[0];
+        assert_eq!(app.graph.track_buffer_ids[1], shared_buffer_id);
+        let snapshots = pending.built_patterns.clone();
+        assert_eq!(snapshots.len(), 2);
+        for snapshot in &snapshots {
+            assert_eq!(snapshot.sample_ids[0].0, shared_buffer_id);
+            assert_eq!(snapshot.sample_ids[1].0, shared_buffer_id);
+        }
+
+        let take_chunk = pending.project.take_pools[0].takes[0].chunks[0].clone();
+        let mut sample_assets = {
+            let pending = app
+                .editor
+                .pending_project_load
+                .as_mut()
+                .expect("project should remain pending for take conversion");
+            std::mem::take(&mut pending.sample_assets)
+        };
+        let (take_snapshot, _, fallback_count) = app
+            .project_pattern_into_snapshot(take_chunk, &mut sample_assets)
+            .expect("take chunk should reuse the pending project asset pool");
+        assert_eq!(fallback_count, 0);
+        assert_eq!(sample_assets.len(), 1);
+        assert_eq!(take_snapshot.sample_ids[0].0, shared_buffer_id);
+        assert_eq!(
+            take_snapshot.sample_ids[1].0, -1,
+            "an empty non-owning take lane should remain unbound"
+        );
+        assert!(
+            app.sample_buffer_path_registry
+                .values()
+                .all(|path| path == &sample_path),
+            "an empty non-owning take lane must not load an arbitrary fallback WAV"
         );
         app.editor.pending_project_load = None;
         graph.process_block();
