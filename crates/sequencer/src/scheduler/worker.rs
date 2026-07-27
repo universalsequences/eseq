@@ -114,6 +114,12 @@ pub fn spawn_scheduler_thread(
                                 runtime.replace_song_in_place(song);
                             }
                         }
+                        crate::sequencer::SongPlaybackCommand::Rebuild { song } => {
+                            let clock_beats = lookahead_state.clock.total_beats;
+                            if let Some(runtime) = lookahead_state.song.as_mut() {
+                                runtime.rebuild_song(song, clock_beats);
+                            }
+                        }
                         crate::sequencer::SongPlaybackCommand::Stop => {
                             lookahead_state.song = None;
                             state.song_playback().clear_position();

@@ -266,9 +266,11 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             // edit one track's clip must not restart the
                             // accumulator evolution of tracks whose resolved
                             // pattern is unchanged across the boundary.
+                            let (previous, current) =
+                                song.transition_rows(prev_row, row);
                             mark_song_row_accum_resets(
-                                &song.song().rows[prev_row],
-                                &song.song().rows[row],
+                                previous,
+                                current,
                                 pending_accum_reset,
                             );
                         }

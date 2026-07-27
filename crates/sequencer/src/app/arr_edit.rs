@@ -592,6 +592,10 @@ impl App {
         };
         if self.state.rebuild_song_playback(std::sync::Arc::clone(&song)).is_ok() {
             self.active_runtime_song = Some(song);
+            // A structural remap can change the current row's ordinal without
+            // re-entering it. Do not let the old ordinal suppress the next
+            // real scheduler-authoritative RowApplied notice.
+            self.song_mirrored_row = None;
         }
     }
 
@@ -1008,7 +1012,8 @@ mod tests {
     #[test]
     fn arrangement_primitives_are_rejected_while_song_editing_is_locked() {
         let mut app = test_app();
-        app.song_transport_locks_edits = true;
+        app.song_transport_mode =
+            crate::app::song_transport::SongTransportMode::ArrangementCapture;
         let error = app
             .arr_replace(ProjectArrangement::new(2, 16.0))
             .expect_err("locked");
@@ -1821,7 +1826,8 @@ mod tests {
         let id = clip_at(&app, 0, 8.0);
         let before = app.state.committed_arrangement();
         let depth = app.history.undo_len();
-        app.song_transport_locks_edits = true;
+        app.song_transport_mode =
+            crate::app::song_transport::SongTransportMode::ArrangementCapture;
 
         let locked = crate::app::song_edit::SONG_EDITS_LOCKED_ERROR;
         let errors: Vec<String> = vec![

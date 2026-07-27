@@ -1210,6 +1210,51 @@ mod tests {
         assert_eq!(app.history.undo_len(), depth, "copy is read-only");
     }
 
+    #[test]
+    fn region_edits_are_allowed_during_song_playback_and_locked_during_capture() {
+        let mut playback = app_with_song();
+        playback
+            .set_use_arrangement(true)
+            .expect("enable arrangement");
+        playback
+            .song_transport_play(false)
+            .expect("song playback starts");
+        playback.state.song_playback().drain_commands();
+        playback.set_song_region(SongRegionSelection::new(0, 1, 4.0, 8.0));
+        playback
+            .song_region_move(12.0)
+            .expect("region move succeeds during song playback");
+        let rebuilds = playback
+            .state
+            .song_playback()
+            .drain_commands()
+            .into_iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    crate::sequencer::SongPlaybackCommand::Rebuild { .. }
+                )
+            })
+            .count();
+        assert_eq!(rebuilds, 1, "one region commit sends one Rebuild");
+
+        let mut capture = app_with_song();
+        capture
+            .set_use_arrangement(true)
+            .expect("enable arrangement");
+        capture
+            .song_transport_play(true)
+            .expect("arrangement capture starts");
+        capture.set_song_region(SongRegionSelection::new(0, 1, 4.0, 8.0));
+        let error = capture
+            .song_region_move(12.0)
+            .expect_err("capture owns the pending arrangement splice");
+        assert_eq!(
+            error,
+            "song editing is unavailable during arrangement capture"
+        );
+    }
+
     /// 5.1: a clip the copy boundary cuts into stores its offset ADVANCED to
     /// the cut, so the pasted result plays the identical slice rather than
     /// restarting the pattern.

@@ -324,6 +324,7 @@ impl App {
             ]),
             retained_bytes,
         );
+        self.rebuild_active_song_after_arrangement_edit();
         Ok(())
     }
 
@@ -427,6 +428,7 @@ impl App {
             ]),
             retained_bytes,
         );
+        self.rebuild_active_song_after_arrangement_edit();
         Ok(take_id)
     }
 

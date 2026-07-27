@@ -1376,7 +1376,7 @@
 ;; lane (the arrangement's one ruler) sits OUTSIDE the track scroll container
 ;; so it stays pinned while track rows scroll vertically inside it.
 ;; The step tile hides the global status line, so song-primitive rejections
-;; (including "song editing is unavailable during song playback/capture")
+;; (including "song editing is unavailable during arrangement capture")
 ;; surface here; the strip disappears on the next successful edit.
 (def arrangement-error-banner ()
   (if (= SEQ.song-edit-error nil)

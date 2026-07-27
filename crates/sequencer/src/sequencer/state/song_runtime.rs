@@ -119,6 +119,13 @@ pub enum SongPlaybackCommand {
     Refresh {
         song: Arc<RuntimeSong>,
     },
+    /// Structurally rebuilt arrangement rows. The scheduler remaps by its
+    /// clock-derived song beat and either installs immediately when the
+    /// sounding source/offset identity is unchanged or defers to the next
+    /// row boundary.
+    Rebuild {
+        song: Arc<RuntimeSong>,
+    },
     Stop,
 }
 
@@ -344,6 +351,14 @@ pub enum SongChunkPlan {
 /// allocation-free apart from mailbox notice pushes.
 pub struct SongPlaybackRuntime {
     song: Arc<RuntimeSong>,
+    /// Latest structural rebuild waiting for the sounding row's next
+    /// boundary. Replacing this pointer is allocation-free; every rebuild was
+    /// already materialized on the control thread.
+    pending_rebuild: Option<Arc<RuntimeSong>>,
+    /// The song retained for one returned boundary plan when a pending
+    /// rebuild installs. Lookahead uses it to compare the actually sounding
+    /// row with the newly governing row for accumulator resets.
+    transition_from: Option<(Arc<RuntimeSong>, usize)>,
     samples_per_quarter: f64,
     start_beat: f64,
     initial_row: usize,
@@ -355,6 +370,10 @@ pub struct SongPlaybackRuntime {
     /// pattern step coinciding with a row boundary is scheduled from the new
     /// row at exactly the sample where the clock crosses the boundary beat.
     clock_beat_offset: f64,
+    /// Song-timeline beat anchoring the sounding row's lane offsets. Kept
+    /// independently from `row` so an identity-compatible cursor remap can
+    /// adopt the new layout without moving the phase anchor.
+    row_anchor_beat: f64,
     started: bool,
     ended: bool,
     /// See `SongPlaybackCommand::Start::open_ended`.
@@ -399,13 +418,17 @@ impl SongPlaybackRuntime {
         let initial_row = song
             .row_index_at_beat(start_beat)
             .ok_or_else(|| format!("no song row governs start beat {start_beat}"))?;
+        let row_anchor_beat = song.rows[initial_row].start_beat;
         Ok(Self {
             song,
+            pending_rebuild: None,
+            transition_from: None,
             samples_per_quarter,
             start_beat,
             initial_row,
             row: initial_row,
             clock_beat_offset: start_beat,
+            row_anchor_beat,
             started: false,
             ended: false,
             open_ended: false,
@@ -446,6 +469,52 @@ impl SongPlaybackRuntime {
         true
     }
 
+    /// Apply a structurally rebuilt song against the scheduler clock's
+    /// current planning point. Row ordinals are deliberately ignored: the
+    /// governing row is found from the clock-derived song beat.
+    ///
+    /// Identity-compatible current rows install immediately while retaining
+    /// the sounding row's phase anchor. A changed current row stays pending
+    /// until `next_chunk` reaches the old sounding row's next boundary. A
+    /// rebuild received before the first chunk can install directly because
+    /// there is no sounding row to protect.
+    pub fn rebuild_song(&mut self, song: Arc<RuntimeSong>, clock_beats: f64) {
+        let song_beat = self.clock_beat_offset + clock_beats;
+        let next_row = song.row_index_at_beat(song_beat).unwrap_or(0);
+        let current = &self.song.rows[self.row];
+        let next = &song.rows[next_row];
+        let same_sounding_identity = current.resolved_sources == next.resolved_sources
+            && current.lane_offsets == next.lane_offsets;
+        let past_end = song_beat >= song.end_beat;
+
+        if !self.started || same_sounding_identity || past_end {
+            self.install_rebuild(song, next_row, false);
+        } else {
+            self.pending_rebuild = Some(song);
+        }
+    }
+
+    fn install_rebuild(
+        &mut self,
+        song: Arc<RuntimeSong>,
+        row: usize,
+        at_boundary: bool,
+    ) {
+        if at_boundary {
+            let previous = std::mem::replace(&mut self.song, song);
+            self.transition_from = Some((previous, self.row));
+            self.row_anchor_beat = self.song.rows[row].start_beat;
+        } else {
+            self.song = song;
+        }
+        self.row = row;
+        self.initial_row = self
+            .song
+            .row_index_at_beat(self.start_beat)
+            .unwrap_or(0);
+        self.pending_rebuild = None;
+    }
+
     pub fn current_row(&self) -> usize {
         self.row
     }
@@ -459,6 +528,9 @@ impl SongPlaybackRuntime {
     pub fn reset(&mut self) {
         self.row = self.initial_row;
         self.clock_beat_offset = self.start_beat;
+        self.row_anchor_beat = self.song.rows[self.initial_row].start_beat;
+        self.pending_rebuild = None;
+        self.transition_from = None;
         self.started = false;
         self.ended = false;
     }
@@ -474,7 +546,26 @@ impl SongPlaybackRuntime {
     /// clip step offsets.
     pub fn row_clock_anchor(&self, row: usize) -> (f64, &[f64]) {
         let row = &self.song.rows[row];
-        (row.start_beat - self.clock_beat_offset, &row.lane_offsets)
+        (
+            self.row_anchor_beat - self.clock_beat_offset,
+            &row.lane_offsets,
+        )
+    }
+
+    /// Rows on either side of the most recent boundary. A deferred Rebuild
+    /// crosses between two immutable songs, so the prior row cannot be
+    /// recovered by indexing the newly installed layout.
+    pub fn transition_rows(
+        &self,
+        previous_row: usize,
+        current_row: usize,
+    ) -> (&RuntimeSongRow, &RuntimeSongRow) {
+        let previous = self
+            .transition_from
+            .as_ref()
+            .map(|(song, row)| &song.rows[*row])
+            .unwrap_or_else(|| &self.song.rows[previous_row]);
+        (previous, &self.song.rows[current_row])
     }
 
     fn publish_position(&self, mailbox: &SongPlaybackMailbox, anchor_sample: u64, anchor_beat: f64) {
@@ -510,6 +601,7 @@ impl SongPlaybackRuntime {
         if self.ended {
             return SongChunkPlan::Ended;
         }
+        self.transition_from = None;
         let mut song_beat = self.clock_beat_offset + clock_beats;
         if !self.started {
             self.started = true;
@@ -541,6 +633,29 @@ impl SongPlaybackRuntime {
                     wrapped,
                 };
             }
+            if let Some(song) = self.pending_rebuild.take() {
+                let next_row = song.row_index_at_beat(song_beat).unwrap_or(0);
+                let past_end = song_beat >= song.end_beat;
+                self.install_rebuild(song, next_row, true);
+                row_changed = true;
+                if !past_end || self.open_ended {
+                    let row = &self.song.rows[self.row];
+                    mailbox.push_notice(SongPlaybackNotice::RowApplied(
+                        AudibleSongRowApplied {
+                            row_id: row.id,
+                            row_ordinal: self.row,
+                            effective_beat: song_beat,
+                            effective_sample: at_sample,
+                            wrapped: false,
+                        },
+                    ));
+                    self.publish_position(mailbox, at_sample, song_beat);
+                }
+                // Re-evaluate against the rebuilt layout. If the new end is
+                // already behind the cursor, the ordinary end/loop branch
+                // below now owns the outcome.
+                continue;
+            }
             if boundary_is_end {
                 // Guard against a degenerate sub-sample song hanging the
                 // wrap loop: a wrap must make forward progress.
@@ -552,6 +667,7 @@ impl SongPlaybackRuntime {
                     self.clock_beat_offset = 0.0;
                     song_beat = 0.0;
                     self.row = self.song.row_index_at_beat(0.0).unwrap_or(0);
+                    self.row_anchor_beat = self.song.rows[self.row].start_beat;
                     row_changed = true;
                     wrapped = true;
                     let row = &self.song.rows[self.row];
@@ -587,6 +703,7 @@ impl SongPlaybackRuntime {
                 return SongChunkPlan::Ended;
             }
             self.row += 1;
+            self.row_anchor_beat = self.song.rows[self.row].start_beat;
             row_changed = true;
             let row = &self.song.rows[self.row];
             mailbox.push_notice(SongPlaybackNotice::RowApplied(AudibleSongRowApplied {

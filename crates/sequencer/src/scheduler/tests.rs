@@ -5522,6 +5522,235 @@
             .row_ordinal
     }
 
+    fn start_runtime_at_beat(
+        song: Arc<crate::sequencer::RuntimeSong>,
+        beat: f64,
+        mailbox: &crate::sequencer::SongPlaybackMailbox,
+    ) -> crate::sequencer::SongPlaybackRuntime {
+        let samples_per_quarter = 24_000.0;
+        let mut runtime =
+            crate::sequencer::SongPlaybackRuntime::new(song, 0.0, samples_per_quarter)
+                .expect("song playback runtime");
+        let plan = runtime.next_chunk(
+            (beat * samples_per_quarter) as u64,
+            beat,
+            samples_per_quarter as usize,
+            mailbox,
+        );
+        assert!(matches!(
+            plan,
+            crate::sequencer::SongChunkPlan::Schedule { .. }
+        ));
+        mailbox.drain_notices();
+        runtime
+    }
+
+    #[test]
+    fn song_rebuild_remaps_from_clock_beat_and_preserves_the_sounding_anchor() {
+        let (state, _) = song_mode_fixture();
+        song_mode_commit(
+            &state,
+            vec![
+                song_mode_row(10, 0.0, 0, Vec::new()),
+                song_mode_row(11, 4.0, 1, Vec::new()),
+                song_mode_row(12, 8.0, 2, Vec::new()),
+            ],
+            12.0,
+            false,
+        );
+        let original = state.preflight_runtime_song().expect("preflight original");
+        let mut runtime = start_runtime_at_beat(
+            Arc::clone(&original),
+            5.0,
+            state.song_playback(),
+        );
+        assert_eq!(runtime.current_row(), 1);
+        assert!((runtime.row_clock_anchor(1).0 - 4.0).abs() < 1e-9);
+
+        // Move the governing row's start without changing what it resolves.
+        // A row-index-based rebuild would either retain ordinal 1 by accident
+        // or move its phase anchor to beat 2.
+        song_mode_commit(
+            &state,
+            vec![
+                song_mode_row(20, 0.0, 0, Vec::new()),
+                song_mode_row(21, 2.0, 1, Vec::new()),
+                song_mode_row(22, 7.0, 2, Vec::new()),
+            ],
+            12.0,
+            false,
+        );
+        let rebuilt = state.preflight_runtime_song().expect("preflight rebuild");
+        runtime.rebuild_song(Arc::clone(&rebuilt), 5.0);
+
+        assert!(
+            Arc::ptr_eq(runtime.song(), &rebuilt),
+            "identical sounding source/offset identity swaps immediately"
+        );
+        assert_eq!(
+            runtime.current_row(),
+            rebuilt.row_index_at_beat(5.0).unwrap(),
+            "the cursor is selected from the runtime clock beat"
+        );
+        assert!(
+            (runtime.row_clock_anchor(runtime.current_row()).0 - 4.0).abs() < 1e-9,
+            "an immediate remap must not move the sounding phase anchor"
+        );
+        assert!(
+            state.song_playback().drain_notices().is_empty(),
+            "an immediate identity-compatible remap never re-enters the row"
+        );
+    }
+
+    #[test]
+    fn song_rebuild_with_a_changed_current_row_waits_for_the_next_boundary() {
+        let (state, _) = song_mode_fixture();
+        song_mode_commit(
+            &state,
+            vec![
+                song_mode_row(10, 0.0, 0, Vec::new()),
+                song_mode_row(11, 4.0, 1, Vec::new()),
+                song_mode_row(12, 8.0, 2, Vec::new()),
+            ],
+            12.0,
+            false,
+        );
+        let original = state.preflight_runtime_song().expect("preflight original");
+        let mut runtime = start_runtime_at_beat(
+            Arc::clone(&original),
+            5.0,
+            state.song_playback(),
+        );
+
+        song_mode_commit(
+            &state,
+            vec![
+                song_mode_row(20, 0.0, 0, Vec::new()),
+                song_mode_row(21, 3.0, 2, Vec::new()),
+                song_mode_row(22, 10.0, 1, Vec::new()),
+            ],
+            12.0,
+            false,
+        );
+        let rebuilt = state.preflight_runtime_song().expect("preflight rebuild");
+        runtime.rebuild_song(Arc::clone(&rebuilt), 5.0);
+        assert!(
+            Arc::ptr_eq(runtime.song(), &original),
+            "changed sounding identity stays on the old immutable song"
+        );
+
+        let before_boundary = runtime.next_chunk(
+            7 * 24_000,
+            7.0,
+            24_000,
+            state.song_playback(),
+        );
+        assert!(matches!(
+            before_boundary,
+            crate::sequencer::SongChunkPlan::Schedule { row: 1, .. }
+        ));
+        assert!(Arc::ptr_eq(runtime.song(), &original));
+        assert!(
+            state.song_playback().drain_notices().is_empty(),
+            "the rebuilt row must not apply before the old row boundary"
+        );
+
+        let at_boundary = runtime.next_chunk(
+            8 * 24_000,
+            8.0,
+            24_000,
+            state.song_playback(),
+        );
+        assert!(matches!(
+            at_boundary,
+            crate::sequencer::SongChunkPlan::Schedule {
+                row_changed: true,
+                ..
+            }
+        ));
+        assert!(Arc::ptr_eq(runtime.song(), &rebuilt));
+        assert_eq!(runtime.current_row(), rebuilt.row_index_at_beat(8.0).unwrap());
+        let applied = song_row_applied(&state.song_playback().drain_notices());
+        assert_eq!(applied.len(), 1, "{applied:?}");
+        assert!((applied[0].effective_beat - 8.0).abs() < 1e-9);
+        assert!(!applied[0].wrapped);
+    }
+
+    #[test]
+    fn song_rebuild_past_the_new_end_uses_the_existing_end_and_loop_rules() {
+        let (state, _) = song_mode_fixture();
+        song_mode_commit(
+            &state,
+            vec![
+                song_mode_row(10, 0.0, 0, Vec::new()),
+                song_mode_row(11, 4.0, 1, Vec::new()),
+            ],
+            12.0,
+            false,
+        );
+        let original = state.preflight_runtime_song().expect("preflight original");
+
+        let exercise = |loop_enabled: bool| {
+            let mut runtime = start_runtime_at_beat(
+                Arc::clone(&original),
+                5.0,
+                state.song_playback(),
+            );
+            song_mode_commit(
+                &state,
+                vec![
+                    song_mode_row(20, 0.0, 0, Vec::new()),
+                    song_mode_row(21, 2.0, 2, Vec::new()),
+                ],
+                4.0,
+                loop_enabled,
+            );
+            let rebuilt = state.preflight_runtime_song().expect("preflight rebuild");
+            runtime.rebuild_song(rebuilt, 5.0);
+            let plan = runtime.next_chunk(
+                5 * 24_000,
+                5.0,
+                24_000,
+                state.song_playback(),
+            );
+            let notices = state.song_playback().drain_notices();
+            (plan, notices)
+        };
+
+        let (ended, notices) = exercise(false);
+        assert!(matches!(ended, crate::sequencer::SongChunkPlan::Ended));
+        assert!(
+            notices.iter().any(|notice| matches!(
+                notice,
+                crate::sequencer::SongPlaybackNotice::Ended { end_beat, .. }
+                    if (*end_beat - 4.0).abs() < 1e-9
+            )),
+            "{notices:?}"
+        );
+
+        let (wrapped, notices) = exercise(true);
+        assert!(matches!(
+            wrapped,
+            crate::sequencer::SongChunkPlan::Schedule {
+                wrapped: true,
+                ..
+            }
+        ));
+        assert!(
+            notices.iter().any(|notice| matches!(
+                notice,
+                crate::sequencer::SongPlaybackNotice::RowApplied(applied)
+                    if applied.wrapped && applied.effective_beat == 0.0
+            )),
+            "{notices:?}"
+        );
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| matches!(notice, crate::sequencer::SongPlaybackNotice::Ended { .. }))
+        );
+    }
+
     #[test]
     fn song_row_boundary_inside_block_splits_scheduling() {
         run_with_scheduler_stack(|| {
@@ -5971,6 +6200,124 @@
                 applied.len(),
                 wraps + 1,
                 "one initial application plus one per wrap ({applied:?})"
+            );
+        });
+    }
+
+    #[test]
+    fn song_rebuild_ahead_changes_future_playback_without_reentering_the_sounding_row() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            song_mode_commit(
+                &state,
+                vec![
+                    song_mode_row(10, 0.0, 0, Vec::new()),
+                    song_mode_row(11, 8.0, 1, Vec::new()),
+                ],
+                12.0,
+                false,
+            );
+            let original = state.preflight_runtime_song().expect("preflight original");
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let base = state.publish_scheduler_snapshot();
+            let samples_per_quarter = 48_000.0 * 60.0 / base.transport.bpm as f64;
+            let queue = Box::new(ScheduledEventQueue::<128>::new());
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler.song = Some(
+                crate::sequencer::SongPlaybackRuntime::new(
+                    original,
+                    0.0,
+                    samples_per_quarter,
+                )
+                .expect("song playback runtime"),
+            );
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime = None;
+            let block = 4_800_usize;
+            let mut scheduled_until = 0_u64;
+            let mut rendered = 0_u64;
+            let mut triggers = Vec::new();
+            let mut applied = Vec::new();
+            let edit_at = samples_per_quarter as u64;
+            let end_sample = (12.0 * samples_per_quarter) as u64;
+            let mut edited = false;
+
+            while rendered < end_sample {
+                let result = schedule_playing_lookahead(
+                    &mut scheduler,
+                    &state,
+                    &base,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    base.transport.pattern_epoch,
+                    rendered,
+                    (block * 4) as u64,
+                    48_000,
+                    block,
+                    samples_per_quarter,
+                    scheduled_until,
+                    false,
+                    false,
+                );
+                scheduled_until = result.scheduled_until_sample;
+                triggers.extend(observed_triggers(queue.as_ref()));
+                applied.extend(song_row_applied(&state.drain_song_playback_notices()));
+                rendered += block as u64;
+
+                if !edited && rendered >= edit_at {
+                    // The edit is seven beats ahead and outside the current
+                    // lookahead horizon. Scene 2 replaces scene 1 there.
+                    song_mode_commit(
+                        &state,
+                        vec![
+                            song_mode_row(20, 0.0, 0, Vec::new()),
+                            song_mode_row(21, 8.0, 2, Vec::new()),
+                        ],
+                        12.0,
+                        false,
+                    );
+                    let rebuilt = state.preflight_runtime_song().expect("preflight rebuild");
+                    let clock_beat = scheduler.clock.total_beats;
+                    scheduler
+                        .song
+                        .as_mut()
+                        .expect("song runtime")
+                        .rebuild_song(rebuilt, clock_beat);
+                    edited = true;
+                }
+            }
+
+            let after_boundary: Vec<_> = triggers
+                .iter()
+                .filter(|event| {
+                    event.track == 0
+                        && event.sample_time >= (8.0 * samples_per_quarter) as u64
+                })
+                .collect();
+            assert!(
+                !after_boundary.is_empty()
+                    && after_boundary
+                        .iter()
+                        .all(|event| event.transpose == 3.0),
+                "the edit ahead must govern when reached: {after_boundary:#?}"
+            );
+            let sounding_row_entries: Vec<_> = applied
+                .iter()
+                .filter(|notice| notice.effective_beat < 8.0)
+                .collect();
+            assert_eq!(
+                sounding_row_entries.len(),
+                1,
+                "the sounding row is entered once at Start, never by Rebuild: {applied:?}"
+            );
+            assert!(sounding_row_entries[0].effective_beat.abs() < 1e-9);
+            assert!(
+                applied
+                    .iter()
+                    .any(|notice| (notice.effective_beat - 8.0).abs() < 1e-9),
+                "the rebuilt future row applies at its ordinary boundary: {applied:?}"
             );
         });
     }

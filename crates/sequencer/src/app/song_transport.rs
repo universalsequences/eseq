@@ -618,7 +618,10 @@ mod tests {
         let mode = app.song_transport_play(false).expect("play succeeds");
         assert_eq!(mode, SongTransportMode::SongPlayback);
         assert!(app.state.is_playing());
-        assert!(app.song_edits_locked(), "song edits lock during playback");
+        assert!(
+            !app.song_edits_locked(),
+            "ordinary song editing stays available during playback"
+        );
         assert!(app.active_runtime_song.is_some());
         assert_eq!(app.song_transport_mode.binding_str(), "song-playback");
         // Row zero was applied as the launch state.
@@ -909,19 +912,25 @@ mod tests {
     }
 
     #[test]
-    fn song_edit_primitives_are_locked_in_song_modes_and_unlocked_after_stop() {
+    fn song_edit_primitives_are_available_in_playback_but_locked_during_capture() {
         let mut app = app_with_song();
         app.set_use_arrangement(true).unwrap();
-        for record in [false, true] {
-            app.song_transport_play(record).expect("play succeeds");
-            let error = app.arr_set_loop(true).expect_err("edits must be locked");
-            assert_eq!(error, crate::app::song_edit::SONG_EDITS_LOCKED_ERROR);
-            // Zero-length capture commits fail; the transport still stops
-            // and the primitives unlock.
-            let _ = app.song_transport_stop();
-            app.arr_set_loop(app.state.committed_song().unwrap().loop_enabled)
-                .expect("no-op edit succeeds when unlocked");
-        }
+        app.song_transport_play(false).expect("play succeeds");
+        app.arr_set_loop(true)
+            .expect("song playback allows arrangement edits");
+        let _ = app.song_transport_stop();
+
+        app.song_transport_play(true).expect("capture starts");
+        let error = app
+            .arr_set_loop(false)
+            .expect_err("capture owns the arrangement splice");
+        assert_eq!(
+            error,
+            "song editing is unavailable during arrangement capture"
+        );
+        let _ = app.song_transport_stop();
+        app.arr_set_loop(false)
+            .expect("editing unlocks after capture stops");
     }
 
     #[test]
@@ -1071,6 +1080,62 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn drained_rebuilds(app: &App) -> Vec<std::sync::Arc<crate::sequencer::RuntimeSong>> {
+        app.state
+            .song_playback()
+            .drain_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                crate::sequencer::SongPlaybackCommand::Rebuild { song } => Some(song),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn arrangement_edit_and_undo_during_playback_each_send_one_rebuild() {
+        let mut app = playing_song_app(app_with_song());
+        let clip = app
+            .state
+            .committed_arrangement()
+            .expect("arrangement")
+            .track_lanes[0]
+            .iter()
+            .find(|clip| (clip.start_beat - 8.0).abs() < 1e-9)
+            .expect("clip ahead of the playhead")
+            .id;
+        let depth = app.history.undo_len();
+
+        app.arr_clip_move(clip, 10.0)
+            .expect("clip edits are allowed during song playback");
+        assert_eq!(
+            app.history.undo_len(),
+            depth + 1,
+            "one edit remains one undo entry"
+        );
+        assert_eq!(
+            drained_rebuilds(&app).len(),
+            1,
+            "the structural commit sends exactly one Rebuild"
+        );
+        assert_eq!(
+            app.song_mirrored_row,
+            None,
+            "a remapped ordinal cannot suppress the next real row notice"
+        );
+
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            drained_rebuilds(&app).len(),
+            1,
+            "history replay rides the same Rebuild seam"
+        );
+        app.song_transport_stop().unwrap();
     }
 
     /// Slice 3's whole premise: the refreshed rows must be accepted by the
