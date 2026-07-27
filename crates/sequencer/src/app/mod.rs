@@ -884,11 +884,6 @@ pub struct App {
     pub sample_analysis: AnalysisService,
     pub pending_recording_take: Option<RecordingTake>,
     recording_history: Option<RecordingHistoryTransaction>,
-    /// Derived from `song_transport_mode`: true while `SongPlayback` or
-    /// `ArrangementCapture` is active, making the song editing primitives
-    /// (`song_edit.rs`) reject with an actionable error (see
-    /// `App::song_edits_locked` and `song_transport.rs`).
-    pub song_transport_locks_edits: bool,
     /// The single active launch authority (docs/song-mode-spec.md 13); all
     /// transitions go through the methods in `song_transport.rs`.
     pub song_transport_mode: song_transport::SongTransportMode,
@@ -2300,7 +2295,6 @@ impl App {
             sample_analysis: AnalysisService::new(),
             pending_recording_take: None,
             recording_history: None,
-            song_transport_locks_edits: false,
             song_transport_mode: song_transport::SongTransportMode::Stopped,
             use_arrangement: false,
             song_capture_armed: false,

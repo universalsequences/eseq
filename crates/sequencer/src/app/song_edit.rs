@@ -10,12 +10,12 @@
 
 use crate::sequencer::{PatternId, ProjectSongTrackOverride};
 
-use super::App;
+use super::{song_transport::SongTransportMode, App};
 
-/// Error returned by every primitive while a Slice B transport mode locks
-/// song editing (spec 5.6/13: single launch authority).
+/// Error returned by every primitive while arrangement capture owns the
+/// pending splice it will commit at Stop.
 pub const SONG_EDITS_LOCKED_ERROR: &str =
-    "song editing is unavailable during song playback/capture";
+    "song editing is unavailable during arrangement capture";
 
 /// Caller-facing row description for the declarative arrangement replacement
 /// (`def-song` → `App::arr_replace_rows`, which lowers rows to lanes).
@@ -29,13 +29,11 @@ pub struct SongRowSpec {
 impl App {
     /// Whether the song editing primitives must be rejected right now.
     ///
-    /// Slice B seam: song edits are forbidden during `SongPlayback` and
-    /// `ArrangementCapture` (spec 5.6/13). Those transport modes do not
-    /// exist yet; Slice B's transport authority enum MUST feed
-    /// `song_transport_locks_edits` (or replace this body with a mode
-    /// check) when it lands.
+    /// Playback can safely rebuild the scheduler's immutable runtime song.
+    /// Capture remains locked because it owns a growing `[P, Q)` splice and
+    /// must commit that splice atomically at Stop.
     pub fn song_edits_locked(&self) -> bool {
-        self.song_transport_locks_edits
+        self.song_transport_mode == SongTransportMode::ArrangementCapture
     }
 
     pub(super) fn require_song_edit_unlocked(&self) -> Result<(), String> {

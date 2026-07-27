@@ -277,7 +277,6 @@ mod tests {
         assert!(app.take_record_note(0, press_at_beats(anchor, 14.35), 64.0, 1.0));
         let depth = app.history.undo_len();
         app.song_transport_mode = SongTransportMode::Stopped;
-        app.song_transport_locks_edits = false;
         let status = app
             .finish_song_capture_take(40.0)
             .expect("commit succeeds");
@@ -328,7 +327,6 @@ mod tests {
         let (mut app, anchor) = capture_app();
         assert!(app.take_record_note(0, press_at_beats(anchor, 15.5), 60.0, 8.0));
         app.song_transport_mode = SongTransportMode::Stopped;
-        app.song_transport_locks_edits = false;
         app.finish_song_capture_take(40.0).expect("commit succeeds");
         let song = app.state.committed_song().expect("song");
         // P = 15.5, 8 duration steps -> total 8 steps, Q = 15.5 + 2.0 = 17.5.
@@ -359,7 +357,6 @@ mod tests {
         let song_before = app.state.committed_song();
         let depth = app.history.undo_len();
         app.song_transport_mode = SongTransportMode::Stopped;
-        app.song_transport_locks_edits = false;
         let status = app.finish_song_capture_take(40.0).expect("no-op stop");
         assert!(status.contains("unchanged"), "{status}");
         assert_eq!(app.state.committed_song(), song_before);

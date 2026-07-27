@@ -589,6 +589,14 @@ impl SequencerState {
             .send_command(SongPlaybackCommand::Refresh { song })
     }
 
+    /// Hand the scheduler a structurally rebuilt song. Unlike `Refresh`,
+    /// this command remaps the playback cursor and may defer installation
+    /// until the sounding row reaches its next boundary.
+    pub fn rebuild_song_playback(&self, song: Arc<RuntimeSong>) -> Result<(), String> {
+        self.song_playback
+            .send_command(SongPlaybackCommand::Rebuild { song })
+    }
+
     /// Tear down scheduler-side song playback. Callers stop the transport
     /// separately (Slice B).
     pub fn stop_song_playback(&self) -> Result<(), String> {

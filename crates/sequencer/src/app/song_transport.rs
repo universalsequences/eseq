@@ -62,12 +62,6 @@ pub const USE_ARRANGEMENT_WHILE_PLAYING_ERROR: &str =
 impl App {
     fn set_song_transport_mode(&mut self, mode: SongTransportMode) {
         self.song_transport_mode = mode;
-        // Song edits are locked while a song-authority mode is active
-        // (spec 5.6/13); `song_edit.rs` reads this flag.
-        self.song_transport_locks_edits = matches!(
-            mode,
-            SongTransportMode::SongPlayback | SongTransportMode::ArrangementCapture
-        );
     }
 
     /// Whether the transport is playing from the state machine's viewpoint:

@@ -574,7 +574,25 @@ impl App {
     ) -> Result<(), String> {
         self.state
             .set_committed_arrangement(target.clone())
-            .map_err(|error| format!("Arrangement history no longer matches the project: {error}"))
+            .map_err(|error| format!("Arrangement history no longer matches the project: {error}"))?;
+        self.rebuild_active_song_after_arrangement_edit();
+        Ok(())
+    }
+
+    /// Re-preflight structural arrangement edits on the control thread and
+    /// hand the scheduler an immutable replacement. The scheduler decides
+    /// whether the current row is identity-compatible or must remain pending
+    /// until its next boundary.
+    pub(super) fn rebuild_active_song_after_arrangement_edit(&mut self) {
+        if !self.song_playback_authority_active() {
+            return;
+        }
+        let Ok(song) = self.state.preflight_runtime_song() else {
+            return;
+        };
+        if self.state.rebuild_song_playback(std::sync::Arc::clone(&song)).is_ok() {
+            self.active_runtime_song = Some(song);
+        }
     }
 
     /// Shared primitive tail: install the candidate (validating and
@@ -592,6 +610,7 @@ impl App {
         let retained_bytes = patch.retained_bytes();
         self.history
             .commit(label, None, EditPatch::Arrangement(patch), retained_bytes);
+        self.rebuild_active_song_after_arrangement_edit();
         Ok(())
     }
 
