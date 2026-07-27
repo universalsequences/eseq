@@ -1068,11 +1068,6 @@
     :item-label-font-size arrangement-clip-label-font-size
     :item-label-color arrangement-clip-label-color
     :item-corner-radius arrangement-clip-corner-radius
-    ;; Device pixels; width or height 0 restores the short repeat ticks.
-    :loop-notch-width 5
-    :loop-notch-height 12
-    :loop-notch-corner-radius 2.5
-    :loop-notch-smoothing 1.6
     :item-color (list 0.52 0.56 0.62)
     :loop-color (list 0.92 0.72 0.25)
     :playhead-time (bind-seq "song-position-beats")
@@ -1118,11 +1113,6 @@
     :item-label-font-size arrangement-clip-label-font-size
     :item-label-color arrangement-clip-label-color
     :item-corner-radius arrangement-clip-corner-radius
-    ;; Device-pixel notch shape for track clips.
-    :loop-notch-width 2
-    :loop-notch-height 5
-    :loop-notch-corner-radius 8
-    :loop-notch-smoothing 5
     :sidebar-width 0
     :header-height 0
     ;; Track lanes draw NO ruler (:header-height 0 gates every bit of ruler

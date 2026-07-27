@@ -1,10 +1,14 @@
 # Realtime Arrangement Feedback — Recording You Can See, Editing While It Plays
 
-Status: rev 1, 2026-07-27 — **design, nothing built.** Raised while testing
+Status: rev 2, 2026-07-27 — **design, nothing built.** Raised while testing
 clip move (`docs/arrangement-region-editing-spec.md` §6): edits and recordings
 only become visible when they commit, which for arrangement capture means
-*after you stop*. This spec covers the two halves of that: seeing recorded
-material as it is recorded, and editing the arrangement while it plays.
+*after you stop*. This spec covers the three halves of full realtime feedback:
+seeing recorded material as it is recorded, editing the arrangement while it
+plays, and step-sequencer note edits reaching the playing song and the
+timeline. Rev 2 adds slice 3 (note edit-through) after tracing the step-commit
+path and finding the "content edit-through already exists" claim covered
+device edits only.
 
 Related: `docs/song-mode-spec.md` (§7 transport authority, §9/§10 runtime and
 row transitions, §13 the mode machine), `docs/arrangement-lane-model-spec.md`
@@ -24,8 +28,8 @@ row transitions, §13 the mode machine), `docs/arrangement-lane-model-spec.md`
 
 ## 1. Summary
 
-Three slices, in dependency order. 1 is read-only and independently shippable;
-2 is the model/scheduler work; 3 is optional.
+Four slices. 1 and 3 are independently shippable; 2 is the model/scheduler
+work; 4 is optional.
 
 1. **Recording feedback** — while arrangement capture runs, the pending takes
    and the launches captured so far render as **provisional** items in the
@@ -37,9 +41,16 @@ Three slices, in dependency order. 1 is read-only and independently shippable;
    through a layout-tolerant re-preflight. The row under the playhead is never
    re-entered: an edit ahead of the playhead is inaudible now and correct when
    reached; an edit under it takes effect at the next boundary.
-3. **Incremental capture commit** — long takes commit per chunk rather than
+3. **Note edit-through** — a step-sequencer edit to a pattern the playing song
+   resolves becomes audible (the step-commit tail gains the same
+   `invalidate_song_rows_for_pattern` call the device path has — a note edit
+   never changes row layout, so the existing `Refresh` path carries it) and
+   visible (the timeline's note dots gain a pool-content revision so they
+   refresh without a committed-song change). Independent of slice 2: step
+   edits never went through the song-edit lock.
+4. **Incremental capture commit** — long takes commit per chunk rather than
    only at Stop, so a 5-minute recording is not one all-or-nothing entry.
-   Open (§8); slices 1 and 2 do not depend on it.
+   Open (§9); the other slices do not depend on it.
 
 ## 2. Current facts (verified 2026-07-27)
 
@@ -63,17 +74,50 @@ Three slices, in dependency order. 1 is read-only and independently shippable;
   `Arc<SequencerSnapshot>`. A row transition on the scheduler thread is an
   `Arc` pointer switch — no mutexes, no cloning, no allocation, no asset
   loading (`lookahead.rs`, the song-playback branch).
-- **Content edit-through already exists.** `SongPlaybackCommand::Refresh`
-  (`song_runtime.rs:112`) hands the scheduler re-preflighted rows;
-  `SongPlaybackRuntime::replace_song_in_place` (`song_runtime.rs:407-423`)
-  swaps them **only if the row layout is identical** — same row count, same
-  `end_beat`, same ids and start beats — and returns `false` otherwise.
-  Driver: `App::invalidate_song_rows_for_pattern` (`sound_binding.rs`), for
-  device edits landing on a pool pattern the playing song resolves (takes spec
-  §16.7).
+- **Content edit-through exists for device edits only.**
+  `SongPlaybackCommand::Refresh` (`song_runtime.rs:112`) hands the scheduler
+  re-preflighted rows; `SongPlaybackRuntime::replace_song_in_place`
+  (`song_runtime.rs:407-423`) swaps them **only if the row layout is
+  identical** — same row count, same `end_beat`, same ids and start beats —
+  and returns `false` otherwise. The complete caller set of
+  `invalidate_song_rows_for_pattern` (`sound_binding.rs:417`) is the
+  device-value fan-out (`edit.rs`, `fan_out_device_values_to_take_chunks`),
+  its gesture-deferred flush in `finish_active_gesture`
+  (`pending_song_row_invalidation`), and device-state copy
+  (`sound_binding.rs`). No note/step path calls it (takes spec §16.7 was
+  about device edits).
 - So the machinery for "make the future correct without disturbing the
   cursor" is built and proven. What is missing is the **layout-changing** case
-  — which is exactly what every arrangement edit is.
+  — which is exactly what every arrangement edit is — and the **note-edit**
+  driver (slice 3), which needs no new scheduler machinery at all.
+
+**Step edits are pool-correct but song-invisible.**
+
+- Every step/note edit resolves to the **effective current-scene pattern**
+  (`ensure_effective_track_pattern`, `edit.rs`; there is no
+  arbitrary-`PatternId` step-edit path), commits as a `StepCells` /
+  `PatternGeometry` patch, and writes both the pool pattern and the live
+  lanes (`restore_pattern_step_cells_no_publish`, `step_edit.rs`). During
+  song playback the control mirror re-points the live lanes to each row's
+  resolved scene (`apply_song_row_control`), so on a non-latched lane the
+  performer is editing **exactly the pool pattern the sounding row
+  resolved**. The intent is right; only the plumbing stops short.
+- The commit publishes `publish_scheduler_track` — but the scheduler plays
+  the preflight-cloned row snapshot (`lookahead.rs`, `row_snapshot`), so the
+  edit is **inaudible for the rest of the song, including loop wraps**.
+  `pending_gesture_publishes_scheduler` returns `false` for
+  `StepCells | PatternGeometry`, so gesture end does not rescue it either.
+- Exception: **manually latched lanes already hear edits.** The lookahead
+  merges the live snapshot over the row snapshot per chunk for every latched
+  bit (`lookahead.rs:304-323`), consistent with the Seq UI only blocking
+  pointer gestures on take-governed lanes (state `1` in
+  `SEQ.song-track-governed`; ordinary lanes are never dimmed or blocked
+  mid-playback — `song_state.rs:389`).
+- The timeline never sees note edits either: `SEQ.song-lane-events` rebuilds
+  on `pattern_epoch`, which **no step edit bumps** — and an invariant test
+  (`song_transport.rs:965`) forbids the control-side mirror from bumping it,
+  so the dots refresh only incidentally (scene launch, playback start,
+  restore).
 
 **Recording is invisible by construction.**
 
@@ -225,7 +269,69 @@ Tempo/timebase changes mid-flight, scene-cell edits (a different subsystem
 with its own rebuild), and any attempt to crossfade the audio across a swap.
 The contract is "the future becomes correct", not "the present morphs".
 
-## 5. Phasing & tests
+## 5. Slice 3 — step edits reach the playing song and the timeline
+
+The DAW expectation: edit notes in the step sequencer while the arrangement
+plays and (a) hear the change wherever the song plays that pattern, (b) see
+the timeline's dots update. §2 established that (a) fails because nothing
+drives `Refresh` from a note commit, and (b) fails because nothing the commit
+touches gates the lane-events rebuild. Both fixes are one-seam.
+
+### 5.1 Audible: drive the existing Refresh from the step-commit tail
+
+After `apply_recorded_step_mutation` commits (and inside `replay_step_patch`,
+so undo/redo ride the same seam), call
+`invalidate_song_rows_for_pattern(track, target_pattern)` with the
+`StepCells` target — the same one-liner the device path has. While a history
+gesture is active, defer through the existing `pending_song_row_invalidation`
+slot exactly as device drags do.
+
+Why this is sufficient, not a simplification:
+
+- A note edit **never changes row layout** — rows are beat spans over
+  resolved sources; note content lives inside the snapshot. So
+  `replace_song_in_place`'s identity check passes and the existing `Refresh`
+  command carries the whole slice. Slice 2's `Rebuild` is not needed here,
+  which is why this slice ships independently.
+- The **sounding row updates too**: `replace_song_in_place` swaps the row
+  `Arc`s and the lookahead reads `row_snapshot(row)` per chunk, so steps
+  ahead of the playhead *within the current row* become audible at the next
+  lookahead chunk. No retrigger, no clock disturbance — the row is not
+  re-entered, its snapshot pointer moves.
+- `PatternGeometry` (length) commits keep row layout identical too — the
+  song's beat math comes from the arrangement, not the pattern length — so
+  they take the same path. (Verify with a test rather than by assertion:
+  a length change alters `resolved` content, not row spans.)
+- Latched lanes keep their live-merge behavior; after this slice, latched
+  and song-governed lanes simply agree.
+
+Cost: each call is a full `preflight_runtime_song`. Step toggles commit
+per-gesture-less click, so rapid mouse work re-preflights per click. Start
+with that (device edits already accept it at gesture end); if profiling
+objects, coalesce to at most one flush per reactive tick, latest-wins per
+track — the deferred slot already models this.
+
+### 5.2 Visible: a pool-content revision for the lane dots
+
+Do **not** bump `pattern_epoch` from step commits — the invariant test
+(`song_transport.rs:965`) exists because the epoch drives scene-launch-scale
+resyncs, and a per-note bump would stampede unrelated caches. Instead:
+
+- Add a `pool_content_revision: u64` bumped in the one funnel every step
+  write shares — `restore_pattern_step_cells_no_publish` /
+  `restore_pattern_num_steps_no_publish` (undo, redo, and live edits all
+  pass through `replay_step_patch` into these).
+- `sync_song_state` adds it to the lane-events gate:
+  `lanes_changed || pattern_epoch moved || pool_content_revision moved`.
+  The existing value-diff against `cached_lane_events` still suppresses
+  publishes when the edited pattern is not one any lane resolves.
+
+Take-governed lanes (state `1`) stay pointer-blocked in the Seq grid — an
+edit there would target the scene pattern the lane is *not* playing, which is
+the lie the block exists to prevent. Editing a take clip's notes is a
+separate, clip-addressed gesture and stays out of scope.
+
+## 6. Phasing & tests
 
 1. **Recording feedback** (§3) — read-only.
    - `state_values`: `SEQ.song-pending` publishes while capturing, clears on
@@ -247,9 +353,22 @@ The contract is "the future becomes correct", not "the present morphs".
      with no retrigger of the sounding row (assert the row-applied notices).
    - History: an edit committed during playback is one undo entry, and undo
      during playback re-refreshes the scheduler.
-3. **Incremental capture commit** (§8) — only if taken.
+3. **Note edit-through** (§5) — independent of 2, can land first.
+   - `song_runtime`: a step commit on a pattern a playing row resolves ends
+     with a `Refresh` whose swap succeeds (layout identical), including for a
+     `PatternGeometry` length change; a pattern no row resolves triggers no
+     preflight (the `affected` check).
+   - Scheduler: a note added ahead of the playhead in the **sounding** row is
+     audible in that row, with no retrigger; the edit survives loop wrap.
+   - Undo/redo of a step edit re-drives both the Refresh and the dots.
+   - `state_values`: a note edit bumps `pool_content_revision` and refreshes
+     `SEQ.song-lane-events` with no committed-song revision change; an edit
+     to a pattern no lane resolves publishes nothing (value-diff holds).
+   - Gesture-coalesced step edits flush one invalidation at gesture end
+     (`pending_song_row_invalidation` path).
+4. **Incremental capture commit** (§9) — only if taken.
 
-## 6. Proposed decisions
+## 7. Proposed decisions
 
 - Provisional recording state is **read-only and inert**: drawn, never
   editable. It has no `ClipId`, so it is not addressable by any gesture.
@@ -264,8 +383,15 @@ The contract is "the future becomes correct", not "the present morphs".
   only swaps pointers and compares resolved sources.
 - Nothing here changes what a commit IS: same primitives, same single undo
   entry, same history.
+- Note edit-through reuses `Refresh`, never `Rebuild`: a step edit cannot
+  change row layout, and keeping the two commands' contracts distinct is what
+  keeps the identity check on the hot content path cheap.
+- The lane-dot refresh rides a new `pool_content_revision`, never
+  `pattern_epoch` (mirror invariant) and never the committed song revision.
+- Take-governed lanes stay pointer-blocked in the Seq grid; ordinary and
+  latched lanes are editable and, after slice 3, audible.
 
-## 7. Why this is worth doing
+## 8. Why this is worth doing
 
 Recording without feedback is the harshest failure mode the arrangement has:
 the performer plays four bars into what looks like an empty timeline and finds
@@ -273,7 +399,13 @@ out at Stop whether the punch-in landed. And the edit lock makes the
 arrangement the one surface in the program you cannot touch while it plays,
 which is precisely when you know what you want to change.
 
-## 8. Open questions
+And note edit-through closes the most confusing half-truth in the current
+build: during song playback the Seq grid shows the right pattern, accepts the
+edit, writes the right pool pattern — and the song ignores it until the next
+full restart. An edit that is 90% plumbed and 0% audible reads as a bug, not
+a limitation.
+
+## 9. Open questions
 
 - **Incremental capture commit.** Committing per chunk gives crash safety and
   a visible, undoable trail, but changes capture from one atomic entry into
@@ -288,4 +420,9 @@ which is precisely when you know what you want to change.
 - **Rebuild rate.** A commit per gesture is fine; a live-coded script that
   rewrites the arrangement in a loop is not. Does `Rebuild` need coalescing
   (one per frame, latest wins) or is the bounded command channel's back
-  pressure enough?
+  pressure enough? The same question applies to slice 3's per-click
+  `preflight_runtime_song`: measure before adding the per-tick coalescer.
+- **Take clip note editing.** Slice 3 deliberately keeps take-governed lanes
+  blocked in the Seq grid. The DAW-complete version is a clip-addressed edit
+  (select the clip, edit its chunk patterns) — which chunk a step lands in is
+  the only new question, since device writes already fan out across chunks.
