@@ -940,6 +940,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &adsr_editor::ADSR_EDITOR_WIDGET,
     &tabs::TABS_WIDGET,
     &timeline::TIMELINE_WIDGET,
+    &timeline::TIMELINE_CURSOR_MARKER_WIDGET,
     &transport_clock::TRANSPORT_CLOCK_WIDGET,
     &waveform::WAVEFORM_WIDGET,
     &wavetable_viewer::WAVETABLE_VIEWER_WIDGET,

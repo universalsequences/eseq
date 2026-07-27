@@ -102,16 +102,15 @@ impl App {
     /// performance fell through to the live-pattern write path — layering an
     /// unrolled arrangement performance into the scene's looping clip.
     ///
-    /// The capture origin stays song beat zero: the record clock the take
-    /// stamps against is the transport beat clock, which song playback
-    /// started from zero. Returns whether the promotion happened.
+    /// The active song start remains the offset from the raw record clock to
+    /// the arrangement timeline. Returns whether the promotion happened.
     pub fn promote_song_playback_to_capture(&mut self) -> bool {
         if self.song_transport_mode != SongTransportMode::SongPlayback
             || self.song_capture_take.is_some()
         {
             return false;
         }
-        self.begin_song_capture_take();
+        self.begin_song_capture_take(self.active_song_start_beat.unwrap_or(0.0));
         self.set_song_transport_mode(SongTransportMode::ArrangementCapture);
         true
     }
@@ -232,32 +231,38 @@ impl App {
             // captured for the splice. With no committed song, the old
             // whole-song capture remains: transport at beat zero, the
             // performer is the sole launch authority.
-            self.begin_song_capture_take();
             if self.state.committed_song().is_some() {
                 // Open-ended (spec 7.4): the song end is not a stopping
                 // point while recording. Grooving past the old song length
                 // must extend the arrangement, not cut the take off and
                 // commit it there.
-                if let Err(error) = self.start_song_playback_from_zero(true) {
-                    self.discard_song_capture_take();
-                    return Err(error);
-                }
+                let start_beat = self.arrangement_cursor_beat;
+                self.start_song_playback_at(start_beat, true)?;
+                self.begin_song_capture_take(
+                    self.active_song_start_beat
+                        .expect("song start records its normalized beat"),
+                );
                 self.set_song_transport_mode(SongTransportMode::ArrangementCapture);
                 return Ok(SongTransportMode::ArrangementCapture);
             }
+            self.begin_song_capture_take(0.0);
             self.state.start_playback();
             self.set_song_transport_mode(SongTransportMode::ArrangementCapture);
             return Ok(SongTransportMode::ArrangementCapture);
         }
-        self.start_song_playback_from_zero(false)?;
+        self.start_song_playback_at(self.arrangement_cursor_beat, false)?;
         Ok(SongTransportMode::SongPlayback)
     }
 
-    /// The documented song start flow (spec 7.3 / state/song_playback.rs):
-    /// save the live session into the current scene, preflight, apply row
-    /// zero (with an epoch bump — the transport is stopped), hand the song to
-    /// the scheduler, then start the transport.
-    fn start_song_playback_from_zero(&mut self, open_ended: bool) -> Result<(), String> {
+    /// Start the song at an arrangement-timeline beat: save the live session,
+    /// preflight, apply the row governing that beat (with an epoch bump — the
+    /// transport is stopped), hand the song and beat to the scheduler, then
+    /// start the transport.
+    fn start_song_playback_at(
+        &mut self,
+        requested_start_beat: f64,
+        open_ended: bool,
+    ) -> Result<(), String> {
         if !self.state.save_current_pattern_snapshot(
             self.tracks.len(),
             &self.graph.track_buffer_ids,
@@ -274,18 +279,27 @@ impl App {
             .state
             .preflight_runtime_song()
             .map_err(|error| format!("Song playback could not start: {error}"))?;
-        let Some(row0) = song.rows.first().cloned() else {
+        let start_beat = song
+            .normalize_start_beat(requested_start_beat)
+            .map_err(|error| format!("Song playback could not start: {error}"))?;
+        let row_ordinal = song
+            .row_index_at_beat(start_beat)
+            .ok_or_else(|| {
+                format!("Song playback could not start: no row governs beat {start_beat}")
+            })?;
+        let Some(row) = song.rows.get(row_ordinal).cloned() else {
             return Err("Song playback could not start: the song has no rows".to_string());
         };
         // The song is the only launch authority from here: drop any pending
         // quantized session launches so none fires mid-song.
         let _ = self.state.quantized_launches().cancel_all();
-        self.apply_song_row_control(row0.scene, &row0.overrides, true)?;
+        self.apply_song_row_control(row.scene, &row.overrides, true)?;
         self.state
-            .start_song_playback(Arc::clone(&song), 0.0, open_ended)
+            .start_song_playback(Arc::clone(&song), start_beat, open_ended)
             .map_err(|error| format!("Song playback could not start: {error}"))?;
         self.active_runtime_song = Some(song);
-        self.song_mirrored_row = Some(0);
+        self.active_song_start_beat = Some(start_beat);
+        self.song_mirrored_row = Some(row_ordinal);
         self.state.start_playback();
         self.set_song_transport_mode(SongTransportMode::SongPlayback);
         Ok(())
@@ -310,6 +324,7 @@ impl App {
             SongTransportMode::SongPlayback => {
                 let teardown = self.state.stop_song_playback();
                 self.active_runtime_song = None;
+                self.active_song_start_beat = None;
                 self.song_mirrored_row = None;
                 // The latch is transient transport state (takes spec 10).
                 self.state.clear_song_manual_latch();
@@ -335,6 +350,7 @@ impl App {
                 // performance.
                 let playback_teardown = if self.active_runtime_song.is_some() {
                     self.active_runtime_song = None;
+                    self.active_song_start_beat = None;
                     self.song_mirrored_row = None;
                     Some(self.state.stop_song_playback())
                 } else {
@@ -380,6 +396,7 @@ impl App {
         self.discard_song_capture_take();
         if self.active_runtime_song.is_some() {
             self.active_runtime_song = None;
+            self.active_song_start_beat = None;
             self.song_mirrored_row = None;
             let _ = self.state.stop_song_playback();
         }
@@ -416,8 +433,8 @@ impl App {
                 notice.row_ordinal
             ));
         };
-        // The start flow already applied row zero; skip the duplicate initial
-        // notice but always mirror loop wraps (they re-enter row zero).
+        // The start flow already applied the row governing its start beat;
+        // skip that duplicate initial notice, but always mirror loop wraps.
         if !notice.wrapped && self.song_mirrored_row == Some(notice.row_ordinal) {
             return Ok(());
         }
@@ -633,6 +650,68 @@ mod tests {
         assert!(!app.state.is_playing());
         assert!(!app.song_edits_locked());
         assert!(app.active_runtime_song.is_none());
+    }
+
+    #[test]
+    fn arrangement_cursor_starts_playback_and_capture_at_that_song_beat() {
+        let mut playback = app_with_song();
+        playback
+            .set_use_arrangement(true)
+            .expect("toggle while stopped");
+        playback.set_arrangement_cursor(9.0, 0);
+        playback
+            .song_transport_play(false)
+            .expect("mid-song playback starts");
+        assert_eq!(playback.active_song_start_beat, Some(9.0));
+        assert_eq!(
+            playback.state.current_scene_index(),
+            2,
+            "the row governing the cursor must be applied before playback"
+        );
+        let commands = playback.state.song_playback().drain_commands();
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            crate::sequencer::SongPlaybackCommand::Start { start_beat, .. }
+                if *start_beat == 9.0
+        )));
+        playback.song_transport_stop().expect("playback stops");
+        assert_eq!(playback.active_song_start_beat, None);
+
+        let mut capture = app_with_song();
+        capture
+            .set_use_arrangement(true)
+            .expect("toggle while stopped");
+        capture.set_arrangement_cursor(9.0, 0);
+        capture
+            .song_transport_play(true)
+            .expect("mid-song capture starts");
+        capture.record_song_capture_launch(
+            &PatternLaunchTarget::Scene { scene: 1 },
+            1.5,
+        );
+        let take = capture.song_capture_take.as_ref().expect("capture take");
+        assert_eq!(take.timeline_start_beat(), 9.0);
+        assert_eq!(
+            take.events()[0].beat,
+            10.5,
+            "scheduler beat zero must map to the selected arrangement beat"
+        );
+        capture.state.set_scheduler_rendered_beats(2.0);
+        capture
+            .song_transport_stop()
+            .expect("mid-song capture commits");
+        let arrangement = capture
+            .state
+            .committed_arrangement()
+            .expect("committed arrangement");
+        assert_eq!(arrangement.scene_at_beat(10.75), Some(1));
+        assert_eq!(
+            arrangement.scene_at_beat(11.25),
+            Some(2),
+            "the pre-existing arrangement resumes at the translated stop beat"
+        );
+        assert_eq!(capture.active_song_start_beat, None);
+        capture.state.set_scheduler_rendered_beats(0.0);
     }
 
     #[test]

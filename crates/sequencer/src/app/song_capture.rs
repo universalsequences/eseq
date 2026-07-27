@@ -9,9 +9,8 @@
 //! quantized launches (spec 8.3) or the scheduler's rendered-beat clock read
 //! at application time for immediate ones (spec 8.2, never snapped) — both in
 //! the same `rendered_beats` clock domain `quantized_launch::launch_deadline`
-//! uses. Beats are stored relative to the capture's beat origin (the rendered
-//! beat at capture start; the transport starts at song beat zero, spec
-//! 7.4.2).
+//! uses. The transport's selected arrangement start is added to those raw
+//! clock beats, so events are stored directly in the authored song timeline.
 //!
 //! Stop consolidates the take per spec 10.4 (sort by audible beat, group per
 //! boundary with scene-clears-overrides, drop adjacent identical states) and
@@ -63,7 +62,7 @@ pub(crate) enum CaptureLaunchKind {
 }
 
 /// One audible launch observed at the central seam, with its authoritative
-/// audible beat relative to the capture origin.
+/// absolute beat on the arrangement timeline.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CaptureLaunchEvent {
     pub(crate) beat: f64,
@@ -74,10 +73,10 @@ pub(crate) struct CaptureLaunchEvent {
 /// touched while this exists; Stop consolidates and commits it, Cancel
 /// discards it.
 pub struct SongCaptureTake {
-    /// The scheduler rendered-beat clock value at capture start: the take's
-    /// beat-zero origin. Every recorded beat is `raw - origin` (clamped to
-    /// zero) so rows are relative to song start.
-    origin_beats: f64,
+    /// Arrangement beat corresponding to scheduler/record-clock beat zero.
+    /// Adding this offset to recorded raw beats keeps a mid-song capture on
+    /// the authored timeline.
+    timeline_start_beat: f64,
     /// The resolved session state at capture start: the beat-zero row
     /// (spec 7.4.3).
     initial: CapturedSongState,
@@ -98,8 +97,8 @@ impl SongCaptureTake {
         self.events.len()
     }
 
-    pub(crate) fn origin_beats(&self) -> f64 {
-        self.origin_beats
+    pub(crate) fn timeline_start_beat(&self) -> f64 {
+        self.timeline_start_beat
     }
 
     pub(crate) fn initial(&self) -> &CapturedSongState {
@@ -212,11 +211,11 @@ fn consolidate(initial: &CapturedSongState, events: &[CaptureLaunchEvent]) -> Ve
 
 impl App {
     /// Begin the staging take at capture start (spec 7.4.1-7.4.3): clear any
-    /// previous failure state, establish the beat origin from the scheduler's
-    /// rendered-beat clock, and record the current RESOLVED session state
-    /// (current scene plus current track overrides) as the beat-zero row.
-    /// The committed song is untouched and not played.
-    pub(crate) fn begin_song_capture_take(&mut self) {
+    /// previous failure state, establish which arrangement beat corresponds
+    /// to scheduler beat zero, and record the current RESOLVED session state
+    /// (current scene plus current track overrides) as the baseline row.
+    /// The committed song is untouched.
+    pub(crate) fn begin_song_capture_take(&mut self, timeline_start_beat: f64) {
         self.song_capture_failed = false;
         self.song_capture_error = None;
         // A stale overflow left over from earlier song playback must not
@@ -229,13 +228,7 @@ impl App {
             .enumerate()
             .filter_map(|(track, over)| over.map(|id| (track, id)))
             .collect();
-        // Capture always begins with the transport stopped and starting from
-        // song beat zero (spec 7.4.2/9.3), so the origin IS beat zero. The
-        // scheduler's rendered-beat clock is not sampled here: pre-start it
-        // is an asynchronously published leftover of the previous playback,
-        // and any nonzero reading would shift every captured launch and take
-        // note late by that amount.
-        let origin_beats = 0.0;
+        debug_assert!(timeline_start_beat.is_finite() && timeline_start_beat >= 0.0);
         // With a committed song, capture runs ON TOP of song playback
         // (takes spec 9.3): the song keeps launch authority until the
         // performer touches a lane, so the initial state starts untouched.
@@ -248,7 +241,7 @@ impl App {
             std::collections::BTreeSet::new()
         };
         self.song_capture_take = Some(SongCaptureTake {
-            origin_beats,
+            timeline_start_beat,
             whole_song,
             initial: CapturedSongState {
                 start_beat: 0.0,
@@ -259,9 +252,9 @@ impl App {
             events: Vec::new(),
         });
         // Take recording rides the same capture pass (takes spec 8.2): one
-        // transport gesture, two streams, one commit. Same beat origin.
+        // transport gesture, two streams, one commit. Same timeline offset.
         self.take_recording = Some(super::take_recording::TakeRecordingSession::new(
-            origin_beats,
+            timeline_start_beat,
             self.tracks.len(),
         ));
     }
@@ -278,7 +271,8 @@ impl App {
     /// Record one successful audible launch. Called from
     /// `App::apply_pattern_launch` only (the central seam, spec 8.1/14.4);
     /// no-op unless a take is active. `audible_beats` is in the scheduler's
-    /// rendered-beat clock domain; it is stored relative to the take origin.
+    /// rendered-beat clock domain; the capture's timeline offset translates
+    /// it to an absolute arrangement beat.
     pub(crate) fn record_song_capture_launch(
         &mut self,
         target: &PatternLaunchTarget,
@@ -310,7 +304,7 @@ impl App {
             return;
         };
         take.events.push(CaptureLaunchEvent {
-            beat: (audible_beats - take.origin_beats).max(0.0),
+            beat: (take.timeline_start_beat + audible_beats).max(0.0),
             kind,
         });
         // The second writer of provisional content (spec 3.3).
@@ -335,7 +329,7 @@ impl App {
             .unwrap_or_else(|| self.state.scheduler_rendered_beats())
             .max(0.0);
         take.events.push(CaptureLaunchEvent {
-            beat: (beat - take.origin_beats).max(0.0),
+            beat: (take.timeline_start_beat + beat).max(0.0),
             kind: CaptureLaunchKind::Tracks {
                 overrides: vec![(track, pattern_id)],
             },
@@ -388,7 +382,7 @@ impl App {
                     .to_string(),
             );
         }
-        let end_beat = (end_raw_beats - take.origin_beats).max(0.0);
+        let end_beat = (take.timeline_start_beat + end_raw_beats).max(0.0);
         let captured = consolidate(&take.initial, &take.events);
         let previous = self.state.committed_arrangement();
 

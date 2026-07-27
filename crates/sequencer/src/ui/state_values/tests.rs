@@ -19682,6 +19682,76 @@
         }
     }
 
+    #[test]
+    fn metal_seq_transport_stop_resets_arrangement_start_and_has_no_rewind() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        crate::natives::register_song_natives(editor.runtime_mut());
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(do (set! arrangement-cursor-time 20) \
+                 (set! arrangement-cursor-track 2) \
+                 (set-window-buffer \"*transport*\"))",
+            )
+            .expect("park arrangement cursor and open transport");
+        editor.refresh_runtime_side_effects();
+        let _ = editor.drain_host_commands();
+
+        let layout = editor.widget_layout().expect("transport layout");
+        assert!(
+            find_layout_node_by_widget_type(&layout, "rw-icon").is_none(),
+            "the transport must not render a rewind control"
+        );
+        let stop = find_layout_node_by_stable_key(&layout, "transport-stop-button")
+            .expect("stop button");
+        assert_finite_nonzero_rect(stop, "transport-stop-button");
+        let callback = stop
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("stop callback");
+        editor
+            .runtime_mut()
+            .invoke(
+                callback,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("click stop while already stopped");
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("arrangement-cursor-time")
+                .expect("cursor time evaluates"),
+            Some(Value::Number(0.0))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("arrangement-cursor-track")
+                .expect("cursor track evaluates"),
+            Some(Value::Number(-1.0))
+        );
+        let commands = editor.drain_host_commands();
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            eseqlisp::host::HostCommand::Custom { name, payload }
+                if name == "song-set-arr-cursor"
+                    && matches!(
+                        payload,
+                        Value::Map(map)
+                            if matches!(
+                                map.get("time").map(|value| value.borrow().clone()),
+                                Some(Value::Number(time)) if time == 0.0
+                            )
+                            && matches!(
+                                map.get("track").map(|value| value.borrow().clone()),
+                                Some(Value::Number(track)) if track == -1.0
+                            )
+                    )
+        )));
+    }
+
     /// Reactive-bindings smoke test (docs/song-mode-spec.md 12) at the
     /// `sync_song_state` seam the event loop calls each frame: after entering
     /// song playback the mode binding reads "song-playback", the derived
@@ -20847,6 +20917,11 @@
             "selecting a track clip clears the scene selection"
         );
         assert_eq!(read(&mut editor, "arrangement-selected-track"), Value::Number(0.0));
+        assert_eq!(
+            read(&mut editor, "arrangement-cursor-time"),
+            Value::Number(0.0),
+            "clicking inside a clip parks transport start at the clip beginning"
+        );
         assert_eq!(
             read(&mut editor, "(len (arrangement-lane-selection 0))"),
             Value::Number(1.0)
@@ -22414,7 +22489,11 @@
 
         editor
             .runtime_mut()
-            .eval_str("(seq-open-arrangement)")
+            .eval_str(
+                "(do (seq-open-arrangement) \
+                 (set! arrangement-cursor-time 6) \
+                 (set! arrangement-cursor-track 0))",
+            )
             .expect("open arrangement view");
         editor.refresh_runtime_side_effects();
 
@@ -22427,8 +22506,13 @@
         assert_finite_nonzero_rect(scene_lane, "scene timeline instance");
         assert_eq!(
             layout_prop_number(scene_lane, "header-height"),
-            Some(1.6),
+            Some(2.6),
             "the scene lane draws the arrangement's one ruler"
+        );
+        assert_eq!(
+            layout_prop_number(scene_lane, "header-bottom-gutter"),
+            Some(1.0),
+            "the ruler reserves one cell for the transport-start marker"
         );
         assert!(
             matches!(scene_lane.props.get("time-ruler"), Some(Value::Map(_))),
@@ -22440,6 +22524,32 @@
                 Some(Value::ReactiveRef { .. })
             ),
             "playhead-time must bind reactively (render-rate sweep without rebuilds)"
+        );
+        assert_eq!(
+            layout_prop_number(scene_lane, "cursor-time"),
+            Some(6.0),
+            "the transport-start triangle stays on the ruler for track cursors"
+        );
+        assert_eq!(
+            scene_lane.props.get("cursor-marker-visible"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            layout_prop_number(scene_lane, "cursor-marker-scale"),
+            Some(1.6)
+        );
+        assert_eq!(
+            layout_prop_number(scene_lane, "cursor-marker-width-scale"),
+            Some(1.5)
+        );
+        assert_eq!(
+            layout_prop_number(scene_lane, "cursor-marker-height-scale"),
+            Some(0.7)
+        );
+        assert_eq!(
+            scene_lane.props.get("cursor-line-visible"),
+            Some(&Value::Bool(false)),
+            "the scene lane renders the ruler triangle without a vertical line"
         );
         assert_eq!(layout_prop_number(scene_lane, "content-length"), Some(16.0));
 
@@ -22460,6 +22570,20 @@
             layout_prop_number(track_lane, "sidebar-width"),
             Some(0.0),
             "the composed seqv-track-header plays the sidebar role"
+        );
+        assert_eq!(
+            layout_prop_number(track_lane, "cursor-time"),
+            Some(6.0),
+            "the clicked track still draws its cursor line"
+        );
+        assert_eq!(
+            track_lane.props.get("cursor-marker-visible"),
+            Some(&Value::Bool(false)),
+            "track lanes render no duplicate cursor triangle"
+        );
+        assert_eq!(
+            track_lane.props.get("cursor-line-visible"),
+            Some(&Value::Bool(true))
         );
         // Only the scene lane DRAWS a ruler — and what gates that is
         // :header-height, asserted above, since every bit of ruler chrome

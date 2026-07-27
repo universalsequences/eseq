@@ -6,8 +6,8 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MetalPrimitive, MetalProportionalTextPrimitive, MetalQuadPrimitive,
-    MetalRectPrimitive, MetalTrianglePrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
-    WidgetInstance, WidgetKeyEvent, WidgetViewport, ndc_bounds, resolve_named_color, styled_cell,
+    MetalRectPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetInstance,
+    WidgetKeyEvent, WidgetViewport, ndc_bounds, resolve_named_color, styled_cell,
     time_view::{TimeRuler, TimeRulerMode, TimeViewport},
 };
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
@@ -19,6 +19,42 @@ const ALIGNMENT_HELPER_BACKWARD_SNAP_PROXIMITY: f64 = 0.25;
 pub struct TimelineWidget;
 
 pub static TIMELINE_WIDGET: TimelineWidget = TimelineWidget;
+
+pub(super) struct TimelineCursorMarkerWidget;
+
+pub(super) static TIMELINE_CURSOR_MARKER_WIDGET: TimelineCursorMarkerWidget =
+    TimelineCursorMarkerWidget;
+
+#[cfg(target_os = "macos")]
+const TIMELINE_CURSOR_MARKER_FRAGMENT_SHADER: &str = r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float2 instance_size_px = in.uniform_a.xy;
+    float2 marker_size_px = in.uniform_a.zw;
+    float padding_px = in.uniform_b.x;
+
+    // Work in physical pixels so the edge transition remains one pixel wide
+    // regardless of cell size or display scale.
+    float2 p = in.uv * instance_size_px - float2(padding_px);
+    float half_width = marker_size_px.x * 0.5;
+    p.x -= half_width;
+
+    float side_length = max(length(float2(marker_size_px.y, half_width)), 0.0001);
+    float top_distance = p.y;
+    float left_distance =
+        (marker_size_px.y * (p.x + half_width) - half_width * p.y) / side_length;
+    float right_distance =
+        (marker_size_px.y * (half_width - p.x) - half_width * p.y) / side_length;
+    float inside_distance = min(top_distance, min(left_distance, right_distance));
+
+    float edge_width = max(fwidth(inside_distance), 0.75);
+    float alpha = smoothstep(-edge_width * 0.5, edge_width * 0.5, inside_distance);
+    if (alpha <= 0.001) {
+        discard_fragment();
+    }
+    return float4(in.color_a.rgb, in.color_a.a * alpha);
+}
+"#;
 
 #[derive(Clone)]
 struct TimelineLane {
@@ -126,6 +162,10 @@ struct TimelineView {
     /// keeps its legacy per-lane defaults.
     background_color: Option<crate::backend::Color>,
     header_height: f32,
+    /// Reserved empty strip at the bottom of the ruler header. Arrangement
+    /// uses it as a transport-start marker gutter between loop chrome and
+    /// scene content; zero preserves the historical compact header.
+    header_bottom_gutter: f32,
     sidebar_width: f32,
     view_start: f64,
     view_duration: f64,
@@ -143,6 +183,14 @@ struct TimelineView {
     time_ruler: Option<TimeRuler>,
     playhead_time: Option<f64>,
     cursor_time: Option<f64>,
+    /// Cursor rendering is split so a composed timeline can put the marker
+    /// on its ruler lane and the vertical line on a separate content lane.
+    cursor_marker_visible: bool,
+    cursor_line_visible: bool,
+    cursor_marker_scale: f32,
+    cursor_marker_width_scale: f32,
+    cursor_marker_height_scale: f32,
+    cursor_color: crate::backend::Color,
     item_color: crate::backend::Color,
     item_label_font_size: f32,
     item_label_color: crate::backend::Color,
@@ -298,6 +346,87 @@ fn push_rounded_rect(
     });
 }
 
+#[cfg(target_os = "macos")]
+fn push_cursor_marker(
+    primitives: &mut Vec<MetalPrimitive>,
+    center_x: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    color: crate::backend::Color,
+    viewport: WidgetViewport,
+) {
+    const ANTIALIAS_PADDING_PX: f32 = 1.0;
+
+    // Align the triangle's bounds to physical pixels. The marker may shift by
+    // at most half a pixel, which is preferable to a different diagonal
+    // rasterization pattern at otherwise equivalent timeline positions.
+    let marker_width_px = (width * viewport.cell_w).round().max(1.0);
+    let marker_height_px = (height * viewport.cell_h).round().max(1.0);
+    let marker_left_px = (center_x * viewport.cell_w - marker_width_px * 0.5).round();
+    let marker_top_px = (top * viewport.cell_h).round();
+    let instance_width_px = marker_width_px + ANTIALIAS_PADDING_PX * 2.0;
+    let instance_height_px = marker_height_px + ANTIALIAS_PADDING_PX * 2.0;
+    let rect = Rect {
+        row: (marker_top_px - ANTIALIAS_PADDING_PX) / viewport.cell_h,
+        col: (marker_left_px - ANTIALIAS_PADDING_PX) / viewport.cell_w,
+        width: instance_width_px / viewport.cell_w,
+        height: instance_height_px / viewport.cell_h,
+    };
+    let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
+    primitives.push(MetalPrimitive::WidgetInstance {
+        widget_type: "timeline-cursor-marker".to_string(),
+        instance: WidgetInstance {
+            ndc_min,
+            ndc_max,
+            value_t: 0.0,
+            orientation: 0.0,
+            itime: viewport.time_seconds,
+            uniform_a: [
+                instance_width_px,
+                instance_height_px,
+                marker_width_px,
+                marker_height_px,
+            ],
+            uniform_b: [ANTIALIAS_PADDING_PX, 0.0, 0.0, 0.0],
+            uniform_c: [0.0; 4],
+            uniform_d: [0.0; 4],
+            color_a: color.to_rgba(),
+            color_b: [0.0; 4],
+            color_c: [0.0; 4],
+            color_d: [0.0; 4],
+            corner_radius: 0.0,
+            pixel_aspect: instance_width_px / instance_height_px,
+        },
+        is_background: false,
+    });
+}
+
+impl WidgetDefinition for TimelineCursorMarkerWidget {
+    fn names(&self) -> &'static [&'static str] {
+        &["timeline-cursor-marker"]
+    }
+
+    fn measure(
+        &self,
+        _node: &Value,
+        _children: &[Value],
+        _constraints: Constraints,
+        _ctx: &MeasureCtx<'_>,
+        _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
+    ) -> Option<Size> {
+        Some(Size {
+            width: 1.0,
+            height: 1.0,
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
+        Some(TIMELINE_CURSOR_MARKER_FRAGMENT_SHADER)
+    }
+}
+
 impl WidgetDefinition for TimelineWidget {
     fn names(&self) -> &'static [&'static str] {
         &["timeline"]
@@ -451,17 +580,20 @@ impl WidgetDefinition for TimelineWidget {
         }
 
         if let Some(cursor_col) = view.cursor_col() {
-            if content.height > 0.0 {
-                let marker_row = content.row.round() as u16;
+            if view.cursor_marker_visible && content.height > 0.0 {
+                let marker_row = view.cursor_marker_top(1.0).round() as u16;
                 buf.set(
                     marker_row,
                     cursor_col,
-                    styled_cell('▼', theme::CURSOR(), None),
+                    styled_cell('▼', view.cursor_color, None),
                 );
             }
-            for row_offset in 1..(content.height.round() as u16) {
-                let row = content.row.round() as u16 + row_offset;
-                buf.set(row, cursor_col, styled_cell('|', theme::CURSOR(), None));
+            if view.cursor_line_visible {
+                let line_start = usize::from(view.cursor_marker_visible);
+                for row_offset in line_start..content.height.round() as usize {
+                    let row = content.row.round() as u16 + row_offset as u16;
+                    buf.set(row, cursor_col, styled_cell('|', view.cursor_color, None));
+                }
             }
         }
 
@@ -697,12 +829,19 @@ fn build_metal_primitives(
     let mut primitives = Vec::new();
 
     if view.header_height > 0.0 {
-        let loop_band = view.loop_band_rect().map(|(x, width)| {
-            let y = rect.row + (view.header_height * 0.55).min(view.header_height - 0.18);
-            let bottom_inset = 0.08_f32.min(view.header_height * 0.12);
-            let height = (view.header_height - (y - rect.row) - bottom_inset).max(0.12);
-            (x, y, width, height)
-        });
+        let header_chrome_height = (view.header_height - view.header_bottom_gutter).max(0.0);
+        let loop_band = if header_chrome_height > 0.2 {
+            view.loop_band_rect().map(|(x, width)| {
+                let y = rect.row
+                    + (header_chrome_height * 0.55).min(header_chrome_height - 0.18);
+                let bottom_inset = 0.08_f32.min(header_chrome_height * 0.12);
+                let height =
+                    (header_chrome_height - (y - rect.row) - bottom_inset).max(0.12);
+                (x, y, width, height)
+            })
+        } else {
+            None
+        };
         primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
             rect: Rect {
                 row: rect.row,
@@ -737,7 +876,7 @@ fn build_metal_primitives(
             let label_col = x + 0.36;
             let label_width = label.chars().count() as f32 * 0.58 + 0.28;
             let label_row = rect.row
-                + if view.header_height >= 1.6 {
+                + if header_chrome_height >= 1.6 {
                     0.26
                 } else {
                     0.06
@@ -1350,27 +1489,48 @@ fn build_metal_primitives(
     // through clip bodies (DAW convention).
     if let Some(cursor_x) = view.metal_cursor_x() {
         let line_width = (1.0 / viewport.cell_w).max(0.08);
-        let marker_width = (8.0 / viewport.cell_w).max(line_width * 4.0);
-        let marker_height = (5.0 / viewport.cell_h).max(0.28).min(content.height);
-        if marker_height > 0.0 {
-            primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
-                points: [
-                    [cursor_x - marker_width * 0.5, content.row],
-                    [cursor_x + marker_width * 0.5, content.row],
-                    [cursor_x, content.row + marker_height],
-                ],
-                color: theme::CURSOR(),
-            }));
+        let marker_width = (((8.0
+            * view.cursor_marker_scale
+            * view.cursor_marker_width_scale)
+            / viewport.cell_w)
+            .max(line_width * 4.0)
+            * viewport.cell_w)
+            .round()
+            / viewport.cell_w;
+        let marker_height_scale =
+            view.cursor_marker_scale * view.cursor_marker_height_scale;
+        let marker_height = ((((5.0 * marker_height_scale) / viewport.cell_h)
+            .max(0.28 * marker_height_scale)
+            .min(content.height))
+            * viewport.cell_h)
+            .round()
+            / viewport.cell_h;
+        let marker_y = view.cursor_marker_top(marker_height);
+        if view.cursor_marker_visible && marker_height > 0.0 {
+            push_cursor_marker(
+                &mut primitives,
+                cursor_x,
+                marker_y,
+                marker_width,
+                marker_height,
+                view.cursor_color,
+                viewport,
+            );
         }
-        let line_y = content.row + marker_height;
+        let line_y = content.row
+            + if view.cursor_marker_visible && view.header_bottom_gutter <= 0.0 {
+                marker_height
+            } else {
+                0.0
+            };
         let line_height = (content.row + content.height - line_y).max(0.0);
-        if line_height > 0.0 {
+        if view.cursor_line_visible && line_height > 0.0 {
             primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
                 x: cursor_x - line_width * 0.5,
                 y: line_y,
                 width: line_width,
                 height: line_height,
-                color: theme::CURSOR(),
+                color: view.cursor_color,
             }));
         }
     }
@@ -1843,12 +2003,15 @@ impl TimelineView {
     fn from_props(props: &HashMap<String, Value>, rect: Rect) -> Self {
         let view_duration = get_num(props, "view-duration", 16.0).max(0.0001);
         let view_start = get_num(props, "view-start", 0.0).max(0.0);
+        let header_height = get_num(props, "header-height", 1.0).max(0.0) as f32;
         let mut view = Self {
             rect,
             background_color: props
                 .get("background-color")
                 .and_then(theme::parse_color_value),
-            header_height: get_num(props, "header-height", 1.0).max(0.0) as f32,
+            header_height,
+            header_bottom_gutter: get_num(props, "header-bottom-gutter", 0.0)
+                .clamp(0.0, header_height as f64) as f32,
             sidebar_width: get_num(props, "sidebar-width", 0.0).max(0.0) as f32,
             view_start,
             view_duration,
@@ -1867,6 +2030,21 @@ impl TimelineView {
                 .and_then(|map| get_time_ruler(&map)),
             playhead_time: props.get("playhead-time").and_then(as_number),
             cursor_time: props.get("cursor-time").and_then(as_number),
+            cursor_marker_visible: props
+                .get("cursor-marker-visible")
+                .and_then(as_bool)
+                .unwrap_or(true),
+            cursor_line_visible: props
+                .get("cursor-line-visible")
+                .and_then(as_bool)
+                .unwrap_or(true),
+            cursor_marker_scale: get_num(props, "cursor-marker-scale", 1.0)
+                .clamp(0.25, 4.0) as f32,
+            cursor_marker_width_scale: get_num(props, "cursor-marker-width-scale", 1.0)
+                .clamp(0.5, 4.0) as f32,
+            cursor_marker_height_scale: get_num(props, "cursor-marker-height-scale", 1.0)
+                .clamp(0.25, 4.0) as f32,
+            cursor_color: resolve_named_color(props, "cursor-color", theme::CURSOR()),
             item_color: resolve_named_color(props, "item-color", theme::BLUE()),
             item_label_font_size: get_num(props, "item-label-font-size", 10.5).max(1.0) as f32,
             item_label_color: resolve_named_color(props, "item-label-color", theme::BLACK()),
@@ -2302,6 +2480,15 @@ impl TimelineView {
 
     fn metal_cursor_x(&self) -> Option<f32> {
         self.time_viewport().metal_playhead_x(self.cursor_time)
+    }
+
+    fn cursor_marker_top(&self, marker_height: f32) -> f32 {
+        let content_top = self.content_rect().row;
+        if self.header_bottom_gutter <= 0.0 {
+            return content_top;
+        }
+        let gutter_top = content_top - self.header_bottom_gutter;
+        gutter_top + (self.header_bottom_gutter - marker_height).max(0.0) * 0.5
     }
 
     fn cursor_snap_time(&self, time: f64) -> f64 {
@@ -3756,6 +3943,18 @@ mod tests {
         )
     }
 
+    #[cfg(target_os = "macos")]
+    fn cursor_marker_instance(primitives: &[MetalPrimitive]) -> Option<WidgetInstance> {
+        primitives.iter().find_map(|primitive| match primitive {
+            MetalPrimitive::WidgetInstance {
+                widget_type,
+                instance,
+                ..
+            } if widget_type == "timeline-cursor-marker" => Some(*instance),
+            _ => None,
+        })
+    }
+
     /// docs/arrangement-timeline-ui-spec.md 7: `:kind`/`:content` are
     /// optional and lenient — absent keys parse exactly as before (piano-roll
     /// regression), malformed values become `None`/get skipped, never a
@@ -5159,7 +5358,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn metal_cursor_marker_starts_below_ruler_with_triangle_marker() {
+    fn metal_cursor_marker_starts_below_ruler_with_antialiased_marker() {
         let props = HashMap::from([
             ("cursor-time".to_string(), number_value(4.0)),
             ("header-height".to_string(), number_value(2.0)),
@@ -5199,24 +5398,21 @@ mod tests {
         };
 
         let primitives = build_metal_primitives(&node, viewport);
-        let triangle = primitives
-            .iter()
-            .find_map(|primitive| match primitive {
-                MetalPrimitive::Triangle(triangle) if triangle.color == theme::CURSOR() => {
-                    Some(*triangle)
-                }
-                _ => None,
-            })
-            .expect("cursor triangle");
-        assert_eq!(triangle.points[0][1], 2.0);
-        assert_eq!(triangle.points[1][1], 2.0);
+        let marker = cursor_marker_instance(&primitives).expect("cursor marker");
+        assert_eq!(marker.color_a, theme::CURSOR().to_rgba());
+        assert_eq!(marker.uniform_a[2], 8.0, "pixel-aligned marker width");
+        assert_eq!(marker.uniform_a[3], 6.0, "pixel-aligned marker height");
+        let marker_top_px = (1.0 - marker.ndc_min[1]) * viewport.vp_h * 0.5
+            + marker.uniform_b[0];
+        let marker_tip_row = (marker_top_px + marker.uniform_a[3]) / viewport.cell_h;
+        assert!((marker_top_px - 40.0).abs() < 0.001);
 
         let line = primitives
             .iter()
             .find_map(|primitive| match primitive {
                 MetalPrimitive::Quad(quad)
-                    if ((quad.x + quad.width * 0.5) - triangle.points[2][0]).abs() < 0.001
-                        && (quad.y - triangle.points[2][1]).abs() < 0.001 =>
+                    if quad.color == theme::CURSOR()
+                        && (quad.y - marker_tip_row).abs() < 0.001 =>
                 {
                     Some(*quad)
                 }
@@ -5228,6 +5424,96 @@ mod tests {
             line.height < rect.height - 2.0,
             "line should not extend into the ruler"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_cursor_marker_and_line_can_render_independently_with_scaled_sdf_marker() {
+        let props = HashMap::from([
+            ("cursor-time".to_string(), number_value(4.0)),
+            ("cursor-marker-visible".to_string(), bool_value(true)),
+            ("cursor-line-visible".to_string(), bool_value(false)),
+            ("cursor-marker-scale".to_string(), number_value(1.6)),
+            ("cursor-marker-width-scale".to_string(), number_value(1.5)),
+            ("cursor-marker-height-scale".to_string(), number_value(0.7)),
+            ("header-height".to_string(), number_value(2.0)),
+            ("header-bottom-gutter".to_string(), number_value(1.0)),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(8.0)),
+        ]);
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 192.0,
+            height: 12.0,
+        };
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1920.0,
+            vp_h: 1080.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 12.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let mut node = LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "timeline".to_string(),
+            rect,
+            props,
+            children: Vec::new(),
+            focusable: false,
+        };
+
+        let marker_only = build_metal_primitives(&node, viewport);
+        let marker = cursor_marker_instance(&marker_only).expect("scaled cursor marker");
+        assert_eq!(marker.uniform_a[2], 19.0, "80%-scaled, pixel-aligned width");
+        assert_eq!(
+            marker.uniform_a[3], 6.0,
+            "80% overall scale plus 30% height reduction"
+        );
+        let marker_top_px = (1.0 - marker.ndc_min[1]) * viewport.vp_h * 0.5
+            + marker.uniform_b[0];
+        let marker_tip_row = (marker_top_px + marker.uniform_a[3]) / viewport.cell_h;
+        assert!((marker_top_px / viewport.cell_h - 1.35).abs() < 0.001);
+        assert!(
+            marker_tip_row < 2.0,
+            "the gutter keeps the marker above scene content"
+        );
+        assert!(
+            !marker_only.iter().any(|primitive| matches!(
+                primitive,
+                MetalPrimitive::Quad(quad) if quad.color == theme::CURSOR()
+            )),
+            "marker-only mode must not draw a cursor line"
+        );
+
+        node.props
+            .insert("cursor-marker-visible".to_string(), bool_value(false));
+        node.props
+            .insert("cursor-line-visible".to_string(), bool_value(true));
+        let line_only = build_metal_primitives(&node, viewport);
+        assert!(
+            cursor_marker_instance(&line_only).is_none(),
+            "line-only mode must not draw a cursor marker"
+        );
+        let line = line_only
+            .iter()
+            .find_map(|primitive| match primitive {
+                MetalPrimitive::Quad(quad) if quad.color == theme::CURSOR() => Some(*quad),
+                _ => None,
+            })
+            .expect("cursor line");
+        assert_eq!(line.y, 2.0);
+        assert_eq!(line.height, 10.0);
     }
 
     #[test]

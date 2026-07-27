@@ -20,7 +20,7 @@ use super::App;
 /// One in-flight take, borrowed from its `PendingTakeLane`.
 pub struct PendingCaptureLane<'a> {
     pub track: usize,
-    /// Punch-in beat `P`, relative to the capture origin.
+    /// Punch-in beat `P` on the arrangement timeline.
     pub punch_in_beat: f64,
     /// Beats per chunk-domain step; chunks are `MAX_STEPS`-long patterns.
     pub step_beats: f64,
@@ -34,7 +34,7 @@ pub struct PendingCaptureLane<'a> {
 
 /// The provisional state of the running capture (spec 3.2), borrowed.
 pub struct PendingCapture<'a> {
-    /// Capture origin in song beats (always song beat zero today, spec 7.4.2).
+    /// Arrangement beat corresponding to scheduler/record-clock beat zero.
     pub origin_beat: f64,
     pub lanes: Vec<PendingCaptureLane<'a>>,
     /// Captured SCENE launches as `(start-beat, scene)`, beat-ordered.
@@ -61,11 +61,11 @@ impl App {
     /// clip never draws ahead of the playhead the lanes render (spec 3.2).
     /// `None` when the record clock has no anchor yet.
     pub fn pending_capture_head_beat(&self) -> Option<f64> {
-        let origin = self.song_capture_take.as_ref()?.origin_beats();
+        let timeline_start = self.song_capture_take.as_ref()?.timeline_start_beat();
         let head = self
             .state
             .record_beats_at_instant(std::time::Instant::now())
-            .map(|raw| (raw - origin).max(0.0))
+            .map(|raw| (timeline_start + raw).max(0.0))
             .or_else(|| self.state.song_position_beats())?;
         Some(match self.state.song_position_beats() {
             Some(position) => head.min(position),
@@ -140,7 +140,7 @@ impl App {
             .map(|session| session.pending_lane_views())
             .unwrap_or_default();
         Some(f(PendingCapture {
-            origin_beat: take.origin_beats(),
+            origin_beat: take.timeline_start_beat(),
             lanes,
             scene_events,
             track_events,

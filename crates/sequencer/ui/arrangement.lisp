@@ -37,8 +37,11 @@
 (def arrangement-view-padding 8)
 (def arrangement-beats-per-bar 4)
 (def arrangement-snap arrangement-beats-per-bar)
-(def arrangement-header-height 1.6)
-(def arrangement-scene-lane-height 3.6)
+(def arrangement-header-height 2.6)
+;; One cell (~20 px at the default scale) between ruler/loop chrome and the
+;; scene lane. The transport-start triangle lives in this gutter.
+(def arrangement-cursor-gutter-height 1)
+(def arrangement-scene-lane-height 4.6)
 (def arrangement-track-lane-height 2.85)
 ;; Vertical distance in CELLS between one track row's top and the next.
 ;; Track rows stack in a :gap 0 v-stack (see the buffer composition below), so
@@ -55,6 +58,7 @@
 (def arrangement-clip-label-font-size 9)
 (def arrangement-clip-label-color '(rgba 0.2 0.2 0.2 1))
 (def arrangement-timeline-background-color :buffer-bg)
+(def arrangement-cursor-color '(rgba 0.32 0.78 0.94 1))
 ;; Clip corner radius in CELLS (GarageBand-style rounded clips), so it scales
 ;; with the UI zoom like the lane heights above. 0 gives the square clips
 ;; every other timeline host draws.
@@ -1141,23 +1145,31 @@
       ;; item has none, so clicking one selects nothing (realtime feedback
       ;; spec 3.4).
       (let ((ids (arrangement-real-clip-ids i (get event :ids))))
-        (do
-          (seqv-select-track-for-edit i)
-          (set! arrangement-selection '())
-          (set! arrangement-selection-rect nil)
-          ;; A clip and a region are mutually exclusive (region spec 4.1); the
-          ;; Rust side drops the region too, this clears the in-flight ghost.
-          (set! arrangement-region-ghost nil)
-          (set! arrangement-selected-track i)
-          (set! arrangement-track-selection ids)
-          ;; Selecting a clip is the explicit sound-binding gesture (takes
-          ;; spec 16.2/16.6): it re-binds this track's device panel, monitor
-          ;; sound and take punch-in template. The binding lives in Rust so it
-          ;; survives view switches and transport.
-          (if (= (len ids) 0)
-            (do (seq-song-deselect-clip) (seq-song-clear-region))
-            (arrangement-select-clip i (nth ids 0)))
-          (set-arrangement-cursor (get event :time) i)))
+        (let ((clip (if (= (len ids) 0)
+                      nil
+                      (arrangement-find-track-clip i (nth ids 0)))))
+          (do
+            (seqv-select-track-for-edit i)
+            (set! arrangement-selection '())
+            (set! arrangement-selection-rect nil)
+            ;; A clip and a region are mutually exclusive (region spec 4.1);
+            ;; the Rust side drops the region too, this clears the in-flight
+            ;; ghost.
+            (set! arrangement-region-ghost nil)
+            (set! arrangement-selected-track i)
+            (set! arrangement-track-selection ids)
+            ;; Selecting a clip is the explicit sound-binding gesture (takes
+            ;; spec 16.2/16.6): it re-binds this track's device panel, monitor
+            ;; sound and take punch-in template. The binding lives in Rust so
+            ;; it survives view switches and transport.
+            (if (= clip nil)
+              (do (seq-song-deselect-clip) (seq-song-clear-region))
+              (arrangement-select-clip i (nth ids 0)))
+            ;; A clip click also parks the transport start at the clip's
+            ;; beginning, independent of where in its title bar was hit.
+            (set-arrangement-cursor
+              (if (= clip nil) (get event :time) (get clip :start-beat))
+              i))))
       ;; Degenerate zero-movement release, or a click on empty lane space:
       ;; drop the region and park the edit cursor here, Ableton-style
       ;; (region spec 4.4).
@@ -1247,6 +1259,7 @@
     :focusable true
     :sidebar-width 0
     :header-height arrangement-header-height
+    :header-bottom-gutter arrangement-cursor-gutter-height
     :time-ruler (dict :mode :bars-beats :beats-per-bar arrangement-beats-per-bar)
     :grid-density arrangement-grid-density
     :background-color arrangement-timeline-background-color
@@ -1257,7 +1270,15 @@
     :item-color (list 0.52 0.56 0.62)
     :loop-color (list 0.92 0.72 0.25)
     :playhead-time (bind-seq "song-position-beats")
-    :cursor-time (arrangement-lane-cursor-time -1)
+    ;; The ruler always owns the transport-start triangle, while the
+    ;; track-specific cursor line remains in the lane the user clicked.
+    :cursor-time arrangement-cursor-time
+    :cursor-marker-visible true
+    :cursor-marker-scale 1.6
+    :cursor-marker-width-scale 1.5
+    :cursor-marker-height-scale 0.7
+    :cursor-line-visible false
+    :cursor-color arrangement-cursor-color
     :drop-types (list "transport-scene")
     :on-drop (lambda (event) (arrangement-drop-scene event))
     :items (arrangement-scene-items)
@@ -1313,6 +1334,9 @@
     :focusable true
     :playhead-time (bind-seq "song-position-beats")
     :cursor-time (arrangement-lane-cursor-time i)
+    :cursor-marker-visible false
+    :cursor-line-visible true
+    :cursor-color arrangement-cursor-color
     :drop-types (list "transport-scene")
     :on-drop (lambda (event) (arrangement-drop-scene event))
     :items (arrangement-track-items i)

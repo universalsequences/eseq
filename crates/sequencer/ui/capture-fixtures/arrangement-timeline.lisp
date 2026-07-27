@@ -21,4 +21,8 @@
   :end 48)
 
 (def capture-after-sync ()
-  (seq-open-arrangement))
+  (do
+    (seq-open-arrangement)
+    ;; Keep the transport-start marker away from the viewport edge so visual
+    ;; captures exercise both its ruler triangle and owning-track cursor line.
+    (set-arrangement-cursor 20 0)))

@@ -22,8 +22,8 @@ use super::App;
 
 /// One armed track's in-flight take (spec 8.3/8.4).
 pub(crate) struct PendingTakeLane {
-    /// Punch-in beat `P` in the capture's song-beat domain (relative to the
-    /// capture origin), aligned per the quantize policy at the first note.
+    /// Punch-in beat `P` on the arrangement timeline, aligned per the
+    /// quantize policy at the first note.
     pub(crate) punch_in_beat: f64,
     /// Beats per chunk-domain step (the track's base timebase at the
     /// punch-in moment; chunks are `MAX_STEPS`-long patterns).
@@ -40,17 +40,16 @@ pub(crate) struct PendingTakeLane {
 
 /// Per-capture take recording session: one optional pending lane per track.
 pub struct TakeRecordingSession {
-    /// The capture's beat-zero origin on the scheduler rendered-beat clock —
-    /// identical to the launch capture's origin, so take positions and
-    /// spliced rows share one beat domain.
-    origin_beats: f64,
+    /// Arrangement beat corresponding to scheduler/record-clock beat zero.
+    /// Shared with launch capture so notes and spliced rows use one domain.
+    timeline_start_beat: f64,
     lanes: Vec<Option<PendingTakeLane>>,
 }
 
 impl TakeRecordingSession {
-    pub(crate) fn new(origin_beats: f64, track_count: usize) -> Self {
+    pub(crate) fn new(timeline_start_beat: f64, track_count: usize) -> Self {
         Self {
-            origin_beats,
+            timeline_start_beat,
             lanes: (0..track_count).map(|_| None).collect(),
         }
     }
@@ -174,7 +173,7 @@ mod tests {
             false,
         )
         .expect("arr_replace_rows succeeds");
-        app.begin_song_capture_take();
+        app.begin_song_capture_take(0.0);
         app.song_transport_mode = SongTransportMode::ArrangementCapture;
         // First publish initializes the monotonic clock origin; the real
         // anchor sits 1 ms later so its origin-relative timestamp is
@@ -228,6 +227,22 @@ mod tests {
         assert_eq!(chunk.chord_snapshot.steps[9], vec![64.0]);
         // Live pattern untouched: retargeting bypassed the live write path.
         assert!(!app.state.pattern.patterns[0].is_active(0));
+    }
+
+    #[test]
+    fn take_notes_add_the_mid_song_transport_start_to_record_clock_beats() {
+        let (mut app, anchor) = capture_app();
+        app.begin_song_capture_take(8.0);
+        assert!(app.take_record_note(0, press_at_beats(anchor, 2.1), 60.0, 1.0));
+
+        let session = app.take_recording.as_ref().expect("session active");
+        let lane = session.lanes[0].as_ref().expect("lane punched in");
+        assert!(
+            (lane.punch_in_beat - 10.0).abs() < 1e-6,
+            "raw beat 2.1 from an arrangement start at 8 must punch in on \
+             the beat-10 sixteenth grid, got {}",
+            lane.punch_in_beat
+        );
     }
 
     #[test]
@@ -423,7 +438,7 @@ impl App {
         let Some(session) = self.take_recording.as_mut() else {
             return false;
         };
-        let song_beat = (raw_beats - session.origin_beats).max(0.0);
+        let song_beat = (session.timeline_start_beat + raw_beats).max(0.0);
         let Some(slot) = session.lanes.get_mut(track) else {
             return false;
         };

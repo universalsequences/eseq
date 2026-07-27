@@ -439,31 +439,6 @@
 
 ;; ── Button widgets — icons scaled 2x ──
 
-;; Rewind: two left-pointing triangles (mirrored play triangle)
-(defwidget rw-icon
-  :width 2.5 :height 1.8
-  :paint-margin 0.5
-  :shader
-  (sdf/layer
-    ;; Left triangle
-    (sdf/fill
-      (sdf/translate -0.25 0
-        (let ((p1x 0.35) (p1y 0.5) (p2x 0.35) (p2y -0.5) (p3x -0.35) (p3y 0.0))
-          (let ((d1 (- (* (- p2x p1x) (- y p1y)) (* (- p2y p1y) (- x p1x))))
-                (d2 (- (* (- p3x p2x) (- y p2y)) (* (- p3y p2y) (- x p2x))))
-                (d3 (- (* (- p1x p3x) (- y p3y)) (* (- p1y p3y) (- x p3x)))))
-            (max (max d1 d2) d3))))
-      (material :color (rgba 0.75 0.75 0.78 1.0)))
-    ;; Right triangle
-    (sdf/fill
-      (sdf/translate 0.35 0
-        (let ((p1x 0.35) (p1y 0.5) (p2x 0.35) (p2y -0.5) (p3x -0.35) (p3y 0.0))
-          (let ((d1 (- (* (- p2x p1x) (- y p1y)) (* (- p2y p1y) (- x p1x))))
-                (d2 (- (* (- p3x p2x) (- y p2y)) (* (- p3y p2y) (- x p2x))))
-                (d3 (- (* (- p1x p3x) (- y p3y)) (* (- p1y p3y) (- x p3x)))))
-            (max (max d1 d2) d3))))
-      (material :color (rgba 0.75 0.75 0.78 1.0)))))
-
 (defwidget stop-icon
   :width 2.5 :height 1.8
   :paint-margin 0.5
@@ -471,6 +446,14 @@
   (sdf/layer
     (sdf/fill (sdf/rounded-rect 0.44 0.44 0.05)
       (material :color (rgba 0.75 0.75 0.78 1.0)))))
+
+;; Stop returns the arrangement insertion/start marker to the beginning even
+;; when playback is already stopped. The cursor mirror makes the next Play
+;; start at beat zero; -1 leaves no track-specific cursor line behind.
+(def transport-stop ()
+  (do
+    (if SEQ.playing (seq-toggle-play) nil)
+    (set-arrangement-cursor 0 -1)))
 
 (defwidget play-icon
   :width 2.5 :height 1.8
@@ -634,12 +617,10 @@
     ;; Transport buttons in a shared rounded-rect container
     (box :background "transport-btn-bg" :padding 0.015 :height 1.4
       (h-stack :gap 0.2 :align :center
-        (box :width 2.5
-          :on-click |x y r| (if SEQ.playing (seq-toggle-play) nil)
-          (rw-icon))
-        (box :width 2.5
-          :on-click |x y r| (if SEQ.playing (seq-toggle-play) nil)
-          (stop-icon))
+        (subtree :key "transport-stop-button"
+          (box :width 2.5
+            :on-click |x y r| (transport-stop)
+            (stop-icon)))
         (box :width 2.5
           :on-click |x y r| (seq-toggle-play)
           (play-icon :active (if SEQ.playing 1 0)))

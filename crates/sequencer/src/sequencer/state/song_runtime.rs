@@ -71,6 +71,29 @@ impl RuntimeSong {
             .iter()
             .rposition(|row| row.start_beat <= beat)
     }
+
+    /// Validate and normalize a requested transport start on the song
+    /// timeline. Looping songs wrap starts beyond the loop end; non-looping
+    /// songs require a position strictly before the end.
+    pub fn normalize_start_beat(&self, start_beat: f64) -> Result<f64, String> {
+        if !start_beat.is_finite() || start_beat < 0.0 {
+            return Err(format!("invalid song start beat {start_beat}"));
+        }
+        if self.loop_enabled {
+            if self.end_beat > 0.0 {
+                Ok(start_beat.rem_euclid(self.end_beat))
+            } else {
+                Err("song end beat must be positive".to_string())
+            }
+        } else if start_beat >= self.end_beat {
+            Err(format!(
+                "song start beat {start_beat} is at or past the song end {}",
+                self.end_beat
+            ))
+        } else {
+            Ok(start_beat)
+        }
+    }
 }
 
 /// Scheduler-authoritative record of one audible row transition: the row
@@ -397,24 +420,7 @@ impl SongPlaybackRuntime {
                 "invalid samples-per-quarter {samples_per_quarter} for song playback"
             ));
         }
-        if !start_beat.is_finite() || start_beat < 0.0 {
-            return Err(format!("invalid song start beat {start_beat}"));
-        }
-        let start_beat = if song.loop_enabled {
-            if song.end_beat > 0.0 {
-                start_beat.rem_euclid(song.end_beat)
-            } else {
-                return Err("song end beat must be positive".to_string());
-            }
-        } else {
-            if start_beat >= song.end_beat {
-                return Err(format!(
-                    "song start beat {start_beat} is at or past the song end {}",
-                    song.end_beat
-                ));
-            }
-            start_beat
-        };
+        let start_beat = song.normalize_start_beat(start_beat)?;
         let initial_row = song
             .row_index_at_beat(start_beat)
             .ok_or_else(|| format!("no song row governs start beat {start_beat}"))?;

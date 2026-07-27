@@ -896,8 +896,12 @@ pub struct App {
     /// The preflighted song currently handed to the scheduler while
     /// `SongPlayback` is active; used to mirror row transitions control-side.
     pub active_runtime_song: Option<std::sync::Arc<crate::sequencer::RuntimeSong>>,
+    /// Song-timeline beat corresponding to scheduler beat zero for the active
+    /// playback. Capture uses the same offset so recorded events remain on
+    /// the arrangement timeline after a mid-song start.
+    pub active_song_start_beat: Option<f64>,
     /// Last row ordinal mirrored control-side (skips the duplicate initial
-    /// `RowApplied` notice for row zero).
+    /// `RowApplied` notice for the selected start row).
     pub song_mirrored_row: Option<usize>,
     /// Bumped whenever the control-side mirror repaints live state from a
     /// song row (row transitions, Back to Song). The reactive tick treats it
@@ -2299,6 +2303,7 @@ impl App {
             use_arrangement: false,
             song_capture_armed: false,
             active_runtime_song: None,
+            active_song_start_beat: None,
             song_mirrored_row: None,
             song_row_mirror_epoch: 0,
             song_capture_take: None,
