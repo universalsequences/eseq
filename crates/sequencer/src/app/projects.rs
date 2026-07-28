@@ -954,6 +954,14 @@ impl App {
         self.song_clip_selection = None;
         self.song_region_selection = None;
         self.song_edit_error = None;
+        // In-flight capture/take state is keyed by the OUTGOING project's
+        // track indices and pattern pools; carrying it across a load would let
+        // the next stop-commit splice stale chunks into the new project.
+        self.discard_song_capture_take();
+        self.active_runtime_song = None;
+        self.active_song_start_beat = None;
+        self.song_mirrored_row = None;
+        self.song_transport_mode = crate::app::song_transport::SongTransportMode::Stopped;
     }
 
     pub fn start_new_project(&mut self) {
@@ -3459,15 +3467,21 @@ impl App {
                         }
                     });
 
+                // A moved or renamed asset must never make the project
+                // unopenable: leave the lane unbound (as an empty lane is) and
+                // count it so the load reports the substitution.
                 let Some(path_buf) = resolved_path else {
                     let reference = saved_path
                         .as_ref()
                         .map(|path| format!("path '{}'", path.display()))
                         .unwrap_or_else(|| format!("name '{saved_name}'"));
-                    return Err(format!(
-                        "Couldn't resolve saved sample {reference} for track {}",
+                    eprintln!(
+                        "project-load: couldn't resolve saved sample {reference} for track {}; leaving lane unbound",
                         track_idx + 1,
-                    ));
+                    );
+                    fallback_count += 1;
+                    sample_ids.push((-1, String::new(), self.graph.sample_rate));
+                    continue;
                 };
                 let asset = self
                     .load_project_sample_asset(sample_assets, &path_buf)

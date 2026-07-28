@@ -5162,17 +5162,52 @@ fn fan_out_device_values_to_take_chunks(
     target: ResolvedDeviceTarget,
     snapshot: &DeviceValueSnapshot,
 ) -> Result<(), EditError> {
+    // A partial fan-out would leave the chunks diverging permanently (16.4)
+    // with nothing in history recording it, so each sibling's pre-edit value
+    // is kept until the whole set has been written and the first failure
+    // rewinds the ones already touched.
+    let mut written: Vec<(ResolvedDeviceTarget, DeviceValueSnapshot)> = Vec::new();
     for chunk in app.take_sibling_chunks(target.track, target.pattern) {
         let sibling = ResolvedDeviceTarget {
             pattern: chunk,
             ..target
         };
-        restore_device_value_snapshot(app, sibling, snapshot)?;
+        let before = match capture_device_value_snapshot(app, sibling) {
+            Ok(before) => before,
+            Err(error) => return Err(rewind_fanned_out_chunks(app, written, error)),
+        };
+        if let Err(error) = restore_device_value_snapshot(app, sibling, snapshot) {
+            return Err(rewind_fanned_out_chunks(app, written, error));
+        }
+        written.push((sibling, before));
     }
     // Edit-through (16.7): the playing song's prebuilt rows cloned this
     // pattern at preflight and would otherwise keep the pre-edit sound.
     invalidate_song_rows_for_edit(app, target.track, target.pattern);
     Ok(())
+}
+
+/// Undo the sibling chunks a failed fan-out already wrote. The callers roll
+/// back `target` themselves; without this the take's chunks would keep two
+/// different device states.
+fn rewind_fanned_out_chunks(
+    app: &mut App,
+    written: Vec<(ResolvedDeviceTarget, DeviceValueSnapshot)>,
+    error: EditError,
+) -> EditError {
+    let mut failures = Vec::new();
+    for (sibling, before) in written.iter().rev() {
+        if let Err(rewind_error) = restore_device_value_snapshot(app, *sibling, before) {
+            failures.push(format!("chunk {}: {rewind_error:?}", sibling.pattern.0));
+        }
+    }
+    if failures.is_empty() {
+        return error;
+    }
+    EditError::ReplayFailed(format!(
+        "{error:?}; rewinding the take's other chunks also failed: {}",
+        failures.join(", ")
+    ))
 }
 
 /// Edit-through for a pool pattern the playing song may resolve: re-preflight
@@ -5397,11 +5432,13 @@ pub fn apply_recorded_instrument_values_mutation(
         .id_at(track)
         .ok_or(EditError::TrackOutOfRange { track })?;
     // Preset loads follow the sound binding like any other device edit
-    // (takes spec 16.4).
-    let pattern = app
-        .bound_read_pattern(track)
-        .or_else(|| app.state.effective_track_pattern_id(track))
-        .ok_or(EditError::MissingTrackPattern)?;
+    // (takes spec 16.4), including materializing the scene pattern when the
+    // current scene is bare for the track — same resolution as
+    // `resolve_device_value_target`.
+    let pattern = match app.bound_read_pattern(track) {
+        Some(pattern) if !app.track_sound_binding(track).is_scene() => pattern,
+        _ => ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?,
+    };
     let target = ResolvedDeviceTarget {
         id: DeviceId::TrackInstrument(track_id),
         track,
@@ -7909,6 +7946,56 @@ mod tests {
             .expect("launch scene 0");
         assert!(app.state.capture_step_snapshot(1, 0).active);
         assert!(!app.state.capture_step_snapshot(1, 4).active);
+    }
+
+    /// Regression: loading an instrument preset in a bare scene must
+    /// materialize the scene's pattern like every other device edit path
+    /// (takes spec 11.1/16.4) instead of failing with `MissingTrackPattern`.
+    #[test]
+    fn instrument_preset_load_materializes_a_bare_scene_pattern() {
+        let state = SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(2, &[]),
+                PatternSnapshot::new_default(2, &[]),
+            ],
+            0,
+        );
+        // Shape of a track added while on scene 0: scene 1's cell is bare.
+        state.with_scenes_mut(|scenes| {
+            if let Some(id) = scenes.scenes[1].cells[1].take() {
+                scenes.track_pools[1].remove(id);
+            }
+        });
+        let mut app = test_app(state);
+        app.tracks = vec!["Track 1".to_string(), "Track 2".to_string()];
+        app.track_registry =
+            crate::sequencer::TrackRegistry::for_legacy_track_count(2).unwrap();
+        app.graph.track_buffer_ids = vec![-1, -1];
+        app.graph.track_sample_rates = vec![44_100, 44_100];
+        app.graph.track_instrument_types = vec![InstrumentType::Sampler, InstrumentType::Sampler];
+
+        app.state
+            .launch_scene(
+                1,
+                2,
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            )
+            .expect("launch scene 1");
+        assert!(app.state.effective_track_pattern_id(1).is_none());
+
+        apply_recorded_instrument_values_mutation(&mut app, 1, "Load preset", |_app| Ok(()))
+            .expect("the preset load resolves a pattern in a bare scene");
+        assert!(
+            app.state.effective_track_pattern_id(1).is_some(),
+            "the bare scene's pattern is materialized on demand"
+        );
     }
 
     fn configure_test_sampler_project(app: &mut App, sample_path: &str) {

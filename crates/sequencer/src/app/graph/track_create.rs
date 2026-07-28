@@ -2,6 +2,11 @@ use super::*;
 
 impl GraphController<'_> {
     pub fn add_track(&mut self, wav_path: &Path) -> Result<usize, String> {
+        // Graph sample buffers are immutable and never freed, so the limit must
+        // be checked BEFORE decoding: a rejected add must not retain a buffer.
+        if self.app.state.active_track_count() >= MAX_TRACKS {
+            return Err("Maximum number of tracks reached".to_string());
+        }
         let loaded = crate::instruments::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
         self.app.submit_sample_analysis(&loaded);
         let track_name =

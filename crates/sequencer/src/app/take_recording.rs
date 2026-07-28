@@ -21,6 +21,10 @@ use super::song_transport::SongTransportMode;
 use super::App;
 
 /// One armed track's in-flight take (spec 8.3/8.4).
+///
+/// `Clone` exists for one reason: the stop-commit keeps a restore copy so a
+/// failed commit hands the performance back instead of destroying it.
+#[derive(Clone)]
 pub(crate) struct PendingTakeLane {
     /// Punch-in beat `P` on the arrangement timeline, aligned per the
     /// quantize policy at the first note.
@@ -39,6 +43,7 @@ pub(crate) struct PendingTakeLane {
 }
 
 /// Per-capture take recording session: one optional pending lane per track.
+#[derive(Clone)]
 pub struct TakeRecordingSession {
     /// Arrangement beat corresponding to scheduler/record-clock beat zero.
     /// Shared with launch capture so notes and spliced rows use one domain.
@@ -91,6 +96,24 @@ impl TakeRecordingSession {
                     .map(|lane| (track, lane))
             })
             .collect()
+    }
+}
+
+/// Quantization grid for a take lane, expressed in the lane's own chunk-domain
+/// steps (spec 8.3/8.4). `Sixteenth` means "the track's own step grid" (note
+/// positions round to whole steps), and every coarser grid is rounded to a
+/// whole number of steps so that punch-in `P` and the note positions inside the
+/// clip snap to ONE grid even when the track's timebase is not commensurate
+/// with the record-quantize grid (e.g. 1/16 quantize on a 1/8 track).
+/// `None` for `Off`, which preserves the performed sub-step phase.
+fn take_grid_steps(quantize: RecordQuantize, step_beats: f64) -> Option<f64> {
+    let grid_beats = quantize.grid_beats()?;
+    if !(step_beats > 0.0) {
+        return None;
+    }
+    match quantize {
+        RecordQuantize::Sixteenth => Some(1.0),
+        _ => Some((grid_beats / step_beats).round().max(1.0)),
     }
 }
 
@@ -274,6 +297,36 @@ mod tests {
     }
 
     #[test]
+    fn quantized_punch_in_snaps_to_the_tracks_own_step_grid() {
+        // 1/16 record quantize on a 1/8 track: the note grid inside the clip
+        // is the track's STEP grid, so the punch-in has to use the same grid.
+        // Snapping P to an absolute 0.25-beat grid would start the clip a
+        // quarter-step off the track's timebase and shift every take note.
+        let (mut app, anchor) = capture_app();
+        app.state.transport.record_quantize.store(
+            RecordQuantize::Sixteenth as u32,
+            Ordering::Relaxed,
+        );
+        app.state.with_scenes_mut(|scenes| {
+            let pool = scenes.track_pools.get_mut(0).expect("track pool");
+            for pattern in pool.patterns.values_mut() {
+                pattern.track_params.timebase = crate::sequencer::Timebase::Eighth;
+            }
+        });
+        assert!(app.take_record_note(0, press_at_beats(anchor, 12.3), 60.0, 1.0));
+        let session = app.take_recording.as_ref().expect("session active");
+        let lane = session.lanes[0].as_ref().expect("lane punched in");
+        assert!((lane.step_beats - 0.5).abs() < 1e-9, "{}", lane.step_beats);
+        assert!(
+            (lane.punch_in_beat - 12.5).abs() < 1e-6,
+            "punch-in must land on the track's 1/8 step grid, got {}",
+            lane.punch_in_beat
+        );
+        // The note itself lands on take step 0, i.e. exactly at P.
+        assert!(lane.chunks[0].track_bits[0] & 1 == 1, "note at take step 0");
+    }
+
+    #[test]
     fn chunk_rollover_extends_pending_chunks() {
         let (mut app, anchor) = capture_app();
         assert!(app.take_record_note(0, press_at_beats(anchor, 4.0), 60.0, 1.0));
@@ -367,6 +420,38 @@ mod tests {
     }
 
     #[test]
+    fn failed_commit_keeps_the_recorded_take() {
+        let (mut app, anchor) = capture_app();
+        assert!(app.take_record_note(0, press_at_beats(anchor, 12.1), 60.0, 2.0));
+        // A dropped capture notice fails the commit (spec 10.3): the take may
+        // be incomplete, so the arrangement stays as it was.
+        for _ in 0..300 {
+            app.state
+                .song_playback()
+                .push_notice(crate::sequencer::SongPlaybackNotice::Ended {
+                    end_beat: 16.0,
+                    end_sample: 0,
+                });
+        }
+        let song_before = app.state.committed_song();
+        app.song_transport_mode = SongTransportMode::Stopped;
+        let error = app
+            .finish_song_capture_take(40.0)
+            .expect_err("overflow fails the commit");
+        assert!(error.contains("overflow"), "{error}");
+        assert_eq!(app.state.committed_song(), song_before);
+        // The recorded performance is NOT destroyed along with the failed
+        // commit: it stays pending until the performer discards it (Cancel)
+        // or a new capture replaces it.
+        let session = app.take_recording.as_ref().expect("take preserved");
+        assert!(session.has_pending_content());
+        assert!(
+            app.state.track_takes(0).is_empty(),
+            "a failed commit leaves nothing in the take pool"
+        );
+    }
+
+    #[test]
     fn stop_without_notes_or_launches_commits_nothing() {
         let (mut app, anchor) = capture_app();
         let song_before = app.state.committed_song();
@@ -451,15 +536,16 @@ impl App {
                 return false;
             }
             // Punch-in (spec 8.3): grid quantize puts P on the note's
-            // quantized boundary; Off floors the exact beat to the step grid
-            // (the sub-step remainder becomes the note's step-0 delay).
-            let punch_in_beat = match quantize.grid_beats() {
-                Some(grid) => (song_beat / grid).round() * grid,
-                None => match quantize {
-                    RecordQuantize::Off => (song_beat / step_beats).floor() * step_beats,
-                    // Sixteenth: nearest step boundary.
-                    _ => (song_beat / step_beats).round() * step_beats,
-                },
+            // quantized boundary — the SAME grid the note positions below use,
+            // so the clip start never lands off the track's step grid; Off
+            // floors the exact beat to the step grid (the sub-step remainder
+            // becomes the note's step-0 delay).
+            let punch_in_beat = match take_grid_steps(quantize, step_beats) {
+                Some(grid_steps) => {
+                    let grid = grid_steps * step_beats;
+                    (song_beat / grid).round() * grid
+                }
+                None => (song_beat / step_beats).floor() * step_beats,
             }
             .max(0.0);
             *slot = Some(PendingTakeLane {
@@ -474,24 +560,16 @@ impl App {
 
         // Clip-relative position in take steps (spec 8.4).
         let pos_steps = (song_beat - lane.punch_in_beat) / lane.step_beats;
-        let (step, delay) = match quantize {
-            RecordQuantize::Off => {
+        let (step, delay) = match take_grid_steps(quantize, lane.step_beats) {
+            Some(grid_steps) => (
+                ((pos_steps / grid_steps).round() * grid_steps)
+                    .round()
+                    .max(0.0) as usize,
+                0.0,
+            ),
+            None => {
                 let step = pos_steps.floor().max(0.0);
                 (step as usize, (pos_steps - step).clamp(0.0, 1.0) as f32)
-            }
-            RecordQuantize::Sixteenth => (pos_steps.round().max(0.0) as usize, 0.0),
-            _ => {
-                let grid_steps = (quantize
-                    .grid_beats()
-                    .expect("non-off record quantization must define a grid")
-                    / lane.step_beats)
-                    .max(1.0e-9);
-                (
-                    ((pos_steps / grid_steps).round() * grid_steps)
-                        .round()
-                        .max(0.0) as usize,
-                    0.0,
-                )
             }
         };
         // Chunk rollover (spec 8.4): extend with fresh template chunks.

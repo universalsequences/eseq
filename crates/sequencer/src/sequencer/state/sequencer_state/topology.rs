@@ -475,6 +475,7 @@ impl SequencerState {
         if target > last || scenes.scenes.len() != snapshot.scene_references.len() {
             return Err("Track history topology no longer matches the project".to_string());
         }
+        scenes.move_track_take_pool(last, target);
         let pool = scenes.track_pools.remove(last);
         scenes.track_pools.insert(target, pool);
         let track_override = scenes.track_overrides.remove(last);

@@ -7062,7 +7062,177 @@
             .quantized_launches
             .session_snapshot(&base_snapshot)
             .is_none());
+        // The ack releases the snapshot override but NOT the adoption: the
+        // control thread publishes the mirrored snapshot BEFORE it acks, and
+        // the worker drains the ack a whole loop iteration before it compares
+        // patterns. Releasing here would let the mirror's pattern change fire
+        // the resync (queue clear + seek) the boundary split exists to avoid.
+        assert_eq!(scheduler.quantized_launches.adopted_pattern(), Some(1));
+        assert!(
+            scheduler.quantized_launches.observe_pattern_switch(1),
+            "the mirrored pattern is adopted, not resynced"
+        );
         assert_eq!(scheduler.quantized_launches.adopted_pattern(), None);
+        // Spent: a later switch back to the same scene resyncs normally.
+        assert!(!scheduler.quantized_launches.observe_pattern_switch(1));
+    }
+
+    /// Two owners quantized to the same boundary (a scene launch plus a track
+    /// launch) are BOTH made audible: every due is reported as
+    /// scheduler-applied, so the control-side mirror skips the epoch bump for
+    /// both and a single-slot override would silently drop one launch's
+    /// content.
+    #[test]
+    fn concurrent_boundary_launches_all_reach_the_chunk_snapshot() {
+        use crate::quantized_launch::{
+            LaunchQuantize, PatternLaunchTarget, QuantizedLaunchOwner,
+        };
+        use std::sync::Arc;
+
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        state.transport.playing.store(true, Ordering::Relaxed);
+        let base_snapshot = state.publish_scheduler_snapshot();
+        let mut scene_launch = (*state.latest_scheduler_snapshot()).clone();
+        Arc::make_mut(&mut scene_launch.tracks[0]).steps[0].active = true;
+        scene_launch.transport.current_pattern = 1;
+        let scene_launch = Arc::new(scene_launch);
+        let mut track_launch = (*state.latest_scheduler_snapshot()).clone();
+        Arc::make_mut(&mut track_launch.tracks[1]).steps[1].active = true;
+        let track_launch = Arc::new(track_launch);
+
+        state
+            .quantized_launches()
+            .schedule(
+                PatternLaunchTarget::Scene { scene: 1 },
+                LaunchQuantize::Quarter,
+                QuantizedLaunchOwner::Transport,
+                2,
+                2,
+                Some(Arc::clone(&scene_launch)),
+            )
+            .expect("schedule scene launch");
+        state
+            .quantized_launches()
+            .schedule(
+                PatternLaunchTarget::SceneTracks {
+                    scene: 0,
+                    tracks: vec![1],
+                },
+                LaunchQuantize::Quarter,
+                QuantizedLaunchOwner::SceneMacro(3),
+                2,
+                2,
+                Some(Arc::clone(&track_launch)),
+            )
+            .expect("schedule track launch");
+
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        state
+            .quantized_launches()
+            .process_scheduler(&mut scheduler.quantized_launches, 0.3, 0.3, true, false);
+        // Both land on the same quarter boundary (1.0) and install together.
+        let (_, install) = scheduler
+            .quantized_launches
+            .next_session_chunk(1.0, 1_000.0, 4_096);
+        assert!(matches!(
+            install,
+            crate::quantized_launch::SessionLaunchInstall::AllTracks
+        ));
+        let merged = scheduler
+            .quantized_launches
+            .session_snapshot(&base_snapshot)
+            .expect("both overrides");
+        assert!(
+            Arc::ptr_eq(&merged.tracks[0], &scene_launch.tracks[0]),
+            "the scene launch must still schedule its own tracks"
+        );
+        assert!(
+            Arc::ptr_eq(&merged.tracks[1], &track_launch.tracks[1]),
+            "the track launch overrides the scene launch on its mask"
+        );
+        assert_eq!(scheduler.quantized_launches.adopted_pattern(), Some(1));
+
+        // Both dues report scheduler-applied, and each ack releases only its
+        // own override.
+        state
+            .quantized_launches()
+            .process_scheduler(&mut scheduler.quantized_launches, 1.05, 1.05, true, false);
+        let due = state.quantized_launches().drain_valid_due();
+        assert_eq!(due.len(), 2);
+        assert!(due.iter().all(|entry| entry.scheduler_applied));
+        for entry in &due {
+            state
+                .quantized_launches()
+                .acknowledge_mirror(entry.token)
+                .expect("ack");
+        }
+        state
+            .quantized_launches()
+            .process_scheduler(&mut scheduler.quantized_launches, 1.1, 1.1, true, false);
+        assert!(scheduler
+            .quantized_launches
+            .session_snapshot(&base_snapshot)
+            .is_none());
+    }
+
+    /// A prebuilt launch snapshot freezes bpm/track count at preflight, up to
+    /// a whole quantize interval before the boundary. The clock derives its
+    /// beat rate from the chunk snapshot while the surrounding chunk math uses
+    /// the live one, so the live transport must win for the override window.
+    #[test]
+    fn boundary_launch_override_follows_the_live_tempo_not_the_preflight_one() {
+        use crate::quantized_launch::{
+            LaunchQuantize, PatternLaunchTarget, QuantizedLaunchOwner,
+        };
+        use std::sync::Arc;
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.transport.playing.store(true, Ordering::Relaxed);
+        state.transport.bpm.store(120, Ordering::Relaxed);
+        let mut prebuilt = (*state.publish_scheduler_snapshot()).clone();
+        Arc::make_mut(&mut prebuilt.tracks[0]).steps[0].active = true;
+        let prebuilt = Arc::new(prebuilt);
+        // Tempo edited while the launch waits for its boundary.
+        state.transport.bpm.store(90, Ordering::Relaxed);
+        let base_snapshot = state.publish_scheduler_snapshot();
+
+        state
+            .quantized_launches()
+            .schedule(
+                PatternLaunchTarget::Scene { scene: 0 },
+                LaunchQuantize::Quarter,
+                QuantizedLaunchOwner::Transport,
+                1,
+                1,
+                Some(Arc::clone(&prebuilt)),
+            )
+            .expect("schedule scene launch");
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        state
+            .quantized_launches()
+            .process_scheduler(&mut scheduler.quantized_launches, 0.3, 0.3, true, false);
+        scheduler
+            .quantized_launches
+            .next_session_chunk(1.0, 1_000.0, 4_096);
+        let override_snapshot = scheduler
+            .quantized_launches
+            .session_snapshot(&base_snapshot)
+            .expect("installed override");
+        assert_eq!(
+            override_snapshot.transport.bpm, 90,
+            "the override window must advance the clock at the live tempo"
+        );
+        assert_eq!(
+            override_snapshot.transport.num_tracks,
+            base_snapshot.transport.num_tracks
+        );
+        assert!(
+            Arc::ptr_eq(&override_snapshot.tracks[0], &prebuilt.tracks[0]),
+            "the launched content still comes from the prebuilt snapshot"
+        );
     }
 
     /// Track-mask boundary launches merge only the launched tracks over the

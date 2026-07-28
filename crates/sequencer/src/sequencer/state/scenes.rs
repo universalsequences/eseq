@@ -701,6 +701,19 @@ impl ProjectScenes {
         scene_idx
     }
 
+    /// Reorders the per-track take pool so it stays parallel with
+    /// `track_pools` when a track lane moves (undo of a track delete).
+    pub fn move_track_take_pool(&mut self, from: usize, to: usize) {
+        while self.take_pools.len() < self.track_pools.len() {
+            self.take_pools.push(TrackTakePool::default());
+        }
+        if from >= self.take_pools.len() || to >= self.take_pools.len() || from == to {
+            return;
+        }
+        let pool = self.take_pools.remove(from);
+        self.take_pools.insert(to, pool);
+    }
+
     pub fn remove_track(&mut self, track: usize) -> bool {
         if track >= self.track_pools.len() {
             return false;

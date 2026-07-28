@@ -234,13 +234,25 @@
     (get arrangement-ghost :length)
     (arrangement-scroll-extent)))
 
-;; The model rejects an end at/before the last scene change (spec 9.3); the
-;; widget clamp mirrors that boundary.
+;; The furthest beat any stored clip runs to (0 when the lanes are empty).
+(def arrangement-last-clip-end ()
+  (reduce |acc lane|
+    (reduce |lane-acc clip| (max lane-acc (get clip :end-beat)) acc lane)
+    0
+    SEQ.song-lanes))
+
+;; App::arr_set_end rejects an end AT or before the last scene change, and an
+;; end before the last clip's end (spec 9.3). The clamp has to stay strictly
+;; inside both boundaries: the widget clamps inclusively, so a min that equals
+;; the last scene start hands the primitive the one value it refuses and the
+;; drag comes back as an error banner instead of a clamp.
 (def arrangement-content-length-min ()
-  (let ((count (len SEQ.scene-spans)))
-    (if (= count 0)
-      1
-      (max 1 (get (nth SEQ.scene-spans (- count 1)) :start-beat)))))
+  (let ((count (len SEQ.scene-spans))
+        (clip-floor (arrangement-last-clip-end)))
+    (max 1 clip-floor
+      (if (= count 0)
+        0
+        (+ (get (nth SEQ.scene-spans (- count 1)) :start-beat) 1)))))
 
 (def arrangement-row-selected? (id)
   (> (len (filter (lambda (candidate) (= candidate id)) arrangement-selection)) 0))

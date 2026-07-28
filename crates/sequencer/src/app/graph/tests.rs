@@ -834,6 +834,83 @@
     }
 
     #[test]
+    fn pattern_with_a_moved_sample_loads_unbound_instead_of_aborting_the_project() {
+        let graph = TestLiveGraph::new("project-missing-sample-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos();
+        let sample_path = std::env::temp_dir().join(format!(
+            "eseq-project-missing-sample-{}-{nonce}.wav",
+            std::process::id()
+        ));
+        write_test_wav(&sample_path);
+        let _sample_cleanup = TestProjectFile(sample_path.clone());
+        app.graph_controller()
+            .add_track(&sample_path)
+            .expect("add sampler track");
+
+        let project = app
+            .capture_project("__test-project-missing-sample")
+            .expect("project should capture");
+        let mut pattern = project.patterns[0].clone();
+        // The saved reference points at an asset the user has since moved:
+        // neither the path nor the name resolves anywhere.
+        pattern.sample_paths[0] = Some(
+            std::env::temp_dir()
+                .join(format!("eseq-moved-away-{nonce}.wav"))
+                .to_string_lossy()
+                .into_owned(),
+        );
+        pattern.sample_names[0] = format!("eseq-moved-away-{nonce}");
+
+        let mut sample_assets = std::collections::HashMap::new();
+        let (snapshot, _, fallback_count) = app
+            .project_pattern_into_snapshot(pattern, &mut sample_assets)
+            .expect("a moved sample must not abort the load");
+        assert_eq!(
+            snapshot.sample_ids[0].0, -1,
+            "the unresolvable lane should be left unbound"
+        );
+        assert_eq!(
+            fallback_count, 1,
+            "the unresolvable lane should be reported as a fallback sample"
+        );
+        graph.process_block();
+    }
+
+    #[test]
+    fn new_project_clears_in_flight_take_recording_and_transport_mode() {
+        let graph = TestLiveGraph::new("new-project-capture-reset-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_modulator_track()
+            .expect("add source-project track");
+        app.song_transport_mode = crate::app::song_transport::SongTransportMode::ArrangementCapture;
+        app.take_recording = Some(crate::app::take_recording::TakeRecordingSession::new(
+            0.0,
+            app.tracks.len(),
+        ));
+
+        app.start_new_project();
+
+        assert!(
+            app.take_recording.is_none(),
+            "an in-flight take recording must not survive a project reset"
+        );
+        assert!(app.song_capture_take.is_none());
+        assert!(app.active_runtime_song.is_none());
+        assert_eq!(app.active_song_start_beat, None);
+        assert_eq!(app.song_mirrored_row, None);
+        assert_eq!(
+            app.song_transport_mode,
+            crate::app::song_transport::SongTransportMode::Stopped
+        );
+        graph.process_block();
+    }
+
+    #[test]
     fn new_project_clears_arrangement_state_before_removing_tracks() {
         let graph = TestLiveGraph::new("new-project-arrangement-reset-test");
         let mut app = test_app_with_track_count(&graph, 0);

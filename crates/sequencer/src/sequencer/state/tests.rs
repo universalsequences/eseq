@@ -2197,6 +2197,23 @@
     }
 
     #[test]
+    fn project_scenes_move_track_take_pool_keeps_take_pools_parallel() {
+        let first = sample_pattern_snapshot(2);
+        let second = sample_pattern_snapshot(2);
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&[first, second], 0);
+        let chunk = scenes.scenes[1].cells[1].unwrap();
+        let take = scenes.take_pools[1].insert(None, vec![chunk], 64);
+
+        // Undo of "delete track 0" re-appends the track at the end and moves
+        // its lane back to index 0; every per-track vector must follow.
+        scenes.move_track_take_pool(1, 0);
+
+        assert!(scenes.take_pools[0].contains(take));
+        assert!(scenes.take_pools[1].takes.is_empty());
+        assert_eq!(scenes.take_pools.len(), scenes.track_pools.len());
+    }
+
+    #[test]
     fn project_scenes_purge_unused_track_patterns_removes_only_unreferenced_orphans() {
         let first = sample_pattern_snapshot(1);
         let second = sample_pattern_snapshot(1);
@@ -5807,9 +5824,11 @@
             assert!(lanes[2][1].pattern.is_none(), "bare scene's span is empty");
         });
 
-        // Saving an all-empty snapshot into a bare scene keeps it bare
-        // (lazy materialization requires real content AND an empty pool, so
-        // it can never resurrect a deliberately cleared cell).
+        // Saving an all-empty snapshot into a bare scene keeps it bare. This
+        // track's pool already holds the current scene's pattern, so it is
+        // the non-empty-pool half of the guard that blocks materialization
+        // here; the empty-pool halves are covered by
+        // `lazy_materialization_covers_fully_bare_tracks_only`.
         state.with_scenes_mut(|scenes| {
             assert!(scenes.save_scene_snapshot(1, PatternSnapshot::new_default(3, &[])));
             assert_eq!(scenes.scenes[1].cells[2], None);
@@ -5830,6 +5849,20 @@
             scenes.scenes[0].cells[1] = None;
             scenes.track_pools[1] = TrackPatternPool::default();
         });
+        // Empty pool + NO content: a routine snapshot save (every scene/row
+        // transition runs one) must leave the bare lane alone instead of
+        // minting an empty pattern for it.
+        state.with_scenes_mut(|scenes| {
+            assert!(scenes.save_scene_snapshot(0, PatternSnapshot::new_default(2, &[])));
+            assert!(
+                scenes.track_pools[1].patterns.is_empty(),
+                "an all-empty snapshot never materializes a bare track"
+            );
+            assert_eq!(
+                scenes.scenes[0].cells[1], None,
+                "the untouched bare cell stays bare"
+            );
+        });
         state.with_scenes_mut(|scenes| {
             let mut snapshot = PatternSnapshot::new_default(2, &[]);
             snapshot.track_bits[1][0] |= 1;
@@ -5845,6 +5878,30 @@
             snapshot.track_bits[0][0] |= 1;
             assert!(scenes.save_scene_snapshot(0, snapshot));
             assert_eq!(scenes.scenes[0].cells[0], None, "cleared cells stay cleared");
+        });
+        // A pool holding ONLY claimed take chunks is still bare: chunks are
+        // hidden from the grid, so real content must still mint a grid
+        // pattern (and never adopt the chunk as the scene cell).
+        state.with_scenes_mut(|scenes| {
+            scenes.scenes[0].cells[1] = None;
+            scenes.track_pools[1] = TrackPatternPool::default();
+            scenes.take_pools[1] = TrackTakePool::default();
+            let chunk_data = PatternSnapshot::new_default(2, &[])
+                .track_pattern_data(1)
+                .expect("chunk data");
+            let chunk = scenes.track_pools[1].insert(chunk_data);
+            scenes.take_pools[1].insert(None, vec![chunk], 16);
+
+            let mut snapshot = PatternSnapshot::new_default(2, &[]);
+            snapshot.track_bits[1][0] |= 1;
+            assert!(scenes.save_scene_snapshot(0, snapshot));
+            assert_eq!(
+                scenes.track_pools[1].patterns.len(),
+                2,
+                "a claimed-chunk-only pool still counts as bare"
+            );
+            let cell = scenes.scenes[0].cells[1].expect("content materializes a grid pattern");
+            assert_ne!(cell, chunk, "the take chunk is never adopted as the cell");
         });
     }
 

@@ -36,6 +36,7 @@ pub(super) fn handle(
     let track_groups = ctx.shared.track_groups.clone();
     let record_armed = ctx.shared.record_armed.clone();
     let accumulator_names = ctx.shared.accumulator_names.clone();
+    let arrangement_clipboard = ctx.shared.arrangement_clipboard.clone();
     match name {
         "move-saved-instrument" => {
             let name = extract_string_from_payload(&payload, "name");
@@ -201,6 +202,10 @@ pub(super) fn handle(
             }
             selected_steps.lock().unwrap().clear();
             piano_roll_selection.lock().unwrap().clear();
+            // The arrangement clipboard stores pattern/take IDS, not content:
+            // kept across a project switch it would paste whatever happens to
+            // carry those ids now (region spec 5.1).
+            *arrangement_clipboard.lock().unwrap() = None;
             *ctx.track_names = app.tracks.clone();
             sync_shared_track_collapsed(&track_collapsed, &app);
             current_track.store(0, Ordering::Relaxed);

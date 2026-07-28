@@ -343,18 +343,23 @@ impl App {
     /// Stop-commit (spec 7.4.7/10.4, lane spec 9): decompose the consolidated
     /// take into scene events and clips and splice them into the committed
     /// **arrangement** (one project mutation, one undo entry).
-    /// `end_raw_beats` is the scheduler rendered-beat clock at Stop — the same
-    /// clock the events were recorded against. On any failure the previous
-    /// committed arrangement is intact, the failure state is latched for the
-    /// `song-capture-failed` / `song-capture-error` bindings, and the take is
-    /// discarded.
+    /// `end_raw_beats` is the record-clock beat at Stop — the same clock the
+    /// events were recorded against. On any failure the previous committed
+    /// arrangement is intact, the failure state is latched for the
+    /// `song-capture-failed` / `song-capture-error` bindings, and the launch
+    /// take is discarded. Any RECORDED take content survives a failed commit:
+    /// the pending session stays in `take_recording` (a failed Stop must not
+    /// silently destroy the performance) until it is explicitly discarded
+    /// (Cancel) or replaced by the next capture.
     pub(crate) fn finish_song_capture_take(
         &mut self,
         end_raw_beats: f64,
     ) -> Result<String, String> {
         let result = self.try_finish_song_capture_take(end_raw_beats);
         self.song_capture_take = None;
-        self.take_recording = None;
+        if result.is_ok() {
+            self.take_recording = None;
+        }
         if let Err(error) = &result {
             self.song_capture_failed = true;
             self.song_capture_error = Some(error.clone());
@@ -367,18 +372,21 @@ impl App {
             return Err("no arrangement-capture take is active".to_string());
         };
         // Pending take-recording lanes commit together with the launch
-        // splice as one undo entry (takes spec 8.2/8.5).
-        let pending = self
+        // splice as one undo entry (takes spec 8.2/8.5). The session itself
+        // stays in `self.take_recording` until the commit is certain: draining
+        // it up front would destroy the recorded performance on every failure
+        // path below.
+        let has_pending_takes = self
             .take_recording
-            .take()
-            .map(|session| session.into_pending())
-            .unwrap_or_default();
+            .as_ref()
+            .is_some_and(|session| session.has_pending_content());
         // Spec 10.3: a lost notice means the take may be incomplete; it must
         // never be committed.
         if self.state.song_playback().take_notice_overflow() {
             return Err(
                 "capture events were lost (notice channel overflow); the take was not \
-                 committed and the previous song is unchanged"
+                 committed, the previous song is unchanged and any recorded notes are \
+                 kept pending"
                     .to_string(),
             );
         }
@@ -416,7 +424,7 @@ impl App {
                 // No launches performed: nothing to splice; the committed
                 // arrangement is untouched (spec 9.1) — unless takes were
                 // recorded, in which case they paint onto it unchanged.
-                if pending.is_empty() {
+                if !has_pending_takes {
                     return Ok(
                         "Arrangement capture ended: no launches captured; the committed \
                          song is unchanged"
@@ -451,7 +459,7 @@ impl App {
         // Guarded like every other authoring path; a no-op stop above returns
         // before reaching it, exactly as the row primitive's check did.
         self.require_song_edit_unlocked()?;
-        if pending.is_empty() {
+        if !has_pending_takes {
             let before = previous;
             self.commit_arrangement_edit("Capture arrangement", before, Some(arrangement))
                 .map_err(|error| format!("the captured take could not be committed: {error}"))?;
@@ -469,7 +477,24 @@ impl App {
                 "Arrangement capture committed: {row_count} row(s), end beat {end:.3}"
             ));
         }
-        self.commit_capture_with_takes(arrangement, previous, pending)
+        // Everything fallible that does NOT need the recorded notes is done:
+        // drain the session only now, and hand it back if the commit fails.
+        let Some(session) = self.take_recording.take() else {
+            return Err("the recorded takes are no longer available".to_string());
+        };
+        // `register_pending_takes` moves the chunks into the pattern pool and
+        // the commit's rollback drops them again, so hold a restore copy: a
+        // failed commit rolls the project back, and the performance has to
+        // survive with it (takes spec 8.5 — only Cancel discards notes).
+        let restore = session.clone();
+        let pending = session.into_pending();
+        match self.commit_capture_with_takes(arrangement, previous, pending) {
+            Ok(status) => Ok(status),
+            Err(error) => {
+                self.take_recording = Some(restore);
+                Err(error)
+            }
+        }
     }
 
     /// Splice the consolidated capture into `previous` over `[P, Q)` (lane

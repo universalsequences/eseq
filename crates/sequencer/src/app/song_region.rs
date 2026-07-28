@@ -166,6 +166,22 @@ fn region_snap_beats(start_beat: f64, len_beats: f64) -> f64 {
 }
 
 impl App {
+    /// The model tracks a region actually edits: the lanes inside the
+    /// rectangle that are DRAWN.
+    ///
+    /// The marquee is swept over VISIBLE lanes only
+    /// (`arrangement-region-other-track` walks `seq-visible-track-indices`),
+    /// but the region stores just its two endpoints, so a collapsed track
+    /// between them lands inside the index range while never appearing in the
+    /// rectangle the user saw. Editing it would trim, lift or ripple clips
+    /// with no visual feedback at all, so every region op iterates this
+    /// instead of `track_a..=track_b`.
+    fn region_tracks(&self, region: &SongRegionSelection) -> Vec<usize> {
+        (region.track_a..=region.track_b)
+            .filter(|track| !self.track_collapsed.get(*track).copied().unwrap_or(false))
+            .collect()
+    }
+
     /// Advance a lane source's offset by `delta_beats` of playback, in the
     /// source's own step domain: patterns wrap at the pattern length, takes
     /// advance linearly and never wrap (takes spec 6.1/7.4).
@@ -245,7 +261,7 @@ impl App {
         let scenes = self.state.capture_project_scenes();
 
         let mut tracks = Vec::new();
-        for track in region.track_a..=region.track_b {
+        for track in self.region_tracks(&region) {
             if track >= arrangement.track_lanes.len() {
                 continue;
             }
@@ -361,8 +377,8 @@ impl App {
     /// Only the SELECTED tracks move; every other lane keeps playing at the
     /// beats it always did. Two scopes, same audible contract:
     ///
-    /// - **Region covers every track** — every lane's clips AND the scene
-    ///   lane slide right, so the whole timeline opens up. This is the
+    /// - **Region covers every track** — every selected lane's clips AND the
+    ///   scene lane slide right, so the whole timeline opens up. This is the
     ///   "insert 4 bars into my song" gesture.
     /// - **Region covers some tracks** — only those lanes' clips slide; the
     ///   scene lane and every other lane stay exactly where they were.
@@ -398,11 +414,13 @@ impl App {
         let build = (|| -> Result<ProjectArrangement, String> {
             let mut arrangement = existing.clone();
             arrangement.end_beat += len_beats;
-            let rippled: Vec<usize> = if covers_every_track {
-                (0..arrangement.track_lanes.len()).collect()
-            } else {
-                clipboard.tracks.iter().map(|(track, _)| *track).collect()
-            };
+            // Ripple exactly the lanes the duplicate will re-fill. Even the
+            // whole-timeline gesture must not shift a lane the clipboard has
+            // nothing for (a collapsed track outside the swept endpoints, or
+            // one that no longer resolves): shifting without pasting would
+            // punch a silent hole of `len_beats` into it while every other
+            // lane repeats the region.
+            let rippled: Vec<usize> = clipboard.tracks.iter().map(|(track, _)| *track).collect();
             for track in rippled {
                 if track >= arrangement.track_lanes.len() {
                     continue;
@@ -869,7 +887,7 @@ impl App {
         let mut arrangement = existing.clone();
         let scenes = self.state.capture_project_scenes();
         let mut cleared = 0usize;
-        for track in region.track_a..=region.track_b {
+        for track in self.region_tracks(&region) {
             if track >= arrangement.track_lanes.len() {
                 continue;
             }
@@ -1687,6 +1705,71 @@ mod tests {
         undo(&mut app);
         for track in 0..3 {
             assert_eq!(merged_lane(&app, track), before[track], "undo restores track {track}");
+        }
+    }
+
+    /// A COLLAPSED track between the two marquee endpoints is not in the
+    /// drawn rectangle (the sweep walks visible lanes), so no region op may
+    /// touch it — deleting clips the user never saw selected is silent data
+    /// loss.
+    #[test]
+    fn region_ops_skip_a_collapsed_track_between_the_endpoints() {
+        let mut app = app_with_song_tracks(3);
+        app.set_track_collapsed(1, true);
+        let hidden_before = merged_lane(&app, 1);
+        app.set_song_region(SongRegionSelection::new(0, 2, 4.0, 12.0));
+
+        let copied = app.song_region_copy().expect("copy succeeds");
+        assert_eq!(
+            copied.tracks.iter().map(|(track, _)| *track).collect::<Vec<_>>(),
+            vec![0, 2],
+            "the clipboard holds only the visible lanes of the rectangle"
+        );
+
+        app.song_region_delete().expect("delete succeeds");
+        assert_eq!(
+            merged_lane(&app, 1),
+            hidden_before,
+            "the collapsed lane keeps every clip it had"
+        );
+        for track in [0usize, 2] {
+            assert_eq!(
+                window(&app, track, 4.0, 12.0),
+                vec![(0.0, 8.0, LaneSource::Empty, 0.0)],
+                "track {track} is SILENT across the cleared region"
+            );
+        }
+    }
+
+    /// A scene-lane region ripples the timeline, but a lane the clipboard has
+    /// nothing for (here: a collapsed track outside the visible endpoints)
+    /// must not be shifted — shifting without pasting would punch a silent
+    /// hole into it while every other lane repeats the region.
+    #[test]
+    fn duplicate_never_ripples_a_lane_it_will_not_re_fill() {
+        let mut app = app_with_song_tracks(3);
+        app.set_track_collapsed(0, true);
+        let hidden_before = merged_lane(&app, 0);
+        // What `arrangement-region-all-tracks` reports with track 0 hidden:
+        // first..last VISIBLE track, scene lane included.
+        app.set_song_region(SongRegionSelection::new_in_lane(1, 2, 4.0, 12.0, true));
+        let source: Vec<_> = (1..3).map(|track| window(&app, track, 4.0, 12.0)).collect();
+
+        app.song_region_duplicate().expect("duplicate succeeds");
+        assert_eq!(
+            window(&app, 0, 0.0, 16.0),
+            hidden_before
+                .iter()
+                .map(|(start, end, source, offset)| (*start, *end, *source, *offset))
+                .collect::<Vec<_>>(),
+            "the un-pasted lane plays exactly what it did, with no silent hole"
+        );
+        for track in 1..3 {
+            assert_eq!(
+                window(&app, track, 12.0, 20.0),
+                source[track - 1],
+                "track {track} got the duplicate"
+            );
         }
     }
 

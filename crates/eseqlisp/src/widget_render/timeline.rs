@@ -2677,8 +2677,14 @@ impl TimelineView {
             let right = rect.col + rect.width;
             // Narrow, roughly fixed-width grips (Ableton): a fat handle over
             // a long clip swallows most of its title bar, and on abutting
-            // clips it makes the boundary a coin flip.
-            let handle_width = (rect.width * 0.24).clamp(0.5, 1.25);
+            // clips it makes the boundary a coin flip. Only title-barred
+            // hosts want that tightening — bar-less hosts (piano roll) keep
+            // the forgiving grips notes have always had.
+            let handle_width = if self.has_title_bar() {
+                (rect.width * 0.24).clamp(0.5, 1.25)
+            } else {
+                (rect.width * 0.24).clamp(1.25, 4.0)
+            };
             let outside_slop = 0.75;
 
             // With a title bar the drag handles live on the bar only, so the
@@ -2692,12 +2698,21 @@ impl TimelineView {
                 None => true,
             };
             let has_handles = in_title_bar && rect.width > 1.0;
+            // `item_rect` clamps a clip that begins left of the view to the
+            // content's left edge, so `left` is NOT the clip's start edge for
+            // a scrolled-off clip. Offering a start grip there would trim an
+            // invisible boundary on what looks like a plain title-bar drag.
+            let start_edge_visible = item.start >= self.view_start;
 
             if local_col >= left && local_col < right {
                 if has_handles && local_col >= right - handle_width {
                     return Some(HitRegion::ItemEdgeEnd { item: item.clone() });
                 }
-                if has_handles && title_bar_bottom.is_some() && local_col <= left + handle_width {
+                if has_handles
+                    && start_edge_visible
+                    && title_bar_bottom.is_some()
+                    && local_col <= left + handle_width
+                {
                     return Some(HitRegion::ItemEdgeStart { item: item.clone() });
                 }
                 if in_title_bar && title_bar_bottom.is_some() {
@@ -2710,6 +2725,7 @@ impl TimelineView {
                 if local_col >= right && local_col <= right + outside_slop {
                     slop_hit = Some(HitRegion::ItemEdgeEnd { item: item.clone() });
                 } else if title_bar_bottom.is_some()
+                    && start_edge_visible
                     && local_col <= left
                     && local_col >= left - outside_slop
                 {
@@ -7456,6 +7472,57 @@ mod tests {
             assert_eq!(hit_name(&view, 11.8, row), "body", "row {row}");
             assert_eq!(hit_name(&view, 3.5, row), "background", "row {row}");
         }
+    }
+
+    /// Bar-less hosts keep the forgiving grips they always had: the narrow
+    /// Ableton-style clamp is a title-bar affordance only. The 8-cell item's
+    /// end handle is `8 * 0.24 = 1.92` cells wide here; with the clip clamp it
+    /// would be 1.25 and col 10.5 would read as body.
+    #[test]
+    fn hit_test_without_a_title_bar_keeps_the_wide_end_grip() {
+        let view = title_bar_view(None);
+        assert_eq!(hit_name(&view, 10.5, 4.0), "edge-end");
+        // The title-barred variant of the same item tightens to 1.25 cells.
+        let clip_view = title_bar_view(Some(2.0));
+        assert_eq!(hit_name(&clip_view, 10.5, 0.5), "title-bar");
+        assert_eq!(hit_name(&clip_view, 11.5, 0.5), "edge-end");
+    }
+
+    /// A clip that begins left of the view has its rect clamped to the
+    /// content's left edge, so that edge is NOT the clip's start. Offering a
+    /// start grip there would trim an off-screen boundary on what looks like
+    /// a plain title-bar drag, so the bar stays a move surface.
+    #[test]
+    fn scrolled_off_clip_start_offers_no_start_handle() {
+        let props = HashMap::from([
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(1.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(20.0)),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(8.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(0.0)),
+            ("title-bar-height".to_string(), number_value(2.0)),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 16.0,
+                height: 8.0,
+            },
+        );
+        // Left edge of the content, on the title bar: a move, not a resize.
+        assert_eq!(hit_name(&view, 0.1, 0.5), "title-bar");
+        assert_eq!(hit_name(&view, 1.0, 0.5), "title-bar");
+        // The end edge IS on screen (beat 20 -> col 12), so it keeps its grip.
+        assert_eq!(hit_name(&view, 11.8, 0.5), "edge-end");
     }
 
     /// Back-to-back clips share one boundary, and each wants a handle there.

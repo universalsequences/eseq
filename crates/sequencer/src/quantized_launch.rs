@@ -154,11 +154,18 @@ struct InstalledBoundaryLaunch {
     /// `None` = full scene launch; `Some` = the launched track mask (other
     /// tracks keep scheduling from the base snapshot via a per-chunk merge).
     tracks: Option<Vec<usize>>,
-    /// Scene index the mirror will publish as `current_pattern`. The worker
-    /// suppresses its pattern-switch resync (queue clear + seek) when the
-    /// published pattern matches — the scheduler already switched audibly.
-    expected_pattern: Option<usize>,
 }
+
+/// A scene index an installed boundary launch will publish as
+/// `current_pattern` once the control thread mirrors it.
+struct AdoptedPattern {
+    token: QuantizedLaunchToken,
+    pattern: usize,
+}
+
+/// Adoption expectations outlive their install (see `adopted_patterns`), so
+/// cap the bookkeeping in case a mirror never lands.
+const MAX_ADOPTED_PATTERNS: usize = 8;
 
 /// Which tracks a just-installed boundary launch replaced — the lookahead
 /// pass marks their accumulators for reset, mirroring the control-side
@@ -175,10 +182,26 @@ pub(crate) struct PendingQuantizedLaunches {
     owner_tokens: HashMap<QuantizedLaunchOwner, QuantizedLaunchToken>,
     due_backlog: Vec<PendingDueLaunch>,
     boundary: Vec<PendingBoundaryLaunch>,
-    installed: Option<InstalledBoundaryLaunch>,
-    /// Cached track-mask merge keyed by (installed token, base snapshot
+    /// Every boundary launch made audible but not yet mirrored, in install
+    /// order. Concurrent owners can land on one boundary (a scene macro plus
+    /// a transport track launch), and each due is reported as
+    /// `scheduler_applied`, so all of their snapshots must stay in the
+    /// per-chunk override — a single slot would silently drop the earlier
+    /// launch's content while still telling the control thread it sounded.
+    installed: Vec<InstalledBoundaryLaunch>,
+    /// Bumped whenever `installed` changes; keys the merge cache.
+    install_revision: u64,
+    /// Scene indices the pending mirrors will publish as `current_pattern`,
+    /// in mirror order. Deliberately NOT released by `BoundaryMirrored`: the
+    /// control thread publishes the mirrored snapshot BEFORE it acks, and the
+    /// worker drains the ack earlier in its loop than it compares patterns —
+    /// releasing on the ack would let the pattern-switch resync fire on the
+    /// mirror and undo the boundary split. Released when the worker actually
+    /// observes the published pattern change.
+    adopted_patterns: Vec<AdoptedPattern>,
+    /// Cached snapshot override keyed by (install revision, base snapshot
     /// address) so per-chunk merges don't reallocate every block.
-    merged_cache: Option<(QuantizedLaunchToken, usize, Arc<SequencerSnapshot>)>,
+    merged_cache: Option<(u64, usize, Arc<SequencerSnapshot>)>,
 }
 
 impl PendingQuantizedLaunches {
@@ -222,8 +245,7 @@ impl PendingQuantizedLaunches {
                     },
                 );
             }
-            self.installed = None;
-            self.merged_cache = None;
+            self.clear_installed();
         }
 
         let mut due_tokens = self
@@ -317,6 +339,7 @@ impl PendingQuantizedLaunches {
                     self.pending.remove(&token);
                     self.boundary.retain(|launch| launch.request.token != token);
                     self.drop_installed_token(token);
+                    self.forget_adopted_token(token);
                 }
                 self.boundary.retain(|launch| launch.request.owner != owner);
                 self.due_backlog.retain(|due| due.owner != owner);
@@ -326,8 +349,7 @@ impl PendingQuantizedLaunches {
                 self.owner_tokens.clear();
                 self.due_backlog.clear();
                 self.boundary.clear();
-                self.installed = None;
-                self.merged_cache = None;
+                self.clear_installed();
             }
             QuantizedLaunchMessage::BoundaryMirrored(token) => {
                 self.drop_installed_token(token);
@@ -352,18 +374,33 @@ impl PendingQuantizedLaunches {
             }
         }
         self.drop_installed_token(token);
+        // A cancelled launch never reaches the control thread, so its adoption
+        // expectation would never be observed — drop it with the install.
+        self.forget_adopted_token(token);
         self.due_backlog.retain(|due| due.action.token != token);
     }
 
     fn drop_installed_token(&mut self, token: QuantizedLaunchToken) {
-        if self
-            .installed
-            .as_ref()
-            .is_some_and(|installed| installed.token == token)
-        {
-            self.installed = None;
+        let before = self.installed.len();
+        self.installed.retain(|installed| installed.token != token);
+        if self.installed.len() != before {
+            self.install_revision = self.install_revision.wrapping_add(1);
             self.merged_cache = None;
         }
+    }
+
+    fn forget_adopted_token(&mut self, token: QuantizedLaunchToken) {
+        self.adopted_patterns
+            .retain(|adopted| adopted.token != token);
+    }
+
+    fn clear_installed(&mut self) {
+        if !self.installed.is_empty() {
+            self.installed.clear();
+            self.install_revision = self.install_revision.wrapping_add(1);
+        }
+        self.adopted_patterns.clear();
+        self.merged_cache = None;
     }
 
     /// Plan the next session-mode scheduling chunk: clamp it to the earliest
@@ -432,13 +469,24 @@ impl PendingQuantizedLaunches {
                     SessionLaunchInstall::Tracks(merged)
                 }
             };
-            self.installed = Some(InstalledBoundaryLaunch {
+            if tracks.is_none() {
+                // A full-scene launch replaces every track, so the overrides
+                // installed before it on this boundary no longer contribute.
+                self.installed.clear();
+            }
+            self.installed.push(InstalledBoundaryLaunch {
                 token,
                 snapshot,
                 tracks,
-                expected_pattern,
             });
+            self.install_revision = self.install_revision.wrapping_add(1);
             self.merged_cache = None;
+            if let Some(pattern) = expected_pattern {
+                if self.adopted_patterns.len() >= MAX_ADOPTED_PATTERNS {
+                    self.adopted_patterns.remove(0);
+                }
+                self.adopted_patterns.push(AdoptedPattern { token, pattern });
+            }
             self.due_backlog.push(PendingDueLaunch {
                 action: DuePatternLaunch {
                     token,
@@ -460,38 +508,96 @@ impl PendingQuantizedLaunches {
         &mut self,
         base_snapshot: &SequencerSnapshot,
     ) -> Option<Arc<SequencerSnapshot>> {
-        let installed = self.installed.as_ref()?;
-        let Some(tracks) = &installed.tracks else {
-            return Some(Arc::clone(&installed.snapshot));
-        };
+        if self.installed.is_empty() {
+            return None;
+        }
         let base_key = base_snapshot as *const SequencerSnapshot as usize;
-        if let Some((token, key, merged)) = &self.merged_cache {
-            if *token == installed.token && *key == base_key {
+        if let Some((revision, key, merged)) = &self.merged_cache {
+            if *revision == self.install_revision && *key == base_key {
                 return Some(Arc::clone(merged));
             }
         }
-        let mut merged = base_snapshot.clone();
-        let track_count = merged.tracks.len().min(installed.snapshot.tracks.len());
-        for &track in tracks {
-            if track < track_count {
-                merged.tracks[track] = Arc::clone(&installed.snapshot.tracks[track]);
+        // Fast path: a lone full-scene launch whose preflight transport still
+        // agrees with the live one is usable verbatim.
+        if let [only] = self.installed.as_slice() {
+            if only.tracks.is_none() && live_transport_matches(&only.snapshot, base_snapshot) {
+                return Some(Arc::clone(&only.snapshot));
             }
         }
+        let mut merged = base_snapshot.clone();
+        for installed in &self.installed {
+            match &installed.tracks {
+                None => merged = (*installed.snapshot).clone(),
+                Some(tracks) => {
+                    let track_count = merged.tracks.len().min(installed.snapshot.tracks.len());
+                    for &track in tracks {
+                        if track < track_count {
+                            merged.tracks[track] = Arc::clone(&installed.snapshot.tracks[track]);
+                        }
+                    }
+                }
+            }
+        }
+        // The prebuilt snapshot froze bpm/topology/track count at preflight,
+        // which can be a whole quantize interval before the boundary. The
+        // clock derives its beat rate from the chunk snapshot while the
+        // surrounding chunk math uses the live base snapshot, so the live
+        // transport has to win for the override window.
+        adopt_live_transport(&mut merged, base_snapshot);
         let merged = Arc::new(merged);
-        self.merged_cache = Some((installed.token, base_key, Arc::clone(&merged)));
+        self.merged_cache = Some((self.install_revision, base_key, Arc::clone(&merged)));
         Some(merged)
     }
 
-    /// Scene index an installed-but-unmirrored boundary launch will publish
-    /// as `current_pattern`. The worker skips its pattern-switch resync when
-    /// the base snapshot catches up to this — the switch was already made
-    /// audible by the chunk split, and a queue clear + seek here would
-    /// swallow the boundary step (the original skipped-first-trigger bug).
-    pub(crate) fn adopted_pattern(&self) -> Option<usize> {
-        self.installed
-            .as_ref()
-            .and_then(|installed| installed.expected_pattern)
+    /// Does a published `current_pattern` match a boundary launch the
+    /// scheduler already made audible? The worker skips its pattern-switch
+    /// resync when it does — the switch happened at the chunk split, and a
+    /// queue clear + seek here would swallow the boundary step (the original
+    /// skipped-first-trigger bug).
+    ///
+    /// Observing the switch consumes the expectation (and any superseded ones
+    /// ahead of it); an unrelated pattern voids the pending expectations
+    /// rather than letting them suppress a later legitimate resync.
+    pub(crate) fn observe_pattern_switch(&mut self, pattern: usize) -> bool {
+        match self
+            .adopted_patterns
+            .iter()
+            .position(|adopted| adopted.pattern == pattern)
+        {
+            Some(index) => {
+                self.adopted_patterns.drain(..=index);
+                true
+            }
+            None => {
+                self.adopted_patterns.clear();
+                false
+            }
+        }
     }
+
+    /// Scene index the next pending mirror will publish as `current_pattern`,
+    /// for tests and diagnostics.
+    pub(crate) fn adopted_pattern(&self) -> Option<usize> {
+        self.adopted_patterns.first().map(|adopted| adopted.pattern)
+    }
+}
+
+fn live_transport_matches(snapshot: &SequencerSnapshot, base: &SequencerSnapshot) -> bool {
+    snapshot.transport.bpm == base.transport.bpm
+        && snapshot.transport.topology_epoch == base.transport.topology_epoch
+        && snapshot.transport.num_tracks == live_track_count(snapshot, base)
+}
+
+fn adopt_live_transport(snapshot: &mut SequencerSnapshot, base: &SequencerSnapshot) {
+    snapshot.transport.bpm = base.transport.bpm;
+    snapshot.transport.topology_epoch = base.transport.topology_epoch;
+    snapshot.transport.num_tracks = live_track_count(snapshot, base);
+}
+
+/// The live track count, clamped to what the override snapshot actually
+/// carries — the clock indexes `tracks[0..num_tracks]` directly.
+fn live_track_count(snapshot: &SequencerSnapshot, base: &SequencerSnapshot) -> usize {
+    base.transport.num_tracks.min(snapshot.tracks.len())
 }
 
 pub(crate) fn launch_deadline(rendered_beats: f64, playing: bool, quantize: LaunchQuantize) -> f64 {

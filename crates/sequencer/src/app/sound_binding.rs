@@ -171,7 +171,21 @@ impl App {
             return None;
         }
         let song = self.active_runtime_song.as_ref()?;
-        let row = song.rows.get(self.song_mirrored_row?)?;
+        // A structural arrangement edit nulls the mirrored row until the next
+        // scheduler-authoritative notice (`rebuild_active_song_after_arrangement_edit`).
+        // Keying rule 2 off it alone would unbind EVERY track for that whole
+        // window — the panel jumps back to the scene pattern and its sound is
+        // pushed to the engine mid-playback. The scheduler's own row ordinal
+        // is authoritative in the gap.
+        let ordinal = match self.song_mirrored_row {
+            Some(row) => row,
+            None => self
+                .state
+                .song_playback()
+                .shared()
+                .current_row_ordinal(),
+        };
+        let row = song.rows.get(ordinal)?;
         row.resolved_sources.get(track).copied()
     }
 
@@ -414,13 +428,25 @@ impl App {
     /// engine, so this is about the rows still ahead of the playhead.
     ///
     /// A no-op outside song playback, and when no row uses the pattern.
+    ///
+    /// A take's write fans out to every chunk (16.4) but names the take by its
+    /// FIRST chunk, while preflight stores the per-row CHUNK id — so the guard
+    /// matches the whole chunk set, not just the id it was handed. Otherwise a
+    /// take whose rows all resolve a later chunk (a clip offset past chunk 0)
+    /// would skip the re-preflight and keep the pre-edit sound.
     pub fn invalidate_song_rows_for_pattern(&mut self, track: usize, pattern: PatternId) {
         if !self.song_playback_authority_active() {
             return;
         }
+        let mut candidates = self.take_sibling_chunks(track, pattern);
+        candidates.push(pattern);
         let affected = self.active_runtime_song.as_ref().is_some_and(|song| {
             song.rows.iter().any(|row| {
-                row.resolved_pattern_ids.get(track).copied().flatten() == Some(pattern)
+                row.resolved_pattern_ids
+                    .get(track)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|resolved| candidates.contains(&resolved))
             })
         });
         if !affected {
@@ -1046,5 +1072,52 @@ pub(crate) mod tests {
             0.125,
             "the live mirror carries the selected clip's devices"
         );
+    }
+
+    /// Regression (16.3 rule 2): a structural arrangement edit made DURING
+    /// song playback nulls the mirrored row until the next scheduler notice.
+    /// The binding must keep following what the song is sounding through that
+    /// window — otherwise every track silently unbinds and the scene
+    /// pattern's sound is pushed to the engine mid-playback.
+    #[test]
+    fn an_arrangement_edit_during_playback_keeps_the_audible_binding() {
+        let (mut app, take, _scene_pattern, chunks) = app_with_take();
+        // Give the take a sound of its own so an unbind is observable.
+        app.state.with_scenes_mut(|scenes| {
+            for chunk in &chunks {
+                scenes.track_pools[0]
+                    .get_mut(*chunk)
+                    .expect("chunk in pool")
+                    .instrument_slot
+                    .defaults[0] = 0.75;
+            }
+        });
+        app.set_use_arrangement(true).expect("song mode on");
+        app.song_transport_play(false).expect("song playback starts");
+        app.sync_track_sound_bindings();
+        assert_eq!(
+            app.track_sound_binding(0).source,
+            Some(BoundSource::Take(take)),
+            "row zero plays the take"
+        );
+        assert_eq!(app.state.pattern.instrument_slots[0].defaults.get(0), 0.75);
+
+        // Any structural arrangement edit during playback goes through
+        // `rebuild_active_song_after_arrangement_edit`, which drops the
+        // mirrored row.
+        app.arr_set_loop(true).expect("loop toggles");
+        assert_eq!(app.song_mirrored_row, None);
+        app.sync_track_sound_bindings();
+        assert_eq!(
+            app.track_sound_binding(0).source,
+            Some(BoundSource::Take(take)),
+            "the take stays bound across the rebuild"
+        );
+        assert_eq!(
+            app.state.pattern.instrument_slots[0].defaults.get(0),
+            0.75,
+            "the take's device state is not replaced by the scene pattern's"
+        );
+        app.song_transport_stop().expect("stop succeeds");
     }
 }

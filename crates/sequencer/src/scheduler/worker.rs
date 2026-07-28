@@ -432,6 +432,19 @@ pub fn spawn_scheduler_thread(
                     }
                 }
 
+                // A published pattern change is observed exactly once, before
+                // the resync chain below and independently of which branch it
+                // takes: a boundary launch the scheduler already applied is
+                // adopted here (its mirror must not trigger a resync), and any
+                // other switch voids the pending adoptions. The scheduler
+                // cannot key this off the mailbox ack — the control thread
+                // publishes the mirrored snapshot before it acks, and the ack
+                // is drained above, a whole iteration before this comparison.
+                let pattern_adopted = last_pattern != pattern
+                    && lookahead_state
+                        .quantized_launches
+                        .observe_pattern_switch(pattern);
+
                 if !last_playing {
                     queue.clear();
                     lookahead_state.clock.reset();
@@ -472,10 +485,7 @@ pub fn spawn_scheduler_thread(
                         .process_runtime
                         .reset_transport(lookahead_state.clock.total_beats);
                     state.set_neural_visualization(lookahead_state.neural_runtime.visualization_snapshot());
-                } else if !song_playback_active
-                    && last_pattern != pattern
-                    && lookahead_state.quantized_launches.adopted_pattern() != Some(pattern)
-                {
+                } else if !song_playback_active && last_pattern != pattern && !pattern_adopted {
                     // Pattern switches should replace future scheduled content without
                     // disturbing the current musical phase.
                     //

@@ -976,6 +976,12 @@ pub(crate) fn run_event_loop(
                         }
                         track_names = app.tracks.clone();
                         sync_shared_track_collapsed(&shared.track_collapsed, &app);
+                        // `clear_project_arrangement_state` drops the region
+                        // selection App-side; the clipboard lives out here and
+                        // stores pattern/take IDS rather than content, so
+                        // carrying it into another project would paste
+                        // whatever now happens to hold those ids.
+                        *shared.arrangement_clipboard.lock().unwrap() = None;
                         let restored_track = if app.tracks.is_empty() {
                             0
                         } else {

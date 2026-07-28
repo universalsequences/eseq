@@ -339,11 +339,20 @@ impl App {
             }
             SongTransportMode::ArrangementCapture => {
                 // Stop-commit (spec 7.4.7/10.4): the authoritative Stop
-                // boundary is the scheduler's rendered-beat clock — the same
-                // clock every capture event was recorded against — read
-                // BEFORE the transport stops (the scheduler rewinds its
-                // clock once it observes the stopped transport).
-                let end_raw_beats = self.state.scheduler_rendered_beats();
+                // boundary is the latency-compensated record clock — the same
+                // clock every capture event was recorded against (immediate
+                // launches, manual clip launches and take notes all stamp
+                // `record_beats_at_instant`) — read BEFORE the transport stops
+                // (the scheduler rewinds its clock once it observes the
+                // stopped transport). Reading the raw scheduler frontier here
+                // would place Q one output-latency ahead of the events it
+                // bounds; it stays only as the fallback for the case where the
+                // audio callback never published a record-clock anchor.
+                let end_raw_beats = self
+                    .state
+                    .record_beats_at_instant(std::time::Instant::now())
+                    .unwrap_or_else(|| self.state.scheduler_rendered_beats())
+                    .max(0.0);
                 // Capture-on-playback teardown (takes spec 9.3): the song
                 // was playing underneath; the latch auto-clears at
                 // punch-out (spec 10) — the committed song now CONTAINS the

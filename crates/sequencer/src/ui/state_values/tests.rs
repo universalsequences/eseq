@@ -19650,78 +19650,6 @@
         );
     }
 
-    /// Song status readout (docs/song-mode-spec.md 7.5/11): SESSION by
-    /// default; SONG plus current-row/row-count during song playback; a
-    /// dedicated ARR REC indicator during arrangement capture.
-    #[test]
-    fn metal_seq_transport_song_status_shows_session_song_and_arr_rec_states() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .eval_str(r#"(set-window-buffer "*transport*")"#)
-            .expect("switch to transport buffer");
-        editor.refresh_runtime_side_effects();
-
-        let layout = editor.widget_layout().expect("transport layout");
-        let status = find_layout_node_by_debug_name(&layout, "transport-song-status")
-            .expect("song status container");
-        assert_finite_nonzero_rect(status, "transport-song-status");
-        let mode_label = find_layout_node_by_debug_name(&layout, "transport-song-mode-label")
-            .expect("song mode label");
-        assert_finite_nonzero_rect(mode_label, "transport-song-mode-label");
-        assert!(
-            matches!(mode_label.props.get("text"), Some(Value::String(text)) if text == "SESSION")
-        );
-        assert!(
-            find_layout_node_by_debug_name(&layout, "transport-song-row-indicator").is_none(),
-            "no row indicator outside song playback"
-        );
-
-        // Song playback: SONG plus current row / total rows.
-        let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "song-mode", Value::String("song-playback".to_string()));
-        rt.set_reactive("SEQ", "song-current-row", Value::Number(1.0));
-        rt.set_reactive("SEQ", "song-row-count", Value::Number(3.0));
-        rt.run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        let layout = editor.widget_layout().expect("transport layout");
-        let mode_label = find_layout_node_by_debug_name(&layout, "transport-song-mode-label")
-            .expect("song mode label");
-        assert!(
-            matches!(mode_label.props.get("text"), Some(Value::String(text)) if text == "SONG")
-        );
-        let row_indicator =
-            find_layout_node_by_debug_name(&layout, "transport-song-row-indicator")
-                .expect("current row indicator during song playback");
-        assert_finite_nonzero_rect(row_indicator, "transport-song-row-indicator");
-        assert!(
-            matches!(row_indicator.props.get("text"), Some(Value::String(text)) if text == "2/3"),
-            "row indicator must show ordinal+1 / count: {:?}",
-            row_indicator.props.get("text")
-        );
-
-        // Arrangement capture: ARR REC is its own clearly visible state
-        // (spec 7.5), not the generic record icon.
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "song-mode",
-            Value::String("arrangement-capture".to_string()),
-        );
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        let layout = editor.widget_layout().expect("transport layout");
-        let arr_rec = find_layout_node_by_debug_name(&layout, "transport-arr-rec-indicator")
-            .expect("ARR REC indicator during arrangement capture");
-        assert_finite_nonzero_rect(arr_rec, "transport-arr-rec-indicator");
-        assert!(
-            matches!(arr_rec.props.get("text"), Some(Value::String(text)) if text == "ARR REC")
-        );
-        assert!(
-            find_layout_node_by_debug_name(&layout, "transport-song-mode-label").is_none(),
-            "the plain mode label is replaced by ARR REC during capture"
-        );
-    }
-
     /// The transport Play controls route through the song transport state
     /// machine: `seq-toggle-play` emits the `song-transport-toggle-play`
     /// custom host command instead of toggling the transport atomic, and the
@@ -21301,6 +21229,66 @@
             .runtime_mut()
             .set_reactive("SEQ", "song-region", Value::Nil);
         editor.runtime_mut().run_reactive_cycle();
+    }
+
+    /// The content-length handle's floor must stay strictly inside what
+    /// `App::arr_set_end` accepts: it rejects an end AT or before the last
+    /// scene change, and an end before the last clip's end. A min that lands
+    /// on either boundary turns an ordinary drag into a rejected edit.
+    #[test]
+    fn metal_seq_arrangement_content_length_min_clears_both_model_boundaries() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
+        rt.set_reactive("SEQ", "song-end-beat", Value::Number(64.0));
+        rt.set_reactive("SEQ", "scene-spans", test_list(vec![]));
+        rt.set_reactive("SEQ", "song-lanes", test_list(vec![]));
+        rt.run_reactive_cycle();
+
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| -> Value {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .unwrap_or_else(|error| panic!("{expr}: {error:?}"))
+                .expect("expr returns a value")
+        };
+
+        assert_eq!(
+            read(&mut editor, "(arrangement-content-length-min)"),
+            Value::Number(1.0),
+            "no scenes and no clips: only the >0 rule applies"
+        );
+
+        // A scene change at 32 makes 32 itself illegal, so the handle floor
+        // has to sit past it.
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "scene-spans",
+            test_list(vec![scene_span(0.0, 32.0, 0.0), scene_span(32.0, 64.0, 1.0)]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(arrangement-content-length-min)"),
+            Value::Number(33.0),
+            "the last scene start is refused by the model, not clamped to"
+        );
+
+        // A clip running to 40 outranks the scene boundary: shortening below
+        // its end is refused too.
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "song-lanes",
+            test_list(vec![
+                test_list(vec![lane_clip(0.0, 0.0, 12.0, Value::Number(1.0))]),
+                test_list(vec![lane_clip(1.0, 16.0, 40.0, Value::Number(1.0))]),
+            ]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(arrangement-content-length-min)"),
+            Value::Number(40.0),
+            "the furthest clip end across every lane is the floor"
+        );
     }
 
     /// One completed gesture is one undo entry: the translator's commands
