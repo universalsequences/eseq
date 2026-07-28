@@ -23,7 +23,9 @@ use super::fx_chain::{FxChainLocator, FxGraphEditBatch};
 use super::graph::{
     RackCustomBuildSpec, RackSamplerBuildSpec, RackSlotBuildSpec, RackSlotInstrumentBuildSpec,
 };
-use super::{App, BusChannelState, InputMode, Region, SidebarMode, SidebarTab};
+use super::{
+    App, BusChannelState, InputMode, ProjectSampleAsset, Region, SidebarMode, SidebarTab,
+};
 
 pub(super) fn resolve_live_macro_target(
     state: &crate::sequencer::SequencerState,
@@ -939,12 +941,33 @@ impl From<ProjectBusChannel> for BusChannelState {
 }
 
 impl App {
+    /// Drop every piece of state whose identity belongs to the current
+    /// arrangement before the project's track topology is torn down.
+    ///
+    /// This must run before `clear_all_tracks`: new-track registration
+    /// reconciles committed arrangement lanes against the live topology and
+    /// must never see lanes from the project being replaced.
+    fn clear_project_arrangement_state(&mut self) {
+        self.state.clear_committed_arrangement();
+        self.use_arrangement = false;
+        self.song_capture_armed = false;
+        self.song_clip_selection = None;
+        self.song_region_selection = None;
+        self.song_edit_error = None;
+        // In-flight capture/take state is keyed by the OUTGOING project's
+        // track indices and pattern pools; carrying it across a load would let
+        // the next stop-commit splice stale chunks into the new project.
+        self.discard_song_capture_take();
+        self.active_runtime_song = None;
+        self.active_song_start_beat = None;
+        self.song_mirrored_row = None;
+        self.song_transport_mode = crate::app::song_transport::SongTransportMode::Stopped;
+    }
+
     pub fn start_new_project(&mut self) {
         self.editor.pending_project_load = None;
         self.groups.clear();
-        self.state.set_committed_song(None);
-        self.use_arrangement = false;
-        self.song_capture_armed = false;
+        self.clear_project_arrangement_state();
 
         {
             let mut graph = self.graph_controller();
@@ -1210,6 +1233,7 @@ impl App {
             name: name.to_string(),
             tick: 0,
             project,
+            sample_assets: std::collections::HashMap::new(),
             built_patterns: Vec::new(),
             built_bus_patterns: Vec::new(),
             fallback_samples: 0,
@@ -1220,6 +1244,35 @@ impl App {
 
     pub fn has_pending_project_load(&self) -> bool {
         self.editor.pending_project_load.is_some()
+    }
+
+    fn load_project_sample_asset(
+        &mut self,
+        sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,
+        wav_path: &Path,
+    ) -> Result<ProjectSampleAsset, String> {
+        // Canonical paths collapse relative, absolute, and symlinked references
+        // before any decode, graph allocation, or analyzer submission occurs.
+        let canonical_path = wav_path.canonicalize().map_err(|error| {
+            format!(
+                "Failed to resolve sample '{}': {error}",
+                wav_path.display()
+            )
+        })?;
+        if let Some(asset) = sample_assets.get(&canonical_path) {
+            return Ok(asset.clone());
+        }
+
+        let loaded =
+            crate::instruments::sampler::load_wav_buffer(self.graph.lg.0, &canonical_path)?;
+        self.submit_sample_analysis(&loaded);
+        let asset = ProjectSampleAsset {
+            buffer_id: loaded.buffer_id,
+            sample_rate: loaded.sample_rate,
+            decoded_name: loaded.name,
+        };
+        sample_assets.insert(canonical_path, asset.clone());
+        Ok(asset)
     }
 
     pub fn advance_pending_project_load(&mut self) -> Result<(), String> {
@@ -1724,6 +1777,11 @@ impl App {
             &self.tracks,
             &self.graph.track_instrument_types,
         );
+        self.state
+            .reconcile_committed_arrangement_track_lanes()
+            .map_err(|error| {
+                format!("Could not reconcile arrangement tracks before save: {error}")
+            })?;
         self.save_current_bus_pattern();
 
         let bank = self.state.export_pattern_repository();
@@ -1784,6 +1842,101 @@ impl App {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
+        // Takes spec 6.1/11.1: record per-scene cell presence (the dense
+        // `patterns` bank cannot encode a bare lane) and serialize each
+        // track's take pool with its chunk patterns inline — chunks are in
+        // no scene cell, so the pattern bank never carries them.
+        let scenes_for_takes = self.state.capture_project_scenes();
+        let scene_cell_presence: Vec<Vec<bool>> = scenes_for_takes
+            .scenes
+            .iter()
+            .map(|scene| {
+                (0..num_tracks)
+                    .map(|track| scene.cells.get(track).copied().flatten().is_some())
+                    .collect()
+            })
+            .collect();
+        // Skip the field entirely when every cell is present, keeping files
+        // byte-identical to the pre-takes format.
+        let scene_cell_presence = if scene_cell_presence
+            .iter()
+            .all(|mask| mask.iter().all(|present| *present))
+        {
+            Vec::new()
+        } else {
+            scene_cell_presence
+        };
+        let mut take_pools = Vec::new();
+        for (track, takes) in scenes_for_takes.take_pools.iter().enumerate() {
+            let mut file_takes = Vec::new();
+            for take in &takes.takes {
+                let mut chunks = Vec::with_capacity(take.chunks.len());
+                for chunk_id in &take.chunks {
+                    let data = scenes_for_takes
+                        .track_pools
+                        .get(track)
+                        .and_then(|pool| pool.get(*chunk_id))
+                        .cloned()
+                        .ok_or_else(|| {
+                            format!(
+                                "Track {} take '{}' references chunk pattern {} which is \
+                                 not in the track's pattern pool",
+                                track + 1,
+                                take.name,
+                                chunk_id.0
+                            )
+                        })?;
+                    let mut snapshot = PatternSnapshot::new_default(num_tracks, &[]);
+                    snapshot.set_track_pattern_data(track, data);
+                    let mut sample_paths = vec![None; num_tracks];
+                    let mut sample_names = vec![String::new(); num_tracks];
+                    let (buffer_id, sample_name, _) = snapshot.sample_ids[track].clone();
+                    if snapshot
+                        .instrument_types
+                        .get(track)
+                        .copied()
+                        .unwrap_or(InstrumentType::Sampler)
+                        == InstrumentType::Sampler
+                        && !sample_name.is_empty()
+                    {
+                        // `usize::MAX` bypasses the current-scene live-path
+                        // shortcut; chunks resolve through the registries.
+                        sample_paths[track] = self
+                            .resolve_sample_path_for_snapshot(
+                                usize::MAX,
+                                track,
+                                buffer_id,
+                                &sample_name,
+                            )?
+                            .map(|path| path.to_string_lossy().to_string());
+                    }
+                    sample_names[track] = sample_name;
+                    chunks.push(ProjectPattern::from_snapshot(
+                        &snapshot,
+                        sample_paths,
+                        sample_names,
+                        Vec::new(),
+                    ));
+                }
+                file_takes.push(crate::project::ProjectTake {
+                    id: take.id.0,
+                    name: take.name.clone(),
+                    total_len_steps: take.total_len_steps,
+                    chunks,
+                });
+            }
+            take_pools.push(crate::project::ProjectTrackTakePool {
+                takes: file_takes,
+                next_take_id: takes.next_take_id,
+            });
+        }
+        // Skip the field when no track holds any take.
+        let take_pools = if take_pools.iter().all(|pool| pool.takes.is_empty()) {
+            Vec::new()
+        } else {
+            take_pools
+        };
+
         Ok(ProjectFile {
             version: project_file_version(),
             name: project_name.to_string(),
@@ -1814,14 +1967,14 @@ impl App {
             },
             patterns,
             groups: self.groups.clone(),
-            song: match self.state.committed_song() {
+            arrangement: match self.state.committed_arrangement() {
                 // Serialization maps live pattern-pool ids into the
-                // deterministic ids the loader rebuilds from scene cells;
-                // a song referencing an unpersistable pattern fails the save
-                // with the referencing row positions instead of silently
-                // dropping the reference.
-                Some(song) => Some(crate::sequencer::song_for_serialization(
-                    &song,
+                // deterministic ids the loader rebuilds from scene cells; a
+                // clip referencing an unpersistable pattern fails the save
+                // naming the clip and its track instead of silently dropping
+                // the reference (docs/arrangement-lane-model-spec.md 10).
+                Some(arrangement) => Some(crate::sequencer::arrangement_for_serialization(
+                    &arrangement,
                     &self.state.capture_project_scenes(),
                 )?),
                 None => None,
@@ -1834,6 +1987,13 @@ impl App {
                 .collect(),
             next_macro_id: self.macro_engine.next_id(),
             use_arrangement: self.use_arrangement,
+            record_armed: if self.graph.record_armed.iter().any(|armed| *armed) {
+                self.graph.record_armed.clone()
+            } else {
+                Vec::new()
+            },
+            scene_cell_presence,
+            take_pools,
         })
     }
 
@@ -2366,6 +2526,7 @@ impl App {
                     pending.tick,
                     self.tracks.len()
                 );
+                self.clear_project_arrangement_state();
                 {
                     let mut graph = self.graph_controller();
                     graph.clear_all_tracks();
@@ -2398,11 +2559,27 @@ impl App {
                                 "project-load: add sampler track index={} path={}",
                                 track_idx, sample_path
                             );
-                            self.graph_controller()
-                                .add_track(Path::new(sample_path))
+                            let sample_path = Path::new(sample_path);
+                            let asset = self
+                                .load_project_sample_asset(
+                                    &mut pending.sample_assets,
+                                    sample_path,
+                                )
                                 .map_err(|error| {
-                                    format!("Failed to load sample '{}': {error}", sample_path)
+                                    format!(
+                                        "Failed to load sample '{}': {error}",
+                                        sample_path.display()
+                                    )
                                 })?;
+                            let track_name =
+                                crate::sample_db::display_title_for_sample_path(sample_path)
+                                    .unwrap_or_else(|| asset.decoded_name.clone());
+                            self.graph_controller().add_track_from_sample(
+                                sample_path,
+                                asset.buffer_id,
+                                asset.sample_rate,
+                                track_name,
+                            )?;
                         }
                         ProjectTrackKind::Custom { instrument_name } => {
                             eprintln!(
@@ -2458,20 +2635,20 @@ impl App {
                                                     slot_idx + 1
                                                 )
                                             })?;
-                                        let loaded = crate::instruments::sampler::load_wav_buffer(
-                                            self.graph.lg.0,
-                                            Path::new(sample_path),
-                                        )
-                                        .map_err(|error| {
-                                            format!(
-                                                "Failed to load rack sample '{}' for track {} slot {}: {}",
-                                                sample_path,
-                                                track_idx + 1,
-                                                slot_idx + 1,
-                                                error
+                                        let asset = self
+                                            .load_project_sample_asset(
+                                                &mut pending.sample_assets,
+                                                Path::new(sample_path),
                                             )
-                                        })?;
-                                        self.submit_sample_analysis(&loaded);
+                                            .map_err(|error| {
+                                                format!(
+                                                    "Failed to load rack sample '{}' for track {} slot {}: {}",
+                                                    sample_path,
+                                                    track_idx + 1,
+                                                    slot_idx + 1,
+                                                    error
+                                                )
+                                            })?;
                                         let sample_name = slot
                                             .sample_name
                                             .clone()
@@ -2479,16 +2656,16 @@ impl App {
                                                 saved_pattern_slot
                                                     .and_then(|slot| slot.sample_name.clone())
                                             })
-                                            .unwrap_or_else(|| loaded.name.clone());
+                                            .unwrap_or_else(|| asset.decoded_name.clone());
                                         self.register_loaded_sample_path(
                                             &sample_name,
-                                            loaded.buffer_id,
+                                            asset.buffer_id,
                                             PathBuf::from(sample_path),
                                         );
                                         prepared_sources.push(PreparedRackSlotSource::Sampler(
                                             RackSamplerBuildSpec {
-                                                buffer_id: loaded.buffer_id,
-                                                sample_rate: loaded.sample_rate,
+                                                buffer_id: asset.buffer_id,
+                                                sample_rate: asset.sample_rate,
                                                 sample_name,
                                             },
                                         ));
@@ -2750,6 +2927,7 @@ impl App {
                     let (snapshot, bus_patterns, fallback_count) = self
                         .project_pattern_into_snapshot(
                             pending.project.patterns[pattern_idx].clone(),
+                            &mut pending.sample_assets,
                         )?;
                     pending.built_patterns.push(snapshot);
                     pending.built_bus_patterns.push(bus_patterns);
@@ -2773,7 +2951,10 @@ impl App {
         Ok(())
     }
 
-    fn finish_project_load(&mut self, pending: super::PendingProjectLoad) -> Result<(), String> {
+    fn finish_project_load(
+        &mut self,
+        mut pending: super::PendingProjectLoad,
+    ) -> Result<(), String> {
         eprintln!(
             "project-load: finish start name={} tracks={} built_patterns={} fallback_samples={}",
             pending.name,
@@ -2782,7 +2963,7 @@ impl App {
             pending.fallback_samples
         );
         let ProjectFile {
-            version: _,
+            version: file_version,
             name: _,
             bpm,
             master_volume,
@@ -2796,10 +2977,13 @@ impl App {
             device_instances,
             patterns: _,
             groups,
-            song,
+            arrangement,
             macros,
             next_macro_id,
             use_arrangement,
+            record_armed,
+            scene_cell_presence,
+            take_pools,
         } = pending.project;
         let bank = pending.built_patterns;
         let bus_pattern_bank = pending.built_bus_patterns;
@@ -2823,16 +3007,76 @@ impl App {
         };
         self.state
             .replace_pattern_repository(pattern_repository, current_pattern);
-        // The serialized song was validated at deserialize time against the
-        // deterministic rebuilt-pool id domain, which is exactly what
-        // `replace_pattern_repository` just installed; re-check against the
-        // live scenes and reject the load rather than installing a song that
-        // dangles.
-        if let Some(song) = &song {
-            song.validate(&self.state.capture_project_scenes())
-                .map_err(|error| format!("Project song failed to load: {error}"))?;
+        // Takes spec 6.1/11.1: re-apply per-scene cell absence (bare lanes)
+        // and rebuild each track's take pool. Chunk patterns convert through
+        // the same snapshot path as scene patterns (sample resolution
+        // included) and are inserted into the freshly rebuilt pools; take
+        // ids are restored verbatim so serialized song overrides stay valid.
+        let mut loaded_take_pools = Vec::with_capacity(take_pools.len());
+        for (track, pool) in take_pools.into_iter().enumerate() {
+            let mut takes = Vec::with_capacity(pool.takes.len());
+            for take in pool.takes {
+                let mut chunk_data = Vec::with_capacity(take.chunks.len());
+                for chunk in take.chunks {
+                    let (snapshot, _, fallback_count) =
+                        self.project_pattern_into_snapshot(
+                            chunk,
+                            &mut pending.sample_assets,
+                        )?;
+                    let data = snapshot.track_pattern_data(track).ok_or_else(|| {
+                        format!(
+                            "Take '{}' chunk is missing lane data for track {}",
+                            take.name,
+                            track + 1
+                        )
+                    })?;
+                    pending.fallback_samples += fallback_count;
+                    chunk_data.push(data);
+                }
+                takes.push((take.id, take.name, take.total_len_steps, chunk_data));
+            }
+            loaded_take_pools.push((pool.next_take_id, takes));
         }
-        self.state.set_committed_song(song);
+        self.state
+            .install_project_arrangement(&scene_cell_presence, loaded_take_pools);
+        // Per-track record-arm flags (takes spec 8.1), persisted like
+        // mute/solo. The UI-shared arm vector syncs FROM `graph.record_armed`
+        // on the next tick via `record_arm_sync_pending`.
+        let mut loaded_armed = record_armed;
+        loaded_armed.resize(self.tracks.len(), false);
+        self.graph.record_armed = loaded_armed;
+        self.record_arm_sync_pending = true;
+        // The serialized arrangement was structurally validated at
+        // deserialize time against `SerializedSongContext`, which knows only
+        // the id domain — it can see neither scene cells nor timebases, so a
+        // compile against it would silently produce no scene-backdrop phase
+        // overrides at all. Compile here instead: `replace_pattern_repository`
+        // and `install_project_arrangement` above have just installed the
+        // rebuilt pattern pools, scene cells, and take pools, so the live
+        // scenes are exactly the context the compiler needs.
+        // `set_committed_arrangement` validates, compiles, and installs the
+        // arrangement together with its compiled song, and installs nothing
+        // if the arrangement no longer fits the project.
+        //
+        // Version <= 5 files were authored under the retired backdrop model,
+        // where a lane GAP played the governing scene's cell. Under the
+        // current model a gap is silence, so loading such a file untouched
+        // would silently gut the arrangement. Freeze what every gap sounded
+        // like into real clips first (lane spec 10, v5 -> v6): the project
+        // sounds identical, and the file saves back as version 6.
+        let arrangement = match arrangement {
+            Some(arrangement) if file_version < 6 => {
+                let scenes = self.state.capture_project_scenes();
+                Some(
+                    crate::sequencer::migrate_legacy_backdrops(&arrangement, &scenes)
+                        .map_err(|error| format!("Project arrangement failed to load: {error}"))?,
+                )
+            }
+            other => other,
+        };
+        self.state
+            .set_committed_arrangement(arrangement)
+            .map_err(|error| format!("Project arrangement failed to load: {error}"))?;
         // Persisted transport preference (docs/song-mode-spec.md 7.1); loads
         // happen with the transport stopped, so setting it directly is safe.
         self.use_arrangement = use_arrangement;
@@ -3179,9 +3423,10 @@ impl App {
             .collect()
     }
 
-    fn project_pattern_into_snapshot(
+    pub(super) fn project_pattern_into_snapshot(
         &mut self,
         pattern: ProjectPattern,
+        sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,
     ) -> Result<(PatternSnapshot, Vec<BusPatternSnapshot>, usize), String> {
         let num_tracks = self.tracks.len();
         let mut sample_ids = Vec::with_capacity(num_tracks);
@@ -3199,6 +3444,14 @@ impl App {
                     .cloned()
                     .unwrap_or_default();
 
+                // Full-width take chunks only populate their owning lane. Empty
+                // sampler lanes are intentionally unbound, not missing assets
+                // to be replaced with an arbitrary file from the sample tree.
+                if saved_path.is_none() && saved_name.trim().is_empty() {
+                    sample_ids.push((-1, String::new(), self.graph.sample_rate));
+                    continue;
+                }
+
                 let resolved_path = saved_path
                     .as_ref()
                     .filter(|path| path.exists())
@@ -3212,34 +3465,42 @@ impl App {
                                 .cloned()
                                 .or_else(|| self.resolve_sample_path_by_name(&saved_name))
                         }
-                    })
-                    .or_else(|| self.first_available_sample_path());
+                    });
 
+                // A moved or renamed asset must never make the project
+                // unopenable: leave the lane unbound (as an empty lane is) and
+                // count it so the load reports the substitution.
                 let Some(path_buf) = resolved_path else {
-                    return Err(format!(
-                        "Couldn't recover sample for track {} and no fallback samples exist",
-                        track_idx + 1
-                    ));
+                    let reference = saved_path
+                        .as_ref()
+                        .map(|path| format!("path '{}'", path.display()))
+                        .unwrap_or_else(|| format!("name '{saved_name}'"));
+                    eprintln!(
+                        "project-load: couldn't resolve saved sample {reference} for track {}; leaving lane unbound",
+                        track_idx + 1,
+                    );
+                    fallback_count += 1;
+                    sample_ids.push((-1, String::new(), self.graph.sample_rate));
+                    continue;
                 };
-                let loaded = crate::instruments::sampler::load_wav_buffer(self.graph.lg.0, &path_buf).map_err(
-                    |error| {
+                let asset = self
+                    .load_project_sample_asset(sample_assets, &path_buf)
+                    .map_err(|error| {
                         format!(
                             "Failed to load sample '{}' for track {}: {}",
                             path_buf.display(),
                             track_idx + 1,
                             error
                         )
-                    },
-                )?;
-                self.submit_sample_analysis(&loaded);
-                let buffer_id = loaded.buffer_id;
-                let sample_rate = loaded.sample_rate;
+                    })?;
+                let buffer_id = asset.buffer_id;
+                let sample_rate = asset.sample_rate;
                 let sample_name = crate::sample_db::display_title_for_sample_path(&path_buf)
                     .or_else(|| {
                         let saved_name = saved_name.trim();
                         (!saved_name.is_empty()).then(|| saved_name.to_string())
                     })
-                    .unwrap_or(loaded.name);
+                    .unwrap_or(asset.decoded_name);
                 if saved_path.as_ref() != Some(&path_buf) {
                     fallback_count += 1;
                 }
@@ -3544,33 +3805,6 @@ impl App {
         refresh_neural_output_override_param_ids(&mut snapshot);
 
         Ok((snapshot, bus_patterns, fallback_count))
-    }
-
-    fn first_available_sample_path(&self) -> Option<PathBuf> {
-        fn walk(dir: &Path) -> Option<PathBuf> {
-            let mut entries: Vec<_> = std::fs::read_dir(dir)
-                .ok()?
-                .filter_map(Result::ok)
-                .collect();
-            entries.sort_by_key(|entry| entry.file_name());
-            for entry in entries {
-                let path = entry.path();
-                if path.is_dir() {
-                    if let Some(found) = walk(&path) {
-                        return Some(found);
-                    }
-                } else if path
-                    .extension()
-                    .map(|ext| ext.to_ascii_lowercase() == "wav")
-                    .unwrap_or(false)
-                {
-                    return Some(path);
-                }
-            }
-            None
-        }
-
-        walk(Path::new("samples"))
     }
 
     pub fn push_all_restored_defaults(&mut self) {
@@ -4125,7 +4359,7 @@ mod tests {
             master_volume: 1.0,
             current_pattern: 0,
             current_track: Some(0),
-            song: None,
+            arrangement: None,
             reverb: ProjectReverbState {
                 size: 0.2,
                 brightness: 0.8,
@@ -4178,6 +4412,9 @@ mod tests {
             macros: Vec::new(),
             next_macro_id: 1,
             use_arrangement: false,
+            record_armed: Vec::new(),
+            scene_cell_presence: Vec::new(),
+            take_pools: Vec::new(),
         }
     }
 

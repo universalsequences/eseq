@@ -752,6 +752,37 @@ pub fn hit_test_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutN
     None
 }
 
+/// Scroll-aware focusable hit test: mirrors `hit_test_layout`'s scroll
+/// handling (viewport clamp + offset adjustment before recursing) and
+/// returns the deepest focusable node containing the point. The flat
+/// rect-scan the focus path used before ignored widget scroll containers,
+/// so clicking a scrolled-down focusable widget focused whichever widget's
+/// UNSCROLLED layout rect covered the click.
+pub fn hit_test_focusable(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutNode> {
+    if node.widget_type == "scroll" {
+        if !rect_contains(node.rect, row, col) {
+            return None;
+        }
+        let state =
+            widget_render::scroll::get_scroll_state(widget_render::scroll::scroll_state_key(node));
+        let adjusted_row = row + state.offset_y;
+        return node
+            .children
+            .iter()
+            .rev()
+            .find_map(|child| hit_test_focusable(child, adjusted_row, col));
+    }
+    if let Some(hit) = node
+        .children
+        .iter()
+        .rev()
+        .find_map(|child| hit_test_focusable(child, row, col))
+    {
+        return Some(hit);
+    }
+    (node.focusable && rect_contains(node.rect, row, col)).then_some(node)
+}
+
 pub fn layout_contains_widget_id(node: &LayoutNode, widget_id: u64) -> bool {
     node.widget_id == widget_id
         || node

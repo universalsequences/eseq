@@ -1,6 +1,19 @@
 use crate::*;
 use eseqlisp::metal_backend::MetalBackend;
 
+type PendingPointerDrag = (crossterm::event::MouseEvent, (f32, f32));
+
+fn flush_pending_pointer_drag(
+    pending_drag: &mut Option<PendingPointerDrag>,
+    mut dispatch: impl FnMut(crossterm::event::MouseEvent, f32, f32),
+) -> bool {
+    let Some((mouse, (precise_col, precise_row))) = pending_drag.take() else {
+        return false;
+    };
+    dispatch(mouse, precise_col, precise_row);
+    true
+}
+
 /// The metal_seq event loop: input polling, gestures, async polling, and
 /// host-command dispatch, ending each iteration in the reactive tick.
 #[allow(clippy::too_many_lines)]
@@ -16,7 +29,7 @@ pub(crate) fn run_event_loop(
     let animation_frame_interval = Duration::from_secs_f64(1.0 / 60.0);
     let mut last_render_at = Instant::now() - idle_frame_interval;
     let mut stub_animation_cache = StubAnimationRenderCache::new();
-    let mut pending_drag: Option<(Event, (f32, f32))> = None;
+    let mut pending_drag: Option<PendingPointerDrag> = None;
     let mut sample_import_session: Option<SampleImportSession> = None;
     let mut scroll_accum_y: f32 = 0.0;
     let mut scroll_accum_x: f32 = 0.0;
@@ -57,6 +70,7 @@ pub(crate) fn run_event_loop(
         prev_playhead: u32::MAX,
         prev_transport_playhead: u32::MAX,
         prev_pattern_epoch: 0,
+        prev_song_row_mirror_epoch: 0,
         prev_current_track: usize::MAX,
         prev_cpu_load_bits: u32::MAX,
         prev_peak_l_level: -1.0f64,
@@ -76,6 +90,7 @@ pub(crate) fn run_event_loop(
         prev_current_track_playhead_visible: false,
         prev_ui_epoch: 0,
         prev_fx_epoch: 0,
+        prev_sound_binding_epoch: 0,
         prev_instrument_active_notes: Vec::new(),
         prev_active_buffer_name: editor.active_buffer().name.clone(),
         prev_selected_neural_neurons: shared.selected_neural_neurons.lock().unwrap().clone(),
@@ -688,6 +703,7 @@ pub(crate) fn run_event_loop(
                     {
                         handle_recording_key(
                             &key,
+                            &mut app,
                             &shared.state,
                             &shared.record_armed,
                             &shared.recording,
@@ -700,6 +716,12 @@ pub(crate) fn run_event_loop(
                         RecordingKeyOutcome::Ignored
                     };
                     let intercepted = recording_key_outcome.consumed();
+                    if recording_key_outcome.recorded_take() {
+                        // Take-retargeted notes touch neither the live
+                        // pattern nor the step grid; the timeline preview
+                        // updates at commit.
+                        editor.mark_needs_redraw();
+                    }
                     if recording_key_outcome.recorded() {
                         app.mark_recording_take_changed();
                         let ct = shared.current_track.load(Ordering::Relaxed);
@@ -739,10 +761,25 @@ pub(crate) fn run_event_loop(
                         mouse.kind,
                         crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left)
                     ) {
-                        pending_drag = Some((Event::Mouse(mouse), (precise_col, precise_row)));
+                        pending_drag = Some((mouse, (precise_col, precise_row)));
                     } else {
                         if matches!(mouse.kind, crossterm::event::MouseEventKind::Up(_)) {
-                            pending_drag = None;
+                            // The backend may deliver drag and release in the same
+                            // poll batch. Preserve their order instead of letting
+                            // release discard the final coalesced drag position.
+                            if flush_pending_pointer_drag(
+                                &mut pending_drag,
+                                |pending_mouse, pending_col, pending_row| {
+                                    editor.handle_tiled_mouse_precise(
+                                        pending_mouse,
+                                        pending_col,
+                                        pending_row,
+                                        0,
+                                    );
+                                },
+                            ) {
+                                backend.set_widget_cursor(editor.widget_cursor());
+                            }
                             pointer_released_this_loop = true;
                             pointer_is_down = false;
                         }
@@ -828,8 +865,12 @@ pub(crate) fn run_event_loop(
         // Flush the latest coalesced drag every loop iteration. Waiting for the
         // render boundary makes slider/knob drags feel stale and can drop the
         // final motion segment if mouse-up lands before the next frame.
-        if let Some((Event::Mouse(mouse), (precise_col, precise_row))) = pending_drag.take() {
-            editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
+        if flush_pending_pointer_drag(
+            &mut pending_drag,
+            |mouse, precise_col, precise_row| {
+                editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
+            },
+        ) {
             backend.set_widget_cursor(editor.widget_cursor());
         }
         ui_loop_stats.note_gestures(gestures_started.elapsed());
@@ -935,6 +976,12 @@ pub(crate) fn run_event_loop(
                         }
                         track_names = app.tracks.clone();
                         sync_shared_track_collapsed(&shared.track_collapsed, &app);
+                        // `clear_project_arrangement_state` drops the region
+                        // selection App-side; the clipboard lives out here and
+                        // stores pattern/take IDS rather than content, so
+                        // carrying it into another project would paste
+                        // whatever now happens to hold those ids.
+                        *shared.arrangement_clipboard.lock().unwrap() = None;
                         let restored_track = if app.tracks.is_empty() {
                             0
                         } else {
@@ -1841,4 +1888,33 @@ pub(crate) fn run_event_loop(
 
     let _ = backend.teardown();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    #[test]
+    fn pending_pointer_drag_is_dispatched_before_release_can_clear_it() {
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 17,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        };
+        let mut pending = Some((drag, (17.75, 4.25)));
+        let mut dispatched = Vec::new();
+
+        let flushed = flush_pending_pointer_drag(&mut pending, |mouse, col, row| {
+            dispatched.push((mouse.kind, col, row));
+        });
+
+        assert!(flushed);
+        assert!(pending.is_none());
+        assert_eq!(
+            dispatched,
+            vec![(MouseEventKind::Drag(MouseButton::Left), 17.75, 4.25)]
+        );
+    }
 }

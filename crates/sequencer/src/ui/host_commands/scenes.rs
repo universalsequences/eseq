@@ -294,6 +294,19 @@ pub(super) fn handle(
                 ));
                 return;
             };
+            // During song playback authority a clip click is a PERFORMANCE,
+            // not an edit: assigning the scene cell would retroactively
+            // rewrite every committed row that resolves this scene (the
+            // launched clip visually appearing in unrelated regions of the
+            // timeline). Delegate to the non-destructive override launch —
+            // it latches the lane and records into an active capture; the
+            // scene's cell assignment is untouched.
+            if app.song_playback_authority_active()
+                && scene == app.state.current_scene_index()
+            {
+                handle("launch-track-pattern", payload, app, editor, ctx);
+                return;
+            }
             let num_tracks = app.tracks.len();
             let shared = app.apply_recorded_scene_structure_mutation(
                 "Assign scene cell",
@@ -341,6 +354,15 @@ pub(super) fn handle(
                     Some((format!("Scene cell share failed: {error}"), Instant::now()));
             }
             app.push_all_restored_defaults();
+            // Clicking a clip in the mixer grid IS the clip-launch gesture
+            // (`launch-track-pattern` is a dead command — this is the live
+            // path): latch the lane during song playback (takes spec 10,
+            // the intentional way to claim a lane, take lanes included)
+            // and record the launch into an active arrangement capture.
+            // Only an assignment into the CURRENT scene is audible.
+            if scene == app.state.current_scene_index() {
+                app.observe_manual_clip_launch(track, PatternId(pattern_id));
+            }
             // Assigning into the current scene live-restores the
             // pattern's params + sample; the generic pattern-epoch
             // sync covers steps/params/mixer but not the fx and
@@ -502,6 +524,11 @@ pub(super) fn handle(
                 ));
             }
             app.push_all_restored_defaults();
+            // Clip launches are performance gestures too: latch the lane
+            // during song playback (takes spec 10 — the intentional way to
+            // claim a lane, take lanes included) and record the launch into
+            // an active arrangement capture.
+            app.observe_manual_clip_launch(track, PatternId(pattern_id));
 
             let ct = current_track_for_app(&mut app, &current_track).unwrap_or(track);
             let fx_visible = editor_has_visible_buffer(&editor, "*fx*");

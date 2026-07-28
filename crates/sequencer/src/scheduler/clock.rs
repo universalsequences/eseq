@@ -39,6 +39,15 @@ pub(super) struct SnapshotTrackClockState {
     boundaries: [f64; MAX_STEPS + 1],
     step_ends: [f64; MAX_STEPS],
     cycle_beats: f64,
+    /// Anchored clip phase (takes spec 7.1): the clock-domain beat at which
+    /// the track's active lane clip starts, plus the clip's stored start
+    /// offset in fractional pattern steps. The track's position in its cycle
+    /// is `(total_beats - anchor_beat + offset)` instead of the historical
+    /// free-running `total_beats`; the defaults (0, 0) reproduce free-run
+    /// exactly, so session-mode playback is untouched. Song playback
+    /// installs the current row's anchor every chunk.
+    anchor_beat: f64,
+    offset_steps: f64,
 }
 
 pub(super) struct SnapshotSequencerClock {
@@ -56,6 +65,8 @@ impl SnapshotSequencerClock {
                 boundaries: [0.0; MAX_STEPS + 1],
                 step_ends: [0.0; MAX_STEPS],
                 cycle_beats: 4.0,
+                anchor_beat: 0.0,
+                offset_steps: 0.0,
             })
             .collect();
         Self {
@@ -71,7 +82,61 @@ impl SnapshotSequencerClock {
         self.was_playing = false;
         for track in &mut self.track_clocks {
             track.last_local_step = u32::MAX;
+            track.anchor_beat = 0.0;
+            track.offset_steps = 0.0;
         }
+    }
+
+    /// Install the active song row's per-lane phase anchors (takes spec
+    /// 7.3): every track's clip starts at `anchor_beat` (the row start in
+    /// this clock's beat domain) with its lane's stored step offset. Called
+    /// once per planned song chunk; cleared by `reset` and
+    /// `clear_track_anchors` so session-mode playback keeps free-running.
+    pub(super) fn set_song_row_anchors(&mut self, anchor_beat: f64, lane_offsets: &[f64]) {
+        for (track, clock) in self.track_clocks.iter_mut().enumerate() {
+            clock.anchor_beat = anchor_beat;
+            clock.offset_steps = lane_offsets.get(track).copied().unwrap_or(0.0);
+        }
+    }
+
+    pub(super) fn clear_track_anchors(&mut self) {
+        for clock in &mut self.track_clocks {
+            clock.anchor_beat = 0.0;
+            clock.offset_steps = 0.0;
+        }
+    }
+
+    /// Clear one track's anchor (manual-override latch, takes spec 10): the
+    /// latched track free-runs against the clock like session playback while
+    /// every other lane keeps its song-row anchor.
+    pub(super) fn clear_track_anchor(&mut self, track: usize) {
+        if let Some(clock) = self.track_clocks.get_mut(track) {
+            clock.anchor_beat = 0.0;
+            clock.offset_steps = 0.0;
+        }
+    }
+
+    /// The track's clip-local beat position (takes spec 7.1):
+    /// `steps(beat - start_beat) + offset`, expressed in cycle beats. The
+    /// stored step offset converts to beats through the precomputed
+    /// boundaries so per-step timebase overrides resolve consistently.
+    fn anchored_local_beats(
+        tc: &SnapshotTrackClockState,
+        total_beats: f64,
+        num_steps: usize,
+    ) -> f64 {
+        total_beats - tc.anchor_beat + Self::offset_beats(tc, num_steps)
+    }
+
+    fn offset_beats(tc: &SnapshotTrackClockState, num_steps: usize) -> f64 {
+        if tc.offset_steps == 0.0 || num_steps == 0 {
+            return 0.0;
+        }
+        // Pattern offsets resolve modulo the pattern length (takes spec 6.3).
+        let steps = tc.offset_steps.rem_euclid(num_steps as f64);
+        let step = (steps.floor() as usize).min(num_steps - 1);
+        let frac = steps - step as f64;
+        tc.boundaries[step] + frac * (tc.step_ends[step] - tc.boundaries[step])
     }
 
     pub(super) fn seek_to_rendered_position(
@@ -91,7 +156,8 @@ impl SnapshotSequencerClock {
             self.precompute_boundaries(snapshot, t);
             let ns = snapshot.tracks[t].params.num_steps;
             let tc = &self.track_clocks[t];
-            let pos_in_cycle = self.total_beats % tc.cycle_beats;
+            let pos_in_cycle =
+                Self::anchored_local_beats(tc, self.total_beats, ns).rem_euclid(tc.cycle_beats);
             self.track_clocks[t].last_local_step = Self::derive_local_step(tc, pos_in_cycle, ns)
                 .map(|step| step as u32)
                 .unwrap_or(u32::MAX);
@@ -217,7 +283,11 @@ impl SnapshotSequencerClock {
                 if cycle <= 0.0 {
                     continue;
                 }
-                let pos_in_cycle = self.total_beats % cycle;
+                // Anchored per-lane projection (takes spec 7.1): the clip's
+                // anchor and offset replace the free-running global clock;
+                // defaults make this `total_beats % cycle` exactly.
+                let local_beats = Self::anchored_local_beats(tc, self.total_beats, ns);
+                let pos_in_cycle = local_beats.rem_euclid(cycle);
                 match Self::derive_local_step(tc, pos_in_cycle, ns) {
                     Some(step) => {
                         let step_u32 = step as u32;
@@ -233,7 +303,10 @@ impl SnapshotSequencerClock {
                                     track: t,
                                     step,
                                     offset,
-                                    cycle: (self.total_beats / cycle).floor().max(0.0) as u64,
+                                    // Cycle count is clip-local so step
+                                    // processes see the clip's own
+                                    // repetition index, not the global one.
+                                    cycle: (local_beats / cycle).floor().max(0.0) as u64,
                                     cycle_start_beats: tc.boundaries[step],
                                     absolute_beats: self.total_beats,
                                     samples_per_step,
@@ -259,7 +332,8 @@ impl SnapshotSequencerClock {
             if clock.cycle_beats <= 0.0 {
                 continue;
             }
-            let position = self.total_beats % clock.cycle_beats;
+            let position = Self::anchored_local_beats(clock, self.total_beats, num_steps)
+                .rem_euclid(clock.cycle_beats);
             if let Some(step) = Self::derive_local_step(clock, position, num_steps) {
                 let step_beats = (clock.step_ends[step] - clock.boundaries[step]).max(1.0e-9);
                 let phase = ((position - clock.boundaries[step]) / step_beats).clamp(0.0, 1.0);

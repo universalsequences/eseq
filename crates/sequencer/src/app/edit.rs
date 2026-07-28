@@ -145,7 +145,7 @@ fn rollback_effect_chain_edit<S: EffectChainHistoryState>(
 }
 
 impl App {
-    fn capture_synchronized_scene_structure_state(
+    pub(super) fn capture_synchronized_scene_structure_state(
         &mut self,
     ) -> Result<crate::sequencer::ProjectScenes, String> {
         finish_active_gesture(self);
@@ -1877,7 +1877,7 @@ impl App {
         Ok(())
     }
 
-    fn restore_scene_structure_state(
+    pub(super) fn restore_scene_structure_state(
         &mut self,
         target: &crate::sequencer::ProjectScenes,
     ) -> Result<(), String> {
@@ -4619,10 +4619,11 @@ fn apply_coalesced_device_plock_commands(
         .track_registry
         .id_at(track)
         .ok_or(EditError::TrackOutOfRange { track })?;
-    let pattern_id = app
-        .state
-        .effective_track_pattern_id(track)
-        .ok_or(EditError::MissingTrackPattern)?;
+    // Lazily materialize the pattern when the current scene is bare for the
+    // track (takes spec 11.1): the first edit in a bare scene creates the
+    // pattern and lifts the empty-cell silencing.
+    let pattern_id =
+        ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?;
     let target = TrackPatternId {
         track: track_id,
         pattern: pattern_id,
@@ -4854,6 +4855,41 @@ fn device_value_command_track(cmd: &AppCommand) -> Option<usize> {
     }
 }
 
+/// Effective pattern id for `track`, lazily materializing one when the
+/// current scene is bare for the track (takes spec 11.1): device edits are
+/// keyed per-pattern, so the first edit in a bare scene creates the pattern
+/// from the live track state — with the step content blanked, because the
+/// live step grid still holds the previous scene's notes, which the bare
+/// scene must not inherit.
+fn ensure_effective_track_pattern(
+    app: &mut App,
+    track: usize,
+) -> Option<crate::sequencer::PatternId> {
+    if let Some(id) = app.state.effective_track_pattern_id(track) {
+        return Some(id);
+    }
+    let snapshot = app.state.capture_current_pattern_snapshot(
+        app.tracks.len(),
+        &app.graph.track_buffer_ids,
+        &app.graph.track_sample_rates,
+        &app.tracks,
+        &app.graph.track_instrument_types,
+    );
+    let mut data = snapshot.track_pattern_data(track)?;
+    data.track_bits = Default::default();
+    data.neural_reset_bits = Default::default();
+    for chord in &mut data.chord_snapshot.steps {
+        chord.clear();
+    }
+    for durations in &mut data.chord_snapshot.durations {
+        durations.clear();
+    }
+    for delays in &mut data.chord_snapshot.delays {
+        delays.clear();
+    }
+    app.state.materialize_current_scene_pattern(track, data)
+}
+
 fn resolve_device_value_target(
     app: &mut App,
     cmd: &AppCommand,
@@ -4863,10 +4899,14 @@ fn resolve_device_value_target(
         .track_registry
         .id_at(track)
         .ok_or(EditError::TrackOutOfRange { track })?;
-    let pattern = app
-        .state
-        .effective_track_pattern_id(track)
-        .ok_or(EditError::MissingTrackPattern)?;
+    // Device edits follow the track's sound binding (takes spec 16.4): a
+    // bound take or track clip owns them, and only rule 3 falls back to the
+    // effective scene pattern (which is materialized on demand for a bare
+    // scene). No dual-write — a bound edit never touches the scene pattern.
+    let pattern = match app.bound_read_pattern(track) {
+        Some(pattern) if !app.track_sound_binding(track).is_scene() => pattern,
+        _ => ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?,
+    };
     let (id, slot_idx) = match cmd {
         AppCommand::SetEffectParam { slot_idx, .. }
         | AppCommand::SetEffectTensorCell { slot_idx, .. } => (
@@ -5113,6 +5153,84 @@ fn restore_device_value_snapshot(
     }
 }
 
+/// Mirror a device write onto the rest of the bound take's chunks (takes
+/// spec 16.4). Every write path funnels through `restore_device_value_snapshot`,
+/// so calling this right after it keeps undo and redo fanned out too without
+/// widening the stored patch (16.8 keeps the snapshot per-chunk).
+fn fan_out_device_values_to_take_chunks(
+    app: &mut App,
+    target: ResolvedDeviceTarget,
+    snapshot: &DeviceValueSnapshot,
+) -> Result<(), EditError> {
+    // A partial fan-out would leave the chunks diverging permanently (16.4)
+    // with nothing in history recording it, so each sibling's pre-edit value
+    // is kept until the whole set has been written and the first failure
+    // rewinds the ones already touched.
+    let mut written: Vec<(ResolvedDeviceTarget, DeviceValueSnapshot)> = Vec::new();
+    for chunk in app.take_sibling_chunks(target.track, target.pattern) {
+        let sibling = ResolvedDeviceTarget {
+            pattern: chunk,
+            ..target
+        };
+        let before = match capture_device_value_snapshot(app, sibling) {
+            Ok(before) => before,
+            Err(error) => return Err(rewind_fanned_out_chunks(app, written, error)),
+        };
+        if let Err(error) = restore_device_value_snapshot(app, sibling, snapshot) {
+            return Err(rewind_fanned_out_chunks(app, written, error));
+        }
+        written.push((sibling, before));
+    }
+    // Edit-through (16.7): the playing song's prebuilt rows cloned this
+    // pattern at preflight and would otherwise keep the pre-edit sound.
+    invalidate_song_rows_for_edit(app, target.track, target.pattern);
+    Ok(())
+}
+
+/// Undo the sibling chunks a failed fan-out already wrote. The callers roll
+/// back `target` themselves; without this the take's chunks would keep two
+/// different device states.
+fn rewind_fanned_out_chunks(
+    app: &mut App,
+    written: Vec<(ResolvedDeviceTarget, DeviceValueSnapshot)>,
+    error: EditError,
+) -> EditError {
+    let mut failures = Vec::new();
+    for (sibling, before) in written.iter().rev() {
+        if let Err(rewind_error) = restore_device_value_snapshot(app, *sibling, before) {
+            failures.push(format!("chunk {}: {rewind_error:?}", sibling.pattern.0));
+        }
+    }
+    if failures.is_empty() {
+        return error;
+    }
+    EditError::ReplayFailed(format!(
+        "{error:?}; rewinding the take's other chunks also failed: {}",
+        failures.join(", ")
+    ))
+}
+
+/// Edit-through for a pool pattern the playing song may resolve: re-preflight
+/// the rows so everything the playhead has not reached becomes correct
+/// (takes spec 16.7 for device edits,
+/// docs/realtime-arrangement-feedback-spec.md 5.1 for note edits).
+///
+/// Re-preflighting is far too heavy for every frame of a knob drag, and the
+/// audible row already heard a device value through the direct engine push —
+/// so while a gesture is open this defers to its end through
+/// `pending_song_row_invalidation` (flushed in `finish_active_gesture`).
+fn invalidate_song_rows_for_edit(
+    app: &mut App,
+    track: usize,
+    pattern: crate::sequencer::PatternId,
+) {
+    if app.history.active_gesture().is_some() {
+        app.pending_song_row_invalidation = Some((track, pattern));
+    } else {
+        app.invalidate_song_rows_for_pattern(track, pattern);
+    }
+}
+
 fn device_command_changes_key_locks(cmd: &AppCommand) -> bool {
     matches!(
         cmd,
@@ -5209,7 +5327,9 @@ fn apply_recorded_device_value_commands(
     if current_before.bit_exact_eq(&after) {
         return Ok(EditOutcome::NoOp);
     }
-    if let Err(error) = restore_device_value_snapshot(app, target, &after) {
+    if let Err(error) = restore_device_value_snapshot(app, target, &after)
+        .and_then(|_| fan_out_device_values_to_take_chunks(app, target, &after))
+    {
         return Err(rollback_device_value_edit(
             app,
             target,
@@ -5311,10 +5431,14 @@ pub fn apply_recorded_instrument_values_mutation(
         .track_registry
         .id_at(track)
         .ok_or(EditError::TrackOutOfRange { track })?;
-    let pattern = app
-        .state
-        .effective_track_pattern_id(track)
-        .ok_or(EditError::MissingTrackPattern)?;
+    // Preset loads follow the sound binding like any other device edit
+    // (takes spec 16.4), including materializing the scene pattern when the
+    // current scene is bare for the track — same resolution as
+    // `resolve_device_value_target`.
+    let pattern = match app.bound_read_pattern(track) {
+        Some(pattern) if !app.track_sound_binding(track).is_scene() => pattern,
+        _ => ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?,
+    };
     let target = ResolvedDeviceTarget {
         id: DeviceId::TrackInstrument(track_id),
         track,
@@ -5333,7 +5457,9 @@ pub fn apply_recorded_instrument_values_mutation(
     if before.bit_exact_eq(&after) {
         return Ok(EditOutcome::NoOp);
     }
-    if let Err(error) = restore_device_value_snapshot(app, target, &after) {
+    if let Err(error) = restore_device_value_snapshot(app, target, &after)
+        .and_then(|_| fan_out_device_values_to_take_chunks(app, target, &after))
+    {
         let _ = restore_device_value_snapshot(app, target, &before);
         let _ = push_live_device_values(app, target, Some(&before));
         return Err(error);
@@ -6201,10 +6327,11 @@ fn apply_recorded_pattern_geometry_command(
         .track_registry
         .id_at(track)
         .ok_or(EditError::TrackOutOfRange { track })?;
-    let pattern_id = app
-        .state
-        .effective_track_pattern_id(track)
-        .ok_or(EditError::MissingTrackPattern)?;
+    // Lazily materialize the pattern when the current scene is bare for the
+    // track (takes spec 11.1): the first edit in a bare scene creates the
+    // pattern and lifts the empty-cell silencing.
+    let pattern_id =
+        ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?;
     let target = TrackPatternId {
         track: track_id,
         pattern: pattern_id,
@@ -6290,10 +6417,11 @@ pub fn apply_recorded_step_mutation(
         .track_registry
         .id_at(track)
         .ok_or(EditError::TrackOutOfRange { track })?;
-    let pattern_id = app
-        .state
-        .effective_track_pattern_id(track)
-        .ok_or(EditError::MissingTrackPattern)?;
+    // Lazily materialize the pattern when the current scene is bare for the
+    // track (takes spec 11.1): the first edit in a bare scene creates the
+    // pattern and lifts the empty-cell silencing.
+    let pattern_id =
+        ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?;
     let target = TrackPatternId {
         track: track_id,
         pattern: pattern_id,
@@ -6545,11 +6673,31 @@ pub fn try_apply_command(app: &mut App, cmd: AppCommand) -> Result<EditOutcome, 
     }
 }
 
+/// Replay a step patch and drive note edit-through (spec 5.1): the scheduler
+/// plays preflight-cloned row snapshots, so publishing the live track alone
+/// leaves the edit inaudible for the rest of the song. This seam is the commit
+/// tail for a step edit AND the undo/redo replay, so both drive the same
+/// refresh. A note edit never moves row layout, so the existing `Refresh`
+/// command carries it — `replace_song_in_place`'s identity check passes.
 fn replay_step_patch(
     app: &mut App,
     patch: &StepCellsPatch,
     mode: ApplyMode,
 ) -> Result<MutationEffects, EditError> {
+    let (track, effects) = replay_step_patch_cells(app, patch, mode)?;
+    invalidate_song_rows_for_edit(app, track, patch.target.pattern);
+    Ok(effects)
+}
+
+/// The cells half alone, returning the resolved track index. A geometry patch
+/// replays this directly so the row refresh happens once, AFTER the pattern
+/// length has moved too — a preflight between the two halves would clone a
+/// half-applied pattern.
+fn replay_step_patch_cells(
+    app: &mut App,
+    patch: &StepCellsPatch,
+    mode: ApplyMode,
+) -> Result<(usize, MutationEffects), EditError> {
     let track = app
         .track_registry
         .index_of(patch.target.track)
@@ -6586,7 +6734,7 @@ fn replay_step_patch(
     if publish_scheduler {
         app.state.publish_scheduler_track(track);
     }
-    Ok(MutationEffects { publish_scheduler })
+    Ok((track, MutationEffects { publish_scheduler }))
 }
 
 fn replay_pattern_geometry_patch(
@@ -6609,7 +6757,7 @@ fn replay_pattern_geometry_patch(
             ));
         }
     };
-    let step_effects = replay_step_patch(app, &patch.cells, mode)?;
+    let (_, step_effects) = replay_step_patch_cells(app, &patch.cells, mode)?;
     let geometry_publish = match app
         .state
         .restore_pattern_num_steps_no_publish(track, patch.target.pattern, num_steps)
@@ -6621,7 +6769,7 @@ fn replay_pattern_geometry_patch(
                 ApplyMode::Redo => ApplyMode::Undo,
                 ApplyMode::UserEdit | ApplyMode::ProjectLoad => unreachable!(),
             };
-            return match replay_step_patch(app, &patch.cells, rollback_mode) {
+            return match replay_step_patch_cells(app, &patch.cells, rollback_mode) {
                 Ok(_) => Err(EditError::ReplayFailed(error)),
                 Err(rollback_error) => Err(EditError::ReplayFailed(format!(
                     "{error}; restoring pattern cells also failed: {rollback_error:?}"
@@ -6632,6 +6780,10 @@ fn replay_pattern_geometry_patch(
     if geometry_publish && !step_effects.publish_scheduler {
         app.state.publish_scheduler_snapshot();
     }
+    // A length change keeps row layout identical too — the song's beat math
+    // comes from the arrangement, not the pattern length — so it rides the
+    // same content refresh as a note edit (spec 5.1).
+    invalidate_song_rows_for_edit(app, track, patch.target.pattern);
     Ok(MutationEffects {
         publish_scheduler: step_effects.publish_scheduler || geometry_publish,
     })
@@ -7020,6 +7172,7 @@ fn replay_device_values_patch(
     };
     let current = capture_device_value_snapshot(app, target)?;
     let is_effective = restore_device_value_snapshot(app, target, snapshot)?;
+    fan_out_device_values_to_take_chunks(app, target, snapshot)?;
     if is_effective {
         if let Err(error) = push_live_device_values(app, target, Some(snapshot)) {
             let _ = restore_device_value_snapshot(app, target, &current);
@@ -7280,17 +7433,17 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             app.restore_scene_structure_state(target)
                 .map_err(EditError::ReplayFailed)
         }
-        EditPatch::Song(patch) => {
+        EditPatch::Arrangement(patch) => {
             let target = match mode {
                 ApplyMode::Undo => &patch.before,
                 ApplyMode::Redo => &patch.after,
                 ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
                     return Err(EditError::ReplayFailed(
-                        "song replay requires undo or redo mode".to_string(),
+                        "arrangement replay requires undo or redo mode".to_string(),
                     ));
                 }
             };
-            app.restore_committed_song_state(target)
+            app.restore_committed_arrangement_state(target)
                 .map_err(EditError::ReplayFailed)
         }
         EditPatch::BusGroupStructure(patch) => {
@@ -7385,8 +7538,8 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::TrackDeletion(_) => true,
         EditPatch::TrackPresentation(_) => false,
         EditPatch::SceneStructure(_) => true,
-        // Slice A: the committed song has no scheduler runtime yet.
-        EditPatch::Song(_) => false,
+        // The arrangement's compiled song has no scheduler runtime.
+        EditPatch::Arrangement(_) => false,
         EditPatch::BusGroupStructure(_) => true,
         EditPatch::MacroConfiguration(_) => true,
         EditPatch::EffectChain(_) => true,
@@ -7407,6 +7560,11 @@ pub fn finish_active_gesture(app: &mut App) -> bool {
     let finished = app.history.finish_active_gesture().is_some();
     if finished && publish_scheduler {
         app.state.publish_scheduler_snapshot();
+    }
+    if finished {
+        if let Some((track, pattern)) = app.pending_song_row_invalidation.take() {
+            app.invalidate_song_rows_for_pattern(track, pattern);
+        }
     }
     finished
 }
@@ -7475,7 +7633,7 @@ fn edit_patch_retained_bytes(patch: &EditPatch) -> usize {
         EditPatch::TrackDeletion(patch) => patch.retained_bytes(),
         EditPatch::TrackPresentation(patch) => patch.retained_bytes(),
         EditPatch::SceneStructure(patch) => patch.retained_bytes(),
-        EditPatch::Song(patch) => patch.retained_bytes(),
+        EditPatch::Arrangement(patch) => patch.retained_bytes(),
         EditPatch::BusGroupStructure(patch) => patch.retained_bytes(),
         EditPatch::MacroConfiguration(patch) => patch.retained_bytes(),
         EditPatch::TransportParams(patch) => patch.retained_bytes(),
@@ -7615,7 +7773,7 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         EditPatch::SceneStructure(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
-        EditPatch::Song(_) => {
+        EditPatch::Arrangement(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::BusGroupStructure(_) => {
@@ -7703,6 +7861,141 @@ mod tests {
         app.tracks = vec!["Track 1".to_string()];
         app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app
+    }
+
+    /// Regression: a newly added track has a pattern only in the scene it
+    /// was born in (takes spec 11.1). Switching to another scene must show
+    /// an EMPTY step grid (not the previous scene's notes), and the first
+    /// step edit there must materialize the scene's pattern, lift the
+    /// empty-cell silencing, and leave the original scene untouched.
+    #[test]
+    fn bare_scene_presents_empty_grid_and_first_edit_materializes() {
+        let state = SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(2, &[]),
+                PatternSnapshot::new_default(2, &[]),
+            ],
+            0,
+        );
+        // Shape of a track added while on scene 0: scene 1's cell is bare.
+        state.with_scenes_mut(|scenes| {
+            if let Some(id) = scenes.scenes[1].cells[1].take() {
+                scenes.track_pools[1].remove(id);
+            }
+        });
+        let mut app = test_app(state);
+        app.tracks = vec!["Track 1".to_string(), "Track 2".to_string()];
+        app.track_registry =
+            crate::sequencer::TrackRegistry::for_legacy_track_count(2).unwrap();
+        app.graph.track_buffer_ids = vec![-1, -1];
+        app.graph.track_sample_rates = vec![44_100, 44_100];
+        app.graph.track_instrument_types = vec![InstrumentType::Sampler, InstrumentType::Sampler];
+
+        // Author a step on track 1 while on scene 0.
+        try_apply_command(&mut app, AppCommand::ToggleStep { track: 1, step: 0 })
+            .expect("edit in the born scene");
+        assert!(app.state.capture_step_snapshot(1, 0).active);
+
+        // Switch to scene 1 (bare for track 1): empty grid, silenced lane,
+        // no effective pattern — scene 0's notes must not leak through.
+        app.state
+            .launch_scene(
+                1,
+                2,
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            )
+            .expect("launch scene 1");
+        assert!(!app.state.capture_step_snapshot(1, 0).active, "no leaked notes");
+        assert!(app.state.is_scene_silenced(1));
+        assert!(app.state.effective_track_pattern_id(1).is_none());
+
+        // First step edit in the bare scene materializes the pattern into
+        // scene 1's cell and lifts the silencing.
+        try_apply_command(&mut app, AppCommand::ToggleStep { track: 1, step: 4 })
+            .expect("first edit in the bare scene");
+        let materialized = app
+            .state
+            .effective_track_pattern_id(1)
+            .expect("pattern materialized");
+        app.state.with_scenes_mut(|scenes| {
+            assert_eq!(scenes.scenes[1].cells[1], Some(materialized));
+            assert_ne!(scenes.scenes[0].cells[1], Some(materialized));
+        });
+        assert!(!app.state.is_scene_silenced(1));
+        assert!(app.state.capture_step_snapshot(1, 4).active);
+        assert!(!app.state.capture_step_snapshot(1, 0).active);
+
+        // Back to scene 0: the original pattern is intact and scene 1's
+        // edit stayed in scene 1.
+        app.state
+            .launch_scene(
+                0,
+                2,
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            )
+            .expect("launch scene 0");
+        assert!(app.state.capture_step_snapshot(1, 0).active);
+        assert!(!app.state.capture_step_snapshot(1, 4).active);
+    }
+
+    /// Regression: loading an instrument preset in a bare scene must
+    /// materialize the scene's pattern like every other device edit path
+    /// (takes spec 11.1/16.4) instead of failing with `MissingTrackPattern`.
+    #[test]
+    fn instrument_preset_load_materializes_a_bare_scene_pattern() {
+        let state = SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(2, &[]),
+                PatternSnapshot::new_default(2, &[]),
+            ],
+            0,
+        );
+        // Shape of a track added while on scene 0: scene 1's cell is bare.
+        state.with_scenes_mut(|scenes| {
+            if let Some(id) = scenes.scenes[1].cells[1].take() {
+                scenes.track_pools[1].remove(id);
+            }
+        });
+        let mut app = test_app(state);
+        app.tracks = vec!["Track 1".to_string(), "Track 2".to_string()];
+        app.track_registry =
+            crate::sequencer::TrackRegistry::for_legacy_track_count(2).unwrap();
+        app.graph.track_buffer_ids = vec![-1, -1];
+        app.graph.track_sample_rates = vec![44_100, 44_100];
+        app.graph.track_instrument_types = vec![InstrumentType::Sampler, InstrumentType::Sampler];
+
+        app.state
+            .launch_scene(
+                1,
+                2,
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            )
+            .expect("launch scene 1");
+        assert!(app.state.effective_track_pattern_id(1).is_none());
+
+        apply_recorded_instrument_values_mutation(&mut app, 1, "Load preset", |_app| Ok(()))
+            .expect("the preset load resolves a pattern in a bare scene");
+        assert!(
+            app.state.effective_track_pattern_id(1).is_some(),
+            "the bare scene's pattern is materialized on demand"
+        );
     }
 
     fn configure_test_sampler_project(app: &mut App, sample_path: &str) {

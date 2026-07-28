@@ -2197,6 +2197,23 @@
     }
 
     #[test]
+    fn project_scenes_move_track_take_pool_keeps_take_pools_parallel() {
+        let first = sample_pattern_snapshot(2);
+        let second = sample_pattern_snapshot(2);
+        let mut scenes = ProjectScenes::from_pattern_snapshots(&[first, second], 0);
+        let chunk = scenes.scenes[1].cells[1].unwrap();
+        let take = scenes.take_pools[1].insert(None, vec![chunk], 64);
+
+        // Undo of "delete track 0" re-appends the track at the end and moves
+        // its lane back to index 0; every per-track vector must follow.
+        scenes.move_track_take_pool(1, 0);
+
+        assert!(scenes.take_pools[0].contains(take));
+        assert!(scenes.take_pools[1].takes.is_empty());
+        assert_eq!(scenes.take_pools.len(), scenes.track_pools.len());
+    }
+
+    #[test]
     fn project_scenes_purge_unused_track_patterns_removes_only_unreferenced_orphans() {
         let first = sample_pattern_snapshot(1);
         let second = sample_pattern_snapshot(1);
@@ -3474,6 +3491,50 @@
         );
     }
 
+    /// Boundary-launch preflight (quantized session launches): the target
+    /// scene resolves to a complete snapshot without launching, saving, or
+    /// publishing anything — the launch may still be canceled.
+    #[test]
+    fn preflight_pattern_launch_snapshot_resolves_the_target_scene_read_only() {
+        let state = make_state_with_tracks(2);
+        let first = PatternSnapshot::new_default(2, &[]);
+        let second = snapshot_with_active_step(2, 0, 3);
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let version_before = state.scheduler_snapshot_version();
+        let epoch_before = state.transport.pattern_epoch.load(Ordering::Relaxed);
+
+        let snapshot = state
+            .preflight_pattern_launch_snapshot(
+                &crate::quantized_launch::PatternLaunchTarget::Scene { scene: 1 },
+            )
+            .expect("target scene resolves");
+        assert!(snapshot.transport.playing, "stamped playing for the clock");
+        assert_eq!(snapshot.transport.current_pattern, 1);
+        assert_eq!(snapshot.tracks.len(), 2);
+        assert!(
+            snapshot.tracks[0].steps[3].active,
+            "carries scene 1's pool content, not the live scene 0 state"
+        );
+        assert!(!snapshot.tracks[0].scene_silenced);
+
+        // Read-only: nothing launched, saved, or published.
+        assert_eq!(state.current_scene_index(), 0);
+        assert!(!state.pattern.patterns[0].is_active(3));
+        assert_eq!(state.scheduler_snapshot_version(), version_before);
+        assert_eq!(
+            state.transport.pattern_epoch.load(Ordering::Relaxed),
+            epoch_before
+        );
+
+        // Unresolvable targets fall back to the legacy control-side apply.
+        assert!(state
+            .preflight_pattern_launch_snapshot(
+                &crate::quantized_launch::PatternLaunchTarget::Scene { scene: 5 },
+            )
+            .is_none());
+    }
+
     #[test]
     fn masked_scene_launch_validates_first_and_updates_only_selected_tracks() {
         let state = make_state_with_tracks(2);
@@ -3794,7 +3855,7 @@
     }
 
     #[test]
-    fn launch_scene_with_empty_cell_silences_track_without_mutating_live_lane() {
+    fn launch_scene_with_empty_cell_silences_track_and_blanks_the_live_lane() {
         let state = make_state_with_tracks(1);
         state.clone_pattern(
             1,
@@ -3823,7 +3884,10 @@
         assert!(sample_ids.is_some());
         assert!(state.is_scene_silenced(0));
         assert!(state.latest_scheduler_snapshot().tracks[0].scene_silenced);
-        assert!(state.pattern.patterns[0].is_active(3));
+        // An empty cell presents an EMPTY step grid (takes spec 11.1): the
+        // previous scene's live notes must not show through. Track params
+        // (length, timebase) stay — only note content is blanked.
+        assert!(!state.pattern.patterns[0].is_active(3));
         assert_eq!(state.pattern.track_params[0].get_num_steps(), 7);
         assert_eq!(state.current_scene_index(), 0);
     }
@@ -3845,6 +3909,54 @@
             1,
             "capturing while an empty cell is active must not overwrite orphan data"
         );
+    }
+
+    #[test]
+    fn install_project_arrangement_restores_bare_cells_and_take_pools() {
+        // Two tracks, two scenes, freshly rebuilt as the project loader does:
+        // per-track pool ids are 1..=2 with scene j's cell holding id j+1.
+        let state = make_state_with_tracks(2);
+        state.replace_pattern_repository(
+            vec![snapshot_with_active_step(2, 0, 3), snapshot_with_active_step(2, 0, 5)],
+            0,
+        );
+
+        // Simulated file data: scene 1's cell for track 1 was bare, and
+        // track 0 owned one 300-step take of two chunks (stable id 3).
+        let presence = vec![vec![true, true], vec![true, false]];
+        let mut chunk_a = sample_pattern_snapshot(1).track_pattern_data(0).unwrap();
+        chunk_a.track_bits[0] = 0b1010;
+        let mut chunk_b = chunk_a.clone();
+        chunk_b.track_bits[0] = 0b0111;
+        state.install_project_arrangement(
+            &presence,
+            vec![
+                (7, vec![(3, "Take 4".to_string(), 300, vec![chunk_a, chunk_b])]),
+                (0, Vec::new()),
+            ],
+        );
+
+        let scenes = state.pattern.scenes.lock().unwrap();
+        // Bare cell restored: the loader-materialized pattern is gone.
+        assert_eq!(scenes.scenes[1].cells[1], None);
+        assert!(!scenes.track_pools[1].contains(PatternId(2)));
+        assert!(scenes.track_pools[1].contains(PatternId(1)));
+        // Take rebuilt with its stable id, chunk content, and allocator.
+        let take = scenes.take_pools[0].get(TakeId(3)).expect("take restored");
+        assert_eq!(take.name, "Take 4");
+        assert_eq!(take.total_len_steps, 300);
+        assert_eq!(take.chunks.len(), 2);
+        let chunk_bits: Vec<u64> = take
+            .chunks
+            .iter()
+            .map(|id| scenes.track_pools[0].get(*id).unwrap().track_bits[0])
+            .collect();
+        assert_eq!(chunk_bits, vec![0b1010, 0b0111]);
+        assert_eq!(scenes.take_pools[0].next_take_id, 7);
+        // Chunks are claimed (hidden from the grid) and scene cells for
+        // track 0 are untouched.
+        assert!(scenes.take_pools[0].is_claimed(take.chunks[0]));
+        assert_eq!(scenes.scenes[0].cells[0], Some(PatternId(1)));
     }
 
     #[test]
@@ -5256,7 +5368,7 @@
             scene,
             overrides: overrides
                 .iter()
-                .map(|&(track, pattern_id)| ProjectSongTrackOverride { track, pattern_id })
+                .map(|&(track, pattern_id)| ProjectSongTrackOverride::new(track, Some(pattern_id)))
                 .collect(),
         }
     }
@@ -5276,13 +5388,13 @@
         assert_eq!(
             song.rows[0].overrides,
             vec![
-                ProjectSongTrackOverride { track: 0, pattern_id: 1 },
-                ProjectSongTrackOverride { track: 1, pattern_id: 3 },
+                ProjectSongTrackOverride::new(0, Some(1)),
+                ProjectSongTrackOverride::new(1, Some(3)),
             ]
         );
         assert_eq!(
             song.rows[1].overrides,
-            vec![ProjectSongTrackOverride { track: 1, pattern_id: 1 }]
+            vec![ProjectSongTrackOverride::new(1, Some(1))]
         );
     }
 
@@ -5319,9 +5431,9 @@
         assert_eq!(
             song.rows[0].overrides,
             vec![
-                ProjectSongTrackOverride { track: 0, pattern_id: 1 },
-                ProjectSongTrackOverride { track: 1, pattern_id: 4 },
-                ProjectSongTrackOverride { track: 3, pattern_id: 3 },
+                ProjectSongTrackOverride::new(0, Some(1)),
+                ProjectSongTrackOverride::new(1, Some(4)),
+                ProjectSongTrackOverride::new(3, Some(3)),
             ]
         );
         // Moving it back restores the original assignment.
@@ -5329,9 +5441,9 @@
         assert_eq!(
             song.rows[0].overrides,
             vec![
-                ProjectSongTrackOverride { track: 0, pattern_id: 1 },
-                ProjectSongTrackOverride { track: 2, pattern_id: 3 },
-                ProjectSongTrackOverride { track: 3, pattern_id: 4 },
+                ProjectSongTrackOverride::new(0, Some(1)),
+                ProjectSongTrackOverride::new(2, Some(3)),
+                ProjectSongTrackOverride::new(3, Some(4)),
             ]
         );
     }
@@ -5358,10 +5470,439 @@
         assert_eq!(
             song.rows[0].overrides,
             vec![
-                ProjectSongTrackOverride { track: 0, pattern_id: 1 },
-                ProjectSongTrackOverride { track: 1, pattern_id: 1 },
+                ProjectSongTrackOverride::new(0, Some(1)),
+                ProjectSongTrackOverride::new(1, Some(1)),
             ]
         );
+    }
+
+    #[test]
+    fn song_row_explicit_empty_lane_never_destroys_the_scene_pattern() {
+        // Regression: apply_song_row saves the live snapshot into the
+        // current scene before applying each row. A lane silenced by an
+        // explicit-empty override must keep its live content — blanking it
+        // would be written back over the scene cell's real pattern by the
+        // next row application.
+        let state = make_state_with_tracks(1);
+        state.pattern.patterns[0].set_step_active(3, true);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &[String::from("track")],
+            &[InstrumentType::Sampler],
+        ));
+
+        // Row A: same scene, explicit-empty override for track 0.
+        state
+            .apply_song_row(
+                0,
+                &[(0, None)],
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("track")],
+                &[InstrumentType::Sampler],
+                true,
+            )
+            .expect("row A applies");
+        assert!(state.is_scene_silenced(0));
+
+        // Row B: same scene, no overrides — saves current state first, then
+        // restores the scene cell's pattern.
+        state
+            .apply_song_row(
+                0,
+                &[],
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("track")],
+                &[InstrumentType::Sampler],
+                true,
+            )
+            .expect("row B applies");
+        assert!(!state.is_scene_silenced(0));
+        assert!(
+            state.pattern.patterns[0].is_active(3),
+            "the scene pattern survives an explicit-empty row"
+        );
+        let scenes = state.pattern.scenes.lock().unwrap();
+        let cell = scenes.scenes[0].cells[0].expect("scene cell");
+        let data = scenes.track_pools[0].get(cell).expect("pool pattern");
+        assert!(
+            data.track_bits[0] & (1 << 3) != 0,
+            "the pool pattern keeps its step content"
+        );
+    }
+
+    #[test]
+    fn song_row_take_override_never_reaches_the_session_surface() {
+        // Takes spec 11.2: take chunks are invisible outside the timeline.
+        // A song row whose lane resolves to a take chunk (preflight-expanded
+        // take lanes carry the chunk's PatternId) must NOT paint the chunk
+        // into the live grid or the session override slot — otherwise the
+        // step sequencer shows the take at MAX_STEPS, and the mirror's
+        // save-back writes take content over pool patterns (or mints one
+        // for a bare track).
+        let state = make_state_with_tracks(1);
+        state.pattern.patterns[0].set_step_active(3, true);
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &[String::from("track")],
+            &[InstrumentType::Sampler],
+        ));
+        let scene_steps = state.pattern.track_params[0].get_num_steps();
+
+        // Register a take whose single chunk is MAX_STEPS wide with step 0.
+        let mut chunk = PatternSnapshot::new_default(1, &[])
+            .track_pattern_data(0)
+            .expect("chunk template");
+        chunk.track_params.num_steps = MAX_STEPS;
+        chunk.track_bits[0] |= 1;
+        let take_id = state
+            .register_track_take(0, None, vec![chunk], 16)
+            .expect("take registers");
+        let chunk_id = state.track_takes(0)[0].chunks[0];
+
+        state
+            .apply_song_row(
+                0,
+                &[(0, Some(chunk_id))],
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("track")],
+                &[InstrumentType::Sampler],
+                true,
+            )
+            .expect("take row applies");
+        assert!(
+            !state.is_scene_silenced(0),
+            "a take lane is audibly playing — never silenced"
+        );
+        assert!(
+            state.pattern.patterns[0].is_active(3),
+            "the live grid keeps the scene pattern, not the chunk"
+        );
+        assert!(
+            !state.pattern.patterns[0].is_active(0),
+            "the chunk's content never paints the live grid"
+        );
+        assert_eq!(
+            state.pattern.track_params[0].get_num_steps(),
+            scene_steps,
+            "the live pattern length must not inherit the chunk's MAX_STEPS"
+        );
+        {
+            let scenes = state.pattern.scenes.lock().unwrap();
+            assert_eq!(
+                scenes.track_overrides[0], None,
+                "the session override slot never holds a take chunk"
+            );
+        }
+        // The mixer clip grid must not mark the scene's clip "playing"
+        // while the lane is actually playing the take (takes spec 11.2).
+        assert_eq!(state.song_take_lane_mask(), 1);
+        assert!(
+            state
+                .track_pattern_cells(0)
+                .iter()
+                .all(|cell| !cell.active_effective),
+            "no grid clip is active while the take plays"
+        );
+
+        // The next row's save-back must not leak take content into the pool.
+        state
+            .apply_song_row(
+                0,
+                &[],
+                1,
+                &[-1],
+                &[44_100],
+                &[String::from("track")],
+                &[InstrumentType::Sampler],
+                true,
+            )
+            .expect("follow-up row applies");
+        let scenes = state.pattern.scenes.lock().unwrap();
+        let cell = scenes.scenes[0].cells[0].expect("scene cell");
+        let data = scenes.track_pools[0].get(cell).expect("pool pattern");
+        assert!(
+            data.track_bits[0] & (1 << 3) != 0,
+            "the scene pattern keeps its own content"
+        );
+        assert_ne!(
+            data.track_params.num_steps as usize, MAX_STEPS,
+            "the scene pattern must not inherit the take's length"
+        );
+        let take_chunk = scenes.track_pools[0].get(chunk_id).expect("chunk survives");
+        assert!(
+            take_chunk.track_bits[0] & 1 == 1,
+            "the take chunk itself is untouched"
+        );
+        assert_eq!(scenes.take_pools[0].takes.len(), 1);
+        assert_eq!(scenes.take_pools[0].takes[0].id, take_id);
+        drop(scenes);
+        // The follow-up row plays the scene clip again: the grid marker
+        // returns and the take-lane bit clears.
+        assert_eq!(state.song_take_lane_mask(), 0);
+        assert!(
+            state
+                .track_pattern_cells(0)
+                .iter()
+                .any(|cell| cell.active_effective),
+            "the scene clip is active again once the take row ends"
+        );
+    }
+
+    #[test]
+    fn new_lane_in_captured_rows_gets_free_run_offset_stamps() {
+        // An arrangement captured at unquantized beats predates a new
+        // track. When the track gains its scene pattern, rows referencing
+        // that scene must stamp the free-run phase for the new lane
+        // (takes spec 7.2/9.4) so it plays in time; grid-aligned rows and
+        // other scenes stay untouched.
+        let state = SequencerState::new(2, vec![vec![], vec![]]);
+        state.with_scenes_mut(|scenes| {
+            let snapshots = vec![
+                PatternSnapshot::new_default(2, &[]),
+                PatternSnapshot::new_default(2, &[]),
+            ];
+            *scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        });
+        state.set_committed_song(Some(ProjectSong {
+            rows: vec![
+                song_row(0, 0.0, 0, &[]),
+                // Unquantized captured row: 4.7 beats = step 18.8 of a
+                // 16-step/4-beat pattern -> free-run offset 2.8.
+                song_row(1, 4.7, 1, &[]),
+                song_row(2, 9.3, 0, &[]),
+                // Grid-aligned row: free-run offset 0, no override needed.
+                song_row(3, 12.0, 0, &[]),
+            ],
+            end_beat: 16.0,
+            loop_enabled: false,
+            next_row_id: 4,
+        }));
+        // Adding a track while on scene 0 materializes its current-scene
+        // pattern and stamps the song rows referencing scene 0.
+        state.extend_all_pattern_snapshots_to_track(
+            3,
+            &[],
+            2,
+            CustomInstrumentRunMode::Instrument,
+            None,
+        )
+        .unwrap();
+        let song = state.committed_song().expect("song");
+        let lane = |idx: usize| {
+            song.rows[idx]
+                .overrides
+                .iter()
+                .find(|over| over.track == 2)
+                .copied()
+        };
+        assert_eq!(lane(0), None, "beat 0 is grid-aligned: no override");
+        assert_eq!(lane(1), None, "scene 1 rows are untouched");
+        let stamped = lane(2).expect("off-grid scene 0 row is stamped");
+        assert!((stamped.offset_steps - (9.3 * 4.0) % 16.0).abs() < 1e-9);
+        assert_eq!(lane(3), None, "beat 12 is grid-aligned: no override");
+    }
+
+    #[test]
+    fn added_track_extends_committed_arrangement_and_stamps_its_scene_spans() {
+        let state = SequencerState::new(2, vec![vec![], vec![]]);
+        state.with_scenes_mut(|scenes| {
+            let snapshots = vec![
+                PatternSnapshot::new_default(2, &[]),
+                PatternSnapshot::new_default(2, &[]),
+            ];
+            *scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        });
+        let mut arrangement = ProjectArrangement::new(2, 16.0);
+        arrangement.scene_lane = vec![
+            SceneEvent {
+                start_beat: 0.0,
+                scene: 0,
+            },
+            SceneEvent {
+                start_beat: 4.7,
+                scene: 1,
+            },
+            SceneEvent {
+                start_beat: 9.3,
+                scene: 0,
+            },
+        ];
+        state
+            .set_committed_arrangement(Some(arrangement))
+            .expect("initial arrangement");
+
+        state
+            .extend_all_pattern_snapshots_to_track(
+                3,
+                &[],
+                2,
+                CustomInstrumentRunMode::Instrument,
+                None,
+            )
+            .expect("new track extends its arrangement lane");
+
+        let arrangement = state.committed_arrangement().expect("arrangement survives");
+        assert_eq!(
+            arrangement.track_lanes.len(),
+            3,
+            "the arrangement topology follows the project topology"
+        );
+        let lane = &arrangement.track_lanes[2];
+        assert_eq!(lane.len(), 2, "only the current scene's spans are stamped");
+        assert_eq!((lane[0].start_beat, lane[0].end_beat), (0.0, 4.7));
+        assert_eq!((lane[1].start_beat, lane[1].end_beat), (9.3, 16.0));
+        assert_eq!(lane[0].pattern_id, lane[1].pattern_id);
+        assert_eq!(lane[0].offset_steps, 0.0);
+        assert!(
+            (lane[1].offset_steps - (9.3 * 4.0) % 16.0).abs() < 1e-9,
+            "the later scene span keeps global free-run phase"
+        );
+        state.with_project_scenes(|scenes| {
+            arrangement
+                .validate(scenes)
+                .expect("the extended arrangement validates");
+        });
+        assert!(
+            state.committed_song().is_some(),
+            "the compiled song is rebuilt with the new lane"
+        );
+    }
+
+    #[test]
+    fn added_track_is_bare_outside_the_current_scene() {
+        // Bare tracks (takes spec 11.1, scoped): growing to a new track
+        // materializes exactly one pattern in the CURRENT scene (the
+        // effective-pattern anchor device edits and history need) and a
+        // None cell in every other scene.
+        let state = SequencerState::new(2, vec![vec![], vec![]]);
+        state.with_scenes_mut(|scenes| {
+            let snapshots = vec![
+                PatternSnapshot::new_default(2, &[]),
+                PatternSnapshot::new_default(2, &[]),
+            ];
+            *scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+        });
+        state.extend_all_pattern_snapshots_to_track(
+            3,
+            &[],
+            2,
+            CustomInstrumentRunMode::Instrument,
+            None,
+        )
+        .unwrap();
+        state.with_project_scenes(|scenes| {
+            assert_eq!(
+                scenes.track_pools[2].patterns.len(),
+                1,
+                "one pattern for the current scene only"
+            );
+            assert!(scenes.scenes[0].cells[2].is_some(), "current scene cell");
+            assert_eq!(scenes.scenes[1].cells[2], None, "other scenes stay bare");
+        });
+
+        // The timeline lane projection resolves the bare scenes to nothing:
+        // an empty span, never a synthesized placeholder clip.
+        let song = ProjectSong {
+            rows: vec![song_row(0, 0.0, 0, &[]), song_row(1, 8.0, 1, &[])],
+            end_beat: 16.0,
+            loop_enabled: false,
+            next_row_id: 2,
+        };
+        state.with_project_scenes(|scenes| {
+            let lanes = project_lanes(&song, scenes);
+            assert!(lanes[2][0].pattern.is_some(), "current scene's span resolves");
+            assert!(lanes[2][1].pattern.is_none(), "bare scene's span is empty");
+        });
+
+        // Saving an all-empty snapshot into a bare scene keeps it bare. This
+        // track's pool already holds the current scene's pattern, so it is
+        // the non-empty-pool half of the guard that blocks materialization
+        // here; the empty-pool halves are covered by
+        // `lazy_materialization_covers_fully_bare_tracks_only`.
+        state.with_scenes_mut(|scenes| {
+            assert!(scenes.save_scene_snapshot(1, PatternSnapshot::new_default(3, &[])));
+            assert_eq!(scenes.scenes[1].cells[2], None);
+            assert_eq!(scenes.track_pools[2].patterns.len(), 1);
+        });
+    }
+
+    #[test]
+    fn lazy_materialization_covers_fully_bare_tracks_only() {
+        // A track with an EMPTY pool (fully bare) materializes a pattern on
+        // the first saved content; a track whose pool has patterns but whose
+        // cell was cleared stays cleared.
+        let state = SequencerState::new(2, vec![vec![], vec![]]);
+        state.with_scenes_mut(|scenes| {
+            let snapshots = vec![PatternSnapshot::new_default(2, &[])];
+            *scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+            // Track 1: fully bare (simulated) — empty pool, None cell.
+            scenes.scenes[0].cells[1] = None;
+            scenes.track_pools[1] = TrackPatternPool::default();
+        });
+        // Empty pool + NO content: a routine snapshot save (every scene/row
+        // transition runs one) must leave the bare lane alone instead of
+        // minting an empty pattern for it.
+        state.with_scenes_mut(|scenes| {
+            assert!(scenes.save_scene_snapshot(0, PatternSnapshot::new_default(2, &[])));
+            assert!(
+                scenes.track_pools[1].patterns.is_empty(),
+                "an all-empty snapshot never materializes a bare track"
+            );
+            assert_eq!(
+                scenes.scenes[0].cells[1], None,
+                "the untouched bare cell stays bare"
+            );
+        });
+        state.with_scenes_mut(|scenes| {
+            let mut snapshot = PatternSnapshot::new_default(2, &[]);
+            snapshot.track_bits[1][0] |= 1;
+            assert!(scenes.save_scene_snapshot(0, snapshot));
+            assert_eq!(scenes.track_pools[1].patterns.len(), 1);
+            assert!(scenes.scenes[0].cells[1].is_some(), "bare track materializes");
+        });
+        // Cleared cell with a non-empty pool: content in the live snapshot
+        // must NOT resurrect the cell.
+        state.with_scenes_mut(|scenes| {
+            scenes.scenes[0].cells[0] = None;
+            let mut snapshot = PatternSnapshot::new_default(2, &[]);
+            snapshot.track_bits[0][0] |= 1;
+            assert!(scenes.save_scene_snapshot(0, snapshot));
+            assert_eq!(scenes.scenes[0].cells[0], None, "cleared cells stay cleared");
+        });
+        // A pool holding ONLY claimed take chunks is still bare: chunks are
+        // hidden from the grid, so real content must still mint a grid
+        // pattern (and never adopt the chunk as the scene cell).
+        state.with_scenes_mut(|scenes| {
+            scenes.scenes[0].cells[1] = None;
+            scenes.track_pools[1] = TrackPatternPool::default();
+            scenes.take_pools[1] = TrackTakePool::default();
+            let chunk_data = PatternSnapshot::new_default(2, &[])
+                .track_pattern_data(1)
+                .expect("chunk data");
+            let chunk = scenes.track_pools[1].insert(chunk_data);
+            scenes.take_pools[1].insert(None, vec![chunk], 16);
+
+            let mut snapshot = PatternSnapshot::new_default(2, &[]);
+            snapshot.track_bits[1][0] |= 1;
+            assert!(scenes.save_scene_snapshot(0, snapshot));
+            assert_eq!(
+                scenes.track_pools[1].patterns.len(),
+                2,
+                "a claimed-chunk-only pool still counts as bare"
+            );
+            let cell = scenes.scenes[0].cells[1].expect("content materializes a grid pattern");
+            assert_ne!(cell, chunk, "the take chunk is never adopted as the cell");
+        });
     }
 
     #[test]

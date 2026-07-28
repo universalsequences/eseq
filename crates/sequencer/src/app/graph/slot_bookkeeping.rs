@@ -255,7 +255,7 @@ impl GraphController<'_> {
                 instrument_modulator_node_id,
                 instrument_type,
             )),
-        );
+        )?;
         if let (Some(&buffer_id), Some(&sample_rate)) = (
             self.app.graph.track_buffer_ids.get(idx),
             self.app.graph.track_sample_rates.get(idx),

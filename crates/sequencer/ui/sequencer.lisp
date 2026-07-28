@@ -649,6 +649,44 @@
               (rgba track-r track-g track-b 1.0))
             (rgba 0 0 0 0))))))))
 
+;; SEQ.song-track-governed carries one number per track (takes spec 10 UX):
+;; 0 = the lane is not playing a take (pattern lanes stay fully editable —
+;; jam with the step sequencer while the arrangement plays), 1 = the lane is
+;; take-governed (dimmed steps + non-interactive grid + lit Back-to-Song
+;; play button), 2 = a take lane the performer manually latched away
+;; (editable again; the grey play button returns it to the song).
+(def seqv-track-take-state (i)
+  (let ((state (nth SEQ.song-track-governed i)))
+    (if (= state nil) 0 state)))
+
+(def seqv-track-song-governed? (i)
+  (= (seqv-track-take-state i) 1))
+
+;; Per-track take-lane indicator / Back-to-Song button: a play triangle that
+;; sits lit green while a take governs the lane and grey while the lane is
+;; manually latched (clicking then hands it back to the song). `take-state`
+;; is the SEQ.song-track-governed value (0/1/2); at 0 the triangle renders
+;; fully transparent — the box is ALWAYS in the layout so lanes flipping
+;; between pattern and take never trigger a re-layout, only a repaint.
+(defwidget seqv-back-to-song-icon
+  :width 1.5 :height 1.5
+  :state (take-state)
+  :bindable (take-state)
+  :shader
+  (sdf/layer
+    (sdf/fill
+      (let ((p1x -0.32) (p1y -0.44) (p2x -0.32) (p2y 0.44) (p3x 0.5) (p3y 0.0))
+        (let ((d1 (- (* (- p2x p1x) (- y p1y)) (* (- p2y p1y) (- x p1x))))
+              (d2 (- (* (- p3x p2x) (- y p2y)) (* (- p3y p2y) (- x p2x))))
+              (d3 (- (* (- p1x p3x) (- y p3y)) (* (- p1y p3y) (- x p3x)))))
+          (max (max d1 d2) d3)))
+      (material :color
+        (if (= take-state 1)
+          (rgba 0.35 0.82 0.40 1.0)
+          (if (= take-state 2)
+            (rgba 0.42 0.43 0.47 1.0)
+            (rgba 0 0 0 0)))))))
+
 (def seqv-mute-bg (active)
   (if active
     (rgba 0.08 0.09 0.10 1.0)
@@ -686,6 +724,7 @@
   (let ((name (nth SEQ.track-names i)))
     (box :background "seqv-track-container"
       :padding 0.4
+      :on-click |x y r| (seqv-select-track-for-edit i)
       (h-stack :gap 0.4 :align :center
         (box
           :key (str "seqv-color-badge-" i)
@@ -730,7 +769,20 @@
                      :dark-gray
                      :dim)
             :bg :transparent))
-        (seqv-track-volume-control i)))))
+        (seqv-track-volume-control i)
+        ;; Take-lane indicator (takes spec 10 UX): green = a take governs
+        ;; the lane (steps dim, grid read-only); grey = the performer
+        ;; latched the lane away — click returns it to the song; invisible
+        ;; on pattern lanes. Always laid out — the reactive take-state only
+        ;; repaints the widget, so pattern<->take flips never re-layout.
+        (box :width 2 :height 1.5
+          :background "seqv-back-to-song-icon"
+          :key (str "seqv-back-to-song-" i)
+          :take-state (bind-seq-nth "song-track-governed" i)
+          :on-click |x y r|
+            (if (> (seqv-track-take-state i) 0)
+              (seq-song-back-to-song-track i)
+              nil))))))
 
 (def seqv-track-actions (i)
   (h-stack :gap 0.35 :padding 0.85
@@ -776,46 +828,60 @@
     (seq-set-step-param source :duration (max 1 (min 32 (+ (- step source) 1))))))
 
 (def seqv-step-select-drag-start (track step evt)
-  (do
-    (set! selected-bus -1)
-    (seq-set-track track)
-    (set! seqv-drag-track track)
-    (step-select-drag-start step evt)))
-
-(def seqv-step-select-drag-over (track step evt)
-  (if (and (= seqv-drag-track track) (not (= seqv-duration-drag-source nil)))
-    (seqv-set-duration-from-drag track seqv-duration-drag-source step)
-    (if (= seqv-drag-track track)
-      (do
-        (seq-set-track track)
-        (step-select-drag-over-for-track track step evt))
-      nil)))
-
-(def seqv-step-pointer-down (track step evt)
-  (let ((use-selection (= SEQ.current-track track)))
+  (if (seqv-track-song-governed? track)
+    nil
     (do
       (set! selected-bus -1)
       (seq-set-track track)
       (set! seqv-drag-track track)
-      (if (and (seq-track-step-active? track step) (not (selection-click? evt)) (seqv-duration-edge? evt))
+      (step-select-drag-start step evt))))
+
+(def seqv-step-select-drag-over (track step evt)
+  (if (seqv-track-song-governed? track)
+    nil
+    (if (and (= seqv-drag-track track) (not (= seqv-duration-drag-source nil)))
+      (seqv-set-duration-from-drag track seqv-duration-drag-source step)
+      (if (= seqv-drag-track track)
         (do
-          (set! seqv-duration-drag-source step)
-          (set! step-click-pending nil)
-          (set! step-drag-anchor nil)
-          (set! step-move-last nil)
-          (cool-off-follow)
-          (set-track-cursor-step step)
-          (seqv-set-duration-from-drag track step step))
-        (step-pointer-down-for-track track step evt use-selection)))))
+          (seq-set-track track)
+          (step-select-drag-over-for-track track step evt))
+        nil))))
+
+;; Song-governed lanes are non-interactive (takes spec 10 UX): while the
+;; arrangement holds launch authority the Seq grid is a dimmed read-only view
+;; of the session pattern — edits would silently target a pattern the lane is
+;; not playing.
+(def seqv-step-pointer-down (track step evt)
+  (if (seqv-track-song-governed? track)
+    nil
+    (let ((use-selection (= SEQ.current-track track)))
+      (do
+        (set! selected-bus -1)
+        (seq-set-track track)
+        (set! seqv-drag-track track)
+        (if (and (seq-track-step-active? track step) (not (selection-click? evt)) (seqv-duration-edge? evt))
+          (do
+            (set! seqv-duration-drag-source step)
+            (set! step-click-pending nil)
+            (set! step-drag-anchor nil)
+            (set! step-move-last nil)
+            (cool-off-follow)
+            (set-track-cursor-step step)
+            (seqv-set-duration-from-drag track step step))
+          (step-pointer-down-for-track track step evt use-selection))))))
 
 (def seqv-step-double-click (track step evt)
-  (do
-    (seq-set-track track)
-    (step-double-click-for-track track step evt)))
+  (if (seqv-track-song-governed? track)
+    nil
+    (do
+      (seq-set-track track)
+      (step-double-click-for-track track step evt))))
 
 (def seqv-step-pointer-up (track step evt)
   (do
-    (if (and (= seqv-drag-track track) (= seqv-duration-drag-source nil))
+    (if (and (= seqv-drag-track track)
+          (= seqv-duration-drag-source nil)
+          (not (seqv-track-song-governed? track)))
       (do
         (seq-set-track track)
         (step-pointer-up step evt))
@@ -833,40 +899,45 @@
       (max 1 (min 32 (+ (- step source) 1))))))
 
 (def seqv-drum-step-select-drag-over (track pad-note step evt)
-  (if (and (= seqv-drag-track track)
-        (= seqv-drum-drag-pad pad-note)
-        (not (= seqv-duration-drag-source nil)))
-    (seqv-set-drum-duration-from-drag
-      track pad-note seqv-duration-drag-source step)
-    (if (and (= seqv-drag-track track) (= seqv-drum-drag-pad pad-note))
-      (drum-step-select-drag-over track pad-note step evt)
-      nil)))
+  (if (seqv-track-song-governed? track)
+    nil
+    (if (and (= seqv-drag-track track)
+          (= seqv-drum-drag-pad pad-note)
+          (not (= seqv-duration-drag-source nil)))
+      (seqv-set-drum-duration-from-drag
+        track pad-note seqv-duration-drag-source step)
+      (if (and (= seqv-drag-track track) (= seqv-drum-drag-pad pad-note))
+        (drum-step-select-drag-over track pad-note step evt)
+        nil))))
 
 (def seqv-drum-step-pointer-down (track slot-idx pad-note step evt)
-  (do
-    (seqv-select-drum-slot-index track slot-idx)
-    (set! selected-bus -1)
-    (seq-set-track track)
-    (set! seqv-drag-track track)
-    (set! seqv-drum-drag-pad pad-note)
-    (if (and (seq-drum-lane-step-active? track pad-note step)
-          (not (selection-click? evt))
-          (seqv-duration-edge? evt))
-      (do
-        (set! seqv-duration-drag-source step)
-        (set! step-click-pending nil)
-        (set! step-drag-anchor nil)
-        (set! step-move-last nil)
-        (cool-off-follow)
-        (drum-step-set-cursor track pad-note step)
-        (seqv-set-drum-duration-from-drag track pad-note step step))
-      (drum-step-pointer-down track pad-note step evt))))
+  (if (seqv-track-song-governed? track)
+    nil
+    (do
+      (seqv-select-drum-slot-index track slot-idx)
+      (set! selected-bus -1)
+      (seq-set-track track)
+      (set! seqv-drag-track track)
+      (set! seqv-drum-drag-pad pad-note)
+      (if (and (seq-drum-lane-step-active? track pad-note step)
+            (not (selection-click? evt))
+            (seqv-duration-edge? evt))
+        (do
+          (set! seqv-duration-drag-source step)
+          (set! step-click-pending nil)
+          (set! step-drag-anchor nil)
+          (set! step-move-last nil)
+          (cool-off-follow)
+          (drum-step-set-cursor track pad-note step)
+          (seqv-set-drum-duration-from-drag track pad-note step step))
+        (drum-step-pointer-down track pad-note step evt)))))
 
 (def seqv-drum-step-pointer-up (track pad-note step evt)
   (do
     (if (and (= seqv-drag-track track)
           (= seqv-drum-drag-pad pad-note)
-          (= seqv-duration-drag-source nil))
+          (= seqv-duration-drag-source nil)
+          (not (seqv-track-song-governed? track)))
       (drum-step-pointer-up track pad-note step evt)
       nil)
     (set! seqv-drag-track nil)
@@ -874,10 +945,12 @@
     (set! seqv-duration-drag-source nil)))
 
 (def seqv-drum-step-double-click (track slot-idx pad-note step evt)
-  (do
-    (seqv-select-drum-slot-index track slot-idx)
-    (seq-set-track track)
-    (drum-step-double-click track pad-note step evt)))
+  (if (seqv-track-song-governed? track)
+    nil
+    (do
+      (seqv-select-drum-slot-index track slot-idx)
+      (seq-set-track track)
+      (drum-step-double-click track pad-note step evt))))
 
 ;; Single tight step button (no slider, no number).
 (def seqv-track-step-value (lists track step fallback)
@@ -892,9 +965,12 @@
     (if (= odd2 1) (if (= odd1 1) 0 1) odd1)))
 
 (def seqv-step-cell (track step visible)
-  (let ((track-r (bind-seq-nth "track-color-r-effective" track))
-      (track-g (bind-seq-nth "track-color-g-effective" track))
-      (track-b (bind-seq-nth "track-color-b-effective" track))
+  ;; Step cells use the step-color channels: same as the track color but
+  ;; additionally dimmed while the lane is take-governed (the header keeps
+  ;; its full color — only the actual steps go translucent).
+  (let ((track-r (bind-seq-nth "step-color-r-effective" track))
+      (track-g (bind-seq-nth "step-color-g-effective" track))
+      (track-b (bind-seq-nth "step-color-b-effective" track))
       (plock-kind (bind-seq (str "seq-track-step-plock-kind-" track "-" step)))
       (variant-r (bind-seq (str "seq-track-step-variant-r-" track "-" step)))
       (variant-g (bind-seq (str "seq-track-step-variant-g-" track "-" step)))
@@ -937,9 +1013,9 @@
         :background "seqv-step-shell"))))
 
 (def seqv-drum-lane-step-cell (track slot-idx pad-note step visible)
-  (let ((track-r (bind-seq-nth "track-color-r-effective" track))
-      (track-g (bind-seq-nth "track-color-g-effective" track))
-      (track-b (bind-seq-nth "track-color-b-effective" track))
+  (let ((track-r (bind-seq-nth "step-color-r-effective" track))
+      (track-g (bind-seq-nth "step-color-g-effective" track))
+      (track-b (bind-seq-nth "step-color-b-effective" track))
       (plock-kind (bind-seq (str "seq-track-step-plock-kind-" track "-" step)))
       (variant-r (bind-seq (str "seq-track-step-variant-r-" track "-" step)))
       (variant-g (bind-seq (str "seq-track-step-variant-g-" track "-" step)))

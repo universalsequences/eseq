@@ -406,6 +406,10 @@ pub enum WidgetCursor {
     Default,
     EwResize,
     NsResize,
+    /// Open-hand grab affordance (clip title bars,
+    /// docs/arrangement-region-editing-spec.md 3.1 — spec'd as `Move`, drawn
+    /// as the grab hand).
+    Grab,
     DragCopy,
     DragNotAllowed,
 }
@@ -861,7 +865,12 @@ pub trait WidgetDefinition: Sync {
     ) -> Option<WidgetEvent> {
         None
     }
-    fn captures_scroll_gesture(&self) -> bool {
+    /// Whether a declined scroll gesture (a `None` from
+    /// `scroll_gesture_event`) should still be swallowed instead of bubbling
+    /// to an enclosing scroll container. Node-aware so widgets can opt
+    /// specific instances into pass-through (e.g. a timeline lane inside a
+    /// scroll container that delegates vertical scrolling to it).
+    fn captures_scroll_gesture(&self, _node: &LayoutNode) -> bool {
         false
     }
     fn captures_drag(&self) -> bool {
@@ -931,6 +940,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &adsr_editor::ADSR_EDITOR_WIDGET,
     &tabs::TABS_WIDGET,
     &timeline::TIMELINE_WIDGET,
+    &timeline::TIMELINE_CURSOR_MARKER_WIDGET,
     &transport_clock::TRANSPORT_CLOCK_WIDGET,
     &waveform::WAVEFORM_WIDGET,
     &wavetable_viewer::WAVETABLE_VIEWER_WIDGET,
@@ -2477,7 +2487,7 @@ pub fn map_scroll_gesture_event(
 
 pub fn captures_scroll_gesture(node: &LayoutNode) -> bool {
     widget_definition(&node.widget_type)
-        .map(WidgetDefinition::captures_scroll_gesture)
+        .map(|definition| definition.captures_scroll_gesture(node))
         .unwrap_or(false)
 }
 

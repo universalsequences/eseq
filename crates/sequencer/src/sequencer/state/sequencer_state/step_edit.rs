@@ -533,7 +533,7 @@ impl SequencerState {
         pattern_id: PatternId,
     ) -> Result<f32, String> {
         let scenes = self.pattern.scenes.lock().unwrap();
-        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+        if self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id) {
             return self
                 .pattern
                 .instrument_base_note_offsets
@@ -556,7 +556,7 @@ impl SequencerState {
         value: f32,
     ) -> Result<bool, String> {
         let mut scenes = self.pattern.scenes.lock().unwrap();
-        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let is_effective = self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id);
         let data = scenes
             .track_pools
             .get_mut(track)
@@ -579,7 +579,7 @@ impl SequencerState {
         pattern_id: PatternId,
     ) -> Result<InstrumentDeviceValuesSnapshot, String> {
         let scenes = self.pattern.scenes.lock().unwrap();
-        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+        if self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id) {
             let slot = self
                 .pattern
                 .instrument_slots
@@ -634,7 +634,7 @@ impl SequencerState {
         values: &InstrumentDeviceValuesSnapshot,
     ) -> Result<bool, String> {
         let mut scenes = self.pattern.scenes.lock().unwrap();
-        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let is_effective = self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id);
         let data = scenes
             .track_pools
             .get_mut(track)
@@ -708,7 +708,7 @@ impl SequencerState {
         slot_idx: usize,
     ) -> Result<EffectSlotValuesSnapshot, String> {
         let scenes = self.pattern.scenes.lock().unwrap();
-        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+        if self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id) {
             return self
                 .pattern
                 .effect_chains
@@ -1168,7 +1168,7 @@ impl SequencerState {
         slot_idx: usize,
     ) -> Result<EffectSlotValuesSnapshot, String> {
         let scenes = self.pattern.scenes.lock().unwrap();
-        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+        if self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id) {
             return self
                 .pattern
                 .midi_fx_slots
@@ -1413,7 +1413,7 @@ impl SequencerState {
         midi_fx: bool,
     ) -> Result<bool, String> {
         let mut scenes = self.pattern.scenes.lock().unwrap();
-        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let is_effective = self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id);
         let data = scenes
             .track_pools
             .get_mut(track)
@@ -1460,7 +1460,7 @@ impl SequencerState {
         slot_idx: usize,
     ) -> Result<RackSlotValuesSnapshot, String> {
         let scenes = self.pattern.scenes.lock().unwrap();
-        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+        if self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id) {
             return self
                 .pattern
                 .rack_tracks
@@ -1490,7 +1490,7 @@ impl SequencerState {
         values: &RackSlotValuesSnapshot,
     ) -> Result<bool, String> {
         let mut scenes = self.pattern.scenes.lock().unwrap();
-        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let is_effective = self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id);
         let stored = scenes
             .track_pools
             .get_mut(track)
@@ -1548,6 +1548,10 @@ impl SequencerState {
                 .ok_or_else(|| "live track target no longer exists".to_string())?
                 .set_num_steps(num_steps);
         }
+        // The lane dots project pool content, so a length change has to move
+        // the pool-content revision (spec 5.2) — nothing else the commit
+        // touches gates that rebuild.
+        self.bump_pool_content_revision();
         Ok(is_effective)
     }
 
@@ -1613,6 +1617,11 @@ impl SequencerState {
                 .ok_or_else(|| "live p-lock variant registry is missing".to_string())?;
             *registry = variant_registry.clone();
         }
+        // Every step edit — live, undo and redo — funnels through here, so
+        // this is the one place the arrangement's note dots can learn that
+        // pool content moved (spec 5.2). The pool is written whether or not
+        // the pattern is effective, so the bump is unconditional too.
+        self.bump_pool_content_revision();
         Ok(is_effective)
     }
 
@@ -1654,6 +1663,17 @@ impl SequencerState {
             return Err("live p-lock variant registry is missing".to_string());
         }
         Ok(())
+    }
+
+    /// Blank a track's live note content (active steps, chords, per-step
+    /// plocks) without touching its instrument/effect/mixer state. Used when
+    /// a launched scene resolves no pattern for the track (takes spec 11.1):
+    /// the step grid must present an empty pattern, not the previous
+    /// scene's notes left behind in the live buffers.
+    pub(crate) fn clear_live_track_note_content(&self, track: usize) {
+        for step in 0..MAX_STEPS {
+            self.clear_step_payload_inner(track, step);
+        }
     }
 
     pub(crate) fn clear_step_payload_inner(&self, track: usize, step: usize) {

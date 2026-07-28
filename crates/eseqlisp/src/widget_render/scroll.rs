@@ -271,7 +271,7 @@ impl WidgetDefinition for ScrollWidget {
         vec![build_child(child, child_rect, child_layout_ctx)]
     }
 
-    fn captures_scroll_gesture(&self) -> bool {
+    fn captures_scroll_gesture(&self, _node: &LayoutNode) -> bool {
         true
     }
 

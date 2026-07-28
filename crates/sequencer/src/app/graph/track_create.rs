@@ -2,6 +2,34 @@ use super::*;
 
 impl GraphController<'_> {
     pub fn add_track(&mut self, wav_path: &Path) -> Result<usize, String> {
+        // Graph sample buffers are immutable and never freed, so the limit must
+        // be checked BEFORE decoding: a rejected add must not retain a buffer.
+        if self.app.state.active_track_count() >= MAX_TRACKS {
+            return Err("Maximum number of tracks reached".to_string());
+        }
+        let loaded = crate::instruments::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
+        self.app.submit_sample_analysis(&loaded);
+        let track_name =
+            crate::sample_db::display_title_for_sample_path(wav_path).unwrap_or(loaded.name);
+        self.add_track_from_sample(
+            wav_path,
+            loaded.buffer_id,
+            loaded.sample_rate,
+            track_name,
+        )
+    }
+
+    /// Build a sampler track around an existing immutable graph buffer.
+    ///
+    /// The caller owns sample loading and analysis submission. Project loading
+    /// uses this path so every reference to one WAV can share one buffer.
+    pub(in crate::app) fn add_track_from_sample(
+        &mut self,
+        wav_path: &Path,
+        buffer_id: i32,
+        sample_rate: u32,
+        track_name: String,
+    ) -> Result<usize, String> {
         let idx = self.app.state.active_track_count();
         if idx >= MAX_TRACKS {
             return Err("Maximum number of tracks reached".to_string());
@@ -9,12 +37,6 @@ impl GraphController<'_> {
         self.force_reap_all_rack_teardowns();
         let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
 
-        let loaded = crate::instruments::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
-        self.app.submit_sample_analysis(&loaded);
-        let buffer_id = loaded.buffer_id;
-        let sample_rate = loaded.sample_rate;
-        let track_name =
-            crate::sample_db::display_title_for_sample_path(wav_path).unwrap_or(loaded.name);
         let shell = self.create_track_shell(idx, &track_name)?;
         let voices = self.build_sampler_voices(
             idx,

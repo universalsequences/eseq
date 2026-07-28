@@ -16,6 +16,7 @@ mod step_history;
 mod tracks;
 
 pub(crate) use dispatch::dispatch_custom_host_command;
+pub(crate) use song::apply_song_edit_command;
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};

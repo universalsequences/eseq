@@ -191,6 +191,8 @@ fn process_host_commands(editor: &mut Editor, host: &Rc<RefCell<DemoHost>>) {
                     )));
                 }
             }
+            HostCommand::AuthoringTransactionBegin { .. }
+            | HostCommand::AuthoringTransactionEnd { .. } => {}
         }
     }
 }

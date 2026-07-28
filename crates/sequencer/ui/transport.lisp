@@ -372,6 +372,58 @@
           (sdf/rounded-rect 0.08 0.34 0.03))
         (material :color panel-col)))))
 
+(defwidget session-view-icon
+  :width 2.8 :height 1.4
+  :paint-margin 0.5
+  :state (active)
+  :shader
+  (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
+      (muted-col (rgba 0.25 0.25 0.27 1.0))
+      (bg-col (if (= active 1) :mixer-strip-selected-bg :transparent))
+      (line-col (if (= active 1) fg-col muted-col)))
+    (sdf/layer
+      (sdf/fill
+        (sdf/rounded-rect width height 0.4)
+        (material :color bg-col))
+      (sdf/fill
+        (sdf/translate -0.34 0.22
+          (sdf/rounded-rect 0.09 0.42 0.03))
+        (material :color line-col))
+      (sdf/fill
+        (sdf/translate 0.0 0.08
+          (sdf/rounded-rect 0.09 0.56 0.03))
+        (material :color line-col))
+      (sdf/fill
+        (sdf/translate 0.34 -0.08
+          (sdf/rounded-rect 0.09 0.72 0.03))
+        (material :color line-col)))))
+
+(defwidget arrangement-view-icon
+  :width 2.8 :height 1.4
+  :paint-margin 0.5
+  :state (active)
+  :shader
+  (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
+      (muted-col (rgba 0.25 0.25 0.27 1.0))
+      (bg-col (if (= active 1) :mixer-strip-selected-bg :transparent))
+      (line-col (if (= active 1) fg-col muted-col)))
+    (sdf/layer
+      (sdf/fill
+        (sdf/rounded-rect width height 0.4)
+        (material :color bg-col))
+      (sdf/fill
+        (sdf/translate -0.20 -0.32
+          (sdf/rounded-rect 0.54 0.08 0.03))
+        (material :color line-col))
+      (sdf/fill
+        (sdf/translate -0.08 0.0
+          (sdf/rounded-rect 0.66 0.08 0.03))
+        (material :color line-col))
+      (sdf/fill
+        (sdf/translate 0.04 0.32
+          (sdf/rounded-rect 0.78 0.08 0.03))
+        (material :color line-col)))))
+
 (defwidget transport-tool-chip-bg
   :width 1 :height 1
   :state (active)
@@ -387,31 +439,6 @@
 
 ;; ── Button widgets — icons scaled 2x ──
 
-;; Rewind: two left-pointing triangles (mirrored play triangle)
-(defwidget rw-icon
-  :width 2.5 :height 1.8
-  :paint-margin 0.5
-  :shader
-  (sdf/layer
-    ;; Left triangle
-    (sdf/fill
-      (sdf/translate -0.25 0
-        (let ((p1x 0.35) (p1y 0.5) (p2x 0.35) (p2y -0.5) (p3x -0.35) (p3y 0.0))
-          (let ((d1 (- (* (- p2x p1x) (- y p1y)) (* (- p2y p1y) (- x p1x))))
-                (d2 (- (* (- p3x p2x) (- y p2y)) (* (- p3y p2y) (- x p2x))))
-                (d3 (- (* (- p1x p3x) (- y p3y)) (* (- p1y p3y) (- x p3x)))))
-            (max (max d1 d2) d3))))
-      (material :color (rgba 0.75 0.75 0.78 1.0)))
-    ;; Right triangle
-    (sdf/fill
-      (sdf/translate 0.35 0
-        (let ((p1x 0.35) (p1y 0.5) (p2x 0.35) (p2y -0.5) (p3x -0.35) (p3y 0.0))
-          (let ((d1 (- (* (- p2x p1x) (- y p1y)) (* (- p2y p1y) (- x p1x))))
-                (d2 (- (* (- p3x p2x) (- y p2y)) (* (- p3y p2y) (- x p2x))))
-                (d3 (- (* (- p1x p3x) (- y p3y)) (* (- p1y p3y) (- x p3x)))))
-            (max (max d1 d2) d3))))
-      (material :color (rgba 0.75 0.75 0.78 1.0)))))
-
 (defwidget stop-icon
   :width 2.5 :height 1.8
   :paint-margin 0.5
@@ -419,6 +446,14 @@
   (sdf/layer
     (sdf/fill (sdf/rounded-rect 0.44 0.44 0.05)
       (material :color (rgba 0.75 0.75 0.78 1.0)))))
+
+;; Stop returns the arrangement insertion/start marker to the beginning even
+;; when playback is already stopped. The cursor mirror makes the next Play
+;; start at beat zero; -1 leaves no track-specific cursor line behind.
+(def transport-stop ()
+  (do
+    (if SEQ.playing (seq-toggle-play) nil)
+    (set-arrangement-cursor 0 -1)))
 
 (defwidget play-icon
   :width 2.5 :height 1.8
@@ -553,7 +588,7 @@
 ;; ── Transport layout ──
 
 (effect-buffer "*transport*"
-  (h-stack :gap 0.5 :padding 0.5 :align :center
+  (h-stack :width :fill :gap 0.5 :padding 0.5 :align :center
     
     (subtree :key "transport-samples-sidebar-button"
       (samples-sidebar-icon
@@ -582,12 +617,10 @@
     ;; Transport buttons in a shared rounded-rect container
     (box :background "transport-btn-bg" :padding 0.015 :height 1.4
       (h-stack :gap 0.2 :align :center
-        (box :width 2.5
-          :on-click |x y r| (if SEQ.playing (seq-toggle-play) nil)
-          (rw-icon))
-        (box :width 2.5
-          :on-click |x y r| (if SEQ.playing (seq-toggle-play) nil)
-          (stop-icon))
+        (subtree :key "transport-stop-button"
+          (box :width 2.5
+            :on-click |x y r| (transport-stop)
+            (stop-icon)))
         (box :width 2.5
           :on-click |x y r| (seq-toggle-play)
           (play-icon :active (if SEQ.playing 1 0)))
@@ -612,7 +645,7 @@
         ;; SEQ.use-arrangement reactive directly (ReactiveRef, not a literal).
         (subtree :key "transport-use-arrangement-toggle"
           (box :debug-name "transport-use-arrangement-toggle"
-            :width 5.4 :height 1.1
+            :width 6.2 :height 1.1
             :background "pattern-pill-bg"
             :active (bind-seq "use-arrangement")
             :style transport-icon-style
@@ -620,45 +653,49 @@
             (v-stack :align :center
               (label (if SEQ.use-arrangement "SONG" "SESSION")
                 :font-size 9
-                :color (if SEQ.use-arrangement :white :gray)
+                ;; Amber while a manual launch has latched over the song
+                ;; (takes spec 10) — the song's launch authority is
+                ;; suspended for the latched lanes.
+                :color (if SEQ.song-manual-latch
+                         '(rgba 0.98 0.72 0.25 1)
+                         (if SEQ.use-arrangement :white :gray))
                 :hover-color :white
-                :bg :transparent))))))
-
-    ;; Song transport status (docs/song-mode-spec.md 7.5/11): a dedicated
-    ;; SESSION / SONG / ARR REC readout — ARR REC is its own clearly visible
-    ;; state, never just the generic record icon — plus current row / total
-    ;; rows while song playback is active.
-    (subtree :key "transport-song-status"
-      (box :background "transport-led-bg" :height 1.4
-        :debug-name "transport-song-status"
-        (h-stack :gap 0.3 :align :center :padding 0.45
-          (if (= SEQ.song-mode "arrangement-capture")
-            (label "ARR REC"
-              :debug-name "transport-arr-rec-indicator"
-              :font-size 11 :width 4.6
-              :color '(rgba 0.95 0.25 0.22 1)
-              :bg :transparent)
-            (label (if (= SEQ.song-mode "song-playback") "SONG" "SESSION")
-              :debug-name "transport-song-mode-label"
-              :font-size 11 :width 4.6
-              :color (if (= SEQ.song-mode "song-playback")
-                '(rgba 0.63 0.88 0.41 1)
-                '(rgba 0.55 0.55 0.58 1))
-              :bg :transparent))
-          (if (= SEQ.song-mode "song-playback")
-            (label (fmt "{}/{}" (+ SEQ.song-current-row 1) SEQ.song-row-count)
-              :debug-name "transport-song-row-indicator"
-              :font-size 11 :width 3.2
-              :color '(rgba 0.85 0.85 0.85 1)
-              :bg :transparent)
+                :bg :transparent))))
+        ;; Back to Song (takes spec 10): visible only while latched; clears
+        ;; the latch so latched lanes snap back to the song's resolution
+        ;; with anchored phase.
+        (subtree :key "transport-back-to-song"
+          (if SEQ.song-manual-latch
+            (box :debug-name "transport-back-to-song"
+              :width 3.4 :height 1.1
+              :background "pattern-pill-bg"
+              :active 1
+              :style transport-icon-style
+              :on-click |x y r| (seq-song-back-to-song)
+              (v-stack :align :center
+                (label "->SONG"
+                  :font-size 9
+                  :color '(rgba 0.98 0.72 0.25 1)
+                  :hover-color :white
+                  :bg :transparent)))
             nil))))
-    
+
     ;; Single continuous LED panel
     (box :background "transport-led-bg" :height 1.4 :width 56
       (h-stack
         (subtree :key "transport-clock"
           (h-stack :gap 0 :align :center :padding 0.5
-            (transport-clock :playhead (bind-seq "transport-playhead")
+            (transport-clock
+              ;; Session playback uses the reset-on-Play pattern clock. SONG
+              ;; mode shows the parked cursor while stopped, then the live
+              ;; absolute arrangement clock during playback/capture.
+              :playhead (bind-seq "transport-playhead")
+              :song-position-beats
+                (if (= SEQ.song-mode "session")
+                  (bind-seq "song-cursor-beats")
+                  (bind-seq "song-position-beats"))
+              :use-song-position
+                (or SEQ.use-arrangement (not (= SEQ.song-mode "session")))
               :font-size 15 :width 10 :height 1.2
               :color '(rgba 0.85 0.85 0.85 1)
               :bg :transparent)
@@ -800,4 +837,18 @@
                 :font-size 12
                 
                 :color (if (> SEQ.num-patterns 1) :white :dark-gray)
-                :bg :transparent))))))))
+                :bg :transparent))))))
+
+    ;; Session and arrangement are app views, not tabs in the main buffer.
+    ;; This spacer keeps the view pair against the transport's right edge.
+    (box :width 0 :flex 1)
+    (subtree :key "transport-session-view-button"
+      (session-view-icon
+        :on-click |x y r| (seq-show-sequencer-main)
+        :style transport-icon-style
+        :active (if (seq-arrangement-view?) 0 1)))
+    (subtree :key "transport-arrangement-view-button"
+      (arrangement-view-icon
+        :on-click |x y r| (seq-open-arrangement)
+        :style transport-icon-style
+        :active (if (seq-arrangement-view?) 1 0)))))

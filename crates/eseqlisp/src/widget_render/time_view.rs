@@ -1,5 +1,12 @@
 use crate::layout::Rect;
 
+/// Keep consecutive rendered timeline marks far enough apart that the ruler
+/// remains readable. Timeline geometry is expressed in text cells; six
+/// cells leave roughly three label-widths around a three-digit bar number,
+/// which is enough separation to scan the ruler without wasting horizontal
+/// breathing room at the normal UI scale.
+const MIN_VISIBLE_GRID_SPACING_CELLS: f64 = 6.0;
+
 #[derive(Clone)]
 pub struct TimeRuler {
     pub mode: TimeRulerMode,
@@ -20,6 +27,10 @@ pub struct TimeViewport {
     pub view_duration: f64,
     pub zoom_min_duration: f64,
     pub zoom_max_duration: f64,
+    /// Divides the initial zoom-adaptive grid candidate. The result is then
+    /// promoted by aligned powers of two until it has enough screen space to
+    /// remain readable. The resolved step drives both rendering and editing.
+    pub grid_density: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -183,75 +194,95 @@ impl TimeViewport {
     }
 
     pub fn grid_step(&self, ruler: Option<&TimeRuler>) -> f64 {
-        self.grid_step_and_major_every(ruler).0
+        self.grid_spec(ruler).0
     }
 
-    fn grid_step_and_major_every(&self, ruler: Option<&TimeRuler>) -> (f64, f64) {
+    fn grid_step_candidate(&self, ruler: Option<&TimeRuler>) -> f64 {
         let content = self.content_rect();
         match ruler.map(|r| &r.mode) {
             Some(TimeRulerMode::BarsBeats { .. }) => {
-                let pixels_per_beat = content.width as f64 / self.view_duration.max(0.0001);
-                let step = if pixels_per_beat >= 384.0 {
+                let cells_per_beat = content.width as f64 / self.view_duration.max(0.0001);
+                let step = if cells_per_beat >= 384.0 {
                     0.03125
-                } else if pixels_per_beat >= 192.0 {
+                } else if cells_per_beat >= 192.0 {
                     0.0625
-                } else if pixels_per_beat >= 96.0 {
+                } else if cells_per_beat >= 96.0 {
                     0.125
-                } else if pixels_per_beat >= 48.0 {
+                } else if cells_per_beat >= 48.0 {
                     0.25
-                } else if pixels_per_beat >= 24.0 {
+                } else if cells_per_beat >= 24.0 {
                     0.5
-                } else if pixels_per_beat >= 8.0 {
+                } else if cells_per_beat >= 8.0 {
                     1.0
-                } else if pixels_per_beat >= 4.0 {
+                } else if cells_per_beat >= 4.0 {
                     2.0
-                } else if pixels_per_beat >= 2.0 {
+                } else if cells_per_beat >= 2.0 {
                     4.0
-                } else if pixels_per_beat >= 1.0 {
+                } else if cells_per_beat >= 1.0 {
                     8.0
                 } else {
                     16.0
                 };
-                let major_every = if step < 1.0 {
-                    (1.0_f64 / step).round()
-                } else {
-                    (4.0_f64 / step).max(1.0)
-                };
-                (step, major_every)
+                step / self.grid_density.clamp(1.0, 8.0)
             }
             _ => {
-                let pixels_per_second = content.width as f64 / self.view_duration.max(0.0001);
-                let step = if pixels_per_second >= 200.0 {
+                let cells_per_second = content.width as f64 / self.view_duration.max(0.0001);
+                let step = if cells_per_second >= 200.0 {
                     0.01
-                } else if pixels_per_second >= 100.0 {
+                } else if cells_per_second >= 100.0 {
                     0.02
-                } else if pixels_per_second >= 50.0 {
+                } else if cells_per_second >= 50.0 {
                     0.05
-                } else if pixels_per_second >= 20.0 {
+                } else if cells_per_second >= 20.0 {
                     0.1
-                } else if pixels_per_second >= 10.0 {
+                } else if cells_per_second >= 10.0 {
                     0.25
-                } else if pixels_per_second >= 5.0 {
+                } else if cells_per_second >= 5.0 {
                     0.5
-                } else if pixels_per_second >= 2.0 {
+                } else if cells_per_second >= 2.0 {
                     1.0
-                } else if pixels_per_second >= 1.0 {
+                } else if cells_per_second >= 1.0 {
                     2.0
-                } else if pixels_per_second >= 0.5 {
+                } else if cells_per_second >= 0.5 {
                     5.0
                 } else {
                     10.0
                 };
-                let major_every = if step < 0.1 {
+                step / self.grid_density.clamp(1.0, 8.0)
+            }
+        }
+    }
+
+    /// Resolve the shared rendering and editing grid, plus the number of
+    /// resolved steps between major lines. Promotion is always by powers of
+    /// two, so coarser zoom levels stay aligned with finer ones.
+    fn grid_spec(&self, ruler: Option<&TimeRuler>) -> (f64, i64) {
+        let content = self.content_rect();
+        let cells_per_time = content.width as f64 / self.view_duration.max(0.0001);
+        let mut step = self.grid_step_candidate(ruler);
+        if cells_per_time.is_finite() && cells_per_time > 0.0 {
+            while step.is_finite()
+                && step * cells_per_time < MIN_VISIBLE_GRID_SPACING_CELLS
+            {
+                step *= 2.0;
+            }
+        }
+
+        let major_every = match ruler.map(|ruler| &ruler.mode) {
+            Some(TimeRulerMode::BarsBeats { beats_per_bar }) => {
+                ((*beats_per_bar).max(1) as f64 / step).round().max(1.0) as i64
+            }
+            _ => {
+                (if step < 0.1 {
                     10.0
                 } else if step < 1.0 {
                     5.0
                 } else {
                     4.0
-                };
-                (step, major_every)
+                }) as i64
             }
-        }
+        };
+        (step, major_every)
     }
 
     fn visible_grid_marks(&self, ruler: Option<&TimeRuler>) -> Vec<(f64, u16, bool)> {
@@ -260,9 +291,11 @@ impl TimeViewport {
             return Vec::new();
         }
 
-        let (step, major_every) = self.grid_step_and_major_every(ruler);
+        let (step, major_every) = self.grid_spec(ruler);
 
-        let start = (self.view_start / step).floor() as i64;
+        // First mark at or after view_start: a mark before it would clamp to
+        // the content's left edge and draw an invented grid line/label there.
+        let start = (self.view_start / step).ceil() as i64;
         let end = ((self.view_start + self.view_duration) / step).ceil() as i64;
         let mut cols = Vec::new();
         let mut last = None;
@@ -274,8 +307,7 @@ impl TimeViewport {
             }
             let edge = self.edge_for_time(mark);
             let col = (content.col + edge.min((content.width - 1.0).max(0.0))).round() as u16;
-            let is_major =
-                ((index as f64 / major_every).round() - (index as f64 / major_every)).abs() < 1e-6;
+            let is_major = index.rem_euclid(major_every) == 0;
             if last != Some(col) {
                 cols.push((mark, col, is_major));
                 last = Some(col);
@@ -335,6 +367,7 @@ mod tests {
             view_duration: 16.0,
             zoom_min_duration: 8.0,
             zoom_max_duration: 128.0,
+            grid_density: 1.0,
         };
         let ruler = TimeRuler {
             mode: TimeRulerMode::BarsBeats { beats_per_bar: 4 },
@@ -367,6 +400,7 @@ mod tests {
             view_duration: 4.0,
             zoom_min_duration: 0.25,
             zoom_max_duration: 128.0,
+            grid_density: 1.0,
         };
         let closer = TimeViewport {
             view_duration: 1.0,
@@ -375,6 +409,85 @@ mod tests {
 
         assert_eq!(wide.grid_step(Some(&ruler)), 0.5);
         assert_eq!(closer.grid_step(Some(&ruler)), 0.125);
+    }
+
+    #[test]
+    fn zoomed_out_bars_promote_the_shared_grid_to_eight_bar_marks() {
+        let viewport = TimeViewport {
+            rect: Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 96.0,
+                height: 8.0,
+            },
+            header_height: 1.0,
+            sidebar_width: 0.0,
+            view_start: 0.0,
+            view_duration: 512.0,
+            zoom_min_duration: 4.0,
+            zoom_max_duration: 1024.0,
+            grid_density: 2.0,
+        };
+        let ruler = TimeRuler {
+            mode: TimeRulerMode::BarsBeats { beats_per_bar: 4 },
+        };
+
+        assert_eq!(
+            viewport.grid_step(Some(&ruler)),
+            32.0,
+            "rendering and editing share an eight-bar grid at this zoom"
+        );
+        let marks = viewport.visible_grid_marks(Some(&ruler));
+        assert_eq!(
+            marks[1].0 - marks[0].0,
+            32.0,
+            "the rendered ruler promotes to one mark every eight bars"
+        );
+        assert!(
+            marks.iter().all(|(_, _, is_major)| *is_major),
+            "at this scale every visible eight-bar mark is major"
+        );
+        let labels: Vec<String> = viewport
+            .metal_time_ruler_labels(Some(&ruler))
+            .into_iter()
+            .map(|(_, label)| label)
+            .take(4)
+            .collect();
+        assert_eq!(labels, ["1", "9", "17", "25"]);
+    }
+
+    #[test]
+    fn default_arrangement_zoom_uses_one_bar_grid_for_rendering_and_editing() {
+        let viewport = TimeViewport {
+            rect: Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 144.0,
+                height: 8.0,
+            },
+            header_height: 1.0,
+            sidebar_width: 0.0,
+            view_start: 0.0,
+            view_duration: 64.0,
+            zoom_min_duration: 4.0,
+            zoom_max_duration: 1024.0,
+            grid_density: 2.0,
+        };
+        let ruler = TimeRuler {
+            mode: TimeRulerMode::BarsBeats { beats_per_bar: 4 },
+        };
+
+        assert_eq!(
+            viewport.grid_step(Some(&ruler)),
+            4.0,
+            "the cursor and selection share the visible one-bar grid"
+        );
+        let marks = viewport.visible_grid_marks(Some(&ruler));
+        assert_eq!(
+            marks[1].0 - marks[0].0,
+            4.0,
+            "the resolved grid renders one line per bar"
+        );
     }
 
     #[test]
@@ -392,6 +505,7 @@ mod tests {
             view_duration: 0.25,
             zoom_min_duration: 0.001,
             zoom_max_duration: 128.0,
+            grid_density: 1.0,
         };
         let ruler = TimeRuler {
             mode: TimeRulerMode::Seconds,

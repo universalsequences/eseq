@@ -1034,8 +1034,8 @@
             KeyModifiers::NONE
         )));
         assert!(
-            key_should_reveal_sequencer_track(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-            "plain Tab expands the current sequencer track and should reveal that row"
+            !key_should_reveal_sequencer_track(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            "plain Tab changes the app view and should not scroll a sequencer row"
         );
         assert!(
             !key_should_reveal_sequencer_track(&KeyEvent::new(

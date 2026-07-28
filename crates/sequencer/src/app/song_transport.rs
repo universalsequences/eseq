@@ -62,12 +62,6 @@ pub const USE_ARRANGEMENT_WHILE_PLAYING_ERROR: &str =
 impl App {
     fn set_song_transport_mode(&mut self, mode: SongTransportMode) {
         self.song_transport_mode = mode;
-        // Song edits are locked while a song-authority mode is active
-        // (spec 5.6/13); `song_edit.rs` reads this flag.
-        self.song_transport_locks_edits = matches!(
-            mode,
-            SongTransportMode::SongPlayback | SongTransportMode::ArrangementCapture
-        );
     }
 
     /// Whether the transport is playing from the state machine's viewpoint:
@@ -77,12 +71,108 @@ impl App {
         self.song_transport_mode != SongTransportMode::Stopped || self.state.is_playing()
     }
 
-    /// Spec 7.3: while `SongPlayback` is active the song is the only launch
-    /// authority; every manual scene/track-pattern launch entry point checks
-    /// this and rejects with the same message.
+    /// Manual launches are ALWAYS allowed (takes spec 10, superseding the
+    /// song-mode spec 7.3 wall): a manual launch during song playback takes
+    /// effect audibly and sets the manual-override latch for its scope —
+    /// the song's launch authority is suspended for latched lanes until
+    /// Back to Song clears it (see `apply_pattern_launch_at` and
+    /// `back_to_song`). The method survives so every historical call site
+    /// keeps compiling; it now never rejects.
     pub fn manual_launch_rejection(&self) -> Option<&'static str> {
-        (self.song_transport_mode == SongTransportMode::SongPlayback)
-            .then_some(MANUAL_LAUNCH_DURING_SONG_ERROR)
+        None
+    }
+
+    /// Whether the committed song is currently the playback authority: song
+    /// playback proper, or arrangement capture running on top of it (takes
+    /// spec 9.3). Manual launches latch in either mode.
+    pub fn song_playback_authority_active(&self) -> bool {
+        self.active_runtime_song.is_some()
+            && matches!(
+                self.song_transport_mode,
+                SongTransportMode::SongPlayback | SongTransportMode::ArrangementCapture
+            )
+    }
+
+    /// Recording engaged while the song is ALREADY playing: promote
+    /// `SongPlayback` into `ArrangementCapture` so armed note input records
+    /// into takes (takes spec 8) and commits with the splice at Stop.
+    ///
+    /// Without this, record-arm-then-record during song playback left the
+    /// mode at `SongPlayback`, `take_recording_active()` read false, and the
+    /// performance fell through to the live-pattern write path — layering an
+    /// unrolled arrangement performance into the scene's looping clip.
+    ///
+    /// The active song start remains the offset from the raw record clock to
+    /// the arrangement timeline. Returns whether the promotion happened.
+    pub fn promote_song_playback_to_capture(&mut self) -> bool {
+        if self.song_transport_mode != SongTransportMode::SongPlayback
+            || self.song_capture_take.is_some()
+        {
+            return false;
+        }
+        self.begin_song_capture_take(self.active_song_start_beat.unwrap_or(0.0));
+        self.set_song_transport_mode(SongTransportMode::ArrangementCapture);
+        true
+    }
+
+    /// Back to Song (takes spec 10): clear the manual-override latch so the
+    /// affected lanes snap back to whatever the song resolves at the
+    /// current beat with anchored phase. Audible on the next scheduled
+    /// chunk; the control-side mirror re-applies the current row here.
+    pub fn back_to_song(&mut self) -> Result<String, String> {
+        if !self.song_playback_authority_active() {
+            return Err("Back to Song is only available during song playback".to_string());
+        }
+        if self.state.song_manual_latch_mask() == 0 {
+            return Ok("No manual overrides are latched".to_string());
+        }
+        // Pending quantized manual launches must not fire after the return.
+        let _ = self.state.quantized_launches().cancel_all();
+        self.state.clear_song_manual_latch();
+        if let Some(song) = self.active_runtime_song.clone() {
+            let ordinal = self
+                .state
+                .song_playback()
+                .shared()
+                .current_row_ordinal()
+                .min(song.rows.len().saturating_sub(1));
+            if let Some(row) = song.rows.get(ordinal) {
+                self.apply_song_row_control(row.scene, &row.overrides, false)?;
+                self.song_mirrored_row = Some(ordinal);
+                self.song_row_mirror_epoch += 1;
+            }
+        }
+        Ok("Back to song: manual overrides cleared".to_string())
+    }
+
+    /// Per-track Back to Song (takes spec 10 UX): clear one lane's
+    /// manual-override latch so it snaps back to whatever the song resolves
+    /// at the current beat; other latched lanes stay the performer's.
+    pub fn back_to_song_track(&mut self, track: usize) -> Result<String, String> {
+        if !self.song_playback_authority_active() {
+            return Err("Back to Song is only available during song playback".to_string());
+        }
+        if track >= self.tracks.len() {
+            return Err(format!("Track {} does not exist", track + 1));
+        }
+        if self.state.song_manual_latch_mask() >> track.min(63) & 1 == 0 {
+            return Ok(format!("Track {} is not manually overridden", track + 1));
+        }
+        self.state.clear_song_manual_latch_track(track);
+        if let Some(song) = self.active_runtime_song.clone() {
+            let ordinal = self
+                .state
+                .song_playback()
+                .shared()
+                .current_row_ordinal()
+                .min(song.rows.len().saturating_sub(1));
+            if let Some(row) = song.rows.get(ordinal) {
+                self.apply_song_row_control(row.scene, &row.overrides, false)?;
+                self.song_mirrored_row = Some(ordinal);
+                self.song_row_mirror_epoch += 1;
+            }
+        }
+        Ok(format!("Track {}: back to song", track + 1))
     }
 
     /// Set the persisted `Use Arrangement` preference (spec 7.1). Rejected
@@ -96,6 +186,12 @@ impl App {
             return Err(USE_ARRANGEMENT_WHILE_PLAYING_ERROR.to_string());
         }
         self.use_arrangement = enabled;
+        if !enabled {
+            // Leaving song mode entirely: the timeline selection has no
+            // surface left to explain itself, so it is dropped rather than
+            // left binding the device panel to a take (takes spec 16.6).
+            self.set_song_clip_selection(None);
+        }
         Ok(())
     }
 
@@ -128,26 +224,45 @@ impl App {
             return Ok(SongTransportMode::SessionPlayback);
         }
         if record {
-            // Arrangement capture (spec 7.4): transport starts at beat zero,
-            // the committed song is NOT played, and the performer keeps the
-            // session launch controls. The staging take opens with the
-            // resolved session state as the beat-zero row and establishes
-            // its beat origin from the scheduler's rendered-beat clock
-            // (song_capture.rs).
-            self.begin_song_capture_take();
+            // Arrangement capture. With a committed song, recording runs ON
+            // TOP of song playback (takes spec 9.3): the song plays and
+            // keeps launch authority wherever the performer hasn't
+            // overridden it; manual launches latch (spec 10) and are
+            // captured for the splice. With no committed song, the old
+            // whole-song capture remains: transport at beat zero, the
+            // performer is the sole launch authority.
+            if self.state.committed_song().is_some() {
+                // Open-ended (spec 7.4): the song end is not a stopping
+                // point while recording. Grooving past the old song length
+                // must extend the arrangement, not cut the take off and
+                // commit it there.
+                let start_beat = self.arrangement_cursor_beat;
+                self.start_song_playback_at(start_beat, true)?;
+                self.begin_song_capture_take(
+                    self.active_song_start_beat
+                        .expect("song start records its normalized beat"),
+                );
+                self.set_song_transport_mode(SongTransportMode::ArrangementCapture);
+                return Ok(SongTransportMode::ArrangementCapture);
+            }
+            self.begin_song_capture_take(0.0);
             self.state.start_playback();
             self.set_song_transport_mode(SongTransportMode::ArrangementCapture);
             return Ok(SongTransportMode::ArrangementCapture);
         }
-        self.start_song_playback_from_zero()?;
+        self.start_song_playback_at(self.arrangement_cursor_beat, false)?;
         Ok(SongTransportMode::SongPlayback)
     }
 
-    /// The documented song start flow (spec 7.3 / state/song_playback.rs):
-    /// save the live session into the current scene, preflight, apply row
-    /// zero (with an epoch bump — the transport is stopped), hand the song to
-    /// the scheduler, then start the transport.
-    fn start_song_playback_from_zero(&mut self) -> Result<(), String> {
+    /// Start the song at an arrangement-timeline beat: save the live session,
+    /// preflight, apply the row governing that beat (with an epoch bump — the
+    /// transport is stopped), hand the song and beat to the scheduler, then
+    /// start the transport.
+    fn start_song_playback_at(
+        &mut self,
+        requested_start_beat: f64,
+        open_ended: bool,
+    ) -> Result<(), String> {
         if !self.state.save_current_pattern_snapshot(
             self.tracks.len(),
             &self.graph.track_buffer_ids,
@@ -164,18 +279,27 @@ impl App {
             .state
             .preflight_runtime_song()
             .map_err(|error| format!("Song playback could not start: {error}"))?;
-        let Some(row0) = song.rows.first().cloned() else {
+        let start_beat = song
+            .normalize_start_beat(requested_start_beat)
+            .map_err(|error| format!("Song playback could not start: {error}"))?;
+        let row_ordinal = song
+            .row_index_at_beat(start_beat)
+            .ok_or_else(|| {
+                format!("Song playback could not start: no row governs beat {start_beat}")
+            })?;
+        let Some(row) = song.rows.get(row_ordinal).cloned() else {
             return Err("Song playback could not start: the song has no rows".to_string());
         };
         // The song is the only launch authority from here: drop any pending
         // quantized session launches so none fires mid-song.
         let _ = self.state.quantized_launches().cancel_all();
-        self.apply_song_row_control(row0.scene, &row0.overrides, true)?;
+        self.apply_song_row_control(row.scene, &row.overrides, true)?;
         self.state
-            .start_song_playback(Arc::clone(&song), 0.0)
+            .start_song_playback(Arc::clone(&song), start_beat, open_ended)
             .map_err(|error| format!("Song playback could not start: {error}"))?;
         self.active_runtime_song = Some(song);
-        self.song_mirrored_row = Some(0);
+        self.active_song_start_beat = Some(start_beat);
+        self.song_mirrored_row = Some(row_ordinal);
         self.state.start_playback();
         self.set_song_transport_mode(SongTransportMode::SongPlayback);
         Ok(())
@@ -200,24 +324,62 @@ impl App {
             SongTransportMode::SongPlayback => {
                 let teardown = self.state.stop_song_playback();
                 self.active_runtime_song = None;
+                self.active_song_start_beat = None;
                 self.song_mirrored_row = None;
+                // The latch is transient transport state (takes spec 10).
+                self.state.clear_song_manual_latch();
                 self.state.stop_playback();
                 self.set_song_transport_mode(SongTransportMode::Stopped);
+                // Hand the live grid back to the scene: the last row played
+                // may have silenced lanes it resolved nothing for, and that
+                // silencing belongs to the song, not to session mode.
+                self.state.resync_live_grid_to_current_scene();
                 teardown.map_err(|error| format!("Song playback teardown failed: {error}"))?;
                 Ok(Some("Song playback stopped".to_string()))
             }
             SongTransportMode::ArrangementCapture => {
                 // Stop-commit (spec 7.4.7/10.4): the authoritative Stop
-                // boundary is the scheduler's rendered-beat clock — the same
-                // clock every capture event was recorded against — read
-                // BEFORE the transport stops (the scheduler rewinds its
-                // clock once it observes the stopped transport).
-                let end_raw_beats = self.state.scheduler_rendered_beats();
+                // boundary is the latency-compensated record clock — the same
+                // clock every capture event was recorded against (immediate
+                // launches, manual clip launches and take notes all stamp
+                // `record_beats_at_instant`) — read BEFORE the transport stops
+                // (the scheduler rewinds its clock once it observes the
+                // stopped transport). Reading the raw scheduler frontier here
+                // would place Q one output-latency ahead of the events it
+                // bounds; it stays only as the fallback for the case where the
+                // audio callback never published a record-clock anchor.
+                let end_raw_beats = self
+                    .state
+                    .record_beats_at_instant(std::time::Instant::now())
+                    .unwrap_or_else(|| self.state.scheduler_rendered_beats())
+                    .max(0.0);
+                // Capture-on-playback teardown (takes spec 9.3): the song
+                // was playing underneath; the latch auto-clears at
+                // punch-out (spec 10) — the committed song now CONTAINS the
+                // performance.
+                let playback_teardown = if self.active_runtime_song.is_some() {
+                    self.active_runtime_song = None;
+                    self.active_song_start_beat = None;
+                    self.song_mirrored_row = None;
+                    Some(self.state.stop_song_playback())
+                } else {
+                    None
+                };
+                self.state.clear_song_manual_latch();
                 self.state.stop_playback();
                 // Unlock the song editing primitives before committing: the
                 // commit itself goes through `song_replace`.
                 self.set_song_transport_mode(SongTransportMode::Stopped);
-                self.finish_song_capture_take(end_raw_beats).map(Some)
+                let result = self.finish_song_capture_take(end_raw_beats).map(Some);
+                // Capture ran on top of song playback, so the same row-owned
+                // lane state has to be handed back to the scene.
+                if playback_teardown.is_some() {
+                    self.state.resync_live_grid_to_current_scene();
+                }
+                if let Some(Err(error)) = playback_teardown {
+                    return Err(format!("Song playback teardown failed: {error}"));
+                }
+                result
             }
         }
     }
@@ -241,6 +403,13 @@ impl App {
             );
         }
         self.discard_song_capture_take();
+        if self.active_runtime_song.is_some() {
+            self.active_runtime_song = None;
+            self.active_song_start_beat = None;
+            self.song_mirrored_row = None;
+            let _ = self.state.stop_song_playback();
+        }
+        self.state.clear_song_manual_latch();
         self.state.stop_playback();
         self.set_song_transport_mode(SongTransportMode::Stopped);
         Ok("Arrangement capture cancelled; take discarded, committed song preserved".to_string())
@@ -254,7 +423,14 @@ impl App {
         &mut self,
         notice: &AudibleSongRowApplied,
     ) -> Result<(), String> {
-        if self.song_transport_mode != SongTransportMode::SongPlayback {
+        if !self.song_playback_authority_active() {
+            return Ok(());
+        }
+        // Song-loop wrap while recording (takes spec 12): recording across
+        // the wrap is disallowed — punch-out is forced at `end_beat` and
+        // the pass commits what exists.
+        if notice.wrapped && self.song_transport_mode == SongTransportMode::ArrangementCapture {
+            self.song_transport_stop()?;
             return Ok(());
         }
         let Some(song) = self.active_runtime_song.clone() else {
@@ -266,24 +442,30 @@ impl App {
                 notice.row_ordinal
             ));
         };
-        // The start flow already applied row zero; skip the duplicate initial
-        // notice but always mirror loop wraps (they re-enter row zero).
+        // The start flow already applied the row governing its start beat;
+        // skip that duplicate initial notice, but always mirror loop wraps.
         if !notice.wrapped && self.song_mirrored_row == Some(notice.row_ordinal) {
             return Ok(());
         }
         self.apply_song_row_control(row.scene, &row.overrides, false)?;
         self.song_mirrored_row = Some(notice.row_ordinal);
+        self.song_row_mirror_epoch += 1;
         Ok(())
     }
 
     /// Scheduler reached `end_beat` with looping disabled (spec 7.3.5): stop
-    /// through the state machine.
+    /// through the state machine. During arrangement capture the stop is
+    /// the forced punch-out — the pass commits what exists (takes spec 12).
     pub fn handle_song_playback_ended(&mut self) -> Result<Option<String>, String> {
-        if self.song_transport_mode != SongTransportMode::SongPlayback {
-            return Ok(None);
+        match self.song_transport_mode {
+            SongTransportMode::SongPlayback => self
+                .song_transport_stop()
+                .map(|_| Some("Song ended".to_string())),
+            SongTransportMode::ArrangementCapture if self.active_runtime_song.is_some() => {
+                self.song_transport_stop()
+            }
+            _ => Ok(None),
         }
-        self.song_transport_stop()
-            .map(|_| Some("Song ended".to_string()))
     }
 
     /// Scheduler could not install the song: surface the error and unwind.
@@ -299,13 +481,17 @@ impl App {
     fn apply_song_row_control(
         &mut self,
         scene: usize,
-        overrides: &[(usize, PatternId)],
+        overrides: &[(usize, Option<PatternId>)],
         bump_pattern_epoch: bool,
     ) -> Result<(), String> {
+        // Latched lanes stay the performer's (takes spec 10): the mirror
+        // must neither restore their live state nor clear their session
+        // override slot.
+        let latched_mask = self.state.song_manual_latch_mask();
         if scene != self.state.current_scene_index() {
             self.switch_bus_pattern(scene);
         }
-        let sample_ids = self.state.apply_song_row(
+        let sample_ids = self.state.apply_song_row_latched(
             scene,
             overrides,
             self.tracks.len(),
@@ -314,6 +500,7 @@ impl App {
             &self.tracks,
             &self.graph.track_instrument_types,
             bump_pattern_epoch,
+            latched_mask,
         )?;
         self.graph_controller().apply_sample_ids(&sample_ids);
         let _ = self
@@ -331,7 +518,7 @@ mod tests {
 
     use super::*;
     use crate::app::song_edit::SongRowSpec;
-    use crate::app::{AudioBuses, PatternLaunchError};
+    use crate::app::AudioBuses;
     use crate::audiograph::LiveGraphPtr;
     use crate::quantized_launch::PatternLaunchTarget;
     use crate::recorder::MasterRecorder;
@@ -377,7 +564,7 @@ mod tests {
     /// Three-row song: scenes 0/1/2 at beats 0/4/8, end beat 16.
     fn app_with_song() -> App {
         let mut app = test_app();
-        app.song_replace(
+        app.arr_replace_rows(
             vec![
                 SongRowSpec {
                     start_beat: 0.0,
@@ -398,8 +585,32 @@ mod tests {
             16.0,
             false,
         )
-        .expect("song_replace succeeds");
+        .expect("arr_replace_rows succeeds");
         app
+    }
+
+    /// A song row that resolves nothing for a lane silences it. That is the
+    /// song's state, not the scene's: stopping must hand the lane back, or
+    /// session mode shows the scene's pattern sitting there unlaunched until
+    /// the performer switches scenes and back.
+    #[test]
+    fn stopping_song_playback_unsilences_lanes_the_last_row_left_empty() {
+        let mut app = app_with_song();
+        app.set_use_arrangement(true).expect("toggle while stopped");
+        app.song_transport_play(false).expect("song playback starts");
+        app.apply_song_row_control(0, &[(0, None)], false)
+            .expect("sparse row applies");
+        assert!(
+            app.state.is_scene_silenced(0),
+            "an explicit-empty lane is silenced while the row plays"
+        );
+
+        app.song_transport_stop().expect("stop succeeds");
+
+        assert!(
+            !app.state.is_scene_silenced(0),
+            "the scene resolves a pattern for track 0, so its clip is launched again"
+        );
     }
 
     #[test]
@@ -433,7 +644,10 @@ mod tests {
         let mode = app.song_transport_play(false).expect("play succeeds");
         assert_eq!(mode, SongTransportMode::SongPlayback);
         assert!(app.state.is_playing());
-        assert!(app.song_edits_locked(), "song edits lock during playback");
+        assert!(
+            !app.song_edits_locked(),
+            "ordinary song editing stays available during playback"
+        );
         assert!(app.active_runtime_song.is_some());
         assert_eq!(app.song_transport_mode.binding_str(), "song-playback");
         // Row zero was applied as the launch state.
@@ -445,6 +659,68 @@ mod tests {
         assert!(!app.state.is_playing());
         assert!(!app.song_edits_locked());
         assert!(app.active_runtime_song.is_none());
+    }
+
+    #[test]
+    fn arrangement_cursor_starts_playback_and_capture_at_that_song_beat() {
+        let mut playback = app_with_song();
+        playback
+            .set_use_arrangement(true)
+            .expect("toggle while stopped");
+        playback.set_arrangement_cursor(9.0, 0);
+        playback
+            .song_transport_play(false)
+            .expect("mid-song playback starts");
+        assert_eq!(playback.active_song_start_beat, Some(9.0));
+        assert_eq!(
+            playback.state.current_scene_index(),
+            2,
+            "the row governing the cursor must be applied before playback"
+        );
+        let commands = playback.state.song_playback().drain_commands();
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            crate::sequencer::SongPlaybackCommand::Start { start_beat, .. }
+                if *start_beat == 9.0
+        )));
+        playback.song_transport_stop().expect("playback stops");
+        assert_eq!(playback.active_song_start_beat, None);
+
+        let mut capture = app_with_song();
+        capture
+            .set_use_arrangement(true)
+            .expect("toggle while stopped");
+        capture.set_arrangement_cursor(9.0, 0);
+        capture
+            .song_transport_play(true)
+            .expect("mid-song capture starts");
+        capture.record_song_capture_launch(
+            &PatternLaunchTarget::Scene { scene: 1 },
+            1.5,
+        );
+        let take = capture.song_capture_take.as_ref().expect("capture take");
+        assert_eq!(take.timeline_start_beat(), 9.0);
+        assert_eq!(
+            take.events()[0].beat,
+            10.5,
+            "scheduler beat zero must map to the selected arrangement beat"
+        );
+        capture.state.set_scheduler_rendered_beats(2.0);
+        capture
+            .song_transport_stop()
+            .expect("mid-song capture commits");
+        let arrangement = capture
+            .state
+            .committed_arrangement()
+            .expect("committed arrangement");
+        assert_eq!(arrangement.scene_at_beat(10.75), Some(1));
+        assert_eq!(
+            arrangement.scene_at_beat(11.25),
+            Some(2),
+            "the pre-existing arrangement resumes at the translated stop beat"
+        );
+        assert_eq!(capture.active_song_start_beat, None);
+        capture.state.set_scheduler_rendered_beats(0.0);
     }
 
     #[test]
@@ -461,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    fn play_with_arrangement_and_record_enters_capture_without_playing_song() {
+    fn play_with_arrangement_and_record_enters_capture_on_top_of_playback() {
         let mut app = app_with_song();
         app.set_use_arrangement(true).expect("toggle while stopped");
         let song_before = app.state.committed_song();
@@ -470,8 +746,8 @@ mod tests {
         assert!(app.state.is_playing());
         assert!(app.song_edits_locked(), "song edits lock during capture");
         assert!(
-            app.active_runtime_song.is_none(),
-            "capture must not play the committed song"
+            app.active_runtime_song.is_some(),
+            "capture runs ON TOP of song playback (takes spec 9.3)"
         );
         assert_eq!(app.song_transport_mode.binding_str(), "arrangement-capture");
         assert!(
@@ -488,21 +764,65 @@ mod tests {
             "the committed song is untouched while capture runs"
         );
 
-        // Stop at rendered beat 8 commits the take: with no launches it is
-        // the single beat-zero row holding the initial session state.
+        // Stop at rendered beat 8: with no launches performed there is no
+        // splice — the committed song is untouched and no undo entry is
+        // created (takes spec 9.1/9.5).
         app.state.set_scheduler_rendered_beats(8.0);
-        let status = app.song_transport_stop().expect("stop commits the take");
-        assert!(status.unwrap().contains("committed"), "stop reports the commit");
+        let status = app.song_transport_stop().expect("stop resolves the take");
+        assert!(
+            status.unwrap().contains("unchanged"),
+            "stop reports the launch-free no-op"
+        );
         assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
         assert!(!app.state.is_playing());
         assert!(app.song_capture_take.is_none());
-        let song = app.state.committed_song().expect("captured song committed");
-        assert_eq!(song.rows.len(), 1);
-        assert_eq!(song.rows[0].start_beat, 0.0);
-        assert_eq!(song.rows[0].scene, 0);
-        assert!(song.rows[0].overrides.is_empty());
-        assert_eq!(song.end_beat, 8.0);
+        assert_eq!(
+            app.state.committed_song(),
+            song_before,
+            "a launch-free capture never rewrites the committed song"
+        );
         app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn recording_mid_song_playback_promotes_into_arrangement_capture() {
+        // Arming a track and engaging record while the song is ALREADY
+        // playing must record into a take, not into the scene's looping
+        // pattern — so the note path promotes the mode first.
+        let mut app = app_with_song();
+        app.set_use_arrangement(true).unwrap();
+        app.song_transport_play(false).expect("song playback");
+        assert!(!app.take_recording_active());
+        assert!(app.promote_song_playback_to_capture(), "promotion happens");
+        assert_eq!(app.song_transport_mode, SongTransportMode::ArrangementCapture);
+        assert!(app.song_capture_take.is_some());
+        assert!(
+            app.take_recording_active(),
+            "armed note input now retargets into takes"
+        );
+        assert!(
+            !app.promote_song_playback_to_capture(),
+            "promotion is idempotent"
+        );
+        // Stop runs the capture stop-commit (nothing performed here, so the
+        // committed song is unchanged) and leaves no capture behind.
+        app.state.set_scheduler_rendered_beats(8.0);
+        app.song_transport_stop().expect("stop resolves the capture");
+        assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
+        assert!(app.song_capture_take.is_none());
+        assert!(!app.promote_song_playback_to_capture(), "no-op when stopped");
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn session_playback_recording_is_left_alone() {
+        // Arrangement off: record + play is ordinary live pattern recording.
+        let mut app = app_with_song();
+        app.song_transport_play(true).expect("session playback");
+        assert!(!app.promote_song_playback_to_capture());
+        assert_eq!(app.song_transport_mode, SongTransportMode::SessionPlayback);
+        assert!(!app.take_recording_active());
+        app.song_transport_stop().unwrap();
     }
 
     #[test]
@@ -544,27 +864,75 @@ mod tests {
     }
 
     #[test]
-    fn manual_launches_are_rejected_only_during_song_playback() {
+    fn manual_launches_latch_during_song_playback_and_back_to_song_clears() {
         let mut app = app_with_song();
         assert!(app.manual_launch_rejection().is_none());
         app.set_use_arrangement(true).unwrap();
         app.song_transport_play(false).expect("song playback");
+        // Takes spec 10 (supersedes song-mode spec 7.3): a manual launch is
+        // audible and latches its scope instead of being rejected.
+        assert!(app.manual_launch_rejection().is_none());
+        assert_eq!(app.state.song_manual_latch_mask(), 0);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("manual launch during song playback latches");
         assert_eq!(
-            app.manual_launch_rejection(),
-            Some(MANUAL_LAUNCH_DURING_SONG_ERROR)
+            app.state.song_manual_latch_mask(),
+            1,
+            "a scene launch latches every track (one-track app)"
         );
-        let error = app
-            .apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
-            .expect_err("manual launch during song playback must fail");
-        assert_eq!(error, PatternLaunchError::SongPlaybackActive);
-        assert!(
-            app.drain_due_pattern_launches().is_empty(),
-            "quantized launches are dropped during song playback"
-        );
+        // Back to Song clears the latch and re-applies the current row.
+        let status = app.back_to_song().expect("back to song");
+        assert!(status.contains("Back to song"), "{status}");
+        assert_eq!(app.state.song_manual_latch_mask(), 0);
+        // A track launch latches only its track.
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::SceneTracks {
+            scene: 1,
+            tracks: vec![0],
+        })
+        .expect("track launch latches its track");
+        assert_eq!(app.state.song_manual_latch_mask(), 1);
+        // The latch is transient transport state: stop clears it.
         app.song_transport_stop().expect("stop succeeds");
+        assert_eq!(app.state.song_manual_latch_mask(), 0);
         assert!(app.manual_launch_rejection().is_none());
         app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
-            .expect("manual launch works again after stop");
+            .expect("manual launch works after stop");
+    }
+
+    #[test]
+    fn per_track_back_to_song_clears_only_that_lane() {
+        let mut app = test_app_two_tracks();
+        app.arr_replace_rows(
+            vec![SongRowSpec {
+                start_beat: 0.0,
+                scene: 0,
+                overrides: Vec::new(),
+            }],
+            16.0,
+            false,
+        )
+        .expect("song committed");
+        assert!(app
+            .back_to_song_track(0)
+            .is_err(), "only valid during song playback");
+        app.set_use_arrangement(true).unwrap();
+        app.song_transport_play(false).expect("song playback");
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::SceneTracks {
+            scene: 1,
+            tracks: vec![0, 1],
+        })
+        .expect("both lanes latch");
+        assert_eq!(app.state.song_manual_latch_mask(), 0b11);
+        let status = app.back_to_song_track(0).expect("track 0 returns");
+        assert!(status.contains("back to song"), "{status}");
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            0b10,
+            "track 1 stays the performer's"
+        );
+        let status = app.back_to_song_track(0).expect("idempotent");
+        assert!(status.contains("not manually overridden"), "{status}");
+        app.song_transport_stop().expect("stop succeeds");
     }
 
     #[test]
@@ -632,19 +1000,25 @@ mod tests {
     }
 
     #[test]
-    fn song_edit_primitives_are_locked_in_song_modes_and_unlocked_after_stop() {
+    fn song_edit_primitives_are_available_in_playback_but_locked_during_capture() {
         let mut app = app_with_song();
         app.set_use_arrangement(true).unwrap();
-        for record in [false, true] {
-            app.song_transport_play(record).expect("play succeeds");
-            let error = app.song_set_loop(true).expect_err("edits must be locked");
-            assert_eq!(error, crate::app::song_edit::SONG_EDITS_LOCKED_ERROR);
-            // Zero-length capture commits fail; the transport still stops
-            // and the primitives unlock.
-            let _ = app.song_transport_stop();
-            app.song_set_loop(app.state.committed_song().unwrap().loop_enabled)
-                .expect("no-op edit succeeds when unlocked");
-        }
+        app.song_transport_play(false).expect("play succeeds");
+        app.arr_set_loop(true)
+            .expect("song playback allows arrangement edits");
+        let _ = app.song_transport_stop();
+
+        app.song_transport_play(true).expect("capture starts");
+        let error = app
+            .arr_set_loop(false)
+            .expect_err("capture owns the arrangement splice");
+        assert_eq!(
+            error,
+            "song editing is unavailable during arrangement capture"
+        );
+        let _ = app.song_transport_stop();
+        app.arr_set_loop(false)
+            .expect("editing unlocks after capture stops");
     }
 
     #[test]
@@ -753,6 +1127,273 @@ mod tests {
         assert_eq!(app.state.drain_song_playback_notices().len(), 1);
     }
 
+    // ---------------------------------------------------------------
+    // Note edit-through (docs/realtime-arrangement-feedback-spec.md 5)
+    // ---------------------------------------------------------------
+
+    /// The same three-row song, but every row explicitly empties track 0, so
+    /// no row resolves the pattern a step edit lands on.
+    fn app_with_song_resolving_no_pattern() -> App {
+        let mut app = test_app();
+        let empty_row = |start_beat: f64, scene: usize| SongRowSpec {
+            start_beat,
+            scene,
+            overrides: vec![crate::sequencer::ProjectSongTrackOverride::new(0, None)],
+        };
+        app.arr_replace_rows(
+            vec![empty_row(0.0, 0), empty_row(4.0, 1), empty_row(8.0, 2)],
+            16.0,
+            false,
+        )
+        .expect("arr_replace_rows succeeds");
+        app
+    }
+
+    fn playing_song_app(mut app: App) -> App {
+        app.set_use_arrangement(true).expect("toggle while stopped");
+        app.song_transport_play(false).expect("song playback starts");
+        // Drop the Start command so later drains see only edit-through work.
+        app.state.song_playback().drain_commands();
+        app
+    }
+
+    /// The `Refresh` songs queued for the scheduler since the last drain.
+    fn drained_refreshes(app: &App) -> Vec<std::sync::Arc<crate::sequencer::RuntimeSong>> {
+        app.state
+            .song_playback()
+            .drain_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                crate::sequencer::SongPlaybackCommand::Refresh { song } => Some(song),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn drained_rebuilds(app: &App) -> Vec<std::sync::Arc<crate::sequencer::RuntimeSong>> {
+        app.state
+            .song_playback()
+            .drain_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                crate::sequencer::SongPlaybackCommand::Rebuild { song } => Some(song),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn arrangement_edit_and_undo_during_playback_each_send_one_rebuild() {
+        let mut app = playing_song_app(app_with_song());
+        let clip = app
+            .state
+            .committed_arrangement()
+            .expect("arrangement")
+            .track_lanes[0]
+            .iter()
+            .find(|clip| (clip.start_beat - 8.0).abs() < 1e-9)
+            .expect("clip ahead of the playhead")
+            .id;
+        let depth = app.history.undo_len();
+
+        app.arr_clip_move(clip, 10.0)
+            .expect("clip edits are allowed during song playback");
+        assert_eq!(
+            app.history.undo_len(),
+            depth + 1,
+            "one edit remains one undo entry"
+        );
+        assert_eq!(
+            drained_rebuilds(&app).len(),
+            1,
+            "the structural commit sends exactly one Rebuild"
+        );
+        assert_eq!(
+            app.song_mirrored_row,
+            None,
+            "a remapped ordinal cannot suppress the next real row notice"
+        );
+
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            drained_rebuilds(&app).len(),
+            1,
+            "history replay rides the same Rebuild seam"
+        );
+        app.song_transport_stop().unwrap();
+    }
+
+    /// Slice 3's whole premise: the refreshed rows must be accepted by the
+    /// scheduler's cheap content path, which only swaps when row layout is
+    /// identical.
+    fn assert_swaps_in_place(
+        before: &std::sync::Arc<crate::sequencer::RuntimeSong>,
+        refreshed: &std::sync::Arc<crate::sequencer::RuntimeSong>,
+    ) {
+        let mut runtime = crate::sequencer::SongPlaybackRuntime::new(
+            std::sync::Arc::clone(before),
+            0.0,
+            1.0,
+        )
+        .expect("song playback runtime");
+        assert!(
+            runtime.replace_song_in_place(std::sync::Arc::clone(refreshed)),
+            "a note/geometry edit must not move row layout: the Refresh has to swap in place"
+        );
+    }
+
+    fn toggle_step(app: &mut App, step: usize) {
+        crate::app::edit::try_apply_command(app, crate::app::AppCommand::ToggleStep { track: 0, step })
+            .expect("step edit applies");
+    }
+
+    /// 5.1: a step commit on a pattern the playing song resolves ends with a
+    /// `Refresh` whose swap succeeds — and it does that WITHOUT touching the
+    /// committed song (5.2: the dots ride pool content, not the song).
+    #[test]
+    fn a_step_edit_during_song_playback_refreshes_the_scheduler_rows() {
+        let mut app = playing_song_app(app_with_song());
+        let before = app.active_runtime_song.clone().expect("active song");
+        let song_revision = app.state.committed_song_revision();
+        let pool_revision = app.state.pool_content_revision();
+
+        toggle_step(&mut app, 3);
+
+        let refreshes = drained_refreshes(&app);
+        assert_eq!(refreshes.len(), 1, "one commit, one refresh");
+        assert_swaps_in_place(&before, &refreshes[0]);
+        assert!(
+            app.active_runtime_song
+                .as_ref()
+                .is_some_and(|song| std::sync::Arc::ptr_eq(song, &refreshes[0])),
+            "the control side keeps the rows it handed the scheduler"
+        );
+        assert!(
+            app.state.pool_content_revision() > pool_revision,
+            "the lane dots key off pool content"
+        );
+        assert_eq!(
+            app.state.committed_song_revision(),
+            song_revision,
+            "a note edit is not a song edit"
+        );
+        app.song_transport_stop().unwrap();
+    }
+
+    /// 5.1: a `PatternGeometry` length change keeps row layout identical too —
+    /// the song's beat math comes from the arrangement, not the pattern
+    /// length — so it rides the same `Refresh`, not a rebuild.
+    #[test]
+    fn a_pattern_length_change_during_song_playback_still_swaps_via_refresh() {
+        let mut app = playing_song_app(app_with_song());
+        let before = app.active_runtime_song.clone().expect("active song");
+        let pool_revision = app.state.pool_content_revision();
+
+        crate::app::edit::try_apply_command(
+            &mut app,
+            crate::app::AppCommand::SetTrackNumSteps { track: 0, n: 7 },
+        )
+        .expect("length change applies");
+
+        let refreshes = drained_refreshes(&app);
+        assert_eq!(refreshes.len(), 1, "one geometry commit, one refresh");
+        assert_swaps_in_place(&before, &refreshes[0]);
+        assert!(app.state.pool_content_revision() > pool_revision);
+        app.song_transport_stop().unwrap();
+    }
+
+    /// 5.1: the `affected` check is what keeps this cheap — an edit to a
+    /// pattern no row resolves must not preflight at all.
+    #[test]
+    fn a_step_edit_no_row_resolves_never_preflights() {
+        let mut app = playing_song_app(app_with_song_resolving_no_pattern());
+        assert!(
+            app.active_runtime_song
+                .as_ref()
+                .expect("active song")
+                .rows
+                .iter()
+                .all(|row| row.resolved_pattern_ids[0].is_none()),
+            "fixture must leave track 0 unresolved on every row"
+        );
+        let pool_revision = app.state.pool_content_revision();
+
+        toggle_step(&mut app, 3);
+
+        assert!(
+            drained_refreshes(&app).is_empty(),
+            "no row uses this pattern, so nothing is re-preflighted"
+        );
+        assert!(
+            app.state.pool_content_revision() > pool_revision,
+            "the pool still changed: the dots refresh even when the song ignores it"
+        );
+        app.song_transport_stop().unwrap();
+    }
+
+    /// 5.1: undo and redo ride the same seam, so a step edit reverted during
+    /// playback un-sounds where it was heard — and moves the dots back.
+    #[test]
+    fn undo_and_redo_of_a_step_edit_refresh_the_rows_and_the_dots() {
+        let mut app = playing_song_app(app_with_song());
+        let before = app.active_runtime_song.clone().expect("active song");
+        toggle_step(&mut app, 3);
+        app.state.song_playback().drain_commands();
+
+        for replay in ["undo", "redo"] {
+            let pool_revision = app.state.pool_content_revision();
+            let outcome = match replay {
+                "undo" => crate::app::edit::undo(&mut app),
+                _ => crate::app::edit::redo(&mut app),
+            };
+            assert!(
+                matches!(outcome, crate::app::history::HistoryReplay::Applied(_)),
+                "{replay} applies: {outcome:?}"
+            );
+            let refreshes = drained_refreshes(&app);
+            assert_eq!(refreshes.len(), 1, "{replay} refreshes the rows once");
+            assert_swaps_in_place(&before, &refreshes[0]);
+            assert!(
+                app.state.pool_content_revision() > pool_revision,
+                "{replay} moves pool content, so the dots rebuild"
+            );
+        }
+        app.song_transport_stop().unwrap();
+    }
+
+    /// 5.1 / 7: no coalescing beyond the gesture deferral. With a gesture
+    /// open, the replay parks the invalidation in
+    /// `pending_song_row_invalidation` and the commit's own gesture close
+    /// flushes it — exactly one preflight, never two.
+    #[test]
+    fn a_step_edit_under_an_open_gesture_flushes_one_invalidation_at_gesture_end() {
+        use crate::app::history::{ActiveGesture, GestureId, MergeKey};
+
+        let mut app = playing_song_app(app_with_song());
+        let before = app.active_runtime_song.clone().expect("active song");
+        app.history
+            .begin_gesture(ActiveGesture {
+                id: GestureId(1),
+                merge_key: MergeKey::new("device-drag"),
+            })
+            .expect("gesture starts");
+
+        toggle_step(&mut app, 3);
+
+        let refreshes = drained_refreshes(&app);
+        assert_eq!(refreshes.len(), 1, "one flush, not one per replay");
+        assert_swaps_in_place(&before, &refreshes[0]);
+        assert!(
+            app.pending_song_row_invalidation.is_none(),
+            "the deferred slot is drained by the gesture close, not left dangling"
+        );
+        assert!(app.history.active_gesture().is_none());
+        app.song_transport_stop().unwrap();
+    }
+
     /// Start arrangement capture on an app whose rendered-beat clock is 0.
     fn start_capture(app: &mut App) {
         app.set_use_arrangement(true).expect("toggle while stopped");
@@ -765,7 +1406,9 @@ mod tests {
         app.state.committed_song().expect("song committed")
     }
 
-    fn row_tuples(song: &crate::sequencer::ProjectSong) -> Vec<(f64, usize, Vec<(usize, u64)>)> {
+    fn row_tuples(
+        song: &crate::sequencer::ProjectSong,
+    ) -> Vec<(f64, usize, Vec<(usize, Option<u64>)>)> {
         song.rows
             .iter()
             .map(|row| {
@@ -783,6 +1426,9 @@ mod tests {
 
     #[test]
     fn capture_creates_beat_zero_row_from_the_resolved_initial_state() {
+        // Whole-song capture ("record from an empty song", takes spec 9.3):
+        // with no committed song, a capture with a launch commits from the
+        // resolved beat-zero state.
         let mut app = app_with_song();
         // Resolved session state before capture: scene 2 with an override on
         // track 0 pointing at scene 1's cell (pool id 2).
@@ -793,13 +1439,58 @@ mod tests {
             tracks: vec![0],
         })
         .expect("track launch");
+        app.arr_clear().expect("start from an empty song");
 
         start_capture(&mut app);
+        // A launch at the capture origin replaces the beat-zero row's state.
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::SceneTracks {
+            scene: 1,
+            tracks: vec![0],
+        })
+        .expect("captured launch");
         app.state.set_scheduler_rendered_beats(8.0);
         app.song_transport_stop().expect("stop commits");
         let song = committed(&app);
-        assert_eq!(row_tuples(&song), vec![(0.0, 2, vec![(0, 2)])]);
+        assert_eq!(row_tuples(&song), vec![(0.0, 2, vec![(0, Some(2))])]);
         assert_eq!(song.end_beat, 8.0);
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn capture_splices_from_first_launch_preserving_the_head() {
+        // Splice stopgap (takes spec 9.5): with an existing committed song,
+        // the commit replaces it only from the FIRST captured launch's beat
+        // onward — content before the punch-in survives verbatim.
+        let mut app = app_with_song(); // rows at 0/4/8, end 16
+        let depth = app.history.undo_len();
+        start_capture(&mut app);
+        // Listen for 6 beats before the first (and only) launch.
+        app.state.set_scheduler_rendered_beats(6.0);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 2 })
+            .expect("captured launch");
+        app.state.set_scheduler_rendered_beats(10.0);
+        app.song_transport_stop().expect("stop commits the splice");
+        let song = committed(&app);
+        assert_eq!(
+            row_tuples(&song),
+            vec![
+                // The head of the song is preserved, not nuked to beat 0:
+                // these are the clips scene events 0 and 4 stamped.
+                (0.0, 0, vec![(0, Some(1))]),
+                (4.0, 1, vec![(0, Some(2))]),
+                // From the punch-in on, the capture is the authority (the
+                // old row at 8 is inside the replaced region). The lane is
+                // materialized with the free-run phase stamp (spec 9.4), and
+                // the pre-existing clip resumes at Q playing the same pattern
+                // at the same phase — so `normalize` collapses that boundary
+                // away entirely, which IS the phase-continuity proof.
+                (6.0, 2, vec![(0, Some(3))]),
+            ]
+        );
+        // 6 beats into a 4-beat/16-step free-run = 24 steps mod 16 = 8.
+        assert_eq!(song.rows[2].overrides[0].offset_steps, 8.0);
+        assert_eq!(song.end_beat, 16.0, "the existing song end survives");
+        assert_eq!(app.history.undo_len(), depth + 1, "one commit, one entry");
         app.state.set_scheduler_rendered_beats(0.0);
     }
 
@@ -817,9 +1508,19 @@ mod tests {
         let song = committed(&app);
         assert_eq!(
             row_tuples(&song),
-            vec![(0.0, 0, Vec::new()), (2.375, 1, Vec::new())],
+            vec![
+                (0.0, 0, vec![(0, Some(1))]),
+                (2.375, 1, vec![(0, Some(2))]),
+                // Full splice (takes spec 9.2): the pre-existing clip at the
+                // punch-out beat survives — nothing after Q is nuked.
+                (8.0, 2, vec![(0, Some(3))]),
+            ],
             "the fractional beat must survive to the committed row exactly"
         );
+        // Free-run phase stamping (spec 9.4): committed playback re-enters
+        // the pattern mid-phase ON the grid, exactly as performed. 2.375
+        // beats at 4 steps/beat = offset 9.5 steps.
+        assert_eq!(song.rows[1].overrides[0].offset_steps, 9.5);
         app.state.set_scheduler_rendered_beats(0.0);
     }
 
@@ -837,18 +1538,19 @@ mod tests {
                 crate::quantized_launch::QuantizedLaunchOwner::Transport,
                 app.state.scene_count(),
                 app.tracks.len(),
+                None,
             )
             .expect("schedule succeeds");
         let mut pending = crate::quantized_launch::PendingQuantizedLaunches::default();
         app.state
             .quantized_launches()
-            .process_scheduler(&mut pending, 2.6, true);
+            .process_scheduler(&mut pending, 2.6, 2.6, true, false);
         // The launch becomes due after the boundary; the control thread
         // drains it late (rendered 4.2) — the quantized path through
         // `apply_pattern_launch` must still capture the stamped 4.0.
         app.state
             .quantized_launches()
-            .process_scheduler(&mut pending, 4.2, true);
+            .process_scheduler(&mut pending, 4.2, 4.2, true, false);
         app.state.set_scheduler_rendered_beats(4.2);
         let results = app.drain_due_pattern_launches();
         assert_eq!(results.len(), 1);
@@ -859,9 +1561,84 @@ mod tests {
         let song = committed(&app);
         assert_eq!(
             row_tuples(&song),
-            vec![(0.0, 0, Vec::new()), (4.0, 2, Vec::new())],
+            // The captured clip plays scene 2's cell from beat 4 at free-run
+            // phase 0, and the pre-existing clip from beat 8 plays the same
+            // cell at the same phase, so the two rows collapse into one.
+            vec![(0.0, 0, vec![(0, Some(1))]), (4.0, 2, vec![(0, Some(3))])],
             "the captured beat is the scheduled grid boundary"
         );
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    /// A session-mode quantized launch is applied by the scheduler at the
+    /// boundary (chunk split); the control drain must MIRROR it — same
+    /// state/graph work, scene index moves, but NO pattern-epoch bump (a
+    /// bump would drop the in-flight events including the boundary step) —
+    /// and acknowledge so the scheduler drops its snapshot override.
+    #[test]
+    fn scheduler_applied_boundary_launch_mirrors_without_epoch_bump() {
+        let mut app = test_app();
+        app.state.start_playback();
+
+        let token = app
+            .state
+            .schedule_quantized_pattern_launch(
+                PatternLaunchTarget::Scene { scene: 1 },
+                crate::quantized_launch::LaunchQuantize::Bar,
+                crate::quantized_launch::QuantizedLaunchOwner::Transport,
+            )
+            .expect("schedule while playing");
+        let epoch_before = app
+            .state
+            .transport
+            .pattern_epoch
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mirror_epoch_before = app.song_row_mirror_epoch;
+
+        // Scheduler side: the playing session request routes to the
+        // boundary machinery (the accessor preflighted a snapshot) and
+        // installs at the bar boundary.
+        let mut pending = crate::quantized_launch::PendingQuantizedLaunches::default();
+        app.state
+            .quantized_launches()
+            .process_scheduler(&mut pending, 0.5, 0.5, true, false);
+        app.state.set_scheduler_rendered_beats(4.0);
+        let (_, install) = pending.next_session_chunk(4.0, 1_000.0, 512);
+        assert!(matches!(
+            install,
+            crate::quantized_launch::SessionLaunchInstall::AllTracks
+        ));
+        app.state
+            .quantized_launches()
+            .process_scheduler(&mut pending, 4.0, 4.0, true, false);
+
+        // Control side: the due is a mirror, not a full launch.
+        let results = app.drain_due_pattern_launches();
+        assert_eq!(results.len(), 1);
+        let outcome = results[0].as_ref().expect("mirror applies");
+        assert_eq!(outcome.token, Some(token));
+        assert_eq!(app.state.current_scene_index(), 1);
+        assert_eq!(
+            app.state
+                .transport
+                .pattern_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            epoch_before,
+            "the mirror must not bump the pattern epoch"
+        );
+        assert_eq!(
+            app.song_row_mirror_epoch,
+            mirror_epoch_before + 1,
+            "the mirror drives the UI pattern resync through the mirror-epoch seam"
+        );
+
+        // The acknowledgement releases the scheduler's snapshot override.
+        app.state
+            .quantized_launches()
+            .process_scheduler(&mut pending, 4.1, 4.1, true, false);
+        let base = app.state.latest_scheduler_snapshot();
+        assert!(pending.session_snapshot(&base).is_none());
+        app.state.stop_playback();
         app.state.set_scheduler_rendered_beats(0.0);
     }
 
@@ -893,7 +1670,13 @@ mod tests {
             let song = committed(&app);
             assert_eq!(
                 row_tuples(&song),
-                vec![(0.0, 0, Vec::new()), (4.0, 2, vec![(0, 2)])],
+                vec![
+                    (0.0, 0, vec![(0, Some(1))]),
+                    (4.0, 2, vec![(0, Some(2))]),
+                    // The pre-existing arrangement resumes at Q (spec 9.2):
+                    // scene 2's own cell, which the capture never claimed.
+                    (8.0, 2, vec![(0, Some(3))]),
+                ],
                 "scene_first={scene_first}: one row, scene 2 plus the track override"
             );
             app.state.set_scheduler_rendered_beats(0.0);
@@ -915,9 +1698,472 @@ mod tests {
         let song = committed(&app);
         assert_eq!(
             row_tuples(&song),
-            vec![(0.0, 0, Vec::new()), (2.0, 1, Vec::new())],
+            // The lane carries the free-run phase stamp (spec 9.4): 2 beats
+            // at 4 steps/beat = offset 8. The pre-existing arrangement
+            // resumes at the punch-out (spec 9.2).
+            vec![
+                (0.0, 0, vec![(0, Some(1))]),
+                (2.0, 1, vec![(0, Some(2))]),
+                (8.0, 2, vec![(0, Some(3))]),
+            ],
             "the identical relaunch must not create a second row"
         );
+        assert_eq!(song.rows[1].overrides[0].offset_steps, 8.0);
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    /// Two-track sibling of `test_app` (pool ids 1..=3 per track).
+    fn test_app_two_tracks() -> App {
+        let state = SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(2, &[]),
+                PatternSnapshot::new_default(2, &[]),
+                PatternSnapshot::new_default(2, &[]),
+            ],
+            0,
+        );
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = App::new(
+            Arc::new(state),
+            LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string(), "Track 2".to_string()];
+        app.track_registry =
+            crate::sequencer::TrackRegistry::for_legacy_track_count(2).unwrap();
+        app
+    }
+
+    #[test]
+    fn capture_splice_preserves_content_before_p_and_after_q() {
+        // Previous song rows at 0/4/8, end 16. Capture launches only inside
+        // (5.0, 6.5): the row at 4 splits, the row at 8 survives verbatim,
+        // and a restore row appears at Q with the pre-existing state's
+        // advanced phase.
+        let mut app = app_with_song();
+        start_capture(&mut app);
+        app.state.set_scheduler_rendered_beats(5.0);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 })
+            .expect("launch");
+        app.state.set_scheduler_rendered_beats(6.5);
+        app.song_transport_stop().expect("stop commits");
+        let song = committed(&app);
+        assert_eq!(
+            row_tuples(&song),
+            vec![
+                (0.0, 0, vec![(0, Some(1))]),
+                // Content before P is untouched (the old clip at 4 keeps its
+                // span up to the punch-in).
+                (4.0, 1, vec![(0, Some(2))]),
+                // The performance owns [5.0, 6.5): free-run stamp 5 beats =
+                // 20 steps mod 16 = 4.
+                (5.0, 0, vec![(0, Some(1))]),
+                // At Q the pre-existing clip resumes — `occlude_span`
+                // left-trimmed it and re-stamped its phase, so it re-enters
+                // mid-pattern (6.5 beats = 26 steps mod 16 = 10) with no
+                // restore machinery involved.
+                (6.5, 1, vec![(0, Some(2))]),
+                // Content after Q is untouched.
+                (8.0, 2, vec![(0, Some(3))]),
+            ]
+        );
+        assert_eq!(song.rows[2].overrides[0].offset_steps, 4.0);
+        assert_eq!(song.rows[3].overrides[0].offset_steps, 10.0);
+        assert_eq!(song.end_beat, 16.0);
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    /// The resolved `(pattern, step position)` of one lane at `beat` under a
+    /// compiled song: the row's override if it has one, else the row scene's
+    /// cell advanced from the row start. This is what the runtime plays.
+    fn lane_phase_at(
+        app: &App,
+        song: &crate::sequencer::ProjectSong,
+        track: usize,
+        beat: f64,
+    ) -> (Option<u64>, f64) {
+        let row = crate::sequencer::state_at_beat(song, beat).expect("a row governs the beat");
+        let delta = beat - row.start_beat;
+        match row.overrides.iter().find(|over| over.track == track) {
+            Some(over) => match over.pattern_id {
+                Some(pattern) => (
+                    Some(pattern),
+                    app.advanced_offset(track, pattern, over.offset_steps, delta),
+                ),
+                None => (None, 0.0),
+            },
+            None => {
+                let cell = app.state.with_project_scenes(|scenes| {
+                    scenes
+                        .scenes
+                        .get(row.scene)
+                        .and_then(|scene| scene.cells.get(track))
+                        .copied()
+                        .flatten()
+                        .map(|pattern| pattern.0)
+                });
+                match cell {
+                    Some(pattern) => (
+                        Some(pattern),
+                        app.advanced_offset(track, pattern, 0.0, delta),
+                    ),
+                    None => (None, 0.0),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn capture_leaves_untouched_lanes_unwritten_and_phase_continuous() {
+        // Two tracks; the performer only launches track 0. Track 1 keeps
+        // playing the committed song underneath (takes spec 9.3). In the lane
+        // model that inheritance needs NO representation: the lane is simply
+        // NOT MODIFIED, so the clips that already covered the punch region
+        // keep playing straight through it. (The row model had to materialize
+        // an override carrying the inherited pattern and its advanced phase
+        // onto every captured row, because a row's scene column would
+        // otherwise silence it.)
+        let mut app = test_app_two_tracks();
+        app.arr_replace_rows(
+            vec![
+                SongRowSpec {
+                    start_beat: 0.0,
+                    scene: 0,
+                    overrides: Vec::new(),
+                },
+                SongRowSpec {
+                    start_beat: 8.0,
+                    scene: 1,
+                    overrides: Vec::new(),
+                },
+            ],
+            16.0,
+            false,
+        )
+        .expect("song committed");
+        let before = committed(&app);
+        let before_arrangement = app
+            .state
+            .committed_arrangement()
+            .expect("the def-song lowering commits an arrangement");
+
+        start_capture(&mut app);
+        // 4.5 beats in, so the untouched lane sits mid-pattern (18 steps into
+        // a 16-step cycle) exactly where inheritance is easiest to get wrong.
+        app.state.set_scheduler_rendered_beats(4.5);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::SceneTracks {
+            scene: 2,
+            tracks: vec![0],
+        })
+        .expect("track launch");
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            1,
+            "only the launched track latches"
+        );
+        app.state.set_scheduler_rendered_beats(6.0);
+        app.song_transport_stop().expect("stop commits");
+
+        let arrangement = app
+            .state
+            .committed_arrangement()
+            .expect("the capture commits an arrangement");
+        // The headline win: the untouched lane is byte-identical to what it
+        // was — not trimmed, not re-stamped, not written at all.
+        assert_eq!(
+            arrangement.track_lanes[1], before_arrangement.track_lanes[1],
+            "the untouched lane must not be modified"
+        );
+        // The performer's lane is one clip over the punch region, stamped
+        // with the free-run phase (takes spec 7.2): 4.5 beats = 18 steps mod
+        // the 16-step pattern = 2.
+        let clip = arrangement.track_lanes[0]
+            .iter()
+            .find(|clip| clip.start_beat == 4.5)
+            .expect("the launch opens a clip at the punch-in");
+        assert_eq!(clip.pattern_id, Some(3), "scene 2's cell for track 0");
+        assert!((clip.offset_steps - 2.0).abs() < 1e-9, "{}", clip.offset_steps);
+        assert_eq!(clip.end_beat, 6.0, "the clip closes at the punch-out");
+
+        let song = committed(&app);
+        // The compiled song states the untouched lane's resolution on every
+        // boundary another track's clip created, but only ever as the clip
+        // the row's own scene stamped there — never a launch the performer
+        // did not make.
+        for row in &song.rows {
+            let Some(over) = row.overrides.iter().find(|over| over.track == 1) else {
+                continue;
+            };
+            let cell = app.state.with_project_scenes(|scenes| {
+                scenes.scenes[row.scene].cells[1].map(|pattern| pattern.0)
+            });
+            assert_eq!(
+                (over.pattern_id, over.take_id),
+                (cell, None),
+                "beat {}: the untouched lane may only be phase-materialized",
+                row.start_beat
+            );
+        }
+        // And it plays exactly what it played before the capture — through
+        // the punch region, across the punch-out, and past the song's own
+        // scene change at beat 8.
+        for beat in [3.0, 4.5, 5.0, 6.0, 7.5, 8.0, 9.25, 15.0] {
+            assert_eq!(
+                lane_phase_at(&app, &song, 1, beat),
+                lane_phase_at(&app, &before, 1, beat),
+                "track 1 must play phase-continuously at beat {beat}"
+            );
+        }
+        // The latch auto-clears at punch-out (takes spec 10).
+        assert_eq!(app.state.song_manual_latch_mask(), 0);
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn capture_scene_launch_preserves_take_lanes() {
+        // Takes spec 10 refined: a scene launch during arrangement capture
+        // must NOT claim lanes that are playing takes — only an intentional
+        // clip launch does. The take lane neither latches audibly nor gets
+        // spliced over at commit.
+        use crate::sequencer::{PatternSnapshot, ProjectSongTrackOverride, MAX_STEPS};
+        let mut app = test_app_two_tracks();
+        let mut chunk = PatternSnapshot::new_default(2, &[])
+            .track_pattern_data(0)
+            .expect("chunk template");
+        chunk.track_params.num_steps = MAX_STEPS;
+        chunk.track_bits[0] |= 1;
+        // 64 steps = 16 beats: the take spans the whole song, so it is
+        // still audible at the scene-launch beat.
+        let take_id = app
+            .state
+            .register_track_take(0, None, vec![chunk], 64)
+            .expect("take registers");
+        app.arr_replace_rows(
+            vec![SongRowSpec {
+                start_beat: 0.0,
+                scene: 0,
+                overrides: vec![ProjectSongTrackOverride {
+                    track: 0,
+                    pattern_id: None,
+                    take_id: Some(take_id.0),
+                    offset_steps: 0.0,
+                }],
+            }],
+            16.0,
+            false,
+        )
+        .expect("song committed");
+        start_capture(&mut app);
+        assert_eq!(
+            app.state.song_take_lane_mask(),
+            1,
+            "row zero marks track 0 as a take lane"
+        );
+        app.state.set_scheduler_rendered_beats(4.0);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("scene launch");
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            0b10,
+            "the scene launch latches the pattern lane but not the take lane"
+        );
+        app.state.set_scheduler_rendered_beats(8.0);
+        app.song_transport_stop().expect("stop commits");
+        let song = committed(&app);
+        let spliced = song
+            .rows
+            .iter()
+            .find(|row| row.start_beat == 4.0)
+            .expect("spliced row at the launch beat");
+        let track0 = spliced
+            .overrides
+            .iter()
+            .find(|over| over.track == 0)
+            .expect("take lane materialized in the spliced row");
+        assert_eq!(
+            track0.take_id,
+            Some(take_id.0),
+            "the take survives the scene-launch capture"
+        );
+        assert!(
+            song.rows
+                .iter()
+                .filter(|row| row.start_beat >= 4.0 && row.start_beat < 8.0)
+                .all(|row| row
+                    .overrides
+                    .iter()
+                    .any(|over| over.track == 0 && over.take_id == Some(take_id.0))),
+            "no spliced row replaces the take with a scene pattern"
+        );
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn clip_launch_latches_the_lane_and_splices_at_the_launch_beat() {
+        // The mixer grid clip click (`set-scene-cell` path) is a
+        // performance gesture: it must latch the lane — so later
+        // arrangement row changes stop stealing it until punch-out — and
+        // land in the capture at the beat it was performed.
+        let mut app = app_with_song();
+        start_capture(&mut app);
+        app.state.set_scheduler_rendered_beats(3.0);
+        app.observe_manual_clip_launch(0, PatternId(2));
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            1,
+            "the clip launch latches its lane"
+        );
+        assert_eq!(
+            app.song_capture_take.as_ref().map(|take| take.event_count()),
+            Some(1),
+            "the clip launch is captured"
+        );
+        // A later mirrored row transition must leave the latched lane alone.
+        let song = app.active_runtime_song.clone().expect("active song");
+        app.mirror_song_row_applied(&AudibleSongRowApplied {
+            row_id: song.rows[1].id,
+            row_ordinal: 1,
+            effective_beat: 4.0,
+            effective_sample: 44_100,
+            wrapped: false,
+        })
+        .expect("mirror succeeds");
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            1,
+            "row transitions do not clear the performer's latch"
+        );
+        app.state.set_scheduler_rendered_beats(8.0);
+        app.song_transport_stop().expect("stop commits");
+        let song = committed(&app);
+        let row = song
+            .rows
+            .iter()
+            .find(|row| (row.start_beat - 3.0).abs() < 1e-9)
+            .expect("spliced row at the launch beat, not after");
+        let over = row
+            .overrides
+            .iter()
+            .find(|over| over.track == 0)
+            .expect("clip override on the launched lane");
+        assert_eq!(over.pattern_id, Some(2));
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn clip_launch_capture_keeps_untouched_take_lane_continuous() {
+        // Two lanes playing long takes; the performer clip-launches ONLY
+        // track 0 mid-take and stops before the takes end. Track 1 must
+        // keep its take through the spliced region AND after the punch-out
+        // restore row — continuous offsets, no truncation.
+        use crate::sequencer::{PatternSnapshot, ProjectSongTrackOverride, MAX_STEPS};
+        let mut app = test_app_two_tracks();
+        let mut take_ids = Vec::new();
+        for track in 0..2 {
+            let mut chunk = PatternSnapshot::new_default(2, &[])
+                .track_pattern_data(track)
+                .expect("chunk template");
+            chunk.track_params.num_steps = MAX_STEPS;
+            chunk.track_bits[0] |= 1;
+            // 64 steps = 16 beats at the default sixteenth timebase.
+            take_ids.push(
+                app.state
+                    .register_track_take(track, None, vec![chunk], 64)
+                    .expect("take registers"),
+            );
+        }
+        app.arr_replace_rows(
+            vec![SongRowSpec {
+                start_beat: 0.0,
+                scene: 0,
+                overrides: (0..2)
+                    .map(|track| ProjectSongTrackOverride {
+                        track,
+                        pattern_id: None,
+                        take_id: Some(take_ids[track].0),
+                        offset_steps: 0.0,
+                    })
+                    .collect(),
+            }],
+            16.0,
+            false,
+        )
+        .expect("song committed");
+        start_capture(&mut app);
+        app.state.set_scheduler_rendered_beats(3.0);
+        app.observe_manual_clip_launch(0, PatternId(2));
+        app.state.set_scheduler_rendered_beats(5.5);
+        app.song_transport_stop().expect("stop commits");
+        let song = committed(&app);
+        // Track 1: every row across the whole song still references its
+        // take with the offset matching the row start (4 steps per beat).
+        for row in &song.rows {
+            let over = row
+                .overrides
+                .iter()
+                .find(|over| over.track == 1)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "track 1 lost its take override at row {}",
+                        row.start_beat
+                    )
+                });
+            assert_eq!(
+                over.take_id,
+                Some(take_ids[1].0),
+                "track 1 still plays its take at row {}",
+                row.start_beat
+            );
+            assert!(
+                (over.offset_steps - row.start_beat * 4.0).abs() < 1e-6,
+                "track 1 take offset continuous at row {}: got {}",
+                row.start_beat,
+                over.offset_steps
+            );
+        }
+        // Track 0: the clip governs [3.0, 5.5), the take resumes at 5.5.
+        let clip_row = song
+            .rows
+            .iter()
+            .find(|row| (row.start_beat - 3.0).abs() < 1e-9)
+            .expect("spliced row at the clip launch");
+        let track0 = clip_row
+            .overrides
+            .iter()
+            .find(|over| over.track == 0)
+            .expect("clip override");
+        assert_eq!(track0.pattern_id, Some(2));
+        let restore_row = song
+            .rows
+            .iter()
+            .find(|row| (row.start_beat - 5.5).abs() < 1e-9)
+            .expect("restore row at punch-out");
+        let track0 = restore_row
+            .overrides
+            .iter()
+            .find(|over| over.track == 0)
+            .expect("track 0 restored");
+        assert_eq!(
+            track0.take_id,
+            Some(take_ids[0].0),
+            "track 0's take resumes at punch-out"
+        );
+        assert!((track0.offset_steps - 22.0).abs() < 1e-6);
         app.state.set_scheduler_rendered_beats(0.0);
     }
 
@@ -939,9 +2185,23 @@ mod tests {
         );
         let captured = app.state.committed_song();
         assert_ne!(captured, song_before);
-        // Fresh row ids continue the allocator (spec 10.4.8/5.2).
+        // Rows are compiled output now, so their ids are positional (lane
+        // spec 7 step 4); the identity that must never be reused lives on
+        // clips, and the capture's clips continue that allocator.
         let song = committed(&app);
-        assert_eq!(song.next_row_id, 5, "ids continue after the previous song's 0..=2");
+        assert_eq!(song.next_row_id, song.rows.len() as u64);
+        let arrangement = app
+            .state
+            .committed_arrangement()
+            .expect("the capture commits an arrangement");
+        assert!(
+            arrangement
+                .track_lanes
+                .iter()
+                .flatten()
+                .all(|clip| clip.id.0 < arrangement.next_clip_id),
+            "clip ids stay below the allocator"
+        );
 
         assert!(matches!(
             crate::app::edit::undo(&mut app),
@@ -1011,8 +2271,14 @@ mod tests {
     #[test]
     fn capture_commit_validation_failure_preserves_previous_song() {
         let mut app = app_with_song();
+        // Start from an empty song so the commit takes the whole-song path
+        // (with a committed song and no launches, stop is a documented
+        // no-op instead of a failure — takes spec 9.5).
+        app.arr_clear().expect("clear song");
         let song_before = app.state.committed_song();
         start_capture(&mut app);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("captured launch");
         // Stop with the rendered clock still at the capture origin: the
         // zero-length take fails `end_beat > last start` validation.
         let error = app

@@ -86,6 +86,7 @@
 (bind-key "ESC" "seq-clear-ui-selection")
 
 (defstate piano-roll-placement :bottom)
+(defstate seq-main-view :session)
 (defstate step-panel-buffer "*sequencer*")
 (defstate remembered-step-panel-buffer "*sequencer*")
 (defstate lower-panel-buffer "*fx*")
@@ -125,7 +126,8 @@
       (list (seq-step-tab-label tab) buffer))))
 
 (def seq-main-step-tabs ()
-  (append (list (list "Seq" "*sequencer*")) (map seq-render-step-tab seq-registered-step-tabs)))
+  (append (list (list "Seq" "*sequencer*"))
+    (map seq-render-step-tab seq-registered-step-tabs)))
 
 (def seq-main-step-tab-buffer? (buffer)
   (> (len (filter (lambda (tab) (seq-step-tab-matches-buffer? tab buffer))
@@ -140,6 +142,14 @@
 (def seq-visible-step-panel-buffer ()
   (seq-sanitized-step-buffer step-panel-buffer))
 
+(def seq-arrangement-view? ()
+  (= seq-main-view :arrangement))
+
+(def seq-visible-main-panel-buffer ()
+  (if (seq-arrangement-view?)
+    "*arrangement*"
+    (seq-visible-step-panel-buffer)))
+
 (def seq-main-step-tile-layout-spec ()
   (let ((buffer (seq-visible-step-panel-buffer))
         (tabs (seq-main-step-tabs)))
@@ -150,11 +160,16 @@
       (list :buf buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25))))
 
 (def seq-refresh-step-tabs-if-present ()
-  (do
-    (set-window-tabs-for "*sequencer*" (seq-main-step-tabs))
-    (for-each
-      (lambda (tab) (set-window-tabs-for (seq-step-tab-buffer tab) (seq-main-step-tabs)))
-      seq-registered-step-tabs)))
+  (let ((tabs (seq-main-step-tabs)))
+    (do
+      (if (> (len tabs) 1)
+        (do
+          (set-window-tabs-for "*sequencer*" tabs)
+          (for-each
+            (lambda (tab) (set-window-tabs-for (seq-step-tab-buffer tab) tabs))
+            seq-registered-step-tabs))
+        (clear-window-tabs-for "*sequencer*"))
+      (clear-window-tabs-for "*arrangement*"))))
 
 (def seq-register-step-sequencer-tab (label buffer)
   (do
@@ -184,10 +199,9 @@
     (if (= step-panel-buffer buffer) (set! step-panel-buffer "*sequencer*") nil)
     (if (= remembered-step-panel-buffer buffer) (set! remembered-step-panel-buffer "*sequencer*") nil)
     (set-window-buffer-for buffer "*sequencer*")
-    (seq-refresh-step-tabs-if-present)
-    (if (= (len seq-registered-step-tabs) 0)
-      (clear-window-tabs-for "*sequencer*")
-      false)))
+    ;; The static Seq tab remains, so a refresh selects the tabless layout
+    ;; automatically when the final custom sequencer is removed.
+    (seq-refresh-step-tabs-if-present)))
 
 (def seq-clear-project-script-tabs ()
   (let ((script-tabs (filter seq-script-step-tab? seq-registered-step-tabs)))
@@ -205,7 +219,9 @@
         (do
           (set! step-panel-buffer buffer)
           (set! remembered-step-panel-buffer buffer)
+          (set! seq-main-view :session)
           (set-window-buffer buffer)
+          (seq-refresh-current-layout)
           (seq-refresh-step-tabs-if-present)
           true))
       false)))
@@ -485,6 +501,11 @@
       0.48 (list :buf "*step*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 28)
       0.52 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :max-height 7 :min-height 7 :min-width 28 :max-width 28))))
 
+(def seq-main-panel-layout-spec ()
+  (if (seq-arrangement-view?)
+    (list :buf "*arrangement*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
+    (seq-step-and-track-panel-layout-spec)))
+
 (def seq-collapsible-panel-layout-spec (buffer on-collapse min-width max-width min-height max-height)
   (list :buf buffer
     :hide-status true
@@ -526,9 +547,9 @@
 (def seq-main-and-mixer-layout-spec ()
   (if mixer-panel-visible
     (list :rows :gap 1
-      0.55 (seq-step-and-track-panel-layout-spec)
+      0.55 (seq-main-panel-layout-spec)
       0.45 (seq-mixer-panel-layout-spec nil nil 14 14))
-    (seq-step-and-track-panel-layout-spec)))
+    (seq-main-panel-layout-spec)))
 
 (def seq-lower-panel-layout-spec (lower-buffer lower-ratio lower-min-height lower-max-height)
   (let ((main-layout
@@ -754,20 +775,35 @@
 (def seq-open-piano-roll-preferred ()
   (seq-open-piano-roll-bottom))
 
-(def seq-show-sequencer-main ()
-  (if (and (= (current-buffer-name) "*sequencer*")
-        (= seq-layout-mode :lower-panel)
-        (= step-panel-buffer "*sequencer*"))
-    nil
+(def seq-switch-main-view (view)
+  (let ((old-buffer (seq-visible-main-panel-buffer)))
     (do
-      (set! remembered-step-panel-buffer "*sequencer*")
-      (if (= step-panel-buffer "*piano-roll*")
-        nil
-        (set! step-panel-buffer "*sequencer*"))
-      (set-window-buffer "*sequencer*")
-      (if (= lower-panel-buffer "*piano-roll*")
-        (seq-apply-piano-roll-layout)
+      (set! seq-main-view view)
+      (if (= seq-layout-mode :lower-panel)
+        (do
+          (if (not (= old-buffer (seq-visible-main-panel-buffer)))
+            (set-window-buffer-for old-buffer (seq-visible-main-panel-buffer))
+            nil)
+          (seq-refresh-current-layout))
+        ;; An explicit view switch leaves the instrument patcher workspace and
+        ;; returns to the normal sequencer workspace.
         (seq-apply-fx-layout)))))
+
+(def seq-show-sequencer-main ()
+  (do
+    (set! remembered-step-panel-buffer "*sequencer*")
+    (set! step-panel-buffer "*sequencer*")
+    (seq-switch-main-view :session)))
+
+;; Arrangement is an app view, not a sequencer tile tab. It owns a wider main
+;; layout without the step and track context panes.
+(def seq-open-arrangement ()
+  (seq-switch-main-view :arrangement))
+
+(def seq-toggle-arrangement ()
+  (if (seq-arrangement-view?)
+    (seq-show-sequencer-main)
+    (seq-open-arrangement)))
 
 (def seq-toggle-current-track-expanded-main ()
   (do
@@ -837,7 +873,7 @@
     (instrument-toggle-mods-view)
     (seq-show-fx-lower-panel)))
 
-(bind-key "Tab" "seq-toggle-current-track-expanded-main")
+(bind-key "Tab" "seq-toggle-arrangement")
 (bind-key "BackTab" "seq-toggle-main-or-piano-roll")
 
 (def page-button-width 2.8)
@@ -1981,6 +2017,7 @@
 
 (load "@/ui/step-grid.lisp")
 (load "@/ui/sequencer.lisp")
+(load "@/ui/arrangement.lisp")
 (load "@/ui/effects/step-buffer.lisp")
 
 ; Startup layout is applied by Rust after this file loads. Keep this file free of

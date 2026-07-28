@@ -129,20 +129,28 @@ enum CaptureTrackKind {
     LayerRack,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct CaptureTrackSpec {
     kind: CaptureTrackKind,
     display_name: Option<String>,
     num_steps: Option<usize>,
+    /// `(step, transpose)` pairs authored via `:steps (0 (4 12) 8 ...)`;
+    /// applied to the live pattern and persisted into the scene's pattern
+    /// pool so pool-derived read surfaces (song lane previews) see them.
+    steps: Vec<(usize, f32)>,
     samples: Vec<String>,
     midi_fx: Vec<String>,
     audio_fx: Vec<String>,
     rack_slot_audio_fx: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct CaptureProjectSpec {
     tracks: Vec<CaptureTrackSpec>,
+    /// How many scenes the project should have. The headless capture project
+    /// starts with one; `(scenes N)` clones the first N-1 more so a fixture
+    /// can define a song that actually CHANGES scene.
+    scenes: usize,
 }
 
 struct ParsedCaptureScript {
@@ -227,13 +235,34 @@ fn parse_capture_project(expression: &Expression) -> Result<CaptureProjectSpec, 
         return Err("capture-project must be a list".to_string());
     };
     let mut tracks = Vec::new();
+    let mut scenes = 1usize;
     for (index, expression) in items.iter().skip(1).enumerate() {
+        if expression_name(expression_head_item(expression)) == Some("scenes") {
+            let Expression::List(items) = expression else {
+                unreachable!("head matched, so this is a list");
+            };
+            scenes = items
+                .get(1)
+                .and_then(expression_usize)
+                .filter(|count| *count >= 1)
+                .ok_or_else(|| "(scenes N) expects a positive integer".to_string())?;
+            continue;
+        }
         tracks.push(
             parse_capture_track(expression)
                 .map_err(|error| format!("capture-project track {}: {error}", index + 1))?,
         );
     }
-    Ok(CaptureProjectSpec { tracks })
+    Ok(CaptureProjectSpec { tracks, scenes })
+}
+
+/// The head item of a list expression, for dispatching `capture-project`
+/// entries that are not tracks.
+fn expression_head_item(expression: &Expression) -> Option<&Expression> {
+    match expression {
+        Expression::List(items) => items.first(),
+        _ => None,
+    }
 }
 
 fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, String> {
@@ -265,6 +294,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
 
     let mut display_name = None;
     let mut num_steps = None;
+    let mut steps = Vec::new();
     let mut samples = Vec::new();
     let mut midi_fx = Vec::new();
     let mut audio_fx = Vec::new();
@@ -293,6 +323,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
                 }
                 num_steps = Some(steps);
             }
+            "steps" => steps = parse_capture_steps(value)?,
             "samples" => samples = expression_string_list(value, ":samples")?,
             "midi-fx" => midi_fx = expression_string_list(value, ":midi-fx")?,
             "audio-fx" => audio_fx = expression_string_list(value, ":audio-fx")?,
@@ -323,11 +354,61 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
         kind,
         display_name,
         num_steps,
+        steps,
         samples,
         midi_fx,
         audio_fx,
         rack_slot_audio_fx,
     })
+}
+
+fn expression_step_index(expression: &Expression) -> Option<usize> {
+    match expression {
+        Expression::Number(value)
+            if value.is_finite() && *value >= 0.0 && value.fract() == 0.0 =>
+        {
+            let step = usize::try_from(*value as u64).ok()?;
+            (step < MAX_STEPS).then_some(step)
+        }
+        _ => None,
+    }
+}
+
+fn expression_f32(expression: &Expression) -> Option<f32> {
+    match expression {
+        Expression::Number(value) if value.is_finite() => Some(*value as f32),
+        _ => None,
+    }
+}
+
+/// `:steps` entries are either a bare step index or a `(step transpose)` pair.
+fn parse_capture_steps(value: &Expression) -> Result<Vec<(usize, f32)>, String> {
+    let items = match value {
+        Expression::List(items) | Expression::QuoteList(items) => items,
+        _ => {
+            return Err(
+                ":steps expects a list of step indices or (step transpose) pairs".to_string()
+            );
+        }
+    };
+    items
+        .iter()
+        .map(|item| {
+            if let Some(step) = expression_step_index(item) {
+                return Ok((step, 0.0));
+            }
+            if let Expression::List(pair) | Expression::QuoteList(pair) = item {
+                if let [step, transpose] = pair.as_slice() {
+                    if let (Some(step), Some(transpose)) =
+                        (expression_step_index(step), expression_f32(transpose))
+                    {
+                        return Ok((step, transpose));
+                    }
+                }
+            }
+            Err(":steps entries must be a step index or a (step transpose) pair".to_string())
+        })
+        .collect()
 }
 
 fn expression_name(expression: Option<&Expression>) -> Option<&str> {
@@ -387,6 +468,10 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
         if let Some(num_steps) = spec.num_steps {
             app.state.pattern.track_params[track].set_num_steps(num_steps);
         }
+        for &(step, transpose) in &spec.steps {
+            app.state.pattern.patterns[track].set_step_active(step, true);
+            app.state.pattern.step_data[track].set(step, StepParam::Transpose, transpose);
+        }
         for (sample_idx, sample) in spec.samples.iter().enumerate() {
             let result = match spec.kind {
                 CaptureTrackKind::DrumRack => {
@@ -444,6 +529,46 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
                 })?;
         }
     }
+    // :steps write the live pattern; persist them into the scene's pattern
+    // pool through the production scene-launch path (capture current
+    // snapshot, save, relaunch the same scene) so pool-derived read surfaces
+    // (song lane previews) observe them.
+    if project.tracks.iter().any(|spec| !spec.steps.is_empty()) {
+        let scene = app.state.current_scene_index();
+        app.state
+            .launch_scene(
+                scene,
+                app.tracks.len(),
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            )
+            .ok_or_else(|| {
+                format!("failed to persist :steps into scene {} pattern pool", scene + 1)
+            })?;
+    }
+    // Extra scenes, cloned from the first exactly as the "clone-pattern" host
+    // command does, so every scene has a full cell set for every track.
+    for _ in 1..project.scenes {
+        app.state.clone_pattern(
+            app.tracks.len(),
+            &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates,
+            &app.tracks,
+            &app.graph.track_instrument_types,
+        );
+    }
+    if project.scenes > 1 {
+        app.state.launch_scene(
+            0,
+            app.tracks.len(),
+            &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates,
+            &app.tracks,
+            &app.graph.track_instrument_types,
+        );
+    }
     Ok(())
 }
 
@@ -472,6 +597,14 @@ fn apply_capture_macro_host_commands(
         let HostCommand::Custom { name, payload } = command else {
             continue;
         };
+        // Song/arrangement editing primitives (def-song lowers to
+        // arrangement-replace) so arrangement fixtures can commit a song
+        // during capture setup.
+        if let Some(result) = crate::host_commands::apply_song_edit_command(&name, &payload, app) {
+            result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
+            applied = true;
+            continue;
+        }
         match handle_macro_host_command(&name, &payload, app, state, current_track) {
             MacroHostCommandOutcome::Applied => applied = true,
             MacroHostCommandOutcome::Ignored => {
@@ -614,6 +747,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
             "bus-effects",
             build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
         );
+        sync_song_state(runtime, &app, &mut SongFrameState::default(), true);
         runtime.run_reactive_cycle();
     }
     editor.refresh_runtime_side_effects();
@@ -623,6 +757,12 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| format!("capture-after-sync failed: {error:?}"))?;
     if apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)? {
         sync_macro_state(editor.runtime_mut(), &app);
+        sync_song_state(
+            editor.runtime_mut(),
+            &app,
+            &mut SongFrameState::default(),
+            true,
+        );
     }
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
@@ -682,6 +822,7 @@ mod tests {
                 kind: CaptureTrackKind::Sampler,
                 display_name: Some("Drums".to_string()),
                 num_steps: Some(8),
+                steps: vec![],
                 samples: vec![],
                 midi_fx: vec!["arp".to_string()],
                 audio_fx: vec!["filter".to_string()],

@@ -761,7 +761,11 @@ impl Editor {
         };
         let scrolled_col = local_col + self.widget_layout_scroll_left();
         let scrolled_row = local_row + self.total_scroll_top();
+        let offset =
+            event_scroll_offset_for(self.runtime.current_layout.as_deref(), node.widget_id);
+        crate::widget_render::scroll::set_current_event_scroll_offset(offset);
         self.widget_cursor = widget_render::cursor_for_node(&node, scrolled_col, scrolled_row);
+        crate::widget_render::scroll::set_current_event_scroll_offset(None);
     }
 
     pub(super) fn try_handle_widget_mouse_precise(
@@ -1808,7 +1812,12 @@ impl Editor {
         let scrolled_col = local_col + self.widget_layout_scroll_left();
         let scrolled_row = local_row + self.total_scroll_top();
         let gen_before = widget_render::widget_state_generation();
-        let Some(widget_event) = map_magnify_event(&node, scrolled_col, scrolled_row, delta) else {
+        let offset =
+            event_scroll_offset_for(self.runtime.current_layout.as_deref(), node.widget_id);
+        crate::widget_render::scroll::set_current_event_scroll_offset(offset);
+        let widget_event = map_magnify_event(&node, scrolled_col, scrolled_row, delta);
+        crate::widget_render::scroll::set_current_event_scroll_offset(None);
+        let Some(widget_event) = widget_event else {
             return;
         };
         let output = handle_event(&node, widget_event);
@@ -1850,9 +1859,13 @@ impl Editor {
         let scrolled_row = local_row + self.total_scroll_top();
 
         // Try the leaf widget first
-        if let Some(widget_event) =
-            map_scroll_gesture_event(&node, scrolled_col, scrolled_row, delta_x, delta_y)
-        {
+        let offset =
+            event_scroll_offset_for(self.runtime.current_layout.as_deref(), node.widget_id);
+        crate::widget_render::scroll::set_current_event_scroll_offset(offset);
+        let leaf_event =
+            map_scroll_gesture_event(&node, scrolled_col, scrolled_row, delta_x, delta_y);
+        crate::widget_render::scroll::set_current_event_scroll_offset(None);
+        if let Some(widget_event) = leaf_event {
             let gen_before = widget_render::widget_state_generation();
             let output = handle_event(&node, widget_event);
             if !self.apply_widget_output(output) {
@@ -1875,13 +1888,19 @@ impl Editor {
         // Leaf doesn't capture scroll — walk up to find a scroll container ancestor
         if let Some(layout) = self.runtime.current_layout.as_ref() {
             if let Some(scroll_node) = find_scroll_ancestor(layout, node.widget_id) {
-                if let Some(widget_event) = map_scroll_gesture_event(
+                // The container itself is not displaced by its own offset;
+                // only OUTER scroll ancestors (nested scrolls) apply.
+                let offset = event_scroll_offset_for(Some(layout), scroll_node.widget_id);
+                crate::widget_render::scroll::set_current_event_scroll_offset(offset);
+                let ancestor_event = map_scroll_gesture_event(
                     &scroll_node,
                     scrolled_col,
                     scrolled_row,
                     delta_x,
                     delta_y,
-                ) {
+                );
+                crate::widget_render::scroll::set_current_event_scroll_offset(None);
+                if let Some(widget_event) = ancestor_event {
                     let gen_before = widget_render::widget_state_generation();
                     let output = handle_event(&scroll_node, widget_event);
                     if !self.apply_widget_output(output) {
@@ -1905,6 +1924,23 @@ impl Editor {
 /// Walk the layout tree to find the nearest "scroll" ancestor of the widget with the given ID.
 fn find_scroll_ancestor(node: &LayoutNode, target_id: u64) -> Option<LayoutNode> {
     find_scroll_ancestor_impl(node, target_id, None)
+}
+
+/// The widget-scroll-container offset a pointer event targeting `widget_id`
+/// must be adjusted by (`scroll::set_current_event_scroll_offset`). Every
+/// widget event path that hands node-local coordinates to a widget inside a
+/// scrolled container needs this, or the widget's local row is off by the
+/// container offset — hover cursors, scroll/zoom gestures, and hit regions
+/// then miss for anything below the fold.
+fn event_scroll_offset_for(layout: Option<&LayoutNode>, widget_id: u64) -> Option<f32> {
+    layout
+        .and_then(|layout| find_scroll_ancestor(layout, widget_id))
+        .map(|scroll_node| {
+            crate::widget_render::scroll::get_scroll_state(
+                crate::widget_render::scroll::scroll_state_key(&scroll_node),
+            )
+            .offset_y
+        })
 }
 
 fn find_scroll_ancestor_impl(

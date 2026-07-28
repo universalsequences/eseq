@@ -22,10 +22,24 @@ pub struct PatternState {
     /// because several paths rebuild `ProjectScenes` wholesale from snapshots
     /// (`from_pattern_snapshots`) and would silently drop an embedded song.
     pub(super) song: Mutex<Option<ProjectSong>>,
+    /// The committed arrangement (docs/arrangement-lane-model-spec.md 6), or
+    /// `None` when the project has no arrangement. This is the *authored*
+    /// model; `song` above is its compiled playback form, kept in lockstep by
+    /// `set_committed_arrangement` (spec 7). Lives beside `song` for the same
+    /// reason: `ProjectScenes` is rebuilt wholesale from snapshots.
+    pub(super) arrangement: Mutex<Option<ProjectArrangement>>,
     /// Bumped on every committed-song replacement/edit so per-frame UI code
     /// can rebuild song-derived reactive values (`song-rows`) only when the
     /// song actually changed (docs/song-mode-spec.md 12).
     pub(super) song_revision: AtomicU64,
+    /// Bumped on every pool step/geometry write (the
+    /// `restore_pattern_*_no_publish` funnel every step edit, undo and redo
+    /// passes through). Per-frame UI code that projects POOL CONTENT — the
+    /// arrangement lane dots — keys its rebuild off this
+    /// (docs/realtime-arrangement-feedback-spec.md 5.2). Deliberately not
+    /// `pattern_epoch`: that epoch drives scene-launch-scale resyncs and a
+    /// per-note bump would stampede unrelated caches.
+    pub(super) pool_content_revision: AtomicU64,
     pub(super) current_pattern: AtomicU32,
     pub(super) num_patterns: AtomicU32,
     pub timebase_plocks: Vec<TimebasePLockData>,
@@ -108,7 +122,14 @@ impl RecordClockAnchor {
         self.sequence.fetch_add(1, Ordering::Release);
     }
 
-    pub fn sample(&self, timestamp: Instant) -> Option<(f64, Duration)> {
+    /// Sample the anchor at `timestamp`, returning the anchor beat and the
+    /// SIGNED elapsed seconds from the anchor to `timestamp`. The elapsed
+    /// term is negative when `timestamp` predates the newest anchor — the
+    /// normal case for note-on instants resolved at key RELEASE (the anchor
+    /// republishes every audio block, so a held note's press is always in
+    /// the anchor's past). Clamping that to zero would stamp the note at its
+    /// release instant instead of its press.
+    pub fn sample(&self, timestamp: Instant) -> Option<(f64, f64)> {
         for _ in 0..8 {
             let before = self.sequence.load(Ordering::Acquire);
             if before & 1 != 0 {
@@ -123,10 +144,9 @@ impl RecordClockAnchor {
                     return None;
                 }
                 let now_nanos = record_clock_nanos(timestamp);
-                return Some((
-                    beats,
-                    Duration::from_nanos(now_nanos.saturating_sub(anchor_nanos)),
-                ));
+                let elapsed_secs =
+                    (now_nanos as i128 - anchor_nanos as i128) as f64 / 1.0e9;
+                return Some((beats, elapsed_secs));
             }
         }
         None
@@ -251,6 +271,31 @@ pub struct SequencerState {
     /// Song playback command/notice channels plus render-rate position
     /// atomics (docs/song-mode-spec.md 10.2).
     pub(super) song_playback: SongPlaybackMailbox,
+    /// Manual-override latch bitmask (takes spec 10): while a bit is set,
+    /// the song's launch authority is suspended for that track — the
+    /// scheduler schedules the track from the LIVE session snapshot
+    /// (free-running) instead of the active song row, and the control-side
+    /// row mirror leaves the lane alone. Transient transport state; never
+    /// serialized. Bit `t` = track `t` (`MAX_TRACKS <= 64`).
+    pub(super) song_manual_latch: AtomicU64,
+    /// Which lanes the CURRENTLY MIRRORED song row resolves to a take chunk
+    /// (takes spec 11.2 UX). Written by the control-side row mirror; read by
+    /// `track_pattern_cells` so the mixer clip grid never marks a scene clip
+    /// "playing" while the lane is actually playing a take. Transient
+    /// transport state; never serialized. Bit `t` = track `t`.
+    pub(super) song_take_lane_mask: AtomicU64,
+    /// Tracks whose live device state is on loan to a sound binding (takes
+    /// spec 16.2): the mirror shows a take's or a track clip's frozen
+    /// devices instead of the effective scene pattern's. Any session
+    /// save-back (`capture_current_pattern_snapshot`) would otherwise write
+    /// the borrowed sound over the scene pattern, so capture releases these
+    /// lanes first. Transient; never serialized. Bit `t` = track `t`.
+    pub(super) sound_binding_borrowed: AtomicU64,
+    /// Per borrowed track, the pool pattern whose device state the live
+    /// mirror is showing. Device edits key off "is this pattern the live
+    /// mirror?" (`mirror_device_pattern_id`), which is the bound pattern
+    /// while a lane is borrowed and the effective scene pattern otherwise.
+    pub(super) sound_binding_patterns: Mutex<HashMap<usize, PatternId>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

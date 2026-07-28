@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use super::{CellBuffer, WidgetDefinition, get_f32_prop, resolve_named_color, styled_cell};
+use super::{
+    CellBuffer, WidgetDefinition, get_bool_prop, get_f32_prop, resolve_named_color, styled_cell,
+};
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
 use crate::vm::Value;
@@ -11,8 +13,18 @@ use super::{MetalPrimitive, MetalProportionalTextPrimitive, MetalRectPrimitive, 
 pub struct TransportClockWidget;
 pub static TRANSPORT_CLOCK_WIDGET: TransportClockWidget = TransportClockWidget;
 
-fn clock_parts(playhead: f32) -> (String, String, String) {
-    let step = playhead.max(0.0).floor() as u64;
+fn clock_sixteenth_position(props: &HashMap<String, Value>) -> f32 {
+    if get_bool_prop(props, "use-song-position", false) {
+        // Song position is expressed in quarter-note beats; the legacy
+        // session transport playhead is already an absolute sixteenth count.
+        get_f32_prop(props, "song-position-beats", 0.0) * 4.0
+    } else {
+        get_f32_prop(props, "playhead", 0.0)
+    }
+}
+
+fn clock_parts(sixteenth_position: f32) -> (String, String, String) {
+    let step = sixteenth_position.max(0.0).floor() as u64;
     let bar = step / 16 + 1;
     let beat = (step % 16) / 4 + 1;
     let sixteenth = step % 4 + 1;
@@ -33,7 +45,7 @@ impl WidgetDefinition for TransportClockWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["playhead"]
+        &["playhead", "song-position-beats"]
     }
 
     fn measure(
@@ -51,7 +63,7 @@ impl WidgetDefinition for TransportClockWidget {
     }
 
     fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
-        let (bar, beat, sixteenth) = clock_parts(get_f32_prop(props, "playhead", 0.0));
+        let (bar, beat, sixteenth) = clock_parts(clock_sixteenth_position(props));
         let text = format!("{bar} {beat} {sixteenth}");
         let fg = resolve_named_color(props, "color", theme::WIDGET_LABEL_FG());
         let row = rect.row.round() as u16;
@@ -71,7 +83,7 @@ impl WidgetDefinition for TransportClockWidget {
         node: &LayoutNode,
         _viewport: WidgetViewport,
     ) -> Vec<MetalPrimitive> {
-        let (bar, beat, sixteenth) = clock_parts(get_f32_prop(&node.props, "playhead", 0.0));
+        let (bar, beat, sixteenth) = clock_parts(clock_sixteenth_position(&node.props));
         let font_size = get_f32_prop(&node.props, "font-size", 15.0);
         let fg = resolve_named_color(&node.props, "color", theme::WIDGET_LABEL_FG());
         let bg = theme::BG();
@@ -104,5 +116,46 @@ impl WidgetDefinition for TransportClockWidget {
             ));
         }
         prims
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_clock_uses_elapsed_transport_sixteenths() {
+        let props = HashMap::from([
+            ("playhead".to_string(), Value::Number(222.0)),
+            ("song-position-beats".to_string(), Value::Number(512.0)),
+            ("use-song-position".to_string(), Value::Bool(false)),
+        ]);
+
+        assert_eq!(
+            clock_parts(clock_sixteenth_position(&props)),
+            (" 14".to_string(), "  4".to_string(), "  3".to_string())
+        );
+    }
+
+    #[test]
+    fn song_clock_uses_absolute_arrangement_beats() {
+        let props = HashMap::from([
+            ("playhead".to_string(), Value::Number(222.0)),
+            ("song-position-beats".to_string(), Value::Number(513.5)),
+            ("use-song-position".to_string(), Value::Bool(true)),
+        ]);
+
+        assert_eq!(
+            clock_parts(clock_sixteenth_position(&props)),
+            ("129".to_string(), "  2".to_string(), "  3".to_string())
+        );
+    }
+
+    #[test]
+    fn song_position_is_a_supported_reactive_binding() {
+        assert_eq!(
+            TRANSPORT_CLOCK_WIDGET.bindable_props(),
+            &["playhead", "song-position-beats"]
+        );
     }
 }

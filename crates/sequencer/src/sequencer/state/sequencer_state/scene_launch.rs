@@ -15,11 +15,62 @@ impl SequencerState {
     }
 
     pub fn track_pattern_cells(&self, track: usize) -> Vec<TrackPatternCellView> {
-        self.pattern
+        let mut cells = self
+            .pattern
             .scenes
             .lock()
             .unwrap()
-            .track_pattern_cells(track)
+            .track_pattern_cells(track);
+        // No grid clip is "playing" while the lane is silenced (an
+        // explicit-empty song row / deleted timeline clip) or while the
+        // mirrored song row is playing a take on it (takes spec 11.2) —
+        // the scene-cell fallback in `active_effective` would otherwise
+        // show the scene's clip as audible when it isn't.
+        let take_lane = track < 64 && self.song_take_lane_mask() >> track & 1 == 1;
+        if take_lane || self.is_scene_silenced(track) {
+            for cell in &mut cells {
+                cell.active_effective = false;
+            }
+        }
+        cells
+    }
+
+    /// Repaint the live grid from the current scene's cells, dropping
+    /// whatever song playback left there. Song rows own the live lanes while
+    /// they play — including silencing a lane the row resolves nothing for
+    /// (takes spec 6.1) — and that state is transport state, not the scene's:
+    /// leaving song playback with it still applied shows a scene whose clips
+    /// are visible but not launched.
+    ///
+    /// Unlike `launch_scene` this never saves the mirror back: the mirror
+    /// holds the song's row content, not this scene's, so capturing it would
+    /// write the arrangement over the scene's patterns.
+    pub fn resync_live_grid_to_current_scene(&self) {
+        // The mirror is about to be rewritten from the scene cells; a
+        // borrowed device lane would be silently clobbered (takes spec 16.2).
+        // The App rebinds on its next tick.
+        self.release_bound_device_state();
+        let scene_idx = self.current_scene_index();
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(launched) = scenes.launch_scene(scene_idx) else {
+            return;
+        };
+        for (track, data) in launched.into_iter().enumerate() {
+            match data {
+                Some(data) => {
+                    data.restore_to(self, track);
+                    self.set_scene_silenced(track, false);
+                }
+                None => {
+                    self.clear_live_track_note_content(track);
+                    self.set_scene_silenced(track, true);
+                }
+            }
+        }
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        drop(scenes);
+        self.schedule_mod_resync();
+        self.publish_scheduler_snapshot();
     }
 
     pub fn launch_scene(
@@ -42,6 +93,32 @@ impl SequencerState {
         .map(|result| result.sample_ids)
     }
 
+    /// `launch_scene` for the control-side mirror of a scheduler-applied
+    /// boundary launch: no pattern-epoch bump (the audio callback drops
+    /// in-flight scheduled events whose stamped epoch no longer matches, and
+    /// the scheduler already made the scene audible at the boundary from its
+    /// prebuilt snapshot — the same contract as `apply_song_row`).
+    pub fn launch_scene_mirror(
+        &self,
+        scene_idx: usize,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> Option<Vec<(i32, String, u32)>> {
+        self.launch_scene_profiled_with_epoch(
+            scene_idx,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+            false,
+        )
+        .map(|result| result.sample_ids)
+    }
+
     pub fn launch_scene_profiled(
         &self,
         scene_idx: usize,
@@ -50,6 +127,28 @@ impl SequencerState {
         sample_rates: &[u32],
         names: &[String],
         instrument_types: &[InstrumentType],
+    ) -> Option<PatternSwitchResult> {
+        self.launch_scene_profiled_with_epoch(
+            scene_idx,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_scene_profiled_with_epoch(
+        &self,
+        scene_idx: usize,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+        bump_pattern_epoch: bool,
     ) -> Option<PatternSwitchResult> {
         let total_started = Instant::now();
         let mut profile = PatternSwitchProfile::default();
@@ -88,6 +187,9 @@ impl SequencerState {
                     data.restore_to(self, track);
                     self.set_scene_silenced(track, false);
                 } else {
+                    // No pattern in this scene (bare/cleared cell): present
+                    // an empty step grid, not the previous scene's notes.
+                    self.clear_live_track_note_content(track);
                     self.set_scene_silenced(track, true);
                 }
             }
@@ -104,7 +206,9 @@ impl SequencerState {
             self.pattern
                 .num_patterns
                 .store(scenes.scene_count() as u32, Ordering::Relaxed);
-            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            if bump_pattern_epoch {
+                self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            }
             profile.update_pattern_atoms = started.elapsed();
 
             let metadata = scenes.current_scene_metadata();
@@ -205,6 +309,56 @@ impl SequencerState {
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> bool {
+        self.launch_scene_tracks_with_epoch(
+            scene,
+            tracks,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+            true,
+        )
+    }
+
+    /// `launch_scene_tracks` for the control-side mirror of a
+    /// scheduler-applied boundary launch — no pattern-epoch bump (see
+    /// `launch_scene_mirror`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_scene_tracks_mirror(
+        &self,
+        scene: usize,
+        tracks: &[usize],
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> bool {
+        self.launch_scene_tracks_with_epoch(
+            scene,
+            tracks,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_scene_tracks_with_epoch(
+        &self,
+        scene: usize,
+        tracks: &[usize],
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+        bump_pattern_epoch: bool,
+    ) -> bool {
         if tracks.is_empty() || tracks.iter().any(|track| *track >= num_tracks) {
             return false;
         }
@@ -247,9 +401,109 @@ impl SequencerState {
             data.restore_to(self, track);
             self.set_scene_silenced(track, false);
         }
-        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        if bump_pattern_epoch {
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        }
         self.publish_scheduler_snapshot();
         true
+    }
+
+    /// Prebuild the scheduler snapshot a quantized launch would make audible
+    /// (the per-row preflight pattern, docs/song-mode-spec.md 9, applied to
+    /// session launches): the target scene's cells resolved against the
+    /// pattern pools, materialized as one complete `Arc<SequencerSnapshot>`
+    /// outside the audio path. The scheduler swaps to it exactly at the
+    /// quantize boundary; the control-side mirror follows via the due drain.
+    ///
+    /// Read-only — nothing is launched, saved, or published here; the launch
+    /// may still be replaced or canceled before its boundary.
+    ///
+    /// For a `SceneTracks` target the snapshot still carries the full target
+    /// scene; the scheduler merges only the masked tracks over the live base
+    /// snapshot per chunk. Returns `None` when the target does not fully
+    /// resolve (missing scene, missing masked cell) — the caller falls back
+    /// to the legacy control-side apply, which surfaces the launch error.
+    pub fn preflight_pattern_launch_snapshot(
+        &self,
+        target: &crate::quantized_launch::PatternLaunchTarget,
+    ) -> Option<Arc<SequencerSnapshot>> {
+        use crate::quantized_launch::PatternLaunchTarget;
+        let (scene_idx, mask) = match target {
+            PatternLaunchTarget::Scene { scene } => (*scene, None),
+            PatternLaunchTarget::SceneTracks { scene, tracks } => (*scene, Some(tracks)),
+        };
+        let staged = {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let scene = scenes.scenes.get(scene_idx)?;
+            let track_count = scenes.track_pools.len();
+            let placeholder = PatternSnapshot::new_default(1, &[]).track_pattern_data(0)?;
+            let mut track_data = Vec::with_capacity(track_count);
+            let mut silenced = Vec::with_capacity(track_count);
+            for track in 0..track_count {
+                let cell = scene.cells.get(track).copied().flatten();
+                match cell {
+                    Some(id) => {
+                        let Some(data) = scenes
+                            .track_pools
+                            .get(track)
+                            .and_then(|pool| pool.get(id))
+                            .cloned()
+                        else {
+                            // A launched cell that doesn't resolve: bail so
+                            // the control-side apply reports the error.
+                            if mask.is_none_or(|tracks| tracks.contains(&track)) {
+                                return None;
+                            }
+                            track_data.push(placeholder.clone());
+                            silenced.push(true);
+                            continue;
+                        };
+                        track_data.push(data);
+                        silenced.push(false);
+                    }
+                    None => {
+                        // A track-mask launch requires every masked cell
+                        // (`MissingSceneCell` on the apply path).
+                        if mask.is_some_and(|tracks| tracks.contains(&track)) {
+                            return None;
+                        }
+                        track_data.push(placeholder.clone());
+                        silenced.push(true);
+                    }
+                }
+            }
+            (
+                track_data,
+                silenced,
+                scene.mod_connections.clone(),
+                scene.neural_networks.clone(),
+                scene.graph_overrides.clone(),
+                scene.project_process_chain.clone(),
+            )
+        };
+        let (track_data, silenced, mod_connections, neural_networks, graph_overrides, chain) =
+            staged;
+        let mut snapshot = SequencerSnapshot::capture_from_track_pattern_data(
+            self,
+            &track_data,
+            mod_connections,
+            neural_networks,
+            graph_overrides,
+            chain,
+        );
+        // Only ever scheduled while the transport is playing; stamp it so
+        // the deterministic clock treats it as playing regardless of the
+        // transport state at preflight time (mirrors song-row preflight).
+        snapshot.transport.playing = true;
+        snapshot.transport.current_pattern = scene_idx;
+        for (track, silenced) in silenced.iter().enumerate() {
+            if *silenced {
+                let mut track_snapshot = (*snapshot.tracks[track]).clone();
+                track_snapshot.scene_silenced = true;
+                snapshot.tracks[track] = Arc::new(track_snapshot);
+            }
+        }
+        Some(Arc::new(snapshot))
     }
 
     /// Apply one song row as a single operation (docs/song-mode-spec.md 9):
@@ -273,7 +527,7 @@ impl SequencerState {
     pub fn apply_song_row(
         &self,
         scene: usize,
-        overrides: &[(usize, PatternId)],
+        overrides: &[(usize, Option<PatternId>)],
         num_tracks: usize,
         buffer_ids: &[i32],
         sample_rates: &[u32],
@@ -281,6 +535,37 @@ impl SequencerState {
         instrument_types: &[InstrumentType],
         bump_pattern_epoch: bool,
     ) -> Result<Vec<(i32, String, u32)>, String> {
+        self.apply_song_row_latched(
+            scene,
+            overrides,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+            bump_pattern_epoch,
+            0,
+        )
+    }
+
+    /// `apply_song_row` with a manual-override latch mask (takes spec 10):
+    /// latched tracks keep their live state, their session override slot,
+    /// and their silencing untouched — the song's mirror leaves them to the
+    /// performer until Back to Song clears the latch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_song_row_latched(
+        &self,
+        scene: usize,
+        overrides: &[(usize, Option<PatternId>)],
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+        bump_pattern_epoch: bool,
+        latched_mask: u64,
+    ) -> Result<Vec<(i32, String, u32)>, String> {
+        let latched = |track: usize| track < 64 && latched_mask >> track & 1 == 1;
         if overrides.iter().any(|(track, _)| *track >= num_tracks) {
             return Err("Song row override targets a track that does not exist".to_string());
         }
@@ -291,28 +576,52 @@ impl SequencerState {
             names,
             instrument_types,
         );
-        let launched: Vec<(usize, Option<TrackPatternData>)> = {
+        let launched = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             if scene >= scenes.scene_count() {
                 return Err(format!("Song row references scene {} which does not exist", scene + 1));
             }
             // Resolve the complete row state before mutating anything so a
             // rejected row leaves scenes, overrides, and live state intact.
-            let mut resolved: Vec<(usize, Option<PatternId>, Option<TrackPatternData>)> =
+            let mut resolved: Vec<(usize, Option<PatternId>, Option<TrackPatternData>, bool)> =
                 Vec::with_capacity(num_tracks);
             for track in 0..num_tracks {
-                let override_id = overrides
+                if latched(track) {
+                    continue;
+                }
+                // `Some(None)` is an explicit-empty override: the track is
+                // silenced for the row and must NOT fall back to the scene
+                // cell. Only an absent override resolves through the scene.
+                let override_entry = overrides
                     .iter()
                     .find(|(over_track, _)| *over_track == track)
                     .map(|(_, id)| *id);
-                let effective = override_id.or_else(|| {
-                    scenes
+                // Take-claimed chunks never reach the session surface (takes
+                // spec 11.2): the scheduler plays the take from the runtime
+                // song's own row snapshots, so the mirror must NOT paint the
+                // chunk into the live grid or the session override slot —
+                // doing so leaks the take into the step sequencer, and the
+                // next row's save-back then writes take content over pool
+                // patterns (or mints one for a bare track). A take lane's
+                // session identity stays the scene cell.
+                let take_lane = matches!(
+                    override_entry,
+                    Some(Some(id)) if scenes
+                        .take_pools
+                        .get(track)
+                        .is_some_and(|takes| takes.is_claimed(id))
+                );
+                let override_entry = if take_lane { None } else { override_entry };
+                let override_id = override_entry.flatten();
+                let effective = match override_entry {
+                    Some(explicit) => explicit,
+                    None => scenes
                         .scenes
                         .get(scene)
                         .and_then(|scene| scene.cells.get(track))
                         .copied()
-                        .flatten()
-                });
+                        .flatten(),
+                };
                 let data = match effective {
                     Some(id) => Some(
                         scenes
@@ -331,42 +640,87 @@ impl SequencerState {
                     ),
                     None => None,
                 };
-                resolved.push((track, override_id, data));
+                resolved.push((track, override_id, data, take_lane));
             }
             let current_scene = self.current_scene_index();
             if !scenes.save_scene_snapshot(current_scene, current_snapshot) {
                 return Err("Could not save the outgoing session state".to_string());
             }
             scenes.current_scene = scene;
-            for slot in scenes.track_overrides.iter_mut() {
-                *slot = None;
+            for (track, slot) in scenes.track_overrides.iter_mut().enumerate() {
+                if !latched(track) {
+                    *slot = None;
+                }
             }
-            for (track, override_id, _) in &resolved {
+            for (track, override_id, _, _) in &resolved {
                 if override_id.is_some() {
                     if let Some(slot) = scenes.track_overrides.get_mut(*track) {
                         *slot = *override_id;
                     }
                 }
             }
-            resolved
+            let sample_ids: Vec<(i32, String, u32)> = (0..num_tracks)
+                .map(|track| {
+                    if latched(track) {
+                        // Latched lanes keep their current (performer's)
+                        // binding.
+                        scenes
+                            .effective_track_pattern(track)
+                            .map(|data| data.sample_id.clone())
+                            .unwrap_or((-1, String::new(), 44_100))
+                    } else {
+                        let entry = resolved.iter().find(|(t, _, _, _)| *t == track);
+                        match entry {
+                            Some((_, _, Some(data), _)) => data.sample_id.clone(),
+                            // A take lane with no scene cell keeps its
+                            // current binding — the lane is audibly playing
+                            // its take, not being silenced or rebound.
+                            Some((_, _, None, true)) => scenes
+                                .effective_track_pattern(track)
+                                .map(|data| data.sample_id.clone())
+                                .unwrap_or((-1, String::new(), 44_100)),
+                            _ => (-1, String::new(), 44_100),
+                        }
+                    }
+                })
+                .collect();
+            let launched: Vec<(usize, Option<TrackPatternData>, bool)> = resolved
                 .into_iter()
-                .map(|(track, _, data)| (track, data))
-                .collect()
+                .map(|(track, _, data, take_lane)| (track, data, take_lane))
+                .collect();
+            (launched, sample_ids)
         };
-        let sample_ids = launched
-            .iter()
-            .map(|(_, data)| {
-                data.as_ref()
-                    .map(|data| data.sample_id.clone())
-                    .unwrap_or((-1, String::new(), 44_100))
-            })
-            .collect();
-        for (track, data) in launched {
+        let (launched, sample_ids) = launched;
+        // Publish which lanes this row plays a take on (takes spec 11.2 UX):
+        // the clip grid suppresses its "playing" marker for them. Latched
+        // lanes are absent from `launched` and their bits were cleared when
+        // the latch was set — the performer's launch is what plays there.
+        let mut take_mask = 0u64;
+        for (track, _, take_lane) in &launched {
+            if *take_lane && *track < 64 {
+                take_mask |= 1u64 << *track;
+            }
+        }
+        self.set_song_take_lane_mask(take_mask);
+        for (track, data, take_lane) in launched {
             match data {
                 Some(data) => {
                     data.restore_to(self, track);
                     self.set_scene_silenced(track, false);
                 }
+                // A take lane whose scene cell is bare: the lane is audibly
+                // playing its take from the runtime song, so it is neither
+                // silenced nor repainted — the live grid keeps the track's
+                // session (bare/empty) state.
+                None if take_lane => self.set_scene_silenced(track, false),
+                // Silence WITHOUT blanking the live grid. This mirror saves
+                // the live snapshot into the current scene before applying
+                // each row, so a lane silenced by an explicit-empty override
+                // must keep its live content — blanking here would be saved
+                // back over the scene cell's real pattern on the next row
+                // application (destroying it). The session-mode launch path
+                // blanks empty lanes safely because its save happens before
+                // the blank and a bare cell is never written back.
                 None => self.set_scene_silenced(track, true),
             }
         }
@@ -804,6 +1158,11 @@ impl SequencerState {
             self.with_committed_song_mut(|song| {
                 if let Some(song) = song {
                     remap_song_after_scene_delete(song, cur);
+                }
+            });
+            self.with_committed_arrangement_mut(|arrangement| {
+                if let Some(arrangement) = arrangement {
+                    remap_arrangement_after_scene_delete(arrangement, cur);
                 }
             });
             let launched = scenes

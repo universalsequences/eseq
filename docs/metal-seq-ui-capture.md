@@ -45,6 +45,12 @@ production rack graph path. Drum-rack samples populate consecutive pads
 beginning at the first pad; layer-rack samples are added as broadcast layers.
 Sample paths are resolved relative to the capture script.
 
+`:steps` authors pattern content: a list whose entries are either a step index
+or a `(step transpose)` pair, e.g. `:steps (0 4 (8 12) 12)`. The steps are
+applied to the live pattern and then persisted into the scene's pattern pool
+through the production scene-launch path, so pool-derived read surfaces (such
+as the arrangement timeline's `song-lane-events` clip previews) observe them.
+
 From the repository root:
 
 ```sh

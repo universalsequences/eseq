@@ -3,10 +3,13 @@
     use crate::macro_engine::{MacroCurve, MacroKind, MacroMapping, MacroParamKey};
     use crate::process::ParamTarget;
     use crate::recorder::MasterRecorder;
-    use crate::sequencer::{default_empty_effect_chain, PatternSnapshot, SequencerState};
+    use crate::sequencer::{
+        default_empty_effect_chain, PatternSnapshot, ProjectArrangement, SceneEvent,
+        SequencerState,
+    };
     use crate::app::edit::{try_apply_command, EditOutcome};
     use crate::app::{AppCommand, AudioBuses};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Arc, Mutex};
 
     fn topology_test_slot(
@@ -153,6 +156,24 @@
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
         }
+    }
+
+    fn write_test_wav(path: &Path) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 44_100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).expect("create test WAV");
+        for frame in 0..256 {
+            let phase = frame as f32 / 256.0;
+            let sample = (phase * std::f32::consts::TAU).sin();
+            writer
+                .write_sample((sample * i16::MAX as f32) as i16)
+                .expect("write test WAV sample");
+        }
+        writer.finalize().expect("finalize test WAV");
     }
 
     impl TestLiveGraph {
@@ -571,7 +592,10 @@
             expected_modulator_node_id,
         );
         assert_eq!(slot.defaults.get(enabled_param), 1.0);
-        assert_eq!(sample_ids[track].0, app.graph.track_buffer_ids[track]);
+        // The other scene is bare for the new track (takes spec 11.1): its
+        // sample id is the -1 placeholder, which `apply_sample_ids` ignores,
+        // leaving the track's loaded sample bound.
+        assert_eq!(sample_ids[track].0, -1);
         assert!(matches!(
             try_apply_command(
                 &mut app,
@@ -583,6 +607,327 @@
             ),
             Ok(EditOutcome::Applied(_))
         ));
+        graph.process_block();
+    }
+
+    #[test]
+    fn sampler_tracks_added_to_committed_arrangement_extend_and_stamp_their_lanes() {
+        let graph = TestLiveGraph::new("sampler-track-arrangement-lane-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(0, &[]),
+                PatternSnapshot::new_default(0, &[]),
+            ],
+            0,
+        );
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add first sampler track");
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add second sampler track");
+
+        let mut arrangement = ProjectArrangement::new(2, 16.0);
+        arrangement.scene_lane = vec![
+            SceneEvent {
+                start_beat: 0.0,
+                scene: 0,
+            },
+            SceneEvent {
+                start_beat: 4.0,
+                scene: 1,
+            },
+            SceneEvent {
+                start_beat: 8.0,
+                scene: 0,
+            },
+        ];
+        app.state
+            .set_committed_arrangement(Some(arrangement))
+            .expect("install the two-track arrangement");
+
+        let added = app
+            .graph_controller()
+            .add_blank_sampler_track()
+            .expect("add third sampler track to the arrangement");
+        let added_again = app
+            .graph_controller()
+            .add_blank_sampler_track()
+            .expect("add fourth sampler track to the arrangement");
+        assert_eq!(added, 2);
+        assert_eq!(added_again, 3);
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        assert_eq!(arrangement.track_lanes.len(), 4);
+        for track in [added, added_again] {
+            assert_eq!(
+                arrangement.track_lanes[track]
+                    .iter()
+                    .map(|clip| (clip.start_beat, clip.end_beat))
+                    .collect::<Vec<_>>(),
+                vec![(0.0, 4.0), (8.0, 16.0)]
+            );
+        }
+        assert!(
+            app.state.committed_song().is_some(),
+            "track registration recompiles the arrangement"
+        );
+        graph.process_block();
+    }
+
+    #[test]
+    fn loading_arranged_project_over_another_clears_old_arrangement_before_tracks() {
+        let graph = TestLiveGraph::new("arranged-project-reload-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_modulator_track()
+            .expect("add first source-project track");
+        app.graph_controller()
+            .add_modulator_track()
+            .expect("add second source-project track");
+        app.state
+            .set_committed_arrangement(Some(ProjectArrangement::new(2, 16.0)))
+            .expect("install source-project arrangement");
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos();
+        let project_name = format!(
+            "__test-arranged-project-reload-{}-{nonce}",
+            std::process::id()
+        );
+        let captured = app
+            .capture_project(&project_name)
+            .expect("arranged target project should capture");
+        let project_path = crate::project::save_project(&project_name, &captured)
+            .expect("arranged target project should save");
+        let _cleanup = TestProjectFile(project_path);
+
+        app.queue_project_load_named(&project_name)
+            .expect("arranged target project should queue");
+        for _ in 0..3 {
+            app.advance_pending_project_load()
+                .expect("target tracks should rebuild after clearing the old arrangement");
+        }
+
+        assert_eq!(app.tracks.len(), 2);
+        assert!(app.state.committed_arrangement().is_none());
+        assert!(app.state.committed_song().is_none());
+        assert!(
+            app.has_pending_project_load(),
+            "the target arrangement is installed later, during finalization"
+        );
+        app.editor.pending_project_load = None;
+        graph.process_block();
+    }
+
+    #[test]
+    fn project_load_reuses_one_sample_buffer_across_tracks_patterns_and_take_chunks() {
+        let graph = TestLiveGraph::new("project-sample-pool-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos();
+        let sample_path = std::env::temp_dir().join(format!(
+            "eseq-project-sample-pool-{}-{nonce}.wav",
+            std::process::id()
+        ));
+        write_test_wav(&sample_path);
+        let _sample_cleanup = TestProjectFile(sample_path.clone());
+
+        app.graph_controller()
+            .add_track(&sample_path)
+            .expect("add first source-project sampler track");
+        app.graph_controller()
+            .add_track(&sample_path)
+            .expect("add second source-project sampler track");
+
+        let project_name = format!(
+            "__test-project-sample-pool-{}-{nonce}",
+            std::process::id()
+        );
+        let mut project = app
+            .capture_project(&project_name)
+            .expect("sample-pool project should capture");
+        project.patterns.push(project.patterns[0].clone());
+        let mut take_chunk = project.patterns[0].clone();
+        take_chunk.sample_paths[1] = None;
+        take_chunk.sample_names[1].clear();
+        project.take_pools = vec![
+            crate::project::ProjectTrackTakePool {
+                takes: vec![crate::project::ProjectTake {
+                    id: 0,
+                    name: "Take 1".to_string(),
+                    total_len_steps: 64,
+                    chunks: vec![take_chunk],
+                }],
+                next_take_id: 1,
+            },
+            crate::project::ProjectTrackTakePool::default(),
+        ];
+        let project_path = crate::project::save_project(&project_name, &project)
+            .expect("sample-pool project should save");
+        let _project_cleanup = TestProjectFile(project_path);
+
+        app.queue_project_load_named(&project_name)
+            .expect("sample-pool project should queue");
+        for _ in 0..64 {
+            if app
+                .editor
+                .pending_project_load
+                .as_ref()
+                .is_some_and(|pending| pending.built_patterns.len() == 2)
+            {
+                break;
+            }
+            app.advance_pending_project_load()
+                .expect("sample-pool project should build its patterns");
+        }
+        let pending = app
+            .editor
+            .pending_project_load
+            .as_ref()
+            .expect("project should remain pending before finalization");
+        assert_eq!(
+            pending.sample_assets.len(),
+            1,
+            "all track and pattern references should share one loaded asset"
+        );
+        let shared_buffer_id = app.graph.track_buffer_ids[0];
+        assert_eq!(app.graph.track_buffer_ids[1], shared_buffer_id);
+        let snapshots = pending.built_patterns.clone();
+        assert_eq!(snapshots.len(), 2);
+        for snapshot in &snapshots {
+            assert_eq!(snapshot.sample_ids[0].0, shared_buffer_id);
+            assert_eq!(snapshot.sample_ids[1].0, shared_buffer_id);
+        }
+
+        let take_chunk = pending.project.take_pools[0].takes[0].chunks[0].clone();
+        let mut sample_assets = {
+            let pending = app
+                .editor
+                .pending_project_load
+                .as_mut()
+                .expect("project should remain pending for take conversion");
+            std::mem::take(&mut pending.sample_assets)
+        };
+        let (take_snapshot, _, fallback_count) = app
+            .project_pattern_into_snapshot(take_chunk, &mut sample_assets)
+            .expect("take chunk should reuse the pending project asset pool");
+        assert_eq!(fallback_count, 0);
+        assert_eq!(sample_assets.len(), 1);
+        assert_eq!(take_snapshot.sample_ids[0].0, shared_buffer_id);
+        assert_eq!(
+            take_snapshot.sample_ids[1].0, -1,
+            "an empty non-owning take lane should remain unbound"
+        );
+        assert!(
+            app.sample_buffer_path_registry
+                .values()
+                .all(|path| path == &sample_path),
+            "an empty non-owning take lane must not load an arbitrary fallback WAV"
+        );
+        app.editor.pending_project_load = None;
+        graph.process_block();
+    }
+
+    #[test]
+    fn pattern_with_a_moved_sample_loads_unbound_instead_of_aborting_the_project() {
+        let graph = TestLiveGraph::new("project-missing-sample-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos();
+        let sample_path = std::env::temp_dir().join(format!(
+            "eseq-project-missing-sample-{}-{nonce}.wav",
+            std::process::id()
+        ));
+        write_test_wav(&sample_path);
+        let _sample_cleanup = TestProjectFile(sample_path.clone());
+        app.graph_controller()
+            .add_track(&sample_path)
+            .expect("add sampler track");
+
+        let project = app
+            .capture_project("__test-project-missing-sample")
+            .expect("project should capture");
+        let mut pattern = project.patterns[0].clone();
+        // The saved reference points at an asset the user has since moved:
+        // neither the path nor the name resolves anywhere.
+        pattern.sample_paths[0] = Some(
+            std::env::temp_dir()
+                .join(format!("eseq-moved-away-{nonce}.wav"))
+                .to_string_lossy()
+                .into_owned(),
+        );
+        pattern.sample_names[0] = format!("eseq-moved-away-{nonce}");
+
+        let mut sample_assets = std::collections::HashMap::new();
+        let (snapshot, _, fallback_count) = app
+            .project_pattern_into_snapshot(pattern, &mut sample_assets)
+            .expect("a moved sample must not abort the load");
+        assert_eq!(
+            snapshot.sample_ids[0].0, -1,
+            "the unresolvable lane should be left unbound"
+        );
+        assert_eq!(
+            fallback_count, 1,
+            "the unresolvable lane should be reported as a fallback sample"
+        );
+        graph.process_block();
+    }
+
+    #[test]
+    fn new_project_clears_in_flight_take_recording_and_transport_mode() {
+        let graph = TestLiveGraph::new("new-project-capture-reset-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_modulator_track()
+            .expect("add source-project track");
+        app.song_transport_mode = crate::app::song_transport::SongTransportMode::ArrangementCapture;
+        app.take_recording = Some(crate::app::take_recording::TakeRecordingSession::new(
+            0.0,
+            app.tracks.len(),
+        ));
+
+        app.start_new_project();
+
+        assert!(
+            app.take_recording.is_none(),
+            "an in-flight take recording must not survive a project reset"
+        );
+        assert!(app.song_capture_take.is_none());
+        assert!(app.active_runtime_song.is_none());
+        assert_eq!(app.active_song_start_beat, None);
+        assert_eq!(app.song_mirrored_row, None);
+        assert_eq!(
+            app.song_transport_mode,
+            crate::app::song_transport::SongTransportMode::Stopped
+        );
+        graph.process_block();
+    }
+
+    #[test]
+    fn new_project_clears_arrangement_state_before_removing_tracks() {
+        let graph = TestLiveGraph::new("new-project-arrangement-reset-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_modulator_track()
+            .expect("add source-project track");
+        app.state
+            .set_committed_arrangement(Some(ProjectArrangement::new(1, 16.0)))
+            .expect("install source-project arrangement");
+        app.use_arrangement = true;
+
+        app.start_new_project();
+
+        assert!(app.tracks.is_empty());
+        assert!(app.state.committed_arrangement().is_none());
+        assert!(app.state.committed_song().is_none());
+        assert!(!app.use_arrangement);
         graph.process_block();
     }
 

@@ -9,6 +9,7 @@
     clippy::useless_format
 )]
 
+mod arrangement_actions;
 mod browser;
 mod capture;
 mod constants;
@@ -242,6 +243,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         keyboard_tx: keyboard_tx.clone(),
         accumulator_names: accumulator_names.clone(),
         piano_roll_clipboard: piano_roll_clipboard.clone(),
+        arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
         selected_drum_lane_steps: selected_drum_lane_steps.clone(),
     };
 

@@ -199,9 +199,36 @@ so piano-roll's current usage is byte-for-byte unaffected:
 ```lisp
 (dict :id ... :lane 0 :start 16 :end 32 :label "Verse" :color ...
   :kind :midi                          ; new — :midi | :audio | :scene
-  :content (dict :dots (list (dict :offset 0.25 :value 0.6) ...)))
-                                       ; new — :dots or :peaks payload
+  :content (dict :dots (list (dict :offset 0.25 :value 0.6) ...)
+             :cycle 0.25
+             :phase 0.5))             ; new — :dots or :peaks payload;
+                                       ; optional :cycle = fraction of the
+                                       ; item one repetition covers (>0);
+                                       ; optional :phase = source position
+                                       ; at the item start (0..1)
 ```
+
+A pattern clip declares `:cycle = pattern-length / span` and
+`:phase = offset-steps / pattern-steps`. `:cycle` may be below 1 (the pattern
+repeats) or above 1 (the clip shows only part of one pattern); `:phase`
+anchors that source window at the clip's left edge. The widget therefore
+keeps notes aligned through either-edge resizes instead of restarting or
+stretching the preview. It draws a separator at each visible cycle boundary;
+boundaries and dots are skipped below a few px of per-cycle width. The widget
+still knows nothing about steps or timebases — the host computes both
+ratios. Malformed `:cycle`/`:phase` values degrade to 1/0.
+
+Timeline item labels are styled by the optional widget props
+`:item-label-font-size` (points, default `10.5`) and `:item-label-color`
+(named or RGBA color, default `:black`). Both accept reactive bindings.
+Every label is hard-clipped to the visible item title bar (or item body when
+the title bar is disabled), so a long label cannot paint outside a short
+clip.
+
+The optional `:background-color` widget prop sets the lane background in
+both Metal and terminal rendering and accepts the same named/RGBA colors and
+reactive bindings. When absent, the timeline preserves its legacy lane
+defaults; the arrangement host passes its theme's `:buffer-bg`.
 
 parsed into:
 
@@ -336,16 +363,28 @@ The song primitives are atomic, validated, one-undo-entry operations
 
 ### 9.2 Row granularity: where each gesture lives
 
-A song row is a complete state, so V1 editing is row-granular and lives on
-the **scene lane**. A drag there moves a boundary for every track at once,
-which is exactly what the model expresses. Track lanes in V1 are read-only
-previews of the lane projection; a gesture started on a track-lane clip
-either does nothing (V1 default) or is forwarded to the governing row's
-scene-lane equivalent with the full column highlighted during the drag so
-the cross-track effect is visible. Per-track clip editing (changing one
-lane's pattern without touching others) is expressible later via
-`song-row-set-state` with per-track overrides — `LaneClip.from_override`
-already carries the render hint — but it is out of V1 scope (§3).
+A song row is a complete state, so row-granular editing lives on the
+**scene lane**: a drag there moves a boundary for every track at once,
+which is exactly what the model expresses.
+
+Track lanes additionally support **per-track clip editing** over the merged
+lane projection (adjacent same-pattern spans render as one clip — the
+merge is a view concern; the clip's stable gesture identity is its first
+row's id):
+
+- **Select** a clip; selection is exclusive between the scene lane and
+  track lanes so Backspace is never ambiguous.
+- **Backspace** silences the clip's whole span.
+- **End-edge drag** resizes it: shrinking silences the released tail
+  (shrinking to the clip start deletes it), growing paints the clip's own
+  pattern over what follows.
+
+Every track-clip gesture lowers to exactly ONE `song-track-paint`
+(song-mode-spec 5.6): the primitive owns the row surgery (split + restore
+row + per-row override rewrite + normalize) as one atomic, one-undo-entry
+mutation. Live drags remain ghost-only per §9.1. Silenced regions come
+from explicit-empty overrides (`pattern_id: nil`), which never fall back
+to the scene cell. Whole-clip *moves* on track lanes are not lowered yet.
 
 ### 9.3 Song end is a free gesture
 
@@ -400,3 +439,52 @@ them, §5.6 accepts them); snap is a gesture default, not a model constraint.
 - Peak-cache generation on asset load.
 - `Peaks` rendering wired to real audio clips once audio tracks exist
   (`song-mode-spec.md` §16 lists audio tracks/clips as a future extension).
+
+## 11. Deferred work (agreed, not yet built)
+
+Decisions made during the track-clip editing rounds (2026-07), in rough
+priority order. None require stored-model changes; each is its own slice.
+
+1. **Per-clip phase anchoring** — patterns are transport-phase-locked
+   (`pos_in_cycle = total_beats % cycle`, scheduler clock), so a clip
+   placed at a non-multiple of its pattern length enters mid-pattern.
+   Agreed fix: a preflight-DERIVED per-track anchor — phase zero is the
+   beat where the track's resolved pattern last changed (walk rows,
+   carry the anchor; unchanged pattern inherits it, which preserves the
+   verified seamless row-split property). Clock becomes
+   `(total_beats - anchor).rem_euclid(cycle)`. Scheduler-path slice with
+   the mandated regression suite; care around sync-to-grid steps and the
+   accumulator `cycle` counter.
+2. **Whole-clip move on track lanes** — `:move-items-absolute` /
+   `:finish-move-items` on track lanes are deliberately not lowered
+   (§9.2). A moved clip should restart from its beginning, which is
+   exactly what phase anchoring provides, so build the two together
+   (lowering: silence the old span + paint the new one, or a dedicated
+   compound primitive if two undo entries feel wrong).
+3. **Editing during song playback** — primitives are locked while
+   `SongPlayback`/`ArrangementCapture` are active (single launch
+   authority; the scheduler plays prebuilt row snapshots). Rejections
+   are now VISIBLE via `SEQ.song-edit-error` + the arrangement banner.
+   Making edits audible mid-playback needs prepared-swap machinery:
+   diff the committed song against the active `RuntimeSong`, rebuild
+   affected row snapshots off the audio thread, hand over atomically
+   (see the live-set prepared-swap design). Deliberately deferred until
+   the stopped-transport interactions are settled.
+4. **Clip copy/paste at the per-track cursor** — the cursor already
+   carries (time, track) for this; paste = `song-track-paint` of the
+   copied clip's pattern over [cursor, cursor + span).
+5. **The rest of the UI follows the arrangement during playback** —
+   synth/device panels, the scene launch buttons, mixer faders, and the
+   mixer clip-grid selection currently do not update at all as song
+   playback moves through rows; they keep showing whatever was live at
+   transport start. The control-side mirror already applies each audible
+   row (`apply_song_row_control` on `RowApplied` notices: track state
+   restore, sampler rebinds, current-scene store), so the gap is the UI
+   layer re-reading that state: reactive republish/invalidation on row
+   transitions WITHOUT a pattern-epoch bump (the epoch stays untouched
+   during playback so in-flight scheduled events are not dropped —
+   spec 9's `bump_pattern_epoch: false` mirror contract).
+6. **Polish backlog** — label eliding on narrow spans (labels are already
+   hard-clipped to their clip bounds); an Ableton-style drop-hover insertion
+   preview line while dragging a scene pill; scene-lane vertical scroll
+   pass-through to the sibling track scroll container.

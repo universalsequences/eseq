@@ -347,7 +347,7 @@ impl GraphController<'_> {
             idx,
             CustomInstrumentRunMode::Instrument,
             None,
-        );
+        )?;
         self.app
             .state
             .set_rack_track_for_all_pattern_snapshots(idx, rack_track);

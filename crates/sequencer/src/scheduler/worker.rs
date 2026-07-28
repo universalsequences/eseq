@@ -69,7 +69,11 @@ pub fn spawn_scheduler_thread(
                 // row snapshots immediately.
                 for command in state.song_playback().drain_commands() {
                     match command {
-                        crate::sequencer::SongPlaybackCommand::Start { song, start_beat } => {
+                        crate::sequencer::SongPlaybackCommand::Start {
+                            song,
+                            start_beat,
+                            open_ended,
+                        } => {
                             let samples_per_quarter =
                                 sample_rate as f64 * 60.0 / snapshot.transport.bpm.max(1) as f64;
                             match crate::sequencer::SongPlaybackRuntime::new(
@@ -77,7 +81,8 @@ pub fn spawn_scheduler_thread(
                                 start_beat,
                                 samples_per_quarter,
                             ) {
-                                Ok(runtime) => {
+                                Ok(mut runtime) => {
+                                    runtime.set_open_ended(open_ended);
                                     lookahead_state.song = Some(runtime);
                                     queue.clear();
                                     lookahead_state.clock.reset();
@@ -98,6 +103,21 @@ pub fn spawn_scheduler_thread(
                                         },
                                     );
                                 }
+                            }
+                        }
+                        // Edit-through (takes spec 16.7): rows the playhead
+                        // has not reached pick up the edit; the queue and
+                        // clock are untouched, so nothing already scheduled
+                        // is disturbed.
+                        crate::sequencer::SongPlaybackCommand::Refresh { song } => {
+                            if let Some(runtime) = lookahead_state.song.as_mut() {
+                                runtime.replace_song_in_place(song);
+                            }
+                        }
+                        crate::sequencer::SongPlaybackCommand::Rebuild { song } => {
+                            let clock_beats = lookahead_state.clock.total_beats;
+                            if let Some(runtime) = lookahead_state.song.as_mut() {
+                                runtime.rebuild_song(song, clock_beats);
                             }
                         }
                         crate::sequencer::SongPlaybackCommand::Stop => {
@@ -298,7 +318,12 @@ pub fn spawn_scheduler_thread(
                 state.quantized_launches().process_scheduler(
                     &mut lookahead_state.quantized_launches,
                     rendered_total_beats,
+                    // Boundary-launch deadlines quantize against the
+                    // scheduling frontier so the chunk split always lands on
+                    // a not-yet-scheduled boundary.
+                    lookahead_state.clock.total_beats,
                     playing,
+                    song_playback_active,
                 );
                 if !playing {
                     let live_active = schedule_live_midi_fx(
@@ -407,6 +432,19 @@ pub fn spawn_scheduler_thread(
                     }
                 }
 
+                // A published pattern change is observed exactly once, before
+                // the resync chain below and independently of which branch it
+                // takes: a boundary launch the scheduler already applied is
+                // adopted here (its mirror must not trigger a resync), and any
+                // other switch voids the pending adoptions. The scheduler
+                // cannot key this off the mailbox ack — the control thread
+                // publishes the mirrored snapshot before it acks, and the ack
+                // is drained above, a whole iteration before this comparison.
+                let pattern_adopted = last_pattern != pattern
+                    && lookahead_state
+                        .quantized_launches
+                        .observe_pattern_switch(pattern);
+
                 if !last_playing {
                     queue.clear();
                     lookahead_state.clock.reset();
@@ -447,9 +485,16 @@ pub fn spawn_scheduler_thread(
                         .process_runtime
                         .reset_transport(lookahead_state.clock.total_beats);
                     state.set_neural_visualization(lookahead_state.neural_runtime.visualization_snapshot());
-                } else if !song_playback_active && last_pattern != pattern {
+                } else if !song_playback_active && last_pattern != pattern && !pattern_adopted {
                     // Pattern switches should replace future scheduled content without
                     // disturbing the current musical phase.
+                    //
+                    // A pattern index matching an installed boundary launch is
+                    // excluded above: the scheduler already switched audibly
+                    // at the boundary via the chunk split and this publish is
+                    // the control-side mirror — resyncing here would clear
+                    // the queue and mark the boundary step as already played
+                    // (the skipped-first-trigger bug).
                     let previous_scheduled_until = scheduled_until_sample;
                     queue.clear();
                     lookahead_state.midi_fx_quantizer_state.reset();

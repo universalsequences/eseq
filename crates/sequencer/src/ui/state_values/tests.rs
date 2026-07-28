@@ -675,6 +675,7 @@
             "ui/agent.lisp",
             "ui/step-grid.lisp",
             "ui/sequencer.lisp",
+            "ui/arrangement.lisp",
             "ui/main.lisp",
         ] {
             let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
@@ -1853,6 +1854,7 @@
             vec![
                 ("num-tracks", Value::Number(0.0)),
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
                 ("track-instrument-types", test_list(vec![])),
                 ("sidebar-kind", Value::String("sampler".to_string())),
                 ("sidebar-track-index", Value::Number(0.0)),
@@ -4701,6 +4703,28 @@
             .expect("parse ui/sequencer.lisp");
     }
 
+    /// One `SEQ.scene-spans` entry (lane spec 12): a scene EVENT plus its
+    /// derived end. The span's identity — and every scene gesture's id — is
+    /// its start beat.
+    fn scene_span(start: f64, end: f64, scene: f64) -> Value {
+        map_value([
+            ("start-beat", Value::Number(start)),
+            ("end-beat", Value::Number(end)),
+            ("scene", Value::Number(scene)),
+        ])
+    }
+
+    /// One `SEQ.song-lanes` entry (lane spec 12): a STORED clip, addressed
+    /// by its real `clip-id`.
+    fn lane_clip(clip_id: f64, start: f64, end: f64, pattern: Value) -> Value {
+        map_value([
+            ("clip-id", Value::Number(clip_id)),
+            ("start-beat", Value::Number(start)),
+            ("end-beat", Value::Number(end)),
+            ("pattern-id", pattern),
+        ])
+    }
+
     fn test_list(values: Vec<Value>) -> Value {
         Value::List(
             values
@@ -5341,6 +5365,7 @@
             "SEQ",
             vec![
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
                 ("macros", test_list(vec![])),
                 ("track-plocks", test_list(vec![])),
                 ("track-plock-variants", test_list(vec![])),
@@ -5403,6 +5428,7 @@
             "SEQ",
             vec![
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
                 ("macros", test_list(vec![])),
                 ("track-plocks", test_list(vec![])),
                 ("track-plock-variants", test_list(vec![])),
@@ -12701,6 +12727,28 @@
             .register_native("seq-toggle-master-recording", |_args, _ctx| {
                 Ok(Value::Bool(true))
             });
+        // Sound binding (takes spec 16): the arrangement lanes and device
+        // panel call these on selection and propagation gestures; the layout
+        // tests only need them to exist.
+        for name in [
+            "seq-song-select-clip",
+            "seq-song-deselect-clip",
+            // Region selection (region spec 4.1).
+            "seq-song-set-region",
+            "seq-song-clear-region",
+            // Region clipboard + edit-cursor mirror (region spec 5.1-5.3).
+            "seq-song-set-arr-cursor",
+            "seq-song-region-copy",
+            "seq-song-region-paste",
+            "seq-song-region-delete",
+            "seq-song-region-duplicate",
+            "seq-sound-push-to-pattern",
+            "seq-sound-apply-to-all-takes",
+        ] {
+            editor
+                .runtime_mut()
+                .register_native(name, |_args, _ctx| Ok(Value::Bool(true)));
+        }
     }
 
     fn full_grid_editor_for_scroll_tests() -> eseqlisp::Editor {
@@ -12754,6 +12802,8 @@
                     ])]),
                 ),
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
+                ("song-region", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_bool_list(&[false])),
                 ("track-mutes", test_bool_list(&[false])),
@@ -12970,12 +13020,16 @@
                 ("song-current-row", Value::Number(-1.0)),
                 ("song-current-row-id", Value::Number(-1.0)),
                 ("song-row-count", Value::Number(0.0)),
+                ("song-cursor-beats", Value::Number(0.0)),
                 ("song-position-beats", Value::Number(0.0)),
                 ("song-end-beat", Value::Number(0.0)),
                 ("song-loop-enabled", Value::Bool(false)),
                 ("song-capture-failed", Value::Bool(false)),
                 ("song-capture-error", Value::Nil),
-                ("song-rows", Value::List(vec![])),
+                ("song-lanes", Value::List(vec![])),
+                ("scene-spans", Value::List(vec![])),
+                ("song-lane-events", Value::List(vec![])),
+                ("scene-names", Value::List(vec![])),
                 ("sampler-playhead", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
                 ("master-peak-r", Value::Number(0.0)),
@@ -13922,6 +13976,8 @@
                 ),
                 ("num-tracks", Value::Number(track_count as f64)),
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
+                ("song-region", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_repeated_bool_list(false, track_count)),
                 ("track-mutes", test_repeated_bool_list(false, track_count)),
@@ -16176,6 +16232,106 @@
     }
 
     #[test]
+    fn metal_seq_transport_view_buttons_switch_to_wide_arrangement_layout() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let transport_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*transport*")
+            .expect("transport buffer should exist")
+            .id;
+        editor.set_active_buffer(transport_id);
+        editor.set_layout_viewport(200, 8);
+
+        let session_layout = editor.widget_layout().expect("session transport layout");
+        let session_button =
+            find_layout_node_by_stable_key(&session_layout, "transport-session-view-button")
+                .expect("session view button");
+        let arrangement_button =
+            find_layout_node_by_stable_key(&session_layout, "transport-arrangement-view-button")
+                .expect("arrangement view button");
+        assert_finite_nonzero_rect(session_button, "transport-session-view-button");
+        assert_finite_nonzero_rect(arrangement_button, "transport-arrangement-view-button");
+        assert!(
+            session_button.rect.col < arrangement_button.rect.col,
+            "session must precede arrangement at the transport's right edge"
+        );
+        assert!(
+            session_layout.rect.col + session_layout.rect.width
+                - (arrangement_button.rect.col + arrangement_button.rect.width)
+                < 1.0,
+            "arrangement button should be pinned to the transport's right edge: root={:?}, button={:?}",
+            session_layout.rect,
+            arrangement_button.rect
+        );
+        assert_eq!(layout_prop_number(session_button, "active"), Some(1.0));
+        assert_eq!(layout_prop_number(arrangement_button, "active"), Some(0.0));
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-open-arrangement)")
+            .expect("switch to arrangement");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("seq-main-view").unwrap(),
+            Some(Value::Keyword("arrangement".to_string()))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*sequencer*".to_string())),
+            "arrangement mode should be independent from session tab selection"
+        );
+        let arrangement_tiles = collect_tile_buffer_names(&editor);
+        assert!(
+            arrangement_tiles.contains(&"*arrangement*".to_string()),
+            "arrangement view should own the main panel: {arrangement_tiles:?}"
+        );
+        for hidden in ["*sequencer*", "*step*", "*track*"] {
+            assert!(
+                !arrangement_tiles.contains(&hidden.to_string()),
+                "wide arrangement layout should hide {hidden}: {arrangement_tiles:?}"
+            );
+        }
+        assert!(
+            tile_tabs_for_buffer(&editor, "*arrangement*").is_empty(),
+            "arrangement must not render as a tabbed sequencer tile"
+        );
+
+        let arrangement_transport_layout =
+            editor.widget_layout().expect("arrangement transport layout");
+        let session_button = find_layout_node_by_stable_key(
+            &arrangement_transport_layout,
+            "transport-session-view-button",
+        )
+        .expect("session view button after switch");
+        let arrangement_button = find_layout_node_by_stable_key(
+            &arrangement_transport_layout,
+            "transport-arrangement-view-button",
+        )
+        .expect("arrangement view button after switch");
+        assert_eq!(layout_prop_number(session_button, "active"), Some(0.0));
+        assert_eq!(layout_prop_number(arrangement_button, "active"), Some(1.0));
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-show-sequencer-main)")
+            .expect("return to session");
+        editor.refresh_runtime_side_effects();
+        let session_tiles = collect_tile_buffer_names(&editor);
+        for visible in ["*sequencer*", "*step*", "*track*"] {
+            assert!(
+                session_tiles.contains(&visible.to_string()),
+                "session layout should restore {visible}: {session_tiles:?}"
+            );
+        }
+        assert!(
+            !session_tiles.contains(&"*arrangement*".to_string()),
+            "session layout should remove the arrangement tile: {session_tiles:?}"
+        );
+    }
+
+    #[test]
     fn metal_seq_track_panel_lays_out_timebase_and_mute_group_dropdowns() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.refresh_runtime_side_effects();
@@ -18005,7 +18161,9 @@
         );
         assert_eq!(
             editor.active_leaf().selected_tab,
-            Some(1),
+            // Static tabs are Seq (0) and Arr (1); the registered fake tab
+            // appends after them.
+            Some(2),
             "the visible selected tab should remain the clicked step tab"
         );
     }
@@ -19216,13 +19374,16 @@
     }
 
     #[test]
-    fn metal_seq_transport_playhead_is_render_bound() {
+    fn metal_seq_transport_clock_positions_are_render_bound() {
         let mut editor = full_grid_editor_for_scroll_tests();
         let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
 
         editor
             .runtime_mut()
             .set_reactive("SEQ", "transport-playhead", Value::Number(12.0));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "song-position-beats", Value::Number(513.5));
         editor.runtime_mut().run_reactive_cycle();
 
         assert!(
@@ -19230,7 +19391,84 @@
                 .runtime_mut()
                 .take_pending_buffer_widget_trees()
                 .is_empty(),
-            "bound transport playhead updates must not enqueue transport widget tree rebuilds"
+            "bound session and song clock updates must not enqueue transport tree rebuilds"
+        );
+    }
+
+    #[test]
+    fn metal_seq_transport_clock_selects_absolute_position_in_song_mode() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "transport-playhead", Value::Number(222.0));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "song-position-beats", Value::Number(513.5));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "song-mode",
+            Value::String("song-playback".to_string()),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*transport*")"#)
+            .expect("switch to transport buffer");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("transport layout");
+        let clock = find_layout_node_by_widget_type(&layout, "transport-clock")
+            .expect("transport clock");
+        assert_eq!(layout_prop_number(clock, "playhead"), Some(222.0));
+        assert_eq!(
+            layout_prop_number(clock, "song-position-beats"),
+            Some(513.5)
+        );
+        assert_eq!(
+            layout_prop_bool(clock, "use-song-position"),
+            Some(true),
+            "song playback must display the absolute arrangement position"
+        );
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "song-mode",
+            Value::String("session".to_string()),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("updated transport layout");
+        let clock = find_layout_node_by_widget_type(&layout, "transport-clock")
+            .expect("updated transport clock");
+        assert_eq!(
+            layout_prop_bool(clock, "use-song-position"),
+            Some(false),
+            "session playback must retain the elapsed pattern clock"
+        );
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "use-arrangement", Value::Bool(true));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "song-cursor-beats", Value::Number(512.0));
+        editor
+            .runtime_mut()
+            .eval_str("(set! arrangement-cursor-time 512)")
+            .expect("park stopped arrangement cursor at bar 129");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("stopped song transport layout");
+        let clock = find_layout_node_by_widget_type(&layout, "transport-clock")
+            .expect("stopped song transport clock");
+        assert_eq!(
+            layout_prop_number(clock, "song-position-beats"),
+            Some(512.0)
+        );
+        assert_eq!(
+            layout_prop_bool(clock, "use-song-position"),
+            Some(true),
+            "stopped SONG mode must display the parked arrangement cursor"
         );
     }
 
@@ -19412,78 +19650,6 @@
         );
     }
 
-    /// Song status readout (docs/song-mode-spec.md 7.5/11): SESSION by
-    /// default; SONG plus current-row/row-count during song playback; a
-    /// dedicated ARR REC indicator during arrangement capture.
-    #[test]
-    fn metal_seq_transport_song_status_shows_session_song_and_arr_rec_states() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .eval_str(r#"(set-window-buffer "*transport*")"#)
-            .expect("switch to transport buffer");
-        editor.refresh_runtime_side_effects();
-
-        let layout = editor.widget_layout().expect("transport layout");
-        let status = find_layout_node_by_debug_name(&layout, "transport-song-status")
-            .expect("song status container");
-        assert_finite_nonzero_rect(status, "transport-song-status");
-        let mode_label = find_layout_node_by_debug_name(&layout, "transport-song-mode-label")
-            .expect("song mode label");
-        assert_finite_nonzero_rect(mode_label, "transport-song-mode-label");
-        assert!(
-            matches!(mode_label.props.get("text"), Some(Value::String(text)) if text == "SESSION")
-        );
-        assert!(
-            find_layout_node_by_debug_name(&layout, "transport-song-row-indicator").is_none(),
-            "no row indicator outside song playback"
-        );
-
-        // Song playback: SONG plus current row / total rows.
-        let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "song-mode", Value::String("song-playback".to_string()));
-        rt.set_reactive("SEQ", "song-current-row", Value::Number(1.0));
-        rt.set_reactive("SEQ", "song-row-count", Value::Number(3.0));
-        rt.run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        let layout = editor.widget_layout().expect("transport layout");
-        let mode_label = find_layout_node_by_debug_name(&layout, "transport-song-mode-label")
-            .expect("song mode label");
-        assert!(
-            matches!(mode_label.props.get("text"), Some(Value::String(text)) if text == "SONG")
-        );
-        let row_indicator =
-            find_layout_node_by_debug_name(&layout, "transport-song-row-indicator")
-                .expect("current row indicator during song playback");
-        assert_finite_nonzero_rect(row_indicator, "transport-song-row-indicator");
-        assert!(
-            matches!(row_indicator.props.get("text"), Some(Value::String(text)) if text == "2/3"),
-            "row indicator must show ordinal+1 / count: {:?}",
-            row_indicator.props.get("text")
-        );
-
-        // Arrangement capture: ARR REC is its own clearly visible state
-        // (spec 7.5), not the generic record icon.
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "song-mode",
-            Value::String("arrangement-capture".to_string()),
-        );
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        let layout = editor.widget_layout().expect("transport layout");
-        let arr_rec = find_layout_node_by_debug_name(&layout, "transport-arr-rec-indicator")
-            .expect("ARR REC indicator during arrangement capture");
-        assert_finite_nonzero_rect(arr_rec, "transport-arr-rec-indicator");
-        assert!(
-            matches!(arr_rec.props.get("text"), Some(Value::String(text)) if text == "ARR REC")
-        );
-        assert!(
-            find_layout_node_by_debug_name(&layout, "transport-song-mode-label").is_none(),
-            "the plain mode label is replaced by ARR REC during capture"
-        );
-    }
-
     /// The transport Play controls route through the song transport state
     /// machine: `seq-toggle-play` emits the `song-transport-toggle-play`
     /// custom host command instead of toggling the transport atomic, and the
@@ -19525,10 +19691,80 @@
         }
     }
 
+    #[test]
+    fn metal_seq_transport_stop_resets_arrangement_start_and_has_no_rewind() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        crate::natives::register_song_natives(editor.runtime_mut());
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(do (set! arrangement-cursor-time 20) \
+                 (set! arrangement-cursor-track 2) \
+                 (set-window-buffer \"*transport*\"))",
+            )
+            .expect("park arrangement cursor and open transport");
+        editor.refresh_runtime_side_effects();
+        let _ = editor.drain_host_commands();
+
+        let layout = editor.widget_layout().expect("transport layout");
+        assert!(
+            find_layout_node_by_widget_type(&layout, "rw-icon").is_none(),
+            "the transport must not render a rewind control"
+        );
+        let stop = find_layout_node_by_stable_key(&layout, "transport-stop-button")
+            .expect("stop button");
+        assert_finite_nonzero_rect(stop, "transport-stop-button");
+        let callback = stop
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("stop callback");
+        editor
+            .runtime_mut()
+            .invoke(
+                callback,
+                vec![Value::Number(0.0), Value::Number(0.0), Value::Bool(false)],
+            )
+            .expect("click stop while already stopped");
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("arrangement-cursor-time")
+                .expect("cursor time evaluates"),
+            Some(Value::Number(0.0))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("arrangement-cursor-track")
+                .expect("cursor track evaluates"),
+            Some(Value::Number(-1.0))
+        );
+        let commands = editor.drain_host_commands();
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            eseqlisp::host::HostCommand::Custom { name, payload }
+                if name == "song-set-arr-cursor"
+                    && matches!(
+                        payload,
+                        Value::Map(map)
+                            if matches!(
+                                map.get("time").map(|value| value.borrow().clone()),
+                                Some(Value::Number(time)) if time == 0.0
+                            )
+                            && matches!(
+                                map.get("track").map(|value| value.borrow().clone()),
+                                Some(Value::Number(track)) if track == -1.0
+                            )
+                    )
+        )));
+    }
+
     /// Reactive-bindings smoke test (docs/song-mode-spec.md 12) at the
     /// `sync_song_state` seam the event loop calls each frame: after entering
-    /// song playback the mode binding reads "song-playback", `song-rows` is
-    /// rebuilt only when the committed-song revision changes, and stop
+    /// song playback the mode binding reads "song-playback", the derived
+    /// lane surfaces rebuild when the committed revision changes, and stop
     /// returns the bindings to "session". The exact `song-current-row`
     /// display value needs the scheduler's position atomics, which stay
     /// inactive in this headless test, so it must read -1 here.
@@ -19574,8 +19810,9 @@
             overrides: Vec::new(),
         };
         test_app
-            .song_replace(vec![row(0.0, 0), row(4.0, 1), row(8.0, 2)], 16.0, true)
+            .arr_replace_rows(vec![row(0.0, 0), row(4.0, 1), row(8.0, 2)], 16.0, true)
             .expect("song committed");
+        test_app.set_arrangement_cursor(12.0, -1);
 
         let mut frame = SongFrameState::default();
         assert!(
@@ -19594,16 +19831,20 @@
         assert_eq!(read(&mut editor, "SEQ.song-mode"), Value::String("session".into()));
         assert_eq!(read(&mut editor, "SEQ.use-arrangement"), Value::Bool(false));
         assert_eq!(read(&mut editor, "SEQ.song-row-count"), Value::Number(3.0));
+        assert_eq!(
+            read(&mut editor, "SEQ.song-cursor-beats"),
+            Value::Number(12.0)
+        );
         assert_eq!(read(&mut editor, "SEQ.song-end-beat"), Value::Number(16.0));
         assert_eq!(read(&mut editor, "SEQ.song-loop-enabled"), Value::Bool(true));
         assert_eq!(read(&mut editor, "SEQ.song-current-row"), Value::Number(-1.0));
         assert_eq!(read(&mut editor, "SEQ.song-capture-failed"), Value::Bool(false));
-        let Value::List(rows) = read(&mut editor, "SEQ.song-rows") else {
-            panic!("song-rows must be a list");
+        let Value::List(spans) = read(&mut editor, "SEQ.scene-spans") else {
+            panic!("scene-spans must be a list");
         };
-        assert_eq!(rows.len(), 3, "song-rows carries one entry per row");
+        assert_eq!(spans.len(), 3, "one span per scene event");
 
-        // No change: no publish, and song-rows is not rebuilt (revision key).
+        // No change: no publish, and nothing is rebuilt (revision key).
         assert!(
             !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
             "an unchanged frame publishes nothing"
@@ -19643,15 +19884,3551 @@
         assert_eq!(read(&mut editor, "SEQ.song-capture-failed"), Value::Bool(false));
         assert_eq!(read(&mut editor, "SEQ.song-capture-error"), Value::Nil);
 
-        // Clearing the song flips song-exists and empties song-rows.
-        test_app.song_clear().expect("clear succeeds");
+        // Clearing the song flips song-exists and empties the lane surfaces.
+        test_app.arr_clear().expect("clear succeeds");
         assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(read(&mut editor, "SEQ.song-exists"), Value::Bool(false));
-        let Value::List(rows) = read(&mut editor, "SEQ.song-rows") else {
-            panic!("song-rows must be a list");
+        let Value::List(spans) = read(&mut editor, "SEQ.scene-spans") else {
+            panic!("scene-spans must be a list");
         };
-        assert!(rows.is_empty());
+        assert!(spans.is_empty());
+        let Value::List(lanes) = read(&mut editor, "SEQ.song-lanes") else {
+            panic!("song-lanes must be a list");
+        };
+        assert!(lanes.is_empty());
+    }
+
+    /// Note edit-through, visible half
+    /// (docs/realtime-arrangement-feedback-spec.md 5.2): a step edit moves
+    /// `pool_content_revision` and the lane dots rebuild off it — with no
+    /// committed-song revision change and no `pattern_epoch` bump (the
+    /// mirror invariant). An edit to a pattern no lane resolves still opens
+    /// the gate, and the existing value-diff is what suppresses the publish.
+    #[test]
+    fn metal_seq_song_lane_events_refresh_on_a_pool_content_edit() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        let state = sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut test_app = sequencer::app::App::new(
+            std::sync::Arc::new(state),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        test_app.tracks = vec!["Track 1".to_string()];
+        test_app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        // The song plays scene 0 only, so the lanes reference exactly one
+        // pool pattern: scene 1's is edited later as the "no lane resolves"
+        // case.
+        test_app
+            .arr_replace_rows(
+                vec![sequencer::app::song_edit::SongRowSpec {
+                    start_beat: 0.0,
+                    scene: 0,
+                    overrides: Vec::new(),
+                }],
+                8.0,
+                false,
+            )
+            .expect("song committed");
+
+        let mut frame = SongFrameState::default();
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("binding read evaluates")
+                .expect("binding read returns a value")
+        };
+        let before = read(&mut editor, "SEQ.song-lane-events");
+        let Value::List(entries) = &before else {
+            panic!("song-lane-events must be a list");
+        };
+        assert!(
+            !entries.is_empty(),
+            "the fixture's lane must reference a pool pattern, or this test is vacuous"
+        );
+
+        let song_revision = test_app.state.committed_song_revision();
+        let pool_revision = test_app.state.pool_content_revision();
+        let pattern_epoch = test_app
+            .state
+            .transport
+            .pattern_epoch
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        sequencer::app::edit::try_apply_command(
+            &mut test_app,
+            sequencer::app::AppCommand::ToggleStep { track: 0, step: 3 },
+        )
+        .expect("step edit applies");
+
+        assert!(
+            test_app.state.pool_content_revision() > pool_revision,
+            "the step commit moves pool content"
+        );
+        assert_eq!(
+            test_app.state.committed_song_revision(),
+            song_revision,
+            "a note edit is not a song edit"
+        );
+        assert_eq!(
+            test_app
+                .state
+                .transport
+                .pattern_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            pattern_epoch,
+            "step commits must never bump the pattern epoch (song_transport invariant)"
+        );
+
+        assert!(
+            sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            "the dots rebuild off the pool-content revision alone"
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        let after = read(&mut editor, "SEQ.song-lane-events");
+        assert_ne!(after, before, "the edited note reaches the timeline");
+
+        // An edit to a pattern no lane resolves: scene 1's pattern. The gate
+        // opens (pool content moved), the value-diff keeps it off the wire.
+        test_app.state.launch_scene(
+            1,
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[sequencer::sequencer::InstrumentType::Sampler],
+        );
+        // The launch bumps the pattern epoch, so the gate opens and the dots
+        // are recollected — identically, so nothing is published.
+        sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true);
+        editor.runtime_mut().run_reactive_cycle();
+        let unrelated_before = read(&mut editor, "SEQ.song-lane-events");
+        assert_eq!(unrelated_before, after, "a scene launch changes no dots here");
+
+        let pool_revision = test_app.state.pool_content_revision();
+        sequencer::app::edit::try_apply_command(
+            &mut test_app,
+            sequencer::app::AppCommand::ToggleStep { track: 0, step: 5 },
+        )
+        .expect("step edit applies");
+        assert!(
+            test_app.state.pool_content_revision() > pool_revision,
+            "the gate opens even for a pattern no lane resolves"
+        );
+        sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true);
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "SEQ.song-lane-events"),
+            unrelated_before,
+            "no lane resolves the edited pattern, so nothing is republished"
+        );
+    }
+
+    /// Build a one-track app with a committed one-row song, ready to enter
+    /// arrangement capture (the fixture the two `song-pending` tests share).
+    fn pending_capture_test_app() -> sequencer::app::App {
+        let state = sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut test_app = sequencer::app::App::new(
+            std::sync::Arc::new(state),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        test_app.tracks = vec!["Track 1".to_string()];
+        test_app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        test_app
+            .arr_replace_rows(
+                vec![sequencer::app::song_edit::SongRowSpec {
+                    start_beat: 0.0,
+                    scene: 0,
+                    overrides: Vec::new(),
+                }],
+                32.0,
+                false,
+            )
+            .expect("song committed");
+        test_app.set_use_arrangement(true).expect("toggle while stopped");
+        test_app
+    }
+
+    /// Anchor the record clock at song beat zero and return the instant a
+    /// given beat falls on. The monotonic test clock cannot represent the
+    /// past, so presses are addressed as FUTURE instants from the anchor
+    /// (120 BPM: one beat = 0.5 s), exactly as `take_recording`'s own tests
+    /// do.
+    fn anchor_record_clock(app: &sequencer::app::App) -> std::time::Instant {
+        let now = std::time::Instant::now();
+        app.state.transport.record_clock.publish(0.0, now);
+        let anchor = now
+            .checked_add(std::time::Duration::from_millis(1))
+            .expect("anchor instant");
+        app.state.transport.record_clock.publish(0.0, anchor);
+        anchor
+    }
+
+    fn press_at_beats(anchor: std::time::Instant, beats: f64) -> std::time::Instant {
+        anchor
+            .checked_add(std::time::Duration::from_secs_f64(beats * 0.5))
+            .expect("press instant")
+    }
+
+    /// Provisional recording feedback, publish side
+    /// (docs/realtime-arrangement-feedback-spec.md 3.2/3.3): `SEQ.song-pending`
+    /// exists only while a capture take does. It appears on capture start,
+    /// gains a lane at punch-in, does NOT republish on a frame that recorded
+    /// nothing (the revision gate), and returns to nil on all three exit
+    /// paths — Stop, Cancel and a FAILED stop alike.
+    #[test]
+    fn metal_seq_song_pending_publishes_while_capturing_and_clears_on_every_exit() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mut test_app = pending_capture_test_app();
+        let mut frame = SongFrameState::default();
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("binding read evaluates")
+                .expect("binding read returns a value")
+        };
+
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "SEQ.song-pending"),
+            Value::Nil,
+            "nothing is published while no capture runs"
+        );
+
+        // ── Stop ──────────────────────────────────────────────────────────
+        test_app.song_transport_play(true).expect("capture starts");
+        assert!(test_app.pending_capture_active());
+        assert!(
+            sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            "entering capture publishes the surface"
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(len (get SEQ.song-pending :lanes))"),
+            Value::Number(0.0),
+            "no lane until a track punches in"
+        );
+
+        let anchor = anchor_record_clock(&test_app);
+        let revision = test_app.pending_revision;
+        let song_revision = test_app.state.committed_song_revision();
+        assert!(test_app.take_record_note(0, press_at_beats(anchor, 4.0), 60.0, 4.0));
+        assert!(
+            test_app.pending_revision > revision,
+            "a recorded note is one of the two pending-content writers"
+        );
+        assert_eq!(
+            test_app.state.committed_song_revision(),
+            song_revision,
+            "and it rides its OWN counter: nothing is committed yet"
+        );
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(len (get SEQ.song-pending :lanes))"),
+            Value::Number(1.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (get SEQ.song-pending :lanes) 0) :track)"),
+            Value::Number(0.0)
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(get (nth (get SEQ.song-pending :lanes) 0) :start-beat)"
+            ),
+            Value::Number(4.0),
+            "the span starts at the punch-in beat"
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(len (get (nth (get SEQ.song-pending :lanes) 0) :events))"
+            ),
+            Value::Number(1.0),
+            "the recorded note is drawable content"
+        );
+
+        // The revision gate: a frame with no new note and no new head
+        // quantum republishes nothing. Asserted at the `song-pending` seam
+        // itself — `sync_song_state` still reports dirty every frame during
+        // capture, because the render-rate playhead is moving.
+        assert!(
+            !sync_song_pending(editor.runtime_mut(), &test_app, &mut frame),
+            "a frame that recorded nothing must not republish the dots"
+        );
+
+        test_app.song_transport_stop().expect("stop commits");
+        assert!(!test_app.pending_capture_active());
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "SEQ.song-pending"),
+            Value::Nil,
+            "Stop replaces the provisional items with the committed clips"
+        );
+        assert!(
+            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            "and it stays cleared without republishing"
+        );
+
+        // ── Cancel ────────────────────────────────────────────────────────
+        test_app.song_transport_play(true).expect("capture restarts");
+        let anchor = anchor_record_clock(&test_app);
+        assert!(test_app.take_record_note(0, press_at_beats(anchor, 2.0), 60.0, 2.0));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_ne!(read(&mut editor, "SEQ.song-pending"), Value::Nil);
+        test_app.song_capture_cancel().expect("cancel succeeds");
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "SEQ.song-pending"),
+            Value::Nil,
+            "Cancel makes the provisional items vanish"
+        );
+
+        // ── Failure ───────────────────────────────────────────────────────
+        // A lost notice fails the stop-commit (spec 10.3): the take is
+        // discarded, so the surface must clear on this path too.
+        test_app.song_transport_play(true).expect("capture restarts");
+        let anchor = anchor_record_clock(&test_app);
+        assert!(test_app.take_record_note(0, press_at_beats(anchor, 2.0), 60.0, 2.0));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_ne!(read(&mut editor, "SEQ.song-pending"), Value::Nil);
+        for _ in 0..300 {
+            test_app.state.song_playback().push_notice(
+                sequencer::sequencer::SongPlaybackNotice::Ended {
+                    end_beat: 0.0,
+                    end_sample: 0,
+                },
+            );
+        }
+        let failure = test_app.song_transport_stop();
+        assert!(
+            test_app.song_capture_failed,
+            "the flooded notice channel must fail the commit, got {failure:?}"
+        );
+        assert!(!test_app.pending_capture_active());
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "SEQ.song-pending"),
+            Value::Nil,
+            "a FAILED capture clears the surface too"
+        );
+    }
+
+    /// Capturing over an EMPTY song is spliced from beat ZERO (the
+    /// `(None, _)` arm of the stop-commit), so the state capture STARTED in
+    /// really does become arrangement content from bar 1 — and the
+    /// provisional surface has to say so. Showing nothing until the first
+    /// scene change made a recording look like it began wherever the
+    /// performer first touched a launch button. The reverse case matters
+    /// just as much: with a committed song the splice starts at the first
+    /// launch, so seeding a beat-zero item would paint over an arrangement
+    /// the commit never touches.
+    #[test]
+    fn metal_seq_song_pending_seeds_beat_zero_only_for_a_whole_song_capture() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mut frame = SongFrameState::default();
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("binding read evaluates")
+                .expect("binding read returns a value")
+        };
+
+        // No committed song: the performer is the sole launch authority.
+        let mut empty = pending_capture_test_app();
+        empty.arr_clear().expect("clear the song");
+        empty.song_transport_play(true).expect("capture starts");
+        assert!(sync_song_state(editor.runtime_mut(), &empty, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(len (get SEQ.song-pending :scene-events))"),
+            Value::Number(1.0),
+            "the initial scene is drawn before any launch is performed"
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(get (nth (get SEQ.song-pending :scene-events) 0) :start-beat)"
+            ),
+            Value::Number(0.0)
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(get (nth (get SEQ.song-pending :track-events) 0) :start-beat)"
+            ),
+            Value::Number(0.0),
+            "...along with the clip it puts on the lane"
+        );
+        empty.song_capture_cancel().expect("cancel succeeds");
+
+        // With a committed song the splice starts at the first launch, so
+        // nothing is seeded at beat zero.
+        let mut over_song = pending_capture_test_app();
+        let mut frame = SongFrameState::default();
+        over_song.song_transport_play(true).expect("capture starts");
+        assert!(sync_song_state(
+            editor.runtime_mut(),
+            &over_song,
+            &mut frame,
+            true
+        ));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(len (get SEQ.song-pending :scene-events))"),
+            Value::Number(0.0),
+            "capture ON TOP of a song leaves the pre-existing arrangement to \
+             draw itself until the performer launches something"
+        );
+        assert_eq!(
+            read(&mut editor, "(len (get SEQ.song-pending :track-events))"),
+            Value::Number(0.0)
+        );
+    }
+
+    /// Capture round trip (spec 6 item 1): what the provisional item drew is
+    /// what the commit produced — the lane's provisional span equals the
+    /// committed take clip's span after Stop. Feedback that lied about where
+    /// the recording landed would be worse than no feedback.
+    #[test]
+    fn metal_seq_song_pending_span_matches_the_committed_clip_after_stop() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mut test_app = pending_capture_test_app();
+        let mut frame = SongFrameState::default();
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("binding read evaluates")
+                .expect("binding read returns a value")
+        };
+
+        test_app.song_transport_play(true).expect("capture starts");
+        let anchor = anchor_record_clock(&test_app);
+        // Punch in at beat 4, last note at beat 6 running 4 steps (1 beat).
+        assert!(test_app.take_record_note(0, press_at_beats(anchor, 4.0), 60.0, 4.0));
+        assert!(test_app.take_record_note(0, press_at_beats(anchor, 6.0), 64.0, 4.0));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        let lane = "(nth (get SEQ.song-pending :lanes) 0)";
+        let provisional_start = read(&mut editor, &format!("(get {lane} :start-beat)"));
+        let provisional_end = read(&mut editor, &format!("(get {lane} :end-beat)"));
+        assert_eq!(provisional_start, Value::Number(4.0));
+        assert_eq!(
+            provisional_end,
+            Value::Number(7.0),
+            "punch-in 4 + 12 steps of 0.25 beats"
+        );
+
+        test_app.song_transport_stop().expect("stop commits");
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        // The take clip is spliced INTO the scene clip that covered the lane,
+        // so the lane now holds [0,4), the take, and the remainder.
+        let takes = "(filter (lambda (clip) (not (= (get clip :take-id) nil))) \
+                      (nth SEQ.song-lanes 0))";
+        assert_eq!(
+            read(&mut editor, &format!("(len {takes})")),
+            Value::Number(1.0),
+            "the capture committed exactly one take clip"
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {takes} 0) :start-beat)")),
+            provisional_start,
+            "the committed clip starts where the provisional item did"
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {takes} 0) :end-beat)")),
+            provisional_end,
+            "...and ends where it did"
+        );
+    }
+
+    /// `SEQ.song-region` publish + diff
+    /// (docs/arrangement-region-editing-spec.md 4.1): the Rust-owned region
+    /// surfaces as `(track-a track-b start end)`, republishes only when it
+    /// actually moved, and goes back to nil on clear. Rust ownership is what
+    /// makes the highlight survive a view switch, so this seam — not a Lisp
+    /// defstate — is the source of truth.
+    #[test]
+    fn metal_seq_song_region_publishes_and_diffs() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        let state = sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![sequencer::sequencer::PatternSnapshot::new_default(1, &[])],
+            0,
+        );
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut test_app = sequencer::app::App::new(
+            std::sync::Arc::new(state),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        test_app.tracks = vec!["Track 1".to_string()];
+        test_app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+
+        let mut frame = SongFrameState::default();
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("binding read evaluates")
+                .expect("binding read returns a value")
+        };
+        assert_eq!(
+            read(&mut editor, "SEQ.song-region"),
+            Value::Nil,
+            "no region selected yet"
+        );
+
+        // Setting a region publishes the rectangle plus the scene-lane bit.
+        test_app.set_song_region(sequencer::app::song_region::SongRegionSelection::new(
+            1, 3, 8.0, 24.0,
+        ));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        let Value::List(region) = read(&mut editor, "SEQ.song-region") else {
+            panic!("song-region must be a list once a region is selected");
+        };
+        let region: Vec<Value> = region.iter().map(|cell| cell.borrow().clone()).collect();
+        assert_eq!(
+            region,
+            vec![
+                Value::Number(1.0),
+                Value::Number(3.0),
+                Value::Number(8.0),
+                Value::Number(24.0),
+                Value::Bool(false),
+            ]
+        );
+
+        // A scene-lane marquee over the same rectangle is a DIFFERENT region
+        // (lane spec 8: it carries the scene events too), so it republishes.
+        test_app.set_song_region(
+            sequencer::app::song_region::SongRegionSelection::new_in_lane(
+                1, 3, 8.0, 24.0, true,
+            ),
+        );
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        let Value::List(region) = read(&mut editor, "SEQ.song-region") else {
+            panic!("song-region must still be a list");
+        };
+        assert_eq!(region[4].borrow().clone(), Value::Bool(true));
+        test_app.set_song_region(sequencer::app::song_region::SongRegionSelection::new(
+            1, 3, 8.0, 24.0,
+        ));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+
+        // Same region again: nothing to republish.
+        assert!(
+            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            "an unchanged region publishes nothing"
+        );
+
+        // Moving one edge republishes.
+        test_app.set_song_region(sequencer::app::song_region::SongRegionSelection::new(
+            1, 3, 8.0, 32.0,
+        ));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        let Value::List(region) = read(&mut editor, "SEQ.song-region") else {
+            panic!("song-region must still be a list");
+        };
+        assert_eq!(region[3].borrow().clone(), Value::Number(32.0));
+
+        // Clearing goes back to nil, and stays quiet afterwards.
+        test_app.clear_song_region();
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(read(&mut editor, "SEQ.song-region"), Value::Nil);
+        assert!(
+            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            "clearing an already-clear region publishes nothing"
+        );
+    }
+
+    /// Lane-projection read surface for the arrangement timeline
+    /// (docs/arrangement-timeline-ui-spec.md; song-mode-spec 5.5): `song-lanes`
+    /// publishes the per-track clip spans derived from the committed song plus
+    /// the live scenes, `scene-names` publishes the scene display names, and
+    /// both diff by value — an unchanged frame publishes nothing, a scene
+    /// rename republishes names, a song edit republishes lanes.
+    #[test]
+    fn metal_seq_song_lanes_and_scene_names_publish_on_change() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        let state = sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut test_app = sequencer::app::App::new(
+            std::sync::Arc::new(state),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        test_app.tracks = vec!["Track 1".to_string()];
+        test_app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        let row = |start_beat: f64, scene: usize| sequencer::app::song_edit::SongRowSpec {
+            start_beat,
+            scene,
+            overrides: Vec::new(),
+        };
+        test_app
+            .arr_replace_rows(vec![row(0.0, 0), row(4.0, 1), row(8.0, 2)], 16.0, false)
+            .expect("song committed");
+
+        let mut frame = SongFrameState::default();
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("binding read evaluates")
+                .expect("binding read returns a value")
+        };
+
+        // Lane spec 12: `song-lanes` carries the STORED clips. This song is
+        // three scene changes with no overrides, and a scene event STAMPS its
+        // cells (spec 6.2) — so the lane holds one clip per scene span.
+        assert_eq!(read(&mut editor, "(len SEQ.song-lanes)"), Value::Number(1.0));
+        assert_eq!(
+            read(&mut editor, "(len (nth SEQ.song-lanes 0))"),
+            Value::Number(3.0),
+            "each scene event stamped its cell as a real clip"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 1) :start-beat)"),
+            Value::Number(4.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 2) :pattern-id)"),
+            Value::Number(3.0),
+            "rebuilt-on-load scene cells resolve scene j to PatternId(j + 1)"
+        );
+        // One scene span per scene EVENT, ending at the next.
+        assert_eq!(read(&mut editor, "(len SEQ.scene-spans)"), Value::Number(3.0));
+        assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-spans 1) :start-beat)"),
+            Value::Number(4.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-spans 1) :end-beat)"),
+            Value::Number(8.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(len SEQ.scene-names)"),
+            Value::Number(3.0)
+        );
+
+        // The lane-event read surface publishes one entry per referenced
+        // pool pattern (three scenes -> three patterns on the one track).
+        assert_eq!(
+            read(&mut editor, "(len SEQ.song-lane-events)"),
+            Value::Number(1.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(len (nth SEQ.song-lane-events 0))"),
+            Value::Number(3.0)
+        );
+        // Default 16-step sixteenth-note patterns are one 4-beat cycle.
+        assert_eq!(
+            read(
+                &mut editor,
+                "(get (nth (nth SEQ.song-lane-events 0) 0) :length-beats)"
+            ),
+            Value::Number(4.0)
+        );
+
+        // Value diffing: an unchanged frame publishes nothing.
+        assert!(
+            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            "an unchanged frame must not republish lanes or names"
+        );
+
+        // A scenes-side change (no song revision bump) republishes names.
+        assert!(test_app.state.rename_scene(1, "Drop".to_string()));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(nth SEQ.scene-names 1)"),
+            Value::String("Drop".to_string())
+        );
+
+        // A song edit republishes the derived surfaces.
+        test_app.arr_set_end(24.0).expect("end moved");
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(get (nth SEQ.scene-spans 2) :end-beat)"),
+            Value::Number(24.0)
+        );
+
+        // The latched primitive-rejection error publishes (the arrangement
+        // banner reads it) and clears back to nil.
+        test_app.song_edit_error = Some("song editing is unavailable".to_string());
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "SEQ.song-edit-error"),
+            Value::String("song editing is unavailable".to_string())
+        );
+        test_app.song_edit_error = None;
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(read(&mut editor, "SEQ.song-edit-error"), Value::Nil);
+    }
+
+    /// Scene-lane gesture lifecycle (docs/arrangement-timeline-ui-spec.md
+    /// 9.1): live actions update ghost preview state only (visible in the
+    /// item overlay and content-length), the terminal action forwards the
+    /// ghost's final values to the seq-arrangement-action translator exactly
+    /// once, and the ghost is cleared afterwards so a rejected primitive
+    /// snaps the view back to the committed song.
+    #[test]
+    fn metal_seq_arrangement_gestures_ghost_then_commit_through_translator() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let recorded: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = recorded.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-arrangement-action", move |args, _ctx| {
+                sink.lock().unwrap().push(args.first().cloned().unwrap_or(Value::Nil));
+                Ok(Value::String("recorded".to_string()))
+            });
+
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
+        rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
+        rt.set_reactive(
+            "SEQ",
+            "scene-spans",
+            test_list(vec![scene_span(0.0, 8.0, 0.0), scene_span(8.0, 16.0, 1.0)]),
+        );
+        rt.run_reactive_cycle();
+
+        let eval = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .unwrap_or_else(|error| panic!("{expr}: {error:?}"))
+        };
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            eval(editor, expr).expect("expr returns a value")
+        };
+        let action_field = |action: &Value, key: &str| -> Value {
+            let Value::Map(map) = action else {
+                panic!("recorded action must be a map");
+            };
+            map[key].borrow().clone()
+        };
+
+        // Move drag: live action ghosts (item overlay shifts), commit
+        // forwards the ghost's final start, ghost clears.
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :move-items-absolute :anchor-id 8 :ids (list 8) :start 12))",
+        );
+        assert!(recorded.lock().unwrap().is_empty(), "live drags never commit");
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :start)"),
+            Value::Number(12.0),
+            "move ghost previews the dragged span"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :finish-move-items :anchor-id 8 :ids (list 8)))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 1, "one commit per completed gesture");
+            assert_eq!(
+                action_field(&recorded[0], "type"),
+                Value::Keyword("finish-move-items".to_string())
+            );
+            assert_eq!(action_field(&recorded[0], "from-beat"), Value::Number(8.0));
+            assert_eq!(action_field(&recorded[0], "start"), Value::Number(12.0));
+        }
+
+        // Resize drag: the ghost moves the shared boundary (span 0's end and
+        // span 1's start), the commit carries the resized event's beat + end.
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :resize-item-absolute :id 0 :ids (list 0) :edge :end :time 10))",
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 0) :end)"),
+            Value::Number(10.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :start)"),
+            Value::Number(10.0),
+            "the next span's start previews the boundary move"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :finish-resize-items :id 0 :ids (list 0)))",
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 2);
+            assert_eq!(
+                action_field(&recorded[1], "type"),
+                Value::Keyword("finish-resize-items".to_string())
+            );
+            assert_eq!(action_field(&recorded[1], "from-beat"), Value::Number(0.0));
+            assert_eq!(action_field(&recorded[1], "end"), Value::Number(10.0));
+        }
+
+        // Draw commit carries the start beat plus the selected scene.
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :finish-create-item :lane 0 :start 24 :end 28))",
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 3);
+            assert_eq!(
+                action_field(&recorded[2], "type"),
+                Value::Keyword("finish-create-item".to_string())
+            );
+            assert_eq!(action_field(&recorded[2], "start"), Value::Number(24.0));
+            assert!(matches!(action_field(&recorded[2], "scene"), Value::Number(_)));
+        }
+
+        // Content-length drag ghosts the end marker; release commits once.
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :resize-content-length :length 20))",
+        );
+        assert_eq!(
+            read(&mut editor, "(arrangement-content-length)"),
+            Value::Number(20.0)
+        );
+        assert!(recorded.lock().unwrap().len() == 3);
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :finish-resize-content-length :length 20))",
+        );
+        assert_eq!(
+            read(&mut editor, "(arrangement-content-length)"),
+            Value::Number(16.0),
+            "ghost cleared: content length reads the committed song again"
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 4);
+            assert_eq!(action_field(&recorded[3], "length"), Value::Number(20.0));
+        }
+
+        // Erase forwards the ids (scene-event beats) untouched.
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :delete-items :ids (list 8)))",
+        );
+        assert_eq!(recorded.lock().unwrap().len(), 5);
+
+        // A finish with no preceding live drag is a no-op commit-wise.
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :finish-move-items :anchor-id 8 :ids (list 8)))",
+        );
+        assert_eq!(
+            recorded.lock().unwrap().len(),
+            5,
+            "no ghost -> nothing to commit"
+        );
+
+        // ── Track-clip editing over the STORED clips (lane spec 12) ───────
+        // Lane 0: clip 0 spans [0,8) on pattern 1 and clip 2 spans [8,12) on
+        // pattern 2; [12,16) has no clip and is simply silent.
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "song-lanes",
+            test_list(vec![test_list(vec![
+                lane_clip(0.0, 0.0, 8.0, Value::Number(1.0)),
+                lane_clip(2.0, 8.0, 12.0, Value::Number(2.0)),
+            ])]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-track-clips 0))"),
+            Value::Number(2.0),
+            "every stored clip is an item; the gap is not one"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :end)"),
+            Value::Number(8.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :id)"),
+            Value::Number(0.0),
+            "the item id IS the stored clip id"
+        );
+
+        // Shrink: live drag ghosts the clip end, finish lowers to ONE
+        // :clip-resize naming the clip's own span (lane spec 12).
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :resize-item-absolute :id 0 :ids (list 0) :edge :end :time 6))",
+        );
+        assert_eq!(recorded.lock().unwrap().len(), 5, "live drags never commit");
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :end)"),
+            Value::Number(6.0),
+            "resize ghost previews the clip's new end"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :finish-resize-items :id 0 :ids (list 0)))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 6);
+            assert_eq!(
+                action_field(&recorded[5], "type"),
+                Value::Keyword("clip-resize".to_string())
+            );
+            assert_eq!(action_field(&recorded[5], "track"), Value::Number(0.0));
+            // The gesture names the STORED clip by id and asks for the new
+            // end; the released tail is not a separate paint any more.
+            assert_eq!(action_field(&recorded[5], "clip-id"), Value::Number(0.0));
+            assert_eq!(action_field(&recorded[5], "start"), Value::Number(0.0));
+            assert_eq!(action_field(&recorded[5], "end"), Value::Number(6.0));
+        }
+
+        // Grow: the clip's own pattern eats into what follows.
+        eval(
+            &mut editor,
+            "(do (arrangement-track-action 0 (dict :type :resize-item-absolute :id 2 :ids (list 2) :edge :end :time 15)) \
+             (arrangement-track-action 0 (dict :type :finish-resize-items :id 2 :ids (list 2))))",
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 7);
+            assert_eq!(
+                action_field(&recorded[6], "type"),
+                Value::Keyword("clip-resize".to_string())
+            );
+            assert_eq!(action_field(&recorded[6], "clip-id"), Value::Number(2.0));
+            assert_eq!(action_field(&recorded[6], "start"), Value::Number(8.0));
+            assert_eq!(action_field(&recorded[6], "end"), Value::Number(15.0));
+        }
+
+        // Select + delete: selection is exclusive per lane kind; Backspace
+        // deletes the whole clip.
+        eval(
+            &mut editor,
+            "(do (arrangement-scene-action (dict :type :select :ids (list 8) :time 4)) \
+             (arrangement-track-action 0 (dict :type :select :ids (list 0) :time 1)))",
+        );
+        assert_eq!(
+            read(&mut editor, "arrangement-selection"),
+            Value::List(vec![]),
+            "selecting a track clip clears the scene selection"
+        );
+        assert_eq!(read(&mut editor, "arrangement-selected-track"), Value::Number(0.0));
+        assert_eq!(
+            read(&mut editor, "arrangement-cursor-time"),
+            Value::Number(0.0),
+            "clicking inside a clip parks transport start at the clip beginning"
+        );
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-lane-selection 0))"),
+            Value::Number(1.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-lane-selection 1))"),
+            Value::Number(0.0),
+            "only the owning lane shows the selection"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :delete-items :ids (list 0)))",
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 8);
+            assert_eq!(
+                action_field(&recorded[7], "type"),
+                Value::Keyword("clip-delete".to_string())
+            );
+            assert_eq!(action_field(&recorded[7], "clip-id"), Value::Number(0.0));
+        }
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-lane-selection 0))"),
+            Value::Number(0.0),
+            "delete clears the track selection"
+        );
+
+        // A delete for an id with no stored clip (stale gesture) commits
+        // nothing.
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :delete-items :ids (list 42)))",
+        );
+        assert_eq!(recorded.lock().unwrap().len(), 8);
+
+        // Clicking a time in a track lane parks the track-specific cursor
+        // there (Ableton-style); the scene lane parks it on -1. Only the
+        // owning lane renders it.
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :clear-selection :time 5))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-cursor-time"), Value::Number(5.0));
+        assert_eq!(read(&mut editor, "arrangement-cursor-track"), Value::Number(0.0));
+        assert_eq!(
+            read(&mut editor, "(arrangement-lane-cursor-time 0)"),
+            Value::Number(5.0)
+        );
+        assert_eq!(read(&mut editor, "(arrangement-lane-cursor-time -1)"), Value::Nil);
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :clear-selection :time 7))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-cursor-track"), Value::Number(-1.0));
+        assert_eq!(
+            read(&mut editor, "(arrangement-lane-cursor-time -1)"),
+            Value::Number(7.0)
+        );
+
+        // Dropping a transport scene pill inserts a row at the drop beat,
+        // snapped to the bar grid (replaces the draw tool). sx 0.0 is the
+        // view's midpoint: view 0..64 -> beat 32.
+        eval(
+            &mut editor,
+            "(do (set! arrangement-view-start 0) (set! arrangement-view-duration 64) \
+             (arrangement-drop-scene (dict :sx 0.02 :payload (dict :scene 1))))",
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 9);
+            assert_eq!(
+                action_field(&recorded[8], "type"),
+                Value::Keyword("finish-create-item".to_string())
+            );
+            assert_eq!(
+                action_field(&recorded[8], "start"),
+                Value::Number(32.0),
+                "drop position snaps down to the bar grid"
+            );
+            assert_eq!(action_field(&recorded[8], "scene"), Value::Number(1.0));
+        }
+
+        // Start-edge drag on a track clip: NOT a move and not an end resize —
+        // the left edge alone moves, and the same :clip-resize primitive
+        // re-stamps the phase anchor behind it (lane spec 8). Clip 2 still
+        // spans [8, 12) — nothing above actually mutated the song.
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :resize-item-absolute :id 2 :ids (list 2) :edge :start :time 10))",
+        );
+        assert_eq!(recorded.lock().unwrap().len(), 9, "live drags never commit");
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :start)"),
+            Value::Number(10.0),
+            "start ghost previews the clip's new start"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :end)"),
+            Value::Number(12.0),
+            "and leaves its end alone"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :finish-resize-items :id 2 :ids (list 2)))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 10);
+            assert_eq!(
+                action_field(&recorded[9], "type"),
+                Value::Keyword("clip-resize".to_string())
+            );
+            assert_eq!(action_field(&recorded[9], "clip-id"), Value::Number(2.0));
+            assert_eq!(action_field(&recorded[9], "start"), Value::Number(10.0));
+            assert_eq!(action_field(&recorded[9], "end"), Value::Number(12.0));
+        }
+
+        // Dragged past its own end: the clip is gone, same as the end edge
+        // crossing its start.
+        eval(
+            &mut editor,
+            "(do (arrangement-track-action 0 (dict :type :resize-item-absolute :id 2 :ids (list 2) :edge :start :time 12)) \
+             (arrangement-track-action 0 (dict :type :finish-resize-items :id 2 :ids (list 2))))",
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 11);
+            assert_eq!(
+                action_field(&recorded[10], "type"),
+                Value::Keyword("clip-delete".to_string())
+            );
+            assert_eq!(action_field(&recorded[10], "clip-id"), Value::Number(2.0));
+        }
+
+        // Scene lane: its spans are contiguous, so a start-edge drag IS a
+        // move of that event — the boundary the previous span's end handle
+        // owns. It must never write the start into the event's end.
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :resize-item-absolute :id 8 :ids (list 8) :edge :start :time 6))",
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :start)"),
+            Value::Number(6.0),
+            "start ghost previews the scene event's new start"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :finish-resize-items :id 8 :ids (list 8)))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 12);
+            assert_eq!(
+                action_field(&recorded[11], "type"),
+                Value::Keyword("finish-move-items".to_string())
+            );
+            assert_eq!(action_field(&recorded[11], "from-beat"), Value::Number(8.0));
+            assert_eq!(action_field(&recorded[11], "start"), Value::Number(6.0));
+        }
+
+        // ── Title-bar move (region spec 6) ────────────────────────────────
+        // Clip 2 still spans [8,12): nothing above mutated the reactive song.
+        // A drag with no region under it moves the ONE clip, rigidly — the
+        // ghost keeps the span's length and phase, and the release lowers to
+        // a single :clip-move.
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 20 :lane 0))",
+        );
+        assert_eq!(recorded.lock().unwrap().len(), 12, "live drags never commit");
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :start)"),
+            Value::Number(20.0),
+            "move ghost previews the clip's new start"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :end)"),
+            Value::Number(24.0),
+            "the move is rigid: the span keeps its length"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :finish-move-items :ids (list 2)))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 13);
+            assert_eq!(
+                action_field(&recorded[12], "type"),
+                Value::Keyword("clip-move".to_string())
+            );
+            assert_eq!(action_field(&recorded[12], "track"), Value::Number(0.0));
+            assert_eq!(action_field(&recorded[12], "clip-id"), Value::Number(2.0));
+            assert_eq!(action_field(&recorded[12], "start"), Value::Number(20.0));
+        }
+
+        // A finish whose ghost belongs to another lane commits nothing and
+        // still clears the ghost — a stale ghost is the failure mode this arm
+        // exists to prevent.
+        eval(
+            &mut editor,
+            "(do (arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 20 :lane 0)) \
+             (arrangement-track-action 1 (dict :type :finish-move-items :ids (list 2))))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        assert_eq!(recorded.lock().unwrap().len(), 13);
+
+        // A drag on a clip inside a region that reaches BEYOND it moves the
+        // whole RECTANGLE instead (spec 6.2): the ghost is the region shifted
+        // by the drag delta, every covered clip previews the slide, and the
+        // release carries only that delta. (A region equal to the dragged
+        // clip's own span is just the clip — that is the branch above.)
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "song-region",
+            test_list(vec![
+                Value::Number(0.0),
+                Value::Number(0.0),
+                Value::Number(4.0),
+                Value::Number(16.0),
+                Value::Bool(false),
+            ]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 12 :lane 0))",
+        );
+        assert_eq!(
+            read(&mut editor, "(= (arrangement-ghost-kind) :region-move)"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            read(&mut editor, "(get arrangement-region-ghost :start)"),
+            Value::Number(8.0),
+            "the region ghost previews the shifted rectangle"
+        );
+        assert_eq!(
+            read(&mut editor, "(get arrangement-region-ghost :end)"),
+            Value::Number(20.0)
+        );
+        // ...and so does every clip the rectangle covers: clip 0 spans [0,8)
+        // and clip 2 spans [8,12), both intersect [4,16), both slide by 4.
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :start)"),
+            Value::Number(4.0),
+            "a covered clip previews the slide, not just the rectangle"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :start)"),
+            Value::Number(12.0)
+        );
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :finish-move-items :ids (list 2)))",
+        );
+        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        assert_eq!(read(&mut editor, "arrangement-region-ghost"), Value::Nil);
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 14);
+            assert_eq!(
+                action_field(&recorded[13], "type"),
+                Value::Keyword("region-move".to_string())
+            );
+            assert_eq!(action_field(&recorded[13], "delta"), Value::Number(4.0));
+        }
+
+        // Dragging the rectangle off the front of the timeline clamps at beat
+        // 0 rather than lowering a delta the primitive would refuse.
+        eval(
+            &mut editor,
+            "(do (arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start -4 :lane 0)) \
+             (arrangement-track-action 0 (dict :type :finish-move-items :ids (list 2))))",
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 15);
+            assert_eq!(
+                action_field(&recorded[14], "delta"),
+                Value::Number(-4.0),
+                "the rectangle starts at beat 4, so it can slide 4 beats at most"
+            );
+        }
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "song-region", Value::Nil);
+        editor.runtime_mut().run_reactive_cycle();
+    }
+
+    /// The content-length handle's floor must stay strictly inside what
+    /// `App::arr_set_end` accepts: it rejects an end AT or before the last
+    /// scene change, and an end before the last clip's end. A min that lands
+    /// on either boundary turns an ordinary drag into a rejected edit.
+    #[test]
+    fn metal_seq_arrangement_content_length_min_clears_both_model_boundaries() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
+        rt.set_reactive("SEQ", "song-end-beat", Value::Number(64.0));
+        rt.set_reactive("SEQ", "scene-spans", test_list(vec![]));
+        rt.set_reactive("SEQ", "song-lanes", test_list(vec![]));
+        rt.run_reactive_cycle();
+
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| -> Value {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .unwrap_or_else(|error| panic!("{expr}: {error:?}"))
+                .expect("expr returns a value")
+        };
+
+        assert_eq!(
+            read(&mut editor, "(arrangement-content-length-min)"),
+            Value::Number(1.0),
+            "no scenes and no clips: only the >0 rule applies"
+        );
+
+        // A scene change at 32 makes 32 itself illegal, so the handle floor
+        // has to sit past it.
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "scene-spans",
+            test_list(vec![scene_span(0.0, 32.0, 0.0), scene_span(32.0, 64.0, 1.0)]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(arrangement-content-length-min)"),
+            Value::Number(33.0),
+            "the last scene start is refused by the model, not clamped to"
+        );
+
+        // A clip running to 40 outranks the scene boundary: shortening below
+        // its end is refused too.
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "song-lanes",
+            test_list(vec![
+                test_list(vec![lane_clip(0.0, 0.0, 12.0, Value::Number(1.0))]),
+                test_list(vec![lane_clip(1.0, 16.0, 40.0, Value::Number(1.0))]),
+            ]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(arrangement-content-length-min)"),
+            Value::Number(40.0),
+            "the furthest clip end across every lane is the floor"
+        );
+    }
+
+    /// One completed gesture is one undo entry: the translator's commands
+    /// run through the song host-command path against a real App, and each
+    /// application adds exactly one history entry (song-mode-spec 5.6 H10).
+    #[test]
+    fn metal_seq_arrangement_gesture_commands_are_one_undo_entry_each() {
+        let state = sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = sequencer::app::App::new(
+            std::sync::Arc::new(state),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        // Two scene changes and one clip on track 0: the shapes the scene-lane
+        // and track-lane gestures address.
+        let mut arrangement = sequencer::sequencer::ProjectArrangement::new(1, 16.0);
+        arrangement.scene_lane.push(sequencer::sequencer::SceneEvent {
+            start_beat: 8.0,
+            scene: 1,
+        });
+        let clip_id = arrangement.allocate_clip_id().expect("clip id");
+        arrangement.track_lanes[0].push(sequencer::sequencer::ArrClip::new(
+            clip_id, 2.0, 6.0, Some(2),
+        ));
+        app.arr_replace(arrangement).expect("arrangement committed");
+        let song = app.state.committed_song().expect("committed song");
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+
+        let apply = |app: &mut sequencer::app::App, commands: &[(&str, Value)]| {
+            for (name, payload) in commands {
+                crate::host_commands::apply_song_edit_command(name, payload, app)
+                    .expect("song edit command")
+                    .expect("primitive applies");
+            }
+        };
+
+        // Scene-lane move gesture -> one arrangement-scene-move -> one entry.
+        let action = map_value(vec![
+            ("type", Value::Keyword("finish-move-items".to_string())),
+            // Scene gestures name the EVENT by its beat (lane spec 12).
+            ("from-beat", Value::Number(8.0)),
+            ("start", Value::Number(12.0)),
+        ]);
+        let commands = crate::arrangement_actions::arrangement_action_song_commands(
+            &action,
+            Some(&song),
+            Some(&arrangement),
+        )
+        .expect("gesture translates");
+        assert_eq!(commands.len(), 1);
+        let depth = app.history.undo_len();
+        apply(&mut app, &commands);
+        assert_eq!(app.history.undo_len(), depth + 1, "one gesture, one undo entry");
+        assert_eq!(
+            app.state
+                .committed_arrangement()
+                .unwrap()
+                .scene_lane
+                .iter()
+                .map(|event| event.start_beat)
+                .collect::<Vec<_>>(),
+            vec![0.0, 12.0]
+        );
+
+        // A rejected primitive (moving the scene change at 0.0) changes
+        // nothing and adds no history entry — the view's ghost was already
+        // discarded, so the committed song snaps the display back.
+        let song = app.state.committed_song().unwrap();
+        let arrangement = app.state.committed_arrangement().unwrap();
+        let action = map_value(vec![
+            ("type", Value::Keyword("finish-move-items".to_string())),
+            ("from-beat", Value::Number(0.0)),
+            ("start", Value::Number(4.0)),
+        ]);
+        let commands = crate::arrangement_actions::arrangement_action_song_commands(
+            &action,
+            Some(&song),
+            Some(&arrangement),
+        )
+        .expect("gesture translates");
+        let depth = app.history.undo_len();
+        let result = crate::host_commands::apply_song_edit_command(
+            &commands[0].0,
+            &commands[0].1,
+            &mut app,
+        )
+        .expect("song edit command");
+        assert!(result.is_err(), "moving the first scene change must be rejected");
+        assert_eq!(app.history.undo_len(), depth, "rejection adds no history");
+        assert_eq!(
+            app.state.committed_arrangement().unwrap().scene_lane[0].start_beat,
+            0.0
+        );
+
+        // A scene drop beyond the song end lowers to extend-then-insert and
+        // both primitives apply (the silent-rejection bug: inserting past
+        // the end is invalid without the extension).
+        let song = app.state.committed_song().unwrap();
+        let arrangement = app.state.committed_arrangement().unwrap();
+        let action = map_value(vec![
+            ("type", Value::Keyword("finish-create-item".to_string())),
+            ("start", Value::Number(24.0)),
+            ("end", Value::Number(40.0)),
+            ("scene", Value::Number(0.0)),
+        ]);
+        let commands = crate::arrangement_actions::arrangement_action_song_commands(
+            &action,
+            Some(&song),
+            Some(&arrangement),
+        )
+        .expect("drop translates");
+        assert_eq!(commands.len(), 2, "extend + insert");
+        apply(&mut app, &commands);
+        let arrangement = app.state.committed_arrangement().unwrap();
+        assert_eq!(arrangement.end_beat, 40.0);
+        assert_eq!(
+            arrangement
+                .scene_lane
+                .iter()
+                .map(|event| (event.start_beat, event.scene))
+                .collect::<Vec<_>>(),
+            vec![(0.0, 0), (12.0, 1), (24.0, 0)]
+        );
+
+        // Track-clip surgery: an edge drag lowers to exactly ONE clip resize,
+        // which applies as one undo entry no matter how many compiled rows it
+        // rewrites (lane spec 12 — a clip resize is a clip resize).
+        let song = app.state.committed_song().unwrap();
+        let arrangement = app.state.committed_arrangement().unwrap();
+        let action = map_value(vec![
+            ("type", Value::Keyword("clip-resize".to_string())),
+            ("track", Value::Number(0.0)),
+            ("clip-id", Value::Number(clip_id.0 as f64)),
+            ("start", Value::Number(2.0)),
+            ("end", Value::Number(10.0)),
+        ]);
+        let commands = crate::arrangement_actions::arrangement_action_song_commands(
+            &action,
+            Some(&song),
+            Some(&arrangement),
+        )
+        .expect("clip resize translates");
+        assert_eq!(commands.len(), 1);
+        let depth = app.history.undo_len();
+        apply(&mut app, &commands);
+        assert_eq!(
+            app.history.undo_len(),
+            depth + 1,
+            "clip surgery is one undo entry"
+        );
+        // The lane also holds the clips the scene gestures above stamped
+        // (lane spec 6.2), so the resize is checked on the clip it names.
+        let lane = app.state.committed_arrangement().unwrap().track_lanes[0].clone();
+        let resized = lane
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .expect("the resized clip survives");
+        assert_eq!((resized.start_beat, resized.end_beat), (2.0, 10.0));
+
+        // And Backspace on the clip removes it outright.
+        let song = app.state.committed_song().unwrap();
+        let arrangement = app.state.committed_arrangement().unwrap();
+        let action = map_value(vec![
+            ("type", Value::Keyword("clip-delete".to_string())),
+            ("track", Value::Number(0.0)),
+            ("clip-id", Value::Number(clip_id.0 as f64)),
+        ]);
+        let commands = crate::arrangement_actions::arrangement_action_song_commands(
+            &action,
+            Some(&song),
+            Some(&arrangement),
+        )
+        .expect("clip delete translates");
+        let depth = app.history.undo_len();
+        apply(&mut app, &commands);
+        assert_eq!(app.history.undo_len(), depth + 1);
+        assert!(
+            !app.state.committed_arrangement().unwrap().track_lanes[0]
+                .iter()
+                .any(|clip| clip.id == clip_id),
+            "the deleted clip is gone from the timeline"
+        );
+
+        // A region move is one primitive too: the rectangle is Rust-owned, so
+        // the gesture carries only its delta (region spec 6.2). Region ops are
+        // rectangle surgery — the music is re-stamped as fresh clips, which is
+        // why this runs after the id-addressed gestures above.
+        let fresh = app
+            .arr_clip_create(
+                0,
+                2.0,
+                6.0,
+                sequencer::sequencer::LaneSource::Pattern(sequencer::sequencer::PatternId(2)),
+                0.0,
+            )
+            .expect("clip creates");
+        app.set_song_region(sequencer::app::song_region::SongRegionSelection::new(
+            0, 0, 2.0, 6.0,
+        ));
+        let song = app.state.committed_song().unwrap();
+        let arrangement = app.state.committed_arrangement().unwrap();
+        let action = map_value(vec![
+            ("type", Value::Keyword("region-move".to_string())),
+            ("delta", Value::Number(4.0)),
+        ]);
+        let commands = crate::arrangement_actions::arrangement_action_song_commands(
+            &action,
+            Some(&song),
+            Some(&arrangement),
+        )
+        .expect("region move translates");
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].0, "song-region-move");
+        let depth = app.history.undo_len();
+        apply(&mut app, &commands);
+        assert_eq!(
+            app.history.undo_len(),
+            depth + 1,
+            "a region move is one undo entry"
+        );
+        let lane = app.state.committed_arrangement().unwrap().track_lanes[0].clone();
+        assert!(
+            !lane.iter().any(|clip| clip.id == fresh),
+            "the rectangle was re-stamped, not the clip object"
+        );
+        assert!(
+            lane.iter()
+                .any(|clip| (clip.start_beat, clip.end_beat) == (6.0, 10.0)),
+            "the rectangle slid four beats right: {lane:?}"
+        );
+        assert!(
+            !lane
+                .iter()
+                .any(|clip| clip.start_beat < 6.0 && clip.end_beat > 2.0),
+            "and the beats it left are silent: {lane:?}"
+        );
+        assert_eq!(
+            app.song_region_selection
+                .map(|region| (region.start_beat, region.end_beat)),
+            Some((6.0, 10.0)),
+            "the highlight followed the move"
+        );
+    }
+
+    /// The full keyboard-delete path for a track clip: clicking the clip
+    /// focuses its lane and selects it; Backspace must reach the lane widget
+    /// (the global selected-step delete shortcut defers to a focused widget)
+    /// and lower to one :track-paint action.
+    #[test]
+    fn metal_seq_arrangement_click_then_backspace_deletes_track_clip() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let recorded: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = recorded.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-arrangement-action", move |args, _ctx| {
+                sink.lock().unwrap().push(args.first().cloned().unwrap_or(Value::Nil));
+                Ok(Value::String("recorded".to_string()))
+            });
+
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
+        rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
+        rt.set_reactive(
+            "SEQ",
+            "scene-spans",
+            test_list(vec![scene_span(0.0, 16.0, 0.0)]),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "song-lanes",
+            test_list(vec![test_list(vec![lane_clip(
+                0.0,
+                0.0,
+                16.0,
+                Value::Number(1.0),
+            )])]),
+        );
+        rt.run_reactive_cycle();
+        editor
+            .runtime_mut()
+            .eval_str("(do (seq-open-arrangement) (set! arrangement-view-start 0) \
+                       (set! arrangement-view-duration 64))")
+            .expect("open arrangement view");
+        editor.refresh_runtime_side_effects();
+
+        // Click the middle of the clip in track lane 0 (clip covers beats
+        // 0..16 of a 64-beat view: the left quarter of the lane).
+        let layout = editor.widget_layout().expect("arrangement layout");
+        let container = find_layout_node_by_stable_key(&layout, "arrangement-track-lane-0")
+            .expect("track lane container");
+        let lane = find_layout_node_by_widget_type(container, "timeline")
+            .expect("track timeline instance");
+        let click_col = lane.rect.col + lane.rect.width * (8.0 / 64.0);
+        // Selecting a clip means clicking its TITLE BAR; the body below is a
+        // region-selection surface (region spec 3.1/4.4).
+        let click_row = lane.rect.row + 0.3;
+        for kind in [
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            editor.handle_mouse_precise(
+                crossterm::event::MouseEvent {
+                    kind,
+                    column: click_col as u16,
+                    row: click_row as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                0,
+                0,
+                72,
+                60,
+                click_col,
+                click_row,
+            );
+        }
+        assert!(
+            editor.focused_widget_id().is_some(),
+            "clicking a track clip must focus its lane"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len (arrangement-lane-selection 0))")
+                .unwrap(),
+            Some(Value::Number(1.0)),
+            "clicking a track clip must select it"
+        );
+
+        // The global selected-step delete shortcut must defer to the focused
+        // lane even when grid steps are selected (the app-side key path).
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        selected_steps.lock().unwrap().insert(4);
+        let step_clipboard = Arc::new(Mutex::new(None));
+        let backspace = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Backspace,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        assert!(
+            !handle_metal_command_shortcut(
+                &mut editor,
+                &backspace,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "selected-step delete must defer to the focused arrangement lane"
+        );
+
+        // The editor key path delivers Backspace to the lane widget, which
+        // lowers the selected clip to one :clip-delete.
+        editor.handle_key(backspace);
+        let recorded = recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "backspace deletes the selected clip");
+        let Value::Map(map) = &recorded[0] else {
+            panic!("recorded action must be a map");
+        };
+        assert_eq!(
+            map["type"].borrow().clone(),
+            Value::Keyword("clip-delete".to_string())
+        );
+        assert_eq!(map["clip-id"].borrow().clone(), Value::Number(0.0));
+    }
+
+    /// Clip editing must keep working after the track scroll container is
+    /// scrolled: clicking a below-the-fold clip must focus ITS lane (the
+    /// focus hit-test has to account for the widget scroll offset like the
+    /// mouse hit-test does), Backspace must delete it, and an end-edge drag
+    /// must resize it.
+    #[test]
+    fn metal_seq_arrangement_scrolled_lane_clip_delete_and_resize() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let recorded: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = recorded.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-arrangement-action", move |args, _ctx| {
+                sink.lock().unwrap().push(args.first().cloned().unwrap_or(Value::Nil));
+                Ok(Value::String("recorded".to_string()))
+            });
+
+        // Eight tracks so the lane rows overflow the scroll container; only
+        // track 5 has a clip.
+        let track_count = 8usize;
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "num-tracks", Value::Number(track_count as f64));
+        rt.set_reactive(
+            "SEQ",
+            "track-ids",
+            test_number_list(&(0..track_count).map(|i| i as f64).collect::<Vec<_>>()),
+        );
+        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
+        rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
+        rt.set_reactive(
+            "SEQ",
+            "scene-spans",
+            test_list(vec![scene_span(0.0, 16.0, 0.0)]),
+        );
+        let lanes: Vec<Value> = (0..track_count)
+            .map(|track| {
+                if track == 5 {
+                    test_list(vec![lane_clip(0.0, 0.0, 16.0, Value::Number(1.0))])
+                } else {
+                    test_list(vec![lane_clip(0.0, 0.0, 16.0, Value::Nil)])
+                }
+            })
+            .collect();
+        rt.set_reactive("SEQ", "song-lanes", Value::List(
+            lanes.into_iter().map(|lane| Rc::new(RefCell::new(lane))).collect(),
+        ));
+        rt.run_reactive_cycle();
+        editor
+            .runtime_mut()
+            .eval_str("(do (seq-open-arrangement) (set! arrangement-view-start 0) \
+                       (set! arrangement-view-duration 64))")
+            .expect("open arrangement view");
+        editor.refresh_runtime_side_effects();
+        // A short viewport so the eight lanes overflow the scroll container.
+        editor.set_layout_viewport(72, 20);
+
+        let layout = editor.widget_layout().expect("arrangement layout");
+        let scroll_node = find_layout_node_by_stable_key(&layout, "arrangement-track-scroll")
+            .expect("track scroll container");
+        assert_eq!(scroll_node.widget_type, "scroll");
+        let lane5_container = find_layout_node_by_stable_key(&layout, "arrangement-track-lane-5")
+            .expect("track lane 5 container");
+        let lane5 = find_layout_node_by_widget_type(lane5_container, "timeline")
+            .expect("lane 5 timeline instance");
+        assert!(
+            lane5.rect.row + lane5.rect.height
+                > scroll_node.rect.row + scroll_node.rect.height,
+            "fixture must place lane 5 below the fold (lane bottom {}, viewport bottom {})",
+            lane5.rect.row + lane5.rect.height,
+            scroll_node.rect.row + scroll_node.rect.height
+        );
+
+        // Scroll the container far enough that lane 5 is on screen.
+        let scroll_key = eseqlisp::widget_render::scroll::scroll_state_key(scroll_node);
+        let mut scroll_state = eseqlisp::widget_render::scroll::get_scroll_state(scroll_key);
+        let offset = (lane5.rect.row + lane5.rect.height)
+            - (scroll_node.rect.row + scroll_node.rect.height)
+            + 1.0;
+        scroll_state.offset_y = offset;
+        eseqlisp::widget_render::scroll::set_scroll_state(scroll_key, scroll_state);
+        let offset = eseqlisp::widget_render::scroll::get_scroll_state(scroll_key).offset_y;
+        assert!(offset > 0.0, "scroll offset must clamp to a positive value");
+
+        // Click the middle of lane 5's clip AT ITS RENDERED (scrolled)
+        // position: layout row minus the container's scroll offset.
+        let click_col = lane5.rect.col + lane5.rect.width * (8.0 / 64.0);
+        // The title bar is the clip-selection zone; the body marquees a
+        // region instead (region spec 3.1/4.4).
+        let click_row = lane5.rect.row - offset + 0.3;
+        let mouse = |kind, col: f32, row: f32| crossterm::event::MouseEvent {
+            kind,
+            column: col as u16,
+            row: row as u16,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        for kind in [
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            editor.handle_mouse_precise(
+                mouse(kind, click_col, click_row),
+                0,
+                0,
+                72,
+                20,
+                click_col,
+                click_row,
+            );
+        }
+        assert_eq!(
+            editor.focused_widget_id(),
+            Some(lane5.widget_id),
+            "clicking a scrolled-down clip must focus ITS lane, not the lane \
+             occupying that screen position in unscrolled layout coordinates"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len (arrangement-lane-selection 5))")
+                .unwrap(),
+            Some(Value::Number(1.0)),
+            "clicking a scrolled-down clip must select it"
+        );
+
+        // Backspace deletes the selected clip through the focused lane.
+        editor.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Backspace,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 1, "backspace deletes the scrolled clip");
+            let Value::Map(map) = &recorded[0] else {
+                panic!("recorded action must be a map");
+            };
+            assert_eq!(
+                map["type"].borrow().clone(),
+                Value::Keyword("clip-delete".to_string())
+            );
+            assert_eq!(map["track"].borrow().clone(), Value::Number(5.0));
+        }
+        recorded.lock().unwrap().clear();
+
+        // Hovering the clip's end edge at its RENDERED position must show
+        // the resize cursor (the hover path needs the same scroll-offset
+        // adjustment as the click path). The edge handles live on the clip's
+        // title bar (docs/arrangement-region-editing-spec.md 3.1), so hover
+        // the top of the clip, not its middle.
+        let hover_col = lane5.rect.col + lane5.rect.width * (16.0 / 64.0) - 0.2;
+        let hover_row = lane5.rect.row - offset + 0.4;
+        editor.handle_mouse_precise(
+            mouse(crossterm::event::MouseEventKind::Moved, hover_col, hover_row),
+            0,
+            0,
+            72,
+            20,
+            hover_col,
+            hover_row,
+        );
+        assert_eq!(
+            editor.widget_cursor(),
+            eseqlisp::widget_render::WidgetCursor::EwResize,
+            "end-edge hover on a scrolled clip must show the resize cursor"
+        );
+
+        // Horizontal touchpad panning over a scrolled lane must still pan
+        // the shared time axis. Zoom in first: a 64-beat view of a 16-beat
+        // song clamps max-view-start to 0 and no pan could be observed.
+        editor
+            .runtime_mut()
+            .eval_str("(set! arrangement-view-duration 8)")
+            .expect("zoom in for the pan check");
+        editor.refresh_runtime_side_effects();
+        let _ = editor.widget_layout();
+        assert!(editor.handle_touchpad_scroll(0, 0, click_col, click_row, -40.0, 0.5));
+        editor.refresh_runtime_side_effects();
+        let panned_neg = editor
+            .runtime_mut()
+            .eval_str("arrangement-view-start")
+            .unwrap();
+        assert!(editor.handle_touchpad_scroll(0, 0, click_col, click_row, 40.0, 0.5));
+        editor.refresh_runtime_side_effects();
+        let panned_pos = editor
+            .runtime_mut()
+            .eval_str("arrangement-view-start")
+            .unwrap();
+        assert!(
+            panned_neg != Some(Value::Number(0.0)) || panned_pos != Some(Value::Number(0.0)),
+            "horizontal panning over a scrolled lane must move the time axis \
+             (after -40: {panned_neg:?}, after +40: {panned_pos:?})"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(do (set! arrangement-view-start 0) (set! arrangement-view-duration 64))")
+            .expect("restore the view for the resize check");
+        editor.refresh_runtime_side_effects();
+        let _ = editor.widget_layout();
+
+        // End-edge resize on the scrolled clip: press on the clip's right
+        // edge (on its title bar, where the handles live), drag left past
+        // the snap threshold, release.
+        let edge_col = lane5.rect.col + lane5.rect.width * (16.0 / 64.0) - 0.2;
+        let target_col = lane5.rect.col + lane5.rect.width * (8.0 / 64.0);
+        let row = lane5.rect.row - offset + 0.4;
+        editor.handle_mouse_precise(
+            mouse(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                edge_col,
+                row,
+            ),
+            0,
+            0,
+            72,
+            20,
+            edge_col,
+            row,
+        );
+        editor.handle_mouse_precise(
+            mouse(
+                crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+                target_col,
+                row,
+            ),
+            0,
+            0,
+            72,
+            20,
+            target_col,
+            row,
+        );
+        editor.handle_mouse_precise(
+            mouse(
+                crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                target_col,
+                row,
+            ),
+            0,
+            0,
+            72,
+            20,
+            target_col,
+            row,
+        );
+        {
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(
+                recorded.len(),
+                1,
+                "an end-edge drag on a scrolled clip must commit one gesture"
+            );
+            let Value::Map(map) = &recorded[0] else {
+                panic!("recorded action must be a map");
+            };
+            assert_eq!(
+                map["type"].borrow().clone(),
+                Value::Keyword("clip-resize".to_string()),
+                "resize lowers to one clip resize"
+            );
+            assert_eq!(map["track"].borrow().clone(), Value::Number(5.0));
+        }
+    }
+
+    /// MIDI dot flattening (docs/arrangement-timeline-ui-spec.md 7.1): the
+    /// view flattens raw (time transpose velocity) pattern events into
+    /// normalized (offset, value) dots — offsets over the pattern length,
+    /// values spread across the pattern's own transpose range — capped per
+    /// item by time-bucket collapse (dense clusters thin first).
+    #[test]
+    fn metal_seq_arrangement_dots_flatten_normalized_and_capped() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        let sparse = LanePatternEvents {
+            pattern_id: 1,
+            take_id: None,
+            num_steps: 16,
+            // 16 sixteenth steps = one 4-beat cycle.
+            length_beats: 4.0,
+            // Durations (region spec 3.2): one step, two steps, and a
+            // note running well past the pattern's end.
+            events: vec![
+                (0.0, 0.0, 1.0, 1.0),
+                (4.0, 12.0, 1.0, 2.0),
+                (8.0, -12.0, 1.0, 20.0),
+            ],
+        };
+        let dense = LanePatternEvents {
+            pattern_id: 2,
+            take_id: None,
+            num_steps: 64,
+            length_beats: 16.0,
+            events: (0..600)
+                .map(|index| (index as f64 * 0.1, 0.0, 1.0, 1.0))
+                .collect(),
+        };
+        let rt = editor.runtime_mut();
+        rt.set_reactive(
+            "SEQ",
+            "song-lanes",
+            test_list(vec![test_list(vec![map_value([
+                ("clip-id", Value::Number(0.0)),
+                ("start-beat", Value::Number(0.0)),
+                ("end-beat", Value::Number(16.0)),
+                ("pattern-id", Value::Number(1.0)),
+                ("take-id", Value::Nil),
+                // Halfway through the pattern at the clip's left edge.
+                ("offset-steps", Value::Number(8.0)),
+            ])])]),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "song-lane-events",
+            build_song_lane_events_value(&[vec![sparse, dense]]),
+        );
+        rt.run_reactive_cycle();
+
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("expr evaluates")
+                .expect("expr returns a value")
+        };
+        // Track items carry the MIDI kind and the flattened dots payload.
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :kind)"),
+            Value::Keyword("midi".to_string())
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :label)"),
+            Value::String("Pattern 1".to_string())
+        );
+        // A 16-beat clip over a 4-beat pattern loops 4 times: the content
+        // declares the cycle fraction so the widget tiles the preview.
+        assert_eq!(
+            read(
+                &mut editor,
+                "(get (get (nth (arrangement-track-items 0) 0) :content) :cycle)"
+            ),
+            Value::Number(0.25)
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(get (get (nth (arrangement-track-items 0) 0) :content) :phase)"
+            ),
+            Value::Number(0.5),
+            "pattern preview phase comes from the clip's source offset"
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(arrangement-clip-cycle \
+                   (arrangement-lane-pattern-events 0 1) \
+                   (dict :start-beat 0 :end-beat 2))"
+            ),
+            Value::Number(2.0),
+            "a clip shorter than its pattern exposes a partial source cycle"
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(do \
+                   (set! arrangement-ghost \
+                     (dict :kind :track-resize :track 0 :clip-id 0 \
+                       :edge :start :time 3)) \
+                   (get (arrangement-track-ghost-clip \
+                          0 (nth (arrangement-track-clips 0) 0)) \
+                     :offset-steps))"
+            ),
+            Value::Number(4.0),
+            "live left-edge trim advances and wraps the pattern offset"
+        );
+        read(&mut editor, "(set! arrangement-ghost nil)");
+        let dots = "(get (get (nth (arrangement-track-items 0) 0) :content) :dots)";
+        assert_eq!(
+            read(&mut editor, &format!("(len {dots})")),
+            Value::Number(3.0)
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots} 1) :offset)")),
+            Value::Number(0.25),
+            "offset normalizes event time over the pattern length"
+        );
+        // Transpose range -12..12 spreads to 0.15..0.85 with 0 mid-range.
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots} 0) :value)")),
+            Value::Number(0.5)
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots} 1) :value)")),
+            Value::Number(0.85)
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots} 2) :value)")),
+            Value::Number(0.15)
+        );
+
+        // Note lengths normalize over the same window as offsets, and a
+        // note never paints past the item's end
+        // (docs/arrangement-region-editing-spec.md 3.2).
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots} 0) :width)")),
+            Value::Number(1.0 / 16.0),
+            "duration normalizes over the pattern length"
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots} 1) :width)")),
+            Value::Number(2.0 / 16.0)
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots} 2) :width)")),
+            Value::Number(0.5),
+            "an overlong note clamps at the window end"
+        );
+
+        // 600 events collapse into <= 256 time buckets.
+        let Value::Number(capped) = read(
+            &mut editor,
+            "(len (arrangement-pattern-dots (arrangement-lane-pattern-events 0 2)))",
+        ) else {
+            panic!("dot count must be a number");
+        };
+        assert!(
+            capped <= 256.0 && capped > 200.0,
+            "dense pattern must cap near the bucket count, got {capped}"
+        );
+    }
+
+    /// Take clips clamp to the take's true remaining length (takes spec
+    /// 11.3) and their dots render the exact step window the clip plays,
+    /// normalized to the drawn item — a row extending past the take's end
+    /// draws as empty lane, and a re-anchored clip shows its actual slice.
+    #[test]
+    fn metal_seq_arrangement_take_clips_clamp_and_window_dots() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let take_clip = |clip_id: f64, start: f64, end: f64, offset: f64| {
+            map_value(vec![
+                ("clip-id", Value::Number(clip_id)),
+                ("start-beat", Value::Number(start)),
+                ("end-beat", Value::Number(end)),
+                ("pattern-id", Value::Nil),
+                ("take-id", Value::Number(7.0)),
+                ("offset-steps", Value::Number(offset)),
+            ])
+        };
+        // 32-step take over 8 beats (0.25 beats/step); events at steps
+        // 0 / 16 / 31.
+        let take_entry = LanePatternEvents {
+            pattern_id: 0,
+            take_id: Some(7),
+            num_steps: 32,
+            length_beats: 8.0,
+            events: vec![
+                (0.0, 0.0, 1.0, 1.0),
+                (16.0, 12.0, 1.0, 1.0),
+                (31.0, -12.0, 1.0, 1.0),
+            ],
+        };
+        let rt = editor.runtime_mut();
+        rt.set_reactive(
+            "SEQ",
+            "song-lanes",
+            test_list(vec![test_list(vec![
+                // One stored take clip [0,10) anchored at step 0. The stored
+                // span reaches 10 but the take itself ends at beat 8.
+                take_clip(0.0, 0.0, 10.0, 0.0),
+                // A re-anchored clip: [12,16) playing from step 16.
+                take_clip(2.0, 12.0, 16.0, 16.0),
+            ])]),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "song-lane-events",
+            build_song_lane_events_value(&[vec![take_entry]]),
+        );
+        rt.run_reactive_cycle();
+
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("expr evaluates")
+                .expect("expr returns a value")
+        };
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-track-clips 0))"),
+            Value::Number(2.0),
+            "two stored take clips, published verbatim"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :label)"),
+            Value::String("Take 8".to_string())
+        );
+        // Clip [0,10) clamps to the take end: 0 + 32 * 0.25 = 8.
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :end)"),
+            Value::Number(8.0),
+            "the item ends at the take's true end, not the stored span"
+        );
+        let dots = "(get (get (nth (arrangement-track-items 0) 0) :content) :dots)";
+        assert_eq!(
+            read(&mut editor, &format!("(len {dots})")),
+            Value::Number(3.0)
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots} 1) :offset)")),
+            Value::Number(0.5),
+            "dot offsets normalize over the take window, aligning with notes"
+        );
+        // Re-anchored clip [12,16) offset 16: remaining = 16 steps = 4
+        // beats, so the row span is exactly the remainder; its dots are the
+        // slice [16,32) re-normalized.
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :end)"),
+            Value::Number(16.0)
+        );
+        let dots2 = "(get (get (nth (arrangement-track-items 0) 1) :content) :dots)";
+        assert_eq!(
+            read(&mut editor, &format!("(len {dots2})")),
+            Value::Number(2.0),
+            "only the events inside the clip's window render"
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots2} 0) :offset)")),
+            Value::Number(0.0),
+            "the window's first event sits at the clip start"
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get (nth {dots2} 1) :offset)")),
+            Value::Number(0.9375)
+        );
+    }
+
+    /// Provisional capture content
+    /// (docs/realtime-arrangement-feedback-spec.md 3.4): while a capture
+    /// runs, `SEQ.song-pending` composes extra items into each lane AFTER the
+    /// committed clips, drawn through the committed clips' own dot pipeline.
+    /// They are inert: no id, no label, absent from `arrangement-track-clips`
+    /// (the gesture source of truth), and a `:select` on one selects nothing.
+    #[test]
+    fn metal_seq_arrangement_pending_capture_items_render_but_are_inert() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let recorded: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = recorded.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-arrangement-action", move |args, _ctx| {
+                sink.lock().unwrap().push(args.first().cloned().unwrap_or(Value::Nil));
+                Ok(Value::String("recorded".to_string()))
+            });
+
+        // One committed clip on track 0 over [0,4) — the thing that IS
+        // addressable, so the inertness assertions below are not vacuous.
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
+        rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
+        rt.set_reactive(
+            "SEQ",
+            "scene-spans",
+            test_list(vec![scene_span(0.0, 16.0, 0.0)]),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "song-lanes",
+            test_list(vec![test_list(vec![lane_clip(
+                0.0,
+                0.0,
+                4.0,
+                Value::Number(1.0),
+            )])]),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "song-lane-events",
+            build_song_lane_events_value(&[vec![LanePatternEvents {
+                pattern_id: 1,
+                take_id: None,
+                num_steps: 16,
+                length_beats: 4.0,
+                events: vec![(0.0, 0.0, 1.0, 1.0)],
+            }]]),
+        );
+        // A capture in flight: track 0 punched in at beat 4 and the record
+        // head has reached beat 10; two launches captured, at 0 and 8.
+        // The recorded content (12 steps of 0.25 beats = 3 beats) is SHORTER
+        // than the drawn span, which is what pins the dots to their real
+        // positions instead of stretching them across the growing rect.
+        let pending_lane = map_value(vec![
+            ("track", Value::Number(0.0)),
+            ("start-beat", Value::Number(4.0)),
+            ("end-beat", Value::Number(10.0)),
+            ("num-steps", Value::Number(12.0)),
+            ("length-beats", Value::Number(3.0)),
+            (
+                "events",
+                test_list(vec![
+                    test_number_list(&[0.0, 0.0, 1.0, 1.0]),
+                    test_number_list(&[12.0, 12.0, 1.0, 1.0]),
+                ]),
+            ),
+        ]);
+        let scene_event = |beat: f64, scene: f64| {
+            map_value(vec![
+                ("start-beat", Value::Number(beat)),
+                ("scene", Value::Number(scene)),
+            ])
+        };
+        // The clips those launches put on track 0: a 4-step pattern (1 beat)
+        // at beat 0, replaced by another at beat 8.
+        let track_event = |beat: f64| {
+            map_value(vec![
+                ("track", Value::Number(0.0)),
+                ("start-beat", Value::Number(beat)),
+                ("pattern-id", Value::Number(3.0)),
+                ("num-steps", Value::Number(4.0)),
+                ("length-beats", Value::Number(1.0)),
+                (
+                    "events",
+                    test_list(vec![test_number_list(&[0.0, 0.0, 1.0, 1.0])]),
+                ),
+            ])
+        };
+        rt.set_reactive(
+            "SEQ",
+            "song-pending",
+            map_value(vec![
+                ("origin-beat", Value::Number(0.0)),
+                ("head-beat", Value::Number(10.0)),
+                ("lanes", test_list(vec![pending_lane])),
+                (
+                    "scene-events",
+                    test_list(vec![scene_event(0.0, 0.0), scene_event(8.0, 1.0)]),
+                ),
+                (
+                    "track-events",
+                    test_list(vec![track_event(0.0), track_event(8.0)]),
+                ),
+            ]),
+        );
+        rt.run_reactive_cycle();
+
+        let eval = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .unwrap_or_else(|error| panic!("{expr}: {error:?}"))
+        };
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            eval(editor, expr).expect("expr returns a value")
+        };
+
+        // Drawn: the committed clip, then the two launch clips, then the
+        // recorded take on top — the order the stop-commit paints them in.
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-track-items 0))"),
+            Value::Number(4.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-track-clips 0))"),
+            Value::Number(1.0),
+            "the gesture source of truth still holds only the stored clip"
+        );
+        // Launch clips: the first runs to the next launch, the second to the
+        // record head, and each tiles its pattern over its own span.
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :start)"),
+            Value::Number(0.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :end)"),
+            Value::Number(8.0)
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(get (get (nth (arrangement-track-items 0) 1) :content) :cycle)"
+            ),
+            Value::Number(1.0 / 8.0),
+            "a 1-beat pattern repeats 8 times across an 8-beat launch span"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 2) :end)"),
+            Value::Number(10.0),
+            "the last launch on the lane runs to the record head"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 2) :id)"),
+            Value::Nil
+        );
+        let provisional = "(nth (arrangement-track-items 0) 3)";
+        assert_eq!(
+            read(&mut editor, &format!("(get {provisional} :start)")),
+            Value::Number(4.0)
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get {provisional} :end)")),
+            Value::Number(10.0),
+            "the span grows to the record head"
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get {provisional} :id)")),
+            Value::Nil,
+            "no id: there is no ClipId to name yet"
+        );
+        // Real clip styling and labels: the preview looks like what it is
+        // about to become, and only the id is withheld.
+        assert_eq!(
+            read(&mut editor, &format!("(get {provisional} :label)")),
+            Value::String("Take".to_string())
+        );
+        assert_eq!(
+            read(&mut editor, &format!("(get {provisional} :color)")),
+            read(&mut editor, "(arrangement-clip-color 0)"),
+            "provisional items wear the committed clips' own tint"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :label)"),
+            Value::String("Pattern 3".to_string())
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :label)"),
+            read(&mut editor, "(arrangement-scene-name 0)"),
+            "a captured launch is labelled with the scene it launched"
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                &format!("(len (get (get {provisional} :content) :dots))")
+            ),
+            Value::Number(2.0),
+            "recorded notes draw through the committed dot pipeline"
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                &format!("(get (nth (get (get {provisional} :content) :dots) 1) :offset)")
+            ),
+            Value::Number(0.5),
+            "dots normalize over the DRAWN span (24 steps), so a note at step \
+             12 stays at its real position as the item grows to the head — \
+             normalizing over the recorded length would stretch it to the end"
+        );
+
+        // Scene lane: one committed span plus the two captured launches, the
+        // last running to the record head.
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-scene-items))"),
+            Value::Number(3.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :end)"),
+            Value::Number(8.0),
+            "a captured launch runs to the next one"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 2) :end)"),
+            Value::Number(10.0),
+            "the last captured launch runs to the record head"
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 2) :id)"),
+            Value::Nil
+        );
+
+        // The view can be scrolled out to the record head even when the
+        // committed song ends before it — clamping to `song-end-beat` alone
+        // pinned a whole-song capture at bar 1.
+        assert_eq!(
+            read(&mut editor, "(arrangement-scroll-extent)"),
+            Value::Number(16.0),
+            "the committed end still wins while it is the furthest content"
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "song-end-beat", Value::Number(0.0));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(arrangement-scroll-extent)"),
+            Value::Number(10.0),
+            "with no committed song the record head is the extent"
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
+        editor.runtime_mut().run_reactive_cycle();
+
+        // Inert: the real clip selects, the provisional item does not.
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :select :ids (list 0) :time 1))",
+        );
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-lane-selection 0))"),
+            Value::Number(1.0),
+            "a stored clip still selects — the guard is not over-broad"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :select :ids (list nil) :time 5))",
+        );
+        assert_eq!(
+            read(&mut editor, "arrangement-track-selection"),
+            Value::List(vec![]),
+            "selecting a provisional item selects nothing"
+        );
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :select :ids (list nil) :time 5))",
+        );
+        assert_eq!(
+            read(&mut editor, "arrangement-selection"),
+            Value::List(vec![]),
+            "the same holds in the scene lane"
+        );
+
+        // ...and no gesture on one can reach a primitive.
+        let before = recorded.lock().unwrap().len();
+        eval(
+            &mut editor,
+            "(arrangement-track-action 0 (dict :type :delete-items :ids (list nil)))",
+        );
+        eval(
+            &mut editor,
+            "(do (arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id nil :ids (list nil) :start 12)) \
+             (arrangement-track-action 0 (dict :type :finish-move-items)))",
+        );
+        eval(
+            &mut editor,
+            "(do (arrangement-track-action 0 (dict :type :resize-item-absolute :id nil :ids (list nil) :edge :end :time 14)) \
+             (arrangement-track-action 0 (dict :type :finish-resize-items :id nil :ids (list nil))))",
+        );
+        eval(
+            &mut editor,
+            "(arrangement-scene-action (dict :type :delete-items :ids (list nil)))",
+        );
+        assert_eq!(
+            recorded.lock().unwrap().len(),
+            before,
+            "provisional content lowers to no primitive on any gesture"
+        );
+    }
+
+    /// Arrangement layout (docs/arrangement-timeline-ui-spec.md 4-6): the
+    /// scene lane is the only timeline instance with a header/time ruler,
+    /// track lanes are headerless and sidebar-less, both have finite nonzero
+    /// geometry, the shared playhead prop is a ReactiveRef binding
+    /// (AGENTS.md bindable-props mandate), and nil-pattern spans render
+    /// sparsely (no item).
+    #[test]
+    fn metal_seq_arrangement_layout_one_ruler_headerless_lanes_and_sparse_items() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
+        rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
+        rt.set_reactive(
+            "SEQ",
+            "scene-spans",
+            test_list(vec![scene_span(0.0, 8.0, 0.0), scene_span(8.0, 16.0, 1.0)]),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "song-lanes",
+            // A sparse lane: one clip over [0, 8) and NOTHING over [8, 16),
+            // which is how the model spells silence (lane spec 6.2).
+            test_list(vec![test_list(vec![lane_clip(
+                0.0,
+                0.0,
+                8.0,
+                Value::Number(1.0),
+            )])]),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "scene-names",
+            test_string_list(&["Intro", "Drop"]),
+        );
+        rt.set_reactive("SEQ", "track-selected-0", Value::Bool(true));
+        rt.run_reactive_cycle();
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(do (seq-open-arrangement) \
+                 (set! arrangement-cursor-time 6) \
+                 (set! arrangement-cursor-track 0))",
+            )
+            .expect("open arrangement view");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("arrangement layout");
+        let scene_container = find_layout_node_by_stable_key(&layout, "arrangement-scene-lane")
+            .expect("scene lane container");
+        assert_finite_nonzero_rect(scene_container, "arrangement-scene-lane");
+        let scene_lane = find_layout_node_by_widget_type(scene_container, "timeline")
+            .expect("scene timeline instance");
+        assert_finite_nonzero_rect(scene_lane, "scene timeline instance");
+        assert_eq!(
+            layout_prop_number(scene_lane, "header-height"),
+            Some(2.6),
+            "the scene lane draws the arrangement's one ruler"
+        );
+        assert_eq!(
+            layout_prop_number(scene_lane, "header-bottom-gutter"),
+            Some(1.0),
+            "the ruler reserves one cell for the transport-start marker"
+        );
+        assert!(
+            matches!(scene_lane.props.get("time-ruler"), Some(Value::Map(_))),
+            "the scene lane carries the bars-beats ruler"
+        );
+        assert!(
+            matches!(
+                scene_lane.props.get("playhead-time"),
+                Some(Value::ReactiveRef { .. })
+            ),
+            "playhead-time must bind reactively (render-rate sweep without rebuilds)"
+        );
+        assert_eq!(
+            layout_prop_number(scene_lane, "cursor-time"),
+            Some(6.0),
+            "the transport-start triangle stays on the ruler for track cursors"
+        );
+        assert_eq!(
+            scene_lane.props.get("cursor-marker-visible"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            layout_prop_number(scene_lane, "cursor-marker-scale"),
+            Some(1.6)
+        );
+        assert_eq!(
+            layout_prop_number(scene_lane, "cursor-marker-width-scale"),
+            Some(1.5)
+        );
+        assert_eq!(
+            layout_prop_number(scene_lane, "cursor-marker-height-scale"),
+            Some(0.7)
+        );
+        assert_eq!(
+            scene_lane.props.get("cursor-line-visible"),
+            Some(&Value::Bool(false)),
+            "the scene lane renders the ruler triangle without a vertical line"
+        );
+        assert_eq!(layout_prop_number(scene_lane, "content-length"), Some(16.0));
+
+        // The subtree key names the row (the subtree wrapper owns the stable
+        // key of its root child): "arr-track-<track-id>".
+        let track_container = find_layout_node_by_stable_key(&layout, "arr-track-0")
+            .expect("track lane container");
+        assert_finite_nonzero_rect(track_container, "arrangement-track-lane-0");
+        let track_lane = find_layout_node_by_widget_type(track_container, "timeline")
+            .expect("track timeline instance");
+        assert_finite_nonzero_rect(track_lane, "track timeline instance");
+        assert_eq!(
+            layout_prop_number(track_lane, "header-height"),
+            Some(0.0),
+            "track lanes are headerless (spec 4.2)"
+        );
+        assert_eq!(
+            layout_prop_number(track_lane, "sidebar-width"),
+            Some(0.0),
+            "the composed seqv-track-header plays the sidebar role"
+        );
+        assert_eq!(
+            layout_prop_number(track_lane, "cursor-time"),
+            Some(6.0),
+            "the clicked track still draws its cursor line"
+        );
+        assert_eq!(
+            track_lane.props.get("cursor-marker-visible"),
+            Some(&Value::Bool(false)),
+            "track lanes render no duplicate cursor triangle"
+        );
+        assert_eq!(
+            track_lane.props.get("cursor-line-visible"),
+            Some(&Value::Bool(true))
+        );
+        // Only the scene lane DRAWS a ruler — and what gates that is
+        // :header-height, asserted above, since every bit of ruler chrome
+        // lives inside the header. Track lanes still carry the same
+        // :time-ruler: it is the bar/beat time base that picks the grid
+        // ladder their lines and :grid snapping quantize to, so leaving it
+        // off dropped them onto the seconds ladder and desynced their grid
+        // from the ruler above (see
+        // metal_seq_arrangement_lane_grid_matches_the_ruler_at_every_zoom).
+        assert_eq!(
+            track_lane.props.get("time-ruler"),
+            scene_lane.props.get("time-ruler"),
+            "every lane shares the scene lane's bar/beat time base"
+        );
+        assert!(
+            matches!(
+                track_lane.props.get("playhead-time"),
+                Some(Value::ReactiveRef { .. })
+            ),
+            "every lane shares the same render-rate playhead binding"
+        );
+        assert_eq!(layout_prop_number(track_lane, "content-length"), Some(16.0));
+
+        // The reused track header renders beside the lane.
+        let track_header =
+            find_layout_node_by_stable_key(&layout, "arrangement-track-header-0")
+                .expect("arrangement track header container");
+        assert_finite_nonzero_rect(track_header, "arrangement track header container");
+        assert_eq!(
+            layout_prop_bool(track_header, "selected"),
+            Some(true),
+            "the arrangement header uses the shared reactive track selection"
+        );
+        assert_eq!(
+            track_header.props.get("selected-background-color"),
+            Some(&Value::Keyword("mixer-strip-selected-bg".to_string())),
+            "the selected arrangement header uses the sequencer row theme color"
+        );
+        assert!(
+            find_layout_node_by_stable_key(track_header, "seqv-track-header-0").is_some(),
+            "seqv-track-header is reused unchanged inside the selected arrangement header"
+        );
+
+        // Shared-axis geometry: every lane spans the identical x-range, no
+        // lane overflows the buffer pane (overflow made the viewport scroll
+        // horizontally and hid the track headers), and the scene lane and
+        // first track lane are vertically flush so pointer scroll/zoom is
+        // always captured by a timeline instance.
+        assert_eq!(scene_lane.rect.col, track_lane.rect.col);
+        assert_eq!(scene_lane.rect.width, track_lane.rect.width);
+        let pane_right = layout.rect.col + layout.rect.width;
+        let lane_right = scene_lane.rect.col + scene_lane.rect.width;
+        assert!(
+            lane_right <= pane_right + 0.01,
+            "lanes must not extend past the pane ({lane_right} > {pane_right})"
+        );
+        assert!(
+            scene_lane.rect.width >= layout.rect.width * 0.4,
+            "the flexed lane must absorb the width remaining after the header \
+             column, not collapse to its intrinsic size (lane width {}, pane {})",
+            scene_lane.rect.width,
+            layout.rect.width
+        );
+        let scene_bottom = scene_lane.rect.row + scene_lane.rect.height;
+        // A thin deliberate separator strip (and row border chrome) may sit
+        // between the scene lane and the track rows; anything larger is a
+        // layout regression that would let the pointer fall between lanes.
+        let track_gap = track_lane.rect.row - scene_bottom;
+        assert!(
+            (-0.01..0.5).contains(&track_gap),
+            "track lane must sit just under the scene lane (scene bottom {scene_bottom}, track top {})",
+            track_lane.rect.row
+        );
+
+        // Sticky ruler: the track rows live inside a scroll container that
+        // starts flush under the pinned scene lane and absorbs the rest of
+        // the pane, so vertical track scrolling never moves the ruler.
+        let track_scroll = find_layout_node_by_stable_key(&layout, "arrangement-track-scroll")
+            .expect("track scroll container");
+        assert_eq!(track_scroll.widget_type, "scroll");
+        assert_finite_nonzero_rect(track_scroll, "arrangement-track-scroll");
+        let scroll_gap = track_scroll.rect.row - scene_bottom;
+        assert!(
+            (-0.01..0.5).contains(&scroll_gap),
+            "scroll container starts just under the scene lane (gap {scroll_gap})"
+        );
+        assert!(
+            find_layout_node_by_stable_key(track_scroll, "arr-track-0").is_some(),
+            "track rows are children of the scroll container"
+        );
+        // The track lane delegates vertical scrolling to the container.
+        assert!(
+            matches!(
+                track_lane.props.get("scroll-passthrough"),
+                Some(Value::Keyword(mode)) if mode == "vertical"
+            ),
+            "track lanes must declare :scroll-passthrough :vertical"
+        );
+
+        // Sparse lanes (spec 6): the uncovered stretch produces NO item.
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("expr evaluates")
+                .expect("expr returns a value")
+        };
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-track-items 0))"),
+            Value::Number(1.0)
+        );
+        // Scene-lane items span row-start to next row-start with scene names.
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-scene-items))"),
+            Value::Number(2.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 0) :label)"),
+            Value::String("Intro".to_string())
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 0) :end)"),
+            Value::Number(8.0)
+        );
+        assert_eq!(
+            read(&mut editor, "(get (nth (arrangement-scene-items) 1) :end)"),
+            Value::Number(16.0)
+        );
+    }
+
+    /// Fixture for the region-selection tests: `tracks` lanes, the indices in
+    /// `collapsed` hidden, one full-width clip per visible lane, the view
+    /// showing beats 0..64.
+    fn arrangement_region_editor(tracks: usize, collapsed: &[usize]) -> eseqlisp::Editor {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "num-tracks", Value::Number(tracks as f64));
+        rt.set_reactive(
+            "SEQ",
+            "track-ids",
+            test_number_list(&(0..tracks).map(|i| i as f64).collect::<Vec<_>>()),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-collapsed",
+            test_bool_list(
+                &(0..tracks)
+                    .map(|i| collapsed.contains(&i))
+                    .collect::<Vec<_>>(),
+            ),
+        );
+        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
+        rt.set_reactive("SEQ", "song-end-beat", Value::Number(64.0));
+        rt.set_reactive("SEQ", "scene-spans", test_list(vec![scene_span(0.0, 16.0, 0.0)]));
+        rt.set_reactive(
+            "SEQ",
+            "song-lanes",
+            Value::List(
+                (0..tracks)
+                    .map(|track| {
+                        // The LAST track stays bare (nil pattern renders no
+                        // item), so tests have empty lane background to click.
+                        let pattern = if track + 1 == tracks {
+                            Value::Nil
+                        } else {
+                            Value::Number(1.0)
+                        };
+                        Rc::new(RefCell::new(test_list(vec![lane_clip(
+                            0.0, 0.0, 64.0, pattern,
+                        )])))
+                    })
+                    .collect(),
+            ),
+        );
+        rt.run_reactive_cycle();
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(do (seq-open-arrangement) (set! arrangement-view-start 0) \
+                 (set! arrangement-view-duration 64))",
+            )
+            .expect("open arrangement view");
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(96, 40);
+        editor
+    }
+
+    #[test]
+    fn metal_seq_arrangement_header_and_timeline_click_select_the_track() {
+        let mut editor = arrangement_region_editor(2, &[]);
+        let selected_tracks: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = selected_tracks.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-set-track", move |args, _ctx| {
+                let Some(Value::Number(track)) = args.first() else {
+                    return Err("seq-set-track: expected track number".into());
+                };
+                sink.lock().unwrap().push(*track);
+                Ok(Value::Bool(true))
+            });
+
+        let layout = editor.widget_layout().expect("arrangement layout");
+        let header = find_layout_node_by_stable_key(&layout, "arrangement-track-header-1")
+            .expect("track header container");
+        let header_body = find_layout_node_by_stable_key(header, "seqv-track-header-1")
+            .expect("track header body");
+        let header_content = header_body.children.first().expect("track header content");
+        let header_body_bottom = header_body.rect.row + header_body.rect.height;
+        let header_content_bottom = header_content.rect.row + header_content.rect.height;
+        assert!(
+            header_content_bottom < header_body_bottom - 0.1,
+            "fixture needs exposed header-body space below the compact controls"
+        );
+        let lane = find_layout_node_by_widget_type(
+            find_layout_node_by_stable_key(&layout, "arrangement-track-lane-1")
+                .expect("track lane container"),
+            "timeline",
+        )
+        .expect("track timeline");
+
+        let click = |editor: &mut eseqlisp::Editor, col: f32, row: f32| {
+            for kind in [
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            ] {
+                editor.handle_mouse_precise(
+                    crossterm::event::MouseEvent {
+                        kind,
+                        column: col as u16,
+                        row: row as u16,
+                        modifiers: crossterm::event::KeyModifiers::NONE,
+                    },
+                    0,
+                    0,
+                    96,
+                    40,
+                    col,
+                    row,
+                );
+            }
+        };
+
+        // Hit the full-height header body's exposed lower area, outside its
+        // compact row of controls.
+        click(
+            &mut editor,
+            header_body.rect.col + header_body.rect.width * 0.5,
+            (header_content_bottom + header_body_bottom) * 0.5,
+        );
+        assert_eq!(
+            selected_tracks.lock().unwrap().last().copied(),
+            Some(1.0),
+            "the full pre-timeline header container selects its track"
+        );
+
+        selected_tracks.lock().unwrap().clear();
+        // The second lane is deliberately bare, so this is an empty timeline
+        // background click rather than a clip/title-bar hit.
+        click(
+            &mut editor,
+            lane.rect.col + lane.rect.width * 0.75,
+            lane.rect.row + lane.rect.height * 0.5,
+        );
+        assert_eq!(
+            selected_tracks.lock().unwrap().last().copied(),
+            Some(1.0),
+            "clicking empty timeline space selects its owning track"
+        );
+    }
+
+    /// The `arrangement-track-row-pitch` constant the region drag divides by
+    /// (docs/arrangement-region-editing-spec.md 4.2) must equal the ACTUAL
+    /// vertical distance between two rendered track rows. If the lane height
+    /// or the v-stack gap ever changes without the pitch following, a
+    /// cross-track sweep silently selects the wrong tracks — this is the
+    /// assertion that binds them.
+    #[test]
+    fn metal_seq_arrangement_region_row_pitch_matches_layout() {
+        let mut editor = arrangement_region_editor(4, &[]);
+        let layout = editor.widget_layout().expect("arrangement layout");
+        let lane = |key: &str| {
+            let container =
+                find_layout_node_by_stable_key(&layout, key).expect("track lane container");
+            find_layout_node_by_widget_type(container, "timeline")
+                .expect("timeline instance")
+                .rect
+                .row
+        };
+        let measured = lane("arrangement-track-lane-1") - lane("arrangement-track-lane-0");
+        let measured_next = lane("arrangement-track-lane-2") - lane("arrangement-track-lane-1");
+        assert!(
+            (measured - measured_next).abs() < 0.01,
+            "track rows must be evenly pitched ({measured} vs {measured_next})"
+        );
+        let Some(Value::Number(pitch)) = editor
+            .runtime_mut()
+            .eval_str("arrangement-track-row-pitch")
+            .expect("pitch evaluates")
+        else {
+            panic!("arrangement-track-row-pitch must be a number");
+        };
+        assert!(
+            (pitch - measured as f64).abs() < 0.01,
+            "arrangement-track-row-pitch ({pitch}) must match the rendered row \
+             pitch ({measured}); update the constant next to the lane heights"
+        );
+    }
+
+    /// Ordinal <-> track mapping for a cross-track region drag (region spec
+    /// 4.2). The widget reports vertical travel in CELLS from the originating
+    /// lane; the host divides by the row pitch to get a count of visible
+    /// track rows, steps that far through `seq-visible-track-indices`, clamps
+    /// to the visible range, and maps back to a MODEL track index. Collapsed
+    /// tracks are absent from that list, so a sweep skips straight over them.
+    #[test]
+    fn metal_seq_arrangement_region_maps_row_delta_to_visible_tracks() {
+        // Track 2 collapsed: visible order is 0, 1, 3, 4, 5.
+        let mut editor = arrangement_region_editor(6, &[2]);
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("expr evaluates")
+                .expect("expr returns a value")
+        };
+        assert_eq!(
+            read(&mut editor, "(seq-visible-track-indices)"),
+            test_number_list(&[0.0, 1.0, 3.0, 4.0, 5.0]),
+            "the collapsed track is absent from the visible order"
+        );
+        assert_eq!(
+            read(&mut editor, "(arrangement-visible-ordinal (seq-visible-track-indices) 3)"),
+            Value::Number(2.0),
+            "model track 3 is the THIRD visible row once track 2 collapses"
+        );
+        assert_eq!(
+            read(&mut editor, "(arrangement-visible-ordinal (seq-visible-track-indices) 2)"),
+            Value::Number(-1.0),
+            "a collapsed track has no visible ordinal"
+        );
+
+        // One row of travel down from track 1 lands on model track 3, not 2.
+        assert_eq!(
+            read(
+                &mut editor,
+                "(arrangement-region-other-track 1 arrangement-track-row-pitch)"
+            ),
+            Value::Number(3.0)
+        );
+        // Half a row rounds to the nearer row: still track 1.
+        assert_eq!(
+            read(
+                &mut editor,
+                "(arrangement-region-other-track 1 (* 0.4 arrangement-track-row-pitch))"
+            ),
+            Value::Number(1.0)
+        );
+        // Upward travel is signed.
+        assert_eq!(
+            read(
+                &mut editor,
+                "(arrangement-region-other-track 3 (* -2 arrangement-track-row-pitch))"
+            ),
+            Value::Number(0.0)
+        );
+        // Off the bottom clamps to the last visible track, not past it.
+        assert_eq!(
+            read(
+                &mut editor,
+                "(arrangement-region-other-track 1 (* 40 arrangement-track-row-pitch))"
+            ),
+            Value::Number(5.0)
+        );
+        // Off the top clamps to the first.
+        assert_eq!(
+            read(
+                &mut editor,
+                "(arrangement-region-other-track 4 (* -40 arrangement-track-row-pitch))"
+            ),
+            Value::Number(0.0)
+        );
+        // Missing :row-delta (a host that never sends one) means no travel.
+        assert_eq!(
+            read(&mut editor, "(arrangement-region-other-track 4 nil)"),
+            Value::Number(4.0)
+        );
+    }
+
+    /// End-to-end body-marquee (region spec 4.2/4.3/4.4): pressing a clip's
+    /// BODY and dragging down two lanes commits one region through
+    /// seq-song-set-region, grid-quantized, spanning the swept tracks — and
+    /// the intermediate frames paint the ghost highlight on every lane in
+    /// between, including ones with no clip under the pointer. A plain click
+    /// clears the region and parks the edit cursor.
+    #[test]
+    fn metal_seq_arrangement_body_drag_sweeps_a_cross_track_region() {
+        let mut editor = arrangement_region_editor(5, &[]);
+        let regions: Arc<Mutex<Vec<Vec<f64>>>> = Arc::new(Mutex::new(Vec::new()));
+        let cleared: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let sink = regions.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-song-set-region", move |args, _ctx| {
+                // The 5th argument is the scene-lane bit (lane spec 8); the
+                // rectangle itself is the first four numbers.
+                sink.lock().unwrap().push(
+                    args.iter()
+                        .take(4)
+                        .map(|arg| match arg {
+                            Value::Number(value) => *value,
+                            other => panic!("region args must be numbers, got {other:?}"),
+                        })
+                        .collect(),
+                );
+                Ok(Value::Bool(true))
+            });
+        let clear_sink = cleared.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-song-clear-region", move |_args, _ctx| {
+                *clear_sink.lock().unwrap() += 1;
+                Ok(Value::Bool(true))
+            });
+
+        let layout = editor.widget_layout().expect("arrangement layout");
+        let lane_rect = |key: &str| {
+            let container =
+                find_layout_node_by_stable_key(&layout, key).expect("track lane container");
+            find_layout_node_by_widget_type(container, "timeline")
+                .expect("timeline instance")
+                .rect
+        };
+        let lane1 = lane_rect("arrangement-track-lane-1");
+        let lane3 = lane_rect("arrangement-track-lane-3");
+
+        let mouse = |kind, col: f32, row: f32| crossterm::event::MouseEvent {
+            kind,
+            column: col as u16,
+            row: row as u16,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let send = |editor: &mut eseqlisp::Editor, kind, col: f32, row: f32| {
+            editor.handle_mouse_precise(mouse(kind, col, row), 0, 0, 96, 40, col, row);
+            editor.refresh_runtime_side_effects();
+        };
+
+        // Press on the clip BODY (below the title bar), at beat ~9.
+        let press_col = lane1.col + lane1.width * (9.0 / 64.0);
+        let press_row = lane1.row + lane1.height - 0.3;
+        send(
+            &mut editor,
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            press_col,
+            press_row,
+        );
+        // Drag down into lane 3 and right to beat ~23.
+        let drag_col = lane1.col + lane1.width * (23.0 / 64.0);
+        let drag_row = press_row + (lane3.row - lane1.row);
+        send(
+            &mut editor,
+            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            drag_col,
+            drag_row,
+        );
+
+        // Mid-drag: the ghost paints on every swept lane, including lane 2,
+        // and NOT on lanes outside the sweep.
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("expr evaluates")
+                .expect("expr returns a value")
+        };
+        assert_ne!(
+            read(&mut editor, "(arrangement-region-for-track 2)"),
+            Value::Nil,
+            "the lane between the drag ends is highlighted too"
+        );
+        assert_eq!(
+            read(&mut editor, "(arrangement-region-for-track 4)"),
+            Value::Nil,
+            "lanes outside the sweep stay unhighlighted"
+        );
+        assert!(
+            regions.lock().unwrap().is_empty(),
+            "live drag frames must not commit — ghost only"
+        );
+
+        send(
+            &mut editor,
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            drag_col,
+            drag_row,
+        );
+
+        let committed = regions.lock().unwrap().clone();
+        assert_eq!(committed.len(), 1, "one region per gesture, got {committed:?}");
+        let region = &committed[0];
+        assert_eq!(region[0], 1.0, "the drag started on track 1");
+        assert_eq!(region[1], 3.0, "and swept down to track 3");
+        // Grid-quantized: the view shows 64 beats, so the ladder step divides
+        // the raw span outward rather than landing on the raw pointer beats.
+        assert!(region[2] <= 9.0 && region[2] >= 8.0, "start floors: {region:?}");
+        assert!(region[3] >= 23.0 && region[3] <= 24.0, "end ceils: {region:?}");
+        assert_eq!(
+            read(&mut editor, "arrangement-region-ghost"),
+            Value::Nil,
+            "the ghost clears on commit; the committed region is Rust-owned"
+        );
+
+        // A plain click on empty lane space clears the region and parks the
+        // edit cursor on that track (region spec 4.4).
+        *cleared.lock().unwrap() = 0;
+        let lane4 = lane_rect("arrangement-track-lane-4");
+        let click_col = lane4.col + lane4.width * (40.0 / 64.0);
+        let click_row = lane4.row + lane4.height * 0.5;
+        for kind in [
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            send(&mut editor, kind, click_col, click_row);
+        }
+        assert!(
+            *cleared.lock().unwrap() > 0,
+            "a zero-movement release clears the region"
+        );
+        assert_eq!(
+            read(&mut editor, "arrangement-cursor-track"),
+            Value::Number(4.0),
+            "the click parks the edit cursor on the clicked track"
+        );
+    }
+
+    /// Every lane must quantize to the SAME bar/beat grid the ruler labels
+    /// (docs/arrangement-region-editing-spec.md 4.3). A track lane draws no
+    /// ruler, but the `:time-ruler` prop is not ruler CHROME — it is the time
+    /// base that picks the zoom-adaptive grid ladder. Without it the lane
+    /// fell through to the seconds ladder (steps of 5 or 10 beats), so at
+    /// zoomed-out views its grid lines missed bar lines the ruler was
+    /// labelling and a region drag snapped to those wrong positions.
+    #[test]
+    fn metal_seq_arrangement_lane_grid_matches_the_ruler_at_every_zoom() {
+        let mut editor = arrangement_region_editor(5, &[]);
+        editor.set_layout_viewport(200, 60);
+        for duration in [8.0f64, 16.0, 24.0, 48.0, 96.0, 192.0, 256.0, 512.0] {
+            for start in [0.0f64, 6.0, 6.5, 31.0] {
+                editor
+                    .runtime_mut()
+                    .eval_str(&format!(
+                        "(do (set! arrangement-view-start {start}) \
+                         (set! arrangement-view-duration {duration}))"
+                    ))
+                    .expect("set the view");
+                editor.refresh_runtime_side_effects();
+                let layout = editor.widget_layout().expect("arrangement layout");
+                let lane = |key: &str| {
+                    find_layout_node_by_widget_type(
+                        find_layout_node_by_stable_key(&layout, key).expect("lane container"),
+                        "timeline",
+                    )
+                    .expect("timeline instance")
+                };
+                let (scene_step, _, labels) =
+                    eseqlisp::widget_render::timeline::debug_grid(lane("arrangement-scene-lane"));
+                let (track_step, track_lines, _) = eseqlisp::widget_render::timeline::debug_grid(
+                    lane("arrangement-track-lane-1"),
+                );
+                assert_eq!(
+                    scene_step, track_step,
+                    "lane and ruler must share one grid step \
+                     (view {start}..{}), got ruler {scene_step} vs lane {track_step}",
+                    start + duration
+                );
+                // Every labelled bar on the ruler has a grid line under it in
+                // the track lane, at the same x.
+                for (label_x, label) in &labels {
+                    assert!(
+                        track_lines
+                            .iter()
+                            .any(|line_x| (line_x - label_x).abs() < 0.05),
+                        "bar {label} is labelled at x {label_x} but the track lane \
+                         draws no grid line there (view {start}..{}, step {track_step})",
+                        start + duration
+                    );
+                }
+            }
+        }
+    }
+
+    /// Clicking a clip's TITLE BAR is both gestures at once: it binds the
+    /// track's sound to the clip and selects the clip's merged span as a
+    /// one-track region, so the body lights up exactly like a swept region
+    /// and copy/delete have a target (Ableton). The span travels with the
+    /// Region spec 5.3: the widget's clipboard actions on ANY arrangement
+    /// lane lower to the region commands, and the edit cursor mirrors into
+    /// Rust so the Cmd-V seam has a paste target. Both lanes converge on the
+    /// same three natives — the ui/input.rs seam emits the same commands when
+    /// no lane holds focus.
+    #[test]
+    fn metal_seq_arrangement_clipboard_actions_lower_to_region_commands() {
+        let mut editor = arrangement_region_editor(3, &[]);
+        let copies: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let pastes: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cursors: Arc<Mutex<Vec<Vec<f64>>>> = Arc::new(Mutex::new(Vec::new()));
+        let copy_sink = copies.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-song-region-copy", move |_args, _ctx| {
+                *copy_sink.lock().unwrap() += 1;
+                Ok(Value::Bool(true))
+            });
+        let paste_sink = pastes.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-song-region-paste", move |args, _ctx| {
+                paste_sink
+                    .lock()
+                    .unwrap()
+                    .push(args.first().cloned().unwrap_or(Value::Nil));
+                Ok(Value::Bool(true))
+            });
+        let cursor_sink = cursors.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-song-set-arr-cursor", move |args, _ctx| {
+                cursor_sink.lock().unwrap().push(
+                    args.iter()
+                        .map(|arg| match arg {
+                            Value::Number(value) => *value,
+                            other => panic!("cursor args must be numbers, got {other:?}"),
+                        })
+                        .collect(),
+                );
+                Ok(Value::Bool(true))
+            });
+
+        for expr in [
+            "(arrangement-track-action 1 (dict :type :copy-items :ids (list 0)))",
+            "(arrangement-track-action 1 (dict :type :paste-items :time 12))",
+            "(arrangement-scene-action (dict :type :copy-items :ids (list 0)))",
+            "(arrangement-scene-action (dict :type :paste-items :time 20))",
+            "(arrangement-track-action 2 (dict :type :set-cursor :time 8))",
+        ] {
+            editor.runtime_mut().eval_str(expr).expect(expr);
+        }
+
+        assert_eq!(*copies.lock().unwrap(), 2, "both lanes copy the region");
+        assert_eq!(
+            *pastes.lock().unwrap(),
+            vec![Value::Number(12.0), Value::Number(20.0)],
+            "paste carries the widget's own time"
+        );
+        assert_eq!(
+            *cursors.lock().unwrap(),
+            vec![vec![8.0, 2.0]],
+            "the edit cursor mirrors beat and track into Rust"
+        );
+    }
+
+    /// select because only the lane projection knows how rows merge into one
+    /// clip.
+    #[test]
+    fn metal_seq_arrangement_title_bar_click_selects_the_clip_as_a_region() {
+        let mut editor = arrangement_region_editor(3, &[]);
+        let selects: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = selects.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-song-select-clip", move |args, _ctx| {
+                sink.lock().unwrap().push(args.to_vec());
+                Ok(Value::Bool(true))
+            });
+        let cleared: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let clear_sink = cleared.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-song-clear-region", move |_args, _ctx| {
+                *clear_sink.lock().unwrap() += 1;
+                Ok(Value::Bool(true))
+            });
+        editor
+            .runtime_mut()
+            .register_native("seq-arrangement-action", |_args, _ctx| {
+                Ok(Value::String("recorded".to_string()))
+            });
+
+        let layout = editor.widget_layout().expect("arrangement layout");
+        let container = find_layout_node_by_stable_key(&layout, "arrangement-track-lane-1")
+            .expect("track lane container");
+        let lane = find_layout_node_by_widget_type(container, "timeline")
+            .expect("timeline instance")
+            .rect;
+        // The title bar is the top strip of the clip; the body below it is a
+        // region-selection surface instead (region spec 3.1).
+        let col = lane.col + lane.width * (12.0 / 64.0);
+        let row = lane.row + 0.3;
+        let mouse = |kind| crossterm::event::MouseEvent {
+            kind,
+            column: col as u16,
+            row: row as u16,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        for kind in [
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            editor.handle_mouse_precise(mouse(kind), 0, 0, 96, 40, col, row);
+            editor.refresh_runtime_side_effects();
+        }
+
+        let recorded = selects.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1, "one select per click, got {recorded:?}");
+        assert_eq!(
+            recorded[0],
+            vec![
+                Value::Number(1.0),
+                Value::Number(0.0),
+                // The fixture's clip covers the whole 64-beat song.
+                Value::Number(0.0),
+                Value::Number(64.0),
+            ],
+            "the clip's span rides along so the selection is also a region"
+        );
+
+        // The lane renders that region through the same per-lane prop a swept
+        // region uses, and only on the clicked track.
+        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(expr)
+                .expect("expr evaluates")
+                .expect("expr returns a value")
+        };
+        editor
+            .runtime_mut()
+            .set_reactive(
+                "SEQ",
+                "song-region",
+                test_number_list(&[1.0, 1.0, 0.0, 64.0]),
+            );
+        editor.runtime_mut().run_reactive_cycle();
+        assert_ne!(
+            read(&mut editor, "(arrangement-region-for-track 1)"),
+            Value::Nil,
+            "the clicked track lights its region"
+        );
+        assert_eq!(
+            read(&mut editor, "(arrangement-region-for-track 0)"),
+            Value::Nil,
+            "other tracks do not"
+        );
+
+        // Backspace deletes the clip, and the region goes with it: the
+        // selection pointed AT that clip, so leaving the highlight lit over
+        // now-empty lane would be selecting something that no longer exists.
+        editor.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Backspace,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        editor.refresh_runtime_side_effects();
+        assert!(
+            *cleared.lock().unwrap() > 0,
+            "deleting the selected clip clears its region"
+        );
+        assert_eq!(
+            read(&mut editor, "(len (arrangement-lane-selection 1))"),
+            Value::Number(0.0),
+            "and drops the clip selection"
+        );
     }
 
     #[test]
@@ -20396,6 +24173,8 @@
                 ("track-colors", test_multi_track_colors(3)),
                 ("track-collapsed", test_bool_list(&[false, true, false])),
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
+                ("song-region", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_repeated_bool_list(false, 3)),
                 ("track-mutes", test_repeated_bool_list(false, 3)),
@@ -22446,13 +26225,10 @@
     }
 
     #[test]
-    fn metal_seq_plain_tab_on_visible_sequencer_keeps_tile_tree_stable() {
+    fn metal_seq_plain_tab_toggles_session_and_arrangement_layouts() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut editor = full_grid_editor_for_scroll_tests();
-        set_full_grid_track_count(&mut editor, 10, 16);
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
         let sequencer_id = editor
             .buffers
             .iter()
@@ -22461,62 +26237,74 @@
             .id;
         editor.set_active_buffer(sequencer_id);
         editor.set_layout_viewport(180, 44);
-        let initial_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
-        let initial_layout = initial_frame
-            .widget_layout
-            .as_ref()
-            .expect("initial sequencer layout should build");
-        assert_eq!(
-            count_stable_key_prefix(initial_layout, "seqv-expanded-step-slider-"),
-            0,
-            "fixture should start with compact sequencer rows"
-        );
-
-        let tile_ids_before = editor.tile_root.leaf_ids();
-        let active_tile_before = editor.active_tile;
-        let state = Arc::new(SequencerState::new(10, vec![]));
+        let state = Arc::new(SequencerState::new(1, vec![]));
         let current_track = Arc::new(AtomicUsize::new(0));
         let selected_steps = Arc::new(Mutex::new(HashSet::new()));
         let step_clipboard = Arc::new(Mutex::new(None));
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
 
         assert!(
             handle_metal_command_shortcut(
                 &mut editor,
-                &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                &tab,
                 &state,
                 &current_track,
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should be handled by the sequencer shortcut path"
+            "plain Tab should switch to arrangement"
         );
+        let arrangement_tiles = collect_tile_buffer_names(&editor);
+        assert!(
+            arrangement_tiles.contains(&"*arrangement*".to_string()),
+            "plain Tab should install the arrangement tile: {arrangement_tiles:?}"
+        );
+        for hidden in ["*sequencer*", "*step*", "*track*"] {
+            assert!(
+                !arrangement_tiles.contains(&hidden.to_string()),
+                "plain Tab arrangement mode should hide {hidden}: {arrangement_tiles:?}"
+            );
+        }
 
-        assert_eq!(
-            editor.tile_root.leaf_ids(),
-            tile_ids_before,
-            "plain Tab on an already-visible sequencer must not rebuild the whole tile tree"
+        assert!(
+            handle_metal_command_shortcut(
+                &mut editor,
+                &tab,
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "second plain Tab should return to session"
         );
-        assert_eq!(
-            editor.active_tile, active_tile_before,
-            "plain Tab should keep focus in the existing sequencer tile"
-        );
+        let session_tiles = collect_tile_buffer_names(&editor);
+        for visible in ["*sequencer*", "*step*", "*track*"] {
+            assert!(
+                session_tiles.contains(&visible.to_string()),
+                "second plain Tab should restore {visible}: {session_tiles:?}"
+            );
+        }
+    }
 
-        editor.runtime_mut().run_reactive_cycle();
+    fn toggle_current_track_expanded_for_layout_test(
+        editor: &mut eseqlisp::Editor,
+        _key: &crossterm::event::KeyEvent,
+        _state: &Arc<SequencerState>,
+        _current_track: &Arc<AtomicUsize>,
+        _selected_steps: &Arc<Mutex<HashSet<usize>>>,
+        _step_clipboard: &Arc<
+            Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>,
+        >,
+    ) -> bool {
+        let _ = editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-current-track-expanded-main)");
         editor.refresh_runtime_side_effects();
-        let expanded_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
-        let expanded_layout = expanded_frame
-            .widget_layout
-            .as_ref()
-            .expect("expanded sequencer layout should build");
-        assert_eq!(
-            count_stable_key_prefix(expanded_layout, "seqv-expanded-step-slider-"),
-            PAGE_SIZE,
-            "plain Tab should still expand the current track row"
-        );
+        true
     }
 
     #[test]
-    fn metal_seq_plain_tab_handler_updates_layout_without_extra_reactive_cycle() {
+    fn metal_seq_expanded_track_command_updates_layout_without_extra_reactive_cycle() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -22549,7 +26337,7 @@
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -22557,7 +26345,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should be handled by the sequencer shortcut path"
+            "expanded-track command should be handled"
         );
         let expanded_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
         let expanded_layout = expanded_frame
@@ -22567,11 +26355,11 @@
         assert_eq!(
             count_stable_key_prefix(expanded_layout, "seqv-expanded-step-slider-"),
             PAGE_SIZE,
-            "plain Tab handler should make the next rendered frame expanded without relying on inspect or another reactive pass"
+            "expanded-track command should affect the next frame without another reactive pass"
         );
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -22579,7 +26367,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "second plain Tab should collapse the current sequencer row"
+            "second expanded-track command should collapse the current row"
         );
         let collapsed_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
         let collapsed_layout = collapsed_frame
@@ -22589,12 +26377,12 @@
         assert_eq!(
             count_stable_key_prefix(collapsed_layout, "seqv-expanded-step-slider-"),
             0,
-            "second plain Tab handler should make the next rendered frame compact without relying on inspect or another reactive pass"
+            "collapse command should affect the next frame without another reactive pass"
         );
     }
 
     #[test]
-    fn metal_seq_plain_tab_non_first_track_partial_layout_matches_full_layout_after_collapse() {
+    fn metal_seq_non_first_track_partial_layout_matches_full_layout_after_collapse() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -22624,7 +26412,7 @@
         let _ = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -22632,7 +26420,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should expand the third sequencer row"
+            "expanded-track command should expand the third sequencer row"
         );
         let expanded_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
         let expanded_layout = expanded_frame
@@ -22646,7 +26434,7 @@
         );
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -22654,7 +26442,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should collapse the third sequencer row"
+            "second expanded-track command should collapse the third sequencer row"
         );
         let collapsed_frame = eseqlisp::frame::build_render_frame(&mut editor, 180, 44);
         let collapsed_layout = collapsed_frame
@@ -22776,7 +26564,7 @@
     }
 
     #[test]
-    fn metal_seq_plain_tab_collapse_marks_removed_expanded_widgets_dirty() {
+    fn metal_seq_expanded_track_collapse_marks_removed_widgets_dirty() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -22813,7 +26601,7 @@
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -22821,7 +26609,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should expand the current sequencer row"
+            "expanded-track command should expand the current sequencer row"
         );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -22863,7 +26651,7 @@
         );
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -22871,7 +26659,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should collapse the current sequencer row"
+            "second expanded-track command should collapse the current sequencer row"
         );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -22918,7 +26706,7 @@
     }
 
     #[test]
-    fn metal_seq_tiled_plain_tab_collapse_marks_resized_row_dirty() {
+    fn metal_seq_tiled_expanded_track_collapse_marks_resized_row_dirty() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let sequencer_tile =
@@ -22965,7 +26753,7 @@
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -22973,7 +26761,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should expand the current sequencer row"
+            "expanded-track command should expand the current sequencer row"
         );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -22999,7 +26787,7 @@
         );
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -23007,7 +26795,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should collapse the current sequencer row"
+            "second expanded-track command should collapse the current sequencer row"
         );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -23146,7 +26934,7 @@
     }
 
     #[test]
-    fn metal_seq_tiled_plain_tab_single_track_reveal_keeps_row_height_tight() {
+    fn metal_seq_tiled_single_track_expand_collapse_keeps_row_height_tight() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let sequencer_tile =
@@ -23205,7 +26993,7 @@
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -23213,7 +27001,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "plain Tab should expand the only sequencer row"
+            "expanded-track command should expand the only sequencer row"
         );
         editor.ensure_widget_stable_key_visible_in_buffer_named(
             "*sequencer*",
@@ -23237,7 +27025,7 @@
         );
 
         assert!(
-            handle_metal_command_shortcut(
+            toggle_current_track_expanded_for_layout_test(
                 &mut editor,
                 &tab,
                 &state,
@@ -23245,7 +27033,7 @@
                 &selected_steps,
                 &step_clipboard,
             ),
-            "second plain Tab should collapse the only sequencer row"
+            "second expanded-track command should collapse the only sequencer row"
         );
         editor.ensure_widget_stable_key_visible_in_buffer_named(
             "*sequencer*",
@@ -23272,7 +27060,7 @@
         );
         assert!(
             (collapsed_row.rect.height - initial_row_height).abs() < 0.001,
-            "single-track collapse should restore the compact row height after the real Tab reveal path, initial={} collapsed={}",
+            "single-track collapse should restore the compact row height, initial={} collapsed={}",
             initial_row_height,
             collapsed_row.rect.height
         );
@@ -23381,7 +27169,7 @@
 
     #[test]
     #[ignore = "performance benchmark; run with --ignored --nocapture"]
-    fn metal_seq_plain_tab_expand_current_track_perf_10_tracks() {
+    fn metal_seq_expand_current_track_perf_10_tracks() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         #[derive(Clone)]
@@ -23461,7 +27249,7 @@
 
             let command_start = std::time::Instant::now();
             assert!(
-                handle_metal_command_shortcut(
+                toggle_current_track_expanded_for_layout_test(
                     &mut editor,
                     &tab,
                     &state,
@@ -23469,7 +27257,7 @@
                     &selected_steps,
                     &step_clipboard,
                 ),
-                "plain Tab should be handled by the sequencer shortcut path"
+                "expanded-track command should be handled"
             );
             let command_ms = command_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -23491,11 +27279,11 @@
             let layout = frame
                 .widget_layout
                 .as_ref()
-                .expect("plain Tab expand/collapse should keep sequencer layout renderable");
+                .expect("expanded-track command should keep sequencer layout renderable");
             assert!(
                 count_stable_key_prefix(layout, "seqv-expanded-step-slider-") == 0
                     || count_stable_key_prefix(layout, "seqv-expanded-step-slider-") == PAGE_SIZE,
-                "plain Tab should collapse to zero sliders or expand exactly one page of sliders"
+                "command should collapse to zero sliders or expand exactly one page of sliders"
             );
 
             if iteration > warmup_iterations {
@@ -23512,7 +27300,7 @@
         }
 
         println!(
-            "plain Tab current-track expand perf: {track_count} tracks, {step_count} steps, viewport {viewport_width}x{viewport_height}, {} measured iterations after {} warmups",
+            "current-track expand perf: {track_count} tracks, {step_count} steps, viewport {viewport_width}x{viewport_height}, {} measured iterations after {} warmups",
             measured_iterations, warmup_iterations
         );
         summarize(
@@ -25867,6 +29655,8 @@
                 ("track-collapsed", test_bool_list(&[false])),
                 ("num-tracks", Value::Number(1.0)),
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
+                ("song-region", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
                 (
                     "record-armed",
@@ -26886,6 +30676,181 @@
         assert_visible_inside(filter_body, filter_panel, "filter body");
         assert_visible_inside(sampler_label, sampler_header, "sampler title");
         assert_visible_inside(filter_label, filter_header, "filter title");
+    }
+
+    #[test]
+    fn metal_seq_sampler_waveform_drag_sets_sample_range() {
+        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let mut instrument = test_sampler_instrument_map(0);
+        instrument.insert(
+            "buffer".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                "test-sampler-waveform".to_string(),
+            ))),
+        );
+        instrument.insert(
+            "start-time".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.2))),
+        );
+        instrument.insert(
+            "start-time-field".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                sampler_selection_time_field(0, "start"),
+            ))),
+        );
+        instrument.insert(
+            "end-time".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.8))),
+        );
+        instrument.insert(
+            "end-time-field".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                sampler_selection_time_field(0, "end"),
+            ))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(160, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                (
+                    "track-instrument-types",
+                    test_string_list(&["sampler"]),
+                ),
+                ("compiling", Value::Bool(false)),
+                ("tp-gate", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(instrument)]),
+                ),
+                ("sampler-playhead", Value::Number(0.0)),
+                (
+                    sampler_selection_time_field(0, "start").as_str(),
+                    Value::Number(0.2),
+                ),
+                (
+                    sampler_selection_time_field(0, "end").as_str(),
+                    Value::Number(0.8),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("sampler panel layout");
+        let waveform = find_layout_node_by_widget_type(&layout, "waveform")
+            .expect("sampler waveform should render");
+        assert_finite_nonzero_rect(waveform, "sampler waveform");
+
+        let start_col = waveform.rect.col + waveform.rect.width * 0.2;
+        let end_col = waveform.rect.col + waveform.rect.width * 0.35;
+        let row = waveform.rect.row + waveform.rect.height * 0.6;
+        let pointer_event = |kind, col: f32, row: f32| crossterm::event::MouseEvent {
+            kind,
+            column: col.floor() as u16,
+            row: row.floor() as u16,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        editor.handle_mouse_precise(
+            pointer_event(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                start_col,
+                row,
+            ),
+            0,
+            0,
+            160,
+            18,
+            start_col,
+            row,
+        );
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "pointer down should only position the waveform cursor"
+        );
+        editor.handle_mouse_precise(
+            pointer_event(
+                crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+                end_col,
+                row,
+            ),
+            0,
+            0,
+            160,
+            18,
+            end_col,
+            row,
+        );
+
+        let commands = editor.drain_host_commands();
+        let [eseqlisp::host::HostCommand::Custom { name, payload }] = commands.as_slice() else {
+            panic!("waveform marker drag should emit one sampler parameter batch: {commands:?}");
+        };
+        assert_eq!(name, "set-instrument-param-batch");
+        assert_eq!(extract_usize_from_payload(payload, "track"), Some(0));
+        let Value::Map(payload) = payload else {
+            panic!("sampler parameter batch should have a map payload: {payload:?}");
+        };
+        let Some(updates) = payload.get("updates") else {
+            panic!("sampler parameter batch should contain updates: {payload:?}");
+        };
+        let Value::List(updates) = &*updates.borrow() else {
+            panic!("sampler parameter updates should be a list: {updates:?}");
+        };
+        let update = |index: usize| {
+            let Value::Map(update) = &*updates[index].borrow() else {
+                panic!("sampler parameter update should be a map");
+            };
+            (
+                update
+                    .get("param-idx")
+                    .map(|value| value.borrow().clone()),
+                update.get("value").map(|value| value.borrow().clone()),
+            )
+        };
+        let (start_param, start_value) = update(0);
+        let (end_param, end_value) = update(1);
+        assert_eq!(start_param, Some(Value::Number(2.0)));
+        assert!(
+            matches!(start_value, Some(Value::Number(value)) if (value - 35.0).abs() < 0.01),
+            "start marker should move to 35%: {start_value:?}"
+        );
+        assert_eq!(end_param, Some(Value::Number(3.0)));
+        assert_eq!(end_value, Some(Value::Number(80.0)));
     }
 
     #[test]
@@ -37360,6 +41325,7 @@
                 ),
                 ("num-tracks", Value::Number(2.0)),
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
                 ("track-selected-0", Value::Bool(true)),
                 ("track-selected-1", Value::Bool(false)),
                 ("delete-target-version", Value::Number(0.0)),
@@ -38689,6 +42655,7 @@
             vec![
                 ("playhead", Value::Number(0.0)),
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
                 ("track-colors", test_track_colors()),
                 ("tp-num-steps", Value::Number(16.0)),
                 ("piano-roll-lanes", build_piano_roll_lanes_value()),
@@ -38941,6 +42908,7 @@
             vec![
                 ("playhead", Value::Number(0.0)),
                 ("current-track", Value::Number(0.0)),
+                ("song-bound-clip", Value::Nil),
                 ("track-colors", test_track_colors()),
                 ("tp-num-steps", Value::Number(16.0)),
                 ("piano-roll-lanes", build_piano_roll_lanes_value()),

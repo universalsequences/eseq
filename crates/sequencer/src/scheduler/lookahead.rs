@@ -46,6 +46,26 @@ impl SchedulerLookaheadState {
     }
 }
 
+/// Flag accumulator resets for exactly the tracks whose resolved SOURCE
+/// changed across a song row boundary. Tracks playing the same source
+/// through the boundary keep their accumulator state, so a row split made to
+/// edit one track's clip is audibly transparent to every other track.
+/// Source identity is take-aware (takes spec 7.3): a take lane's identity is
+/// its `TakeId`, so the synthetic rows a chunk boundary introduces are NOT a
+/// source change — no reset, a take is one continuous clip. Existing pending
+/// flags are preserved (marking is additive).
+pub(super) fn mark_song_row_accum_resets(
+    prev: &crate::sequencer::RuntimeSongRow,
+    next: &crate::sequencer::RuntimeSongRow,
+    resets: &mut [bool; MAX_TRACKS],
+) {
+    for (track, reset) in resets.iter_mut().enumerate() {
+        if prev.resolved_sources.get(track) != next.resolved_sources.get(track) {
+            *reset = true;
+        }
+    }
+}
+
 pub(super) fn build_scheduler_scratch_runtime(
     state: Arc<SequencerState>,
     user_source: &str,
@@ -174,6 +194,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let process_runtime = &mut scheduler.process_runtime;
     let graph_manifests = &mut scheduler.graph_manifests;
     let graph_runtimes = &mut scheduler.graph_runtimes;
+    let session_launches = &mut scheduler.quantized_launches;
     let mut debug_graph_drive_chunks = scheduler.debug_graph_drive_chunks;
     let mut debug_accum_invocations = scheduler.debug_accum_invocations;
     let song_playback = &mut scheduler.song;
@@ -213,7 +234,48 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         // cloning, no asset loading on this path (spec 9).
         let mut chunk_frames = scheduler_block_size;
         let mut song_row_snapshot: Option<Arc<SequencerSnapshot>> = None;
+        if song_playback.is_none() {
+            // A song that just stopped must not leave stale per-lane phase
+            // anchors behind: session playback free-runs (anchor 0/0).
+            clock.clear_track_anchors();
+            // Session-mode quantized launches: clamp the chunk to the next
+            // pending boundary and switch the chunk snapshot exactly at the
+            // boundary sample — the song-row chunk split (docs/song-mode-spec
+            // 10.2) applied to manual launches. No queue clear, no epoch
+            // bump, no clock seek: the boundary step's triggers come from
+            // the launched snapshot at the exact boundary sample.
+            let (frames, install) = session_launches.next_session_chunk(
+                clock.total_beats,
+                samples_per_quarter,
+                scheduler_block_size,
+            );
+            chunk_frames = frames;
+            match install {
+                crate::quantized_launch::SessionLaunchInstall::None => {}
+                crate::quantized_launch::SessionLaunchInstall::AllTracks => {
+                    // Scene launches restart accumulator evolution on every
+                    // track, matching the control-side launch path.
+                    *pending_accum_reset = [true; MAX_TRACKS];
+                }
+                crate::quantized_launch::SessionLaunchInstall::Tracks(tracks) => {
+                    for track in tracks {
+                        if track < MAX_TRACKS {
+                            pending_accum_reset[track] = true;
+                        }
+                    }
+                }
+            }
+        }
+        // While a boundary launch awaits its control-side mirror, chunks
+        // schedule from its snapshot override (full scene) or a base+mask
+        // merge (track launches).
+        let session_launch_snapshot: Option<Arc<SequencerSnapshot>> = if song_playback.is_none() {
+            session_launches.session_snapshot(base_snapshot)
+        } else {
+            None
+        };
         if let Some(song) = song_playback.as_mut() {
+            let prev_row = song.current_row();
             match song.next_chunk(
                 scheduled_until_sample,
                 clock.total_beats,
@@ -230,7 +292,24 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     chunk_frames = frames;
                     song_row_snapshot = Some(song.row_snapshot(row));
                     if row_changed {
-                        *pending_accum_reset = [true; MAX_TRACKS];
+                        if wrapped {
+                            // A loop wrap rewinds the clock and every
+                            // self-clocked runtime below; accumulators restart
+                            // with them on every track.
+                            *pending_accum_reset = [true; MAX_TRACKS];
+                        } else {
+                            // Diff-aware row transition: a row split made to
+                            // edit one track's clip must not restart the
+                            // accumulator evolution of tracks whose resolved
+                            // pattern is unchanged across the boundary.
+                            let (previous, current) =
+                                song.transition_rows(prev_row, row);
+                            mark_song_row_accum_resets(
+                                previous,
+                                current,
+                                pending_accum_reset,
+                            );
+                        }
                     }
                     if wrapped {
                         // Loop wrap: song beat zero again. Rewind the clock
@@ -247,10 +326,47 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             graph.reset(0.0);
                         }
                     }
+                    // Anchored per-lane phase (takes spec 7.3): every chunk
+                    // schedules with the governing row's clip anchors, so
+                    // each track's step position is projected from its own
+                    // clip (`start_beat` + offset) instead of the shared
+                    // free-running clock. Installed after any wrap reset so
+                    // the anchors survive it.
+                    let (anchor_beat, lane_offsets) = song.row_clock_anchor(row);
+                    clock.set_song_row_anchors(anchor_beat, lane_offsets);
+                    // Manual-override latch (takes spec 10): latched tracks
+                    // suspend the song's launch authority — they schedule
+                    // from the LIVE session snapshot, free-running (anchor
+                    // cleared), and row boundaries neither swap their
+                    // content nor reset their accumulators.
+                    let latch = state.song_manual_latch_mask();
+                    if latch != 0 {
+                        let mut merged =
+                            (*song_row_snapshot.take().expect("row snapshot set above")).clone();
+                        let track_count = merged
+                            .tracks
+                            .len()
+                            .min(base_snapshot.tracks.len())
+                            .min(64);
+                        for track in 0..track_count {
+                            if latch >> track & 1 == 1 {
+                                merged.tracks[track] =
+                                    Arc::clone(&base_snapshot.tracks[track]);
+                                clock.clear_track_anchor(track);
+                                if !wrapped {
+                                    pending_accum_reset[track] = false;
+                                }
+                            }
+                        }
+                        song_row_snapshot = Some(Arc::new(merged));
+                    }
                 }
             }
         }
-        let snapshot: &SequencerSnapshot = song_row_snapshot.as_deref().unwrap_or(base_snapshot);
+        let snapshot: &SequencerSnapshot = song_row_snapshot
+            .as_deref()
+            .or(session_launch_snapshot.as_deref())
+            .unwrap_or(base_snapshot);
         let chunk_start_beats = clock.total_beats;
         let triggers = clock.process_chunk(chunk_frames, snapshot, state);
         let chunk_end_beats = clock.total_beats;

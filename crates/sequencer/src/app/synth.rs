@@ -629,7 +629,12 @@ impl App {
     }
 
     /// Sends the current base value unless an engaged macro owns this param.
+    /// Silent while the mirror holds a bound-but-not-audible clip (takes
+    /// spec 16.7): tuning a past/future clip is display + edit only.
     pub(super) fn send_effective_instrument_param(&self, track: usize, param_idx: usize) {
+        if self.sound_binding_is_silent(track) {
+            return;
+        }
         let Some(value) = self.effective_instrument_param_value(track, param_idx) else {
             return;
         };

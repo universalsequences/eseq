@@ -51,6 +51,10 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_playhead: u32,
     pub(crate) prev_transport_playhead: u32,
     pub(crate) prev_pattern_epoch: u64,
+    /// Diffed against `App::song_row_mirror_epoch` so mirrored song-row
+    /// transitions (which never bump the real pattern epoch) still trigger
+    /// the full pattern-switch resync.
+    pub(crate) prev_song_row_mirror_epoch: u64,
     pub(crate) prev_current_track: usize,
     pub(crate) prev_cpu_load_bits: u32,
     pub(crate) prev_peak_l_level: f64,
@@ -70,6 +74,7 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_current_track_playhead_visible: bool,
     pub(crate) prev_ui_epoch: usize,
     pub(crate) prev_fx_epoch: usize,
+    pub(crate) prev_sound_binding_epoch: usize,
     pub(crate) prev_instrument_active_notes: Vec<u8>,
     pub(crate) prev_active_buffer_name: String,
     pub(crate) prev_selected_neural_neurons:
@@ -128,6 +133,10 @@ pub(crate) struct SharedHandles {
     pub(crate) keyboard_tx: std::sync::mpsc::Sender<KeyboardTrigger>,
     pub(crate) accumulator_names: Arc<Mutex<Vec<String>>>,
     pub(crate) piano_roll_clipboard: PianoRollClipboard,
+    /// Arrangement region clipboard (region spec 5.1). Lives beside the
+    /// piano-roll clipboard for the same reason: copy/paste are host commands
+    /// applied where the loop context is in scope, not `App` state.
+    pub(crate) arrangement_clipboard: app::song_region::ArrangementClipboardHandle,
     pub(crate) selected_drum_lane_steps: Arc<Mutex<HashSet<DrumLaneStepSelection>>>,
 }
 

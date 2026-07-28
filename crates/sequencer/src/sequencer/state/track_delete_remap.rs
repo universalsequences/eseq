@@ -127,6 +127,55 @@ pub(super) fn remap_song_overrides_after_track_move(song: &mut ProjectSong, from
     }
 }
 
+/// Arrangement sibling of `remap_song_overrides_after_track_delete`
+/// (docs/arrangement-lane-model-spec.md 11): the deleted track's whole clip
+/// lane goes away and higher lanes shift down. Lanes are keyed by position,
+/// so there is nothing else to renumber — and no normalization, because clips
+/// are objects, not launch states.
+pub(super) fn remap_arrangement_after_track_delete(
+    arrangement: &mut ProjectArrangement,
+    deleted_track: usize,
+) {
+    if deleted_track < arrangement.track_lanes.len() {
+        arrangement.track_lanes.remove(deleted_track);
+    }
+}
+
+/// Arrangement sibling of `remap_song_overrides_after_track_move`: the lane
+/// moves with its track. `from` may be one past the end when a freshly
+/// inserted track is being moved into place, in which case an empty lane is
+/// grown first so the lane count keeps matching the track count.
+pub(super) fn remap_arrangement_after_track_move(
+    arrangement: &mut ProjectArrangement,
+    from: usize,
+    to: usize,
+) {
+    while arrangement.track_lanes.len() <= from.max(to) {
+        arrangement.track_lanes.push(Vec::new());
+    }
+    if from == to {
+        return;
+    }
+    let lane = arrangement.track_lanes.remove(from);
+    arrangement.track_lanes.insert(to, lane);
+}
+
+/// Arrangement sibling of `remap_song_after_scene_delete`: decrement scene
+/// references above the deleted scene. The caller must already have rejected
+/// the deletion when the scene is still referenced (spec 11); the compiled
+/// song carries one row per scene event, so today's row-based rejection
+/// covers the arrangement's events too.
+pub(super) fn remap_arrangement_after_scene_delete(
+    arrangement: &mut ProjectArrangement,
+    deleted_scene: usize,
+) {
+    for event in &mut arrangement.scene_lane {
+        if event.scene > deleted_scene {
+            event.scene -= 1;
+        }
+    }
+}
+
 pub(super) fn mod_destination_valid_for_track_count(
     destination: crate::sequencer::ModDestination,
     track_count: usize,

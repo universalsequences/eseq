@@ -755,7 +755,7 @@ impl WidgetDefinition for PatcherWidget {
         }
     }
 
-    fn captures_scroll_gesture(&self) -> bool {
+    fn captures_scroll_gesture(&self, _node: &LayoutNode) -> bool {
         true
     }
 

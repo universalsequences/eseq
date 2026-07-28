@@ -3614,6 +3614,7 @@ fragment float4 live_spectrogram_frag(
                 crate::widget_render::WidgetCursor::Default => CursorIcon::Default,
                 crate::widget_render::WidgetCursor::EwResize => CursorIcon::EwResize,
                 crate::widget_render::WidgetCursor::NsResize => CursorIcon::NsResize,
+                crate::widget_render::WidgetCursor::Grab => CursorIcon::Grab,
                 crate::widget_render::WidgetCursor::DragCopy => CursorIcon::Copy,
                 crate::widget_render::WidgetCursor::DragNotAllowed => CursorIcon::NotAllowed,
             };
@@ -6564,14 +6565,13 @@ fragment float4 live_spectrogram_frag(
                                 }));
                             }
                             ElementState::Released => {
-                                // Clear stale drag so it doesn't fire after the up
-                                *pending_drag = None;
-                                pending.push_back(Event::Mouse(MouseEvent {
+                                let release = Event::Mouse(MouseEvent {
                                     kind: MouseEventKind::Up(button),
                                     column: cursor_cell.0,
                                     row: cursor_cell.1,
                                     modifiers: *modifiers,
-                                }));
+                                });
+                                enqueue_mouse_release(pending, pending_drag, release);
                                 if pressed_mouse_button.as_ref() == Some(&button) {
                                     *pressed_mouse_button = None;
                                 }
@@ -10011,6 +10011,68 @@ fragment float4 live_spectrogram_frag(
             WMouseButton::Right => Some(MouseButton::Right),
             WMouseButton::Middle => Some(MouseButton::Middle),
             _ => None,
+        }
+    }
+
+    fn enqueue_mouse_release(
+        pending: &mut VecDeque<Event>,
+        pending_drag: &mut Option<Event>,
+        release: Event,
+    ) {
+        // Cursor movement is coalesced while a button is held. If release
+        // arrives in the same winit pump, preserve the last movement before
+        // release so consumers observe the complete pointer gesture.
+        if let Some(drag) = pending_drag.take() {
+            pending.push_back(drag);
+        }
+        pending.push_back(release);
+    }
+
+    #[cfg(test)]
+    mod input_queue_tests {
+        use super::*;
+
+        fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> Event {
+            Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        }
+
+        #[test]
+        fn release_queues_final_coalesced_drag_before_mouse_up() {
+            let mut pending = VecDeque::new();
+            let mut pending_drag = Some(mouse_event(
+                MouseEventKind::Drag(MouseButton::Left),
+                17,
+                4,
+            ));
+            let release = mouse_event(MouseEventKind::Up(MouseButton::Left), 17, 4);
+
+            enqueue_mouse_release(&mut pending, &mut pending_drag, release);
+
+            assert!(pending_drag.is_none());
+            assert!(matches!(
+                pending.pop_front(),
+                Some(Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Drag(MouseButton::Left),
+                    column: 17,
+                    row: 4,
+                    ..
+                }))
+            ));
+            assert!(matches!(
+                pending.pop_front(),
+                Some(Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Left),
+                    column: 17,
+                    row: 4,
+                    ..
+                }))
+            ));
+            assert!(pending.is_empty());
         }
     }
 

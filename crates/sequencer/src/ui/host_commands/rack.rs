@@ -37,10 +37,15 @@ pub(super) const COMMANDS: &[&str] = &[
     "set-rack-macro-curve",
     "set-rack-slot-instrument-param",
     "set-rack-slot-instrument-plock",
+    "set-rack-slot-instrument-param-batch",
+    "set-rack-slot-instrument-plock-batch",
     "toggle-rack-slot-instrument-param",
     "toggle-rack-slot-instrument-plock",
     "set-rack-slot-instrument-param-option",
     "set-rack-slot-instrument-plock-option",
+    "set-instrument-param-batch",
+    "set-instrument-plock-batch",
+    "set-instrument-key-lock-batch",
 ];
 
 #[allow(clippy::too_many_lines)]

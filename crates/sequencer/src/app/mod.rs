@@ -31,6 +31,7 @@ use crate::sequencer::{
 };
 use crate::track_color::TrackColor;
 
+pub mod arr_edit;
 mod browser;
 pub mod command;
 pub mod edit;
@@ -42,8 +43,13 @@ mod graph;
 mod hooks;
 mod params;
 mod projects;
+pub mod pending_capture;
 pub mod song_capture;
 pub mod song_edit;
+pub mod song_region;
+pub mod sound_binding;
+pub mod take_edit;
+pub mod take_recording;
 pub mod song_transport;
 mod synth;
 
@@ -241,10 +247,22 @@ struct PendingProjectLoad {
     name: String,
     tick: usize,
     project: crate::project::ProjectFile,
+    sample_assets: HashMap<PathBuf, ProjectSampleAsset>,
     built_patterns: Vec<crate::sequencer::PatternSnapshot>,
     built_bus_patterns: Vec<Vec<BusPatternSnapshot>>,
     fallback_samples: usize,
     phase: PendingProjectLoadPhase,
+}
+
+/// Immutable audio asset interned for the lifetime of one pending project load.
+///
+/// Scene patterns and take chunks store buffer references; they must never
+/// decode or allocate another graph buffer for the same canonical WAV path.
+#[derive(Clone, Debug)]
+struct ProjectSampleAsset {
+    buffer_id: i32,
+    sample_rate: u32,
+    decoded_name: String,
 }
 
 #[derive(Clone)]
@@ -866,11 +884,6 @@ pub struct App {
     pub sample_analysis: AnalysisService,
     pub pending_recording_take: Option<RecordingTake>,
     recording_history: Option<RecordingHistoryTransaction>,
-    /// Derived from `song_transport_mode`: true while `SongPlayback` or
-    /// `ArrangementCapture` is active, making the song editing primitives
-    /// (`song_edit.rs`) reject with an actionable error (see
-    /// `App::song_edits_locked` and `song_transport.rs`).
-    pub song_transport_locks_edits: bool,
     /// The single active launch authority (docs/song-mode-spec.md 13); all
     /// transitions go through the methods in `song_transport.rs`.
     pub song_transport_mode: song_transport::SongTransportMode,
@@ -883,9 +896,19 @@ pub struct App {
     /// The preflighted song currently handed to the scheduler while
     /// `SongPlayback` is active; used to mirror row transitions control-side.
     pub active_runtime_song: Option<std::sync::Arc<crate::sequencer::RuntimeSong>>,
+    /// Song-timeline beat corresponding to scheduler beat zero for the active
+    /// playback. Capture uses the same offset so recorded events remain on
+    /// the arrangement timeline after a mid-song start.
+    pub active_song_start_beat: Option<f64>,
     /// Last row ordinal mirrored control-side (skips the duplicate initial
-    /// `RowApplied` notice for row zero).
-    pub(crate) song_mirrored_row: Option<usize>,
+    /// `RowApplied` notice for the selected start row).
+    pub song_mirrored_row: Option<usize>,
+    /// Bumped whenever the control-side mirror repaints live state from a
+    /// song row (row transitions, Back to Song). The reactive tick treats it
+    /// like a pattern-epoch change so the Seq view follows the arrangement —
+    /// the real pattern epoch must NOT bump mid-playback (it would
+    /// invalidate the scheduler's in-flight lookahead window).
+    pub song_row_mirror_epoch: u64,
     /// The non-destructive staging take while `ArrangementCapture` is active
     /// (docs/song-mode-spec.md 7.4/10.3). Owned by the control thread;
     /// `apply_pattern_launch` appends one lightweight event per audible
@@ -898,6 +921,69 @@ pub struct App {
     /// The actionable error for the most recent failed capture, bound to
     /// `SEQ.song-capture-error`.
     pub song_capture_error: Option<String>,
+    /// The most recent song editing-primitive rejection, bound to
+    /// `SEQ.song-edit-error` so the arrangement view can surface it (the
+    /// step tile hides the global status line). Cleared by the next
+    /// successful song edit.
+    pub song_edit_error: Option<String>,
+    /// In-flight take recording while `ArrangementCapture` is active (takes
+    /// spec 8): armed-track note input retargets into detached pending
+    /// chunks here; the capture stop-commit registers them as takes.
+    pub(crate) take_recording: Option<take_recording::TakeRecordingSession>,
+    /// Change counter for PROVISIONAL capture content
+    /// (docs/realtime-arrangement-feedback-spec.md 3.3): bumped by the
+    /// writers of pending take notes and captured launches, and by nothing
+    /// else. `SEQ.song-pending` rebuilds its dots only when this moves, so a
+    /// recording never invalidates the committed-lane caches per note. It is
+    /// deliberately neither `committed_song_revision` (nothing is committed
+    /// yet) nor `pool_content_revision` (slice 3's counter, for COMMITTED
+    /// pool edits).
+    pub pending_revision: u64,
+    /// Set after project load: the loaded per-track record-arm flags in
+    /// `graph.record_armed` must be pushed INTO the UI-shared arm vector
+    /// (the per-tick sync runs the other way).
+    pub record_arm_sync_pending: bool,
+    /// Persistent arrangement clip selection (takes spec 16.6) — rule 1 of
+    /// the sound-binding order. Timeline state, not view state: it survives
+    /// view switches and transport and never decays implicitly.
+    pub song_clip_selection: Option<sound_binding::SongClipSelection>,
+    /// Persistent arrangement REGION selection
+    /// (docs/arrangement-region-editing-spec.md 4.1) — a time x track
+    /// rectangle. Rust-owned for the same reason as the clip selection: it
+    /// survives view switches and buffer reloads, and the copy/paste/delete
+    /// primitives read it directly. Mutually exclusive with the clip and
+    /// scene-row selections.
+    pub song_region_selection: Option<song_region::SongRegionSelection>,
+    /// Mirror of the arrangement edit cursor (region spec 5.3). The Lisp view
+    /// owns the click gesture, but the Cmd-V seam lives in Rust and needs a
+    /// paste target, so `seq-song-set-arr-cursor` reflects the cursor here
+    /// alongside the region.
+    pub arrangement_cursor_beat: f64,
+    /// Track the cursor is parked on; -1 is the scene lane.
+    pub arrangement_cursor_track: isize,
+    /// Whether the arrangement view is on screen. The clip selection is
+    /// DORMANT while it is not (takes spec 16.6): a take selected in the
+    /// timeline must not keep owning the device panel after the user has
+    /// switched to the Seq tab, where nothing shows what the panel is bound
+    /// to. Returning to the arrangement re-binds to the same selection.
+    pub(crate) arrangement_view_visible: bool,
+    /// Per track, the non-scene source whose device state is currently
+    /// loaded into the live mirror (takes spec 16.2). `None` = the mirror
+    /// holds the effective scene pattern's devices, i.e. nothing is borrowed.
+    pub(crate) loaded_sound_binding: Vec<Option<sound_binding::BoundSource>>,
+    /// Per track, whether the ENGINE currently reflects the loaded binding
+    /// (takes spec 16.7). False while a non-audible clip is bound during song
+    /// playback: the panel and the edit target move, the sound does not —
+    /// the arrangement keeps playing what it was playing.
+    pub(crate) sound_binding_monitored: Vec<bool>,
+    /// Deferred edit-through target (takes spec 16.7): a device edit made
+    /// during a coalescing drag records its pool pattern here and the
+    /// gesture end re-preflights once, instead of per drag frame.
+    pub(crate) pending_song_row_invalidation: Option<(usize, crate::sequencer::PatternId)>,
+    /// Bumped whenever a track's loaded binding actually moves. The device
+    /// panels are rebuilt from epochs, not polled, so swapping the mirror is
+    /// invisible until this tells the reactive tick to republish them.
+    pub sound_binding_epoch: usize,
 }
 
 struct RecordingHistoryTransaction {
@@ -1436,13 +1522,20 @@ impl App {
         &mut self,
         target: &PatternLaunchTarget,
     ) -> Result<PatternLaunchOutcome, PatternLaunchError> {
-        self.apply_pattern_launch_at(target, None)
+        self.apply_pattern_launch_at(target, None, false)
     }
 
+    /// `mirror` marks the control-side mirror of a boundary launch the
+    /// scheduler already applied audibly via its chunk split: identical
+    /// state/graph work, but WITHOUT a pattern-epoch bump — a bump would
+    /// drop the in-flight scheduled events (including the boundary step the
+    /// split just scheduled), exactly like the song-row mirror
+    /// (`apply_song_row_control`).
     fn apply_pattern_launch_at(
         &mut self,
         target: &PatternLaunchTarget,
         audible_beats: Option<f64>,
+        mirror: bool,
     ) -> Result<PatternLaunchOutcome, PatternLaunchError> {
         let num_tracks = self.tracks.len();
         let scene = match target {
@@ -1458,8 +1551,8 @@ impl App {
                 if *scene != self.state.current_scene_index() {
                     self.switch_bus_pattern(*scene);
                 }
-                self.state
-                    .launch_scene(
+                let launched = if mirror {
+                    self.state.launch_scene_mirror(
                         *scene,
                         num_tracks,
                         &self.graph.track_buffer_ids,
@@ -1467,7 +1560,17 @@ impl App {
                         &self.tracks,
                         &self.graph.track_instrument_types,
                     )
-                    .ok_or(PatternLaunchError::SceneOutOfRange { scene: *scene })?
+                } else {
+                    self.state.launch_scene(
+                        *scene,
+                        num_tracks,
+                        &self.graph.track_buffer_ids,
+                        &self.graph.track_sample_rates,
+                        &self.tracks,
+                        &self.graph.track_instrument_types,
+                    )
+                };
+                launched.ok_or(PatternLaunchError::SceneOutOfRange { scene: *scene })?
             }
             PatternLaunchTarget::SceneTracks { scene, tracks } => {
                 if tracks.is_empty() {
@@ -1486,15 +1589,28 @@ impl App {
                         track,
                     });
                 }
-                if !self.state.launch_scene_tracks(
-                    *scene,
-                    tracks,
-                    num_tracks,
-                    &self.graph.track_buffer_ids,
-                    &self.graph.track_sample_rates,
-                    &self.tracks,
-                    &self.graph.track_instrument_types,
-                ) {
+                let launched = if mirror {
+                    self.state.launch_scene_tracks_mirror(
+                        *scene,
+                        tracks,
+                        num_tracks,
+                        &self.graph.track_buffer_ids,
+                        &self.graph.track_sample_rates,
+                        &self.tracks,
+                        &self.graph.track_instrument_types,
+                    )
+                } else {
+                    self.state.launch_scene_tracks(
+                        *scene,
+                        tracks,
+                        num_tracks,
+                        &self.graph.track_buffer_ids,
+                        &self.graph.track_sample_rates,
+                        &self.tracks,
+                        &self.graph.track_instrument_types,
+                    )
+                };
+                if !launched {
                     return Err(PatternLaunchError::MissingSceneCell {
                         scene: *scene,
                         track: tracks[0],
@@ -1516,10 +1632,47 @@ impl App {
             self.graph_controller().sync_current_pattern_mod_routes();
         }
         self.push_all_restored_defaults();
+        // Manual-override latch (takes spec 10): a manual launch while the
+        // committed song is the playback authority suspends the song's
+        // launch authority for its scope — globally for a scene launch,
+        // per-track for a track launch. Cleared by Back to Song, transport
+        // stop, or the capture punch-out.
+        if self.song_playback_authority_active() {
+            match target {
+                PatternLaunchTarget::Scene { .. } => {
+                    // A scene launch claims every lane EXCEPT those playing
+                    // takes right now: scene changes are pattern-lane
+                    // gestures — the song keeps playing the takes underneath
+                    // until the performer intentionally clip-launches such a
+                    // lane (takes spec 10, refined). The capture stores the
+                    // same exclusion so the commit matches what was heard.
+                    let take_lanes = self.state.song_take_lane_mask();
+                    self.state.latch_song_manual_override(
+                        (0..num_tracks.min(64))
+                            .filter(|track| take_lanes >> *track & 1 == 0),
+                    );
+                }
+                PatternLaunchTarget::SceneTracks { tracks, .. } => {
+                    self.state.latch_song_manual_override(tracks.iter().copied());
+                }
+            }
+        }
         // Slice C capture observation (spec 8.1/10.3): record the audible
         // launch after it successfully applied. Cheap control-thread Vec
         // push; no-op unless an arrangement-capture take is active.
-        let beat = audible_beats.unwrap_or_else(|| self.state.scheduler_rendered_beats());
+        // Immediate launches stamp the latency-compensated audible beat
+        // from the audio-anchored record clock — the same clock live note
+        // recording resolves against — so the captured row lands where the
+        // performer HEARD the launch, not at the scheduler's rendered
+        // frontier (that gap is the audio output latency, ~a 16th at
+        // 120 BPM). Quantized launches keep their scheduler-stamped grid
+        // deadline via `audible_beats`.
+        let beat = audible_beats.unwrap_or_else(|| {
+            self.state
+                .record_beats_at_instant(std::time::Instant::now())
+                .unwrap_or_else(|| self.state.scheduler_rendered_beats())
+                .max(0.0)
+        });
         self.record_song_capture_launch(target, beat);
         Ok(PatternLaunchOutcome {
             token: None,
@@ -1563,15 +1716,32 @@ impl App {
                      token,
                      target,
                      deadline_beats,
+                     scheduler_applied,
                  }| {
                     // Quantized launches capture the scheduler-stamped
                     // audible boundary, not the drain time (spec 8.3).
-                    self.apply_pattern_launch_at(&target, Some(deadline_beats))
+                    // Scheduler-applied boundary launches are mirrored
+                    // without an epoch bump; the acknowledgement lets the
+                    // scheduler drop its snapshot override — sent even on a
+                    // failed mirror so the override never leaks.
+                    let result = self
+                        .apply_pattern_launch_at(&target, Some(deadline_beats), scheduler_applied)
                         .map(|mut outcome| {
                             self.note_scene_macro_launch_applied(token);
                             outcome.token = Some(token);
                             outcome
-                        })
+                        });
+                    if scheduler_applied {
+                        let _ = self.state.quantized_launches().acknowledge_mirror(token);
+                        if result.is_ok() {
+                            // No pattern-epoch bump on the mirror, so the UI's
+                            // epoch-keyed pattern resync (scene number, step
+                            // grids, device panels) rides the mirror-epoch
+                            // seam song rows use (reactive_tick).
+                            self.song_row_mirror_epoch += 1;
+                        }
+                    }
+                    result
                 },
             )
             .collect()
@@ -2176,15 +2346,29 @@ impl App {
             sample_analysis: AnalysisService::new(),
             pending_recording_take: None,
             recording_history: None,
-            song_transport_locks_edits: false,
             song_transport_mode: song_transport::SongTransportMode::Stopped,
             use_arrangement: false,
             song_capture_armed: false,
             active_runtime_song: None,
+            active_song_start_beat: None,
             song_mirrored_row: None,
+            song_row_mirror_epoch: 0,
             song_capture_take: None,
             song_capture_failed: false,
             song_capture_error: None,
+            song_edit_error: None,
+            take_recording: None,
+            pending_revision: 0,
+            record_arm_sync_pending: false,
+            song_clip_selection: None,
+            song_region_selection: None,
+            arrangement_cursor_beat: 0.0,
+            arrangement_cursor_track: -1,
+            arrangement_view_visible: false,
+            loaded_sound_binding: Vec::new(),
+            sound_binding_monitored: Vec::new(),
+            pending_song_row_invalidation: None,
+            sound_binding_epoch: 0,
             graph: GraphState {
                 lg,
                 track_node_ids: Vec::new(),

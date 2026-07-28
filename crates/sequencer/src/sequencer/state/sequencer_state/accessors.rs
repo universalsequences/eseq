@@ -9,6 +9,11 @@ impl SequencerState {
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> PatternSnapshot {
+        // A borrowed lane's mirror holds a take's/clip's devices, not the
+        // scene pattern's; capturing it would save that sound over the scene
+        // (takes spec 16.2). Release first — the App rebinds on its next
+        // tick, after whatever launch or row transition triggered this.
+        self.release_bound_device_state();
         let (mod_connections, neural_networks, graph_overrides) = self.current_scene_metadata();
         let mut snapshot = PatternSnapshot::capture_with_mod_connections(
             self,
@@ -73,7 +78,9 @@ impl SequencerState {
                     0,
                 )),
                 song: Mutex::new(None),
+                arrangement: Mutex::new(None),
                 song_revision: AtomicU64::new(0),
+                pool_content_revision: AtomicU64::new(0),
                 current_pattern: AtomicU32::new(0),
                 num_patterns: AtomicU32::new(1),
                 timebase_plocks: (0..MAX_TRACKS).map(|_| TimebasePLockData::new()).collect(),
@@ -256,6 +263,10 @@ impl SequencerState {
             pending_accumulator_reset_tracks: std::array::from_fn(|_| AtomicBool::new(false)),
             quantized_launches: crate::quantized_launch::QuantizedLaunchMailbox::default(),
             song_playback: SongPlaybackMailbox::default(),
+            song_manual_latch: AtomicU64::new(0),
+            song_take_lane_mask: AtomicU64::new(0),
+            sound_binding_borrowed: AtomicU64::new(0),
+            sound_binding_patterns: Mutex::new(HashMap::new()),
         };
         state.publish_scheduler_snapshot();
         state
@@ -278,12 +289,26 @@ impl SequencerState {
         crate::quantized_launch::QuantizedLaunchToken,
         crate::quantized_launch::QuantizedLaunchSubmitError,
     > {
+        // Session-mode quantized launches are applied by the scheduler
+        // itself (chunk split at the boundary, song-row semantics), which
+        // needs the target prebuilt as a snapshot. A failed preflight falls
+        // back to the legacy control-side apply so the launch error still
+        // surfaces at the boundary.
+        let snapshot = if quantize != crate::quantized_launch::LaunchQuantize::Off
+            && self.is_playing()
+            && !self.song_playback.shared().is_active()
+        {
+            self.preflight_pattern_launch_snapshot(&target)
+        } else {
+            None
+        };
         self.quantized_launches.schedule(
             target,
             quantize,
             owner,
             self.scene_count(),
             self.active_track_count(),
+            snapshot,
         )
     }
 
@@ -399,6 +424,131 @@ impl SequencerState {
         );
     }
 
+    /// Insert `chunks` into `track`'s pattern pool and register a take over
+    /// them (takes spec 6.1). Production facade for scenes mutation (the raw
+    /// `with_scenes_mut` seam is test-only).
+    pub(crate) fn register_track_take(
+        &self,
+        track: usize,
+        name: Option<String>,
+        chunks: Vec<TrackPatternData>,
+        total_len_steps: u32,
+    ) -> Result<TakeId, String> {
+        if chunks.is_empty() {
+            return Err("a take requires at least one chunk pattern".to_string());
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        if track >= scenes.track_pools.len() {
+            return Err(format!("track {} does not exist", track + 1));
+        }
+        let chunk_ids: Vec<PatternId> = {
+            let pool = &mut scenes.track_pools[track];
+            chunks.into_iter().map(|data| pool.insert(data)).collect()
+        };
+        while scenes.take_pools.len() < scenes.track_pools.len() {
+            scenes.take_pools.push(TrackTakePool::default());
+        }
+        Ok(scenes.take_pools[track].insert(name, chunk_ids, total_len_steps))
+    }
+
+    /// Remove a take and delete its chunk patterns from the pattern pool
+    /// (takes spec 6.4). The caller owns removing song overrides that
+    /// reference the take and committing the combined undo entry.
+    pub(crate) fn remove_track_take(&self, track: usize, take_id: TakeId) -> Result<(), String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let take = scenes
+            .take_pools
+            .get_mut(track)
+            .and_then(|takes| takes.remove(take_id))
+            .ok_or_else(|| {
+                format!("take {} does not exist on track {}", take_id.0, track + 1)
+            })?;
+        if let Some(pool) = scenes.track_pools.get_mut(track) {
+            for chunk in take.chunks {
+                pool.remove(chunk);
+            }
+        }
+        Ok(())
+    }
+
+    /// Clones of a track's takes for UI listings (takes spec 11.3).
+    pub fn track_takes(&self, track: usize) -> Vec<TrackTake> {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .take_pools
+            .get(track)
+            .map(|takes| takes.takes.clone())
+            .unwrap_or_default()
+    }
+
+    /// Clone of one take.
+    pub fn track_take(&self, track: usize, take_id: TakeId) -> Option<TrackTake> {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .take_pools
+            .get(track)
+            .and_then(|takes| takes.get(take_id))
+            .cloned()
+    }
+
+    /// Load-side arrangement install (takes spec 6.1/11.1), run right after
+    /// `replace_pattern_repository`: re-apply per-scene cell absence so bare
+    /// lanes survive reload (the pattern bank is dense; the loader
+    /// materializes every cell), and rebuild each track's take pool. Chunk
+    /// patterns are inserted into the freshly rebuilt pattern pools with new
+    /// pool ids; take ids are restored verbatim (song overrides reference
+    /// them by stable id).
+    pub(crate) fn install_project_arrangement(
+        &self,
+        scene_cell_presence: &[Vec<bool>],
+        take_pools: Vec<(u64, Vec<(u64, String, u32, Vec<TrackPatternData>)>)>,
+    ) {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        for (scene_idx, mask) in scene_cell_presence.iter().enumerate() {
+            for (track, present) in mask.iter().enumerate() {
+                if *present {
+                    continue;
+                }
+                let cleared = scenes
+                    .scenes
+                    .get_mut(scene_idx)
+                    .and_then(|scene| scene.cells.get_mut(track))
+                    .and_then(|cell| cell.take());
+                if let Some(id) = cleared {
+                    if let Some(pool) = scenes.track_pools.get_mut(track) {
+                        pool.remove(id);
+                    }
+                }
+            }
+        }
+        for (track, (next_take_id, takes)) in take_pools.into_iter().enumerate() {
+            for (id, name, total_len_steps, chunk_data) in takes {
+                let Some(pool) = scenes.track_pools.get_mut(track) else {
+                    continue;
+                };
+                let chunks: Vec<PatternId> =
+                    chunk_data.into_iter().map(|data| pool.insert(data)).collect();
+                let Some(take_pool) = scenes.take_pools.get_mut(track) else {
+                    continue;
+                };
+                take_pool.takes.push(TrackTake {
+                    id: TakeId(id),
+                    name,
+                    chunks,
+                    total_len_steps,
+                });
+                take_pool.next_take_id = take_pool.next_take_id.max(id.saturating_add(1));
+            }
+            if let Some(take_pool) = scenes.take_pools.get_mut(track) {
+                take_pool.next_take_id = take_pool.next_take_id.max(next_take_id);
+            }
+        }
+    }
+
     pub fn current_pattern_sample_ids(&self) -> Vec<(i32, String, u32)> {
         let current_pattern = self.current_pattern_index();
         self.pattern
@@ -432,16 +582,114 @@ impl SequencerState {
         self.pattern.song.lock().unwrap().clone()
     }
 
-    /// Replace the committed song wholesale (project load / new project).
+    /// Replace the committed song directly, clearing any stored arrangement.
+    ///
+    /// The stored authoring model is lanes and rows are compiled output
+    /// (docs/arrangement-lane-model-spec.md 7), so this is NOT an authoring
+    /// path: nothing that edits the project reaches it any more. What is left
+    /// is project reset (`start_new_project`, always `None`), the undo replay
+    /// of the retired `EditPatch::Song`, and playback tests that install a row
+    /// model directly. Installing a song therefore *clears* the arrangement
+    /// rather than deriving one: an arrangement left standing beside a song it
+    /// did not compile to would break the
+    /// `committed_arrangement() == Some(a) implies committed_song() ==
+    /// Some(compile(a))` invariant and, on the next save, write lanes that do
+    /// not match what plays. Authoring goes through
+    /// `set_committed_arrangement`.
     pub fn set_committed_song(&self, song: Option<ProjectSong>) {
+        *self.pattern.arrangement.lock().unwrap() = None;
+        self.install_committed_song(song);
+    }
+
+    /// Install a compiled/committed song without touching the arrangement.
+    fn install_committed_song(&self, song: Option<ProjectSong>) {
         *self.pattern.song.lock().unwrap() = song;
         self.pattern.song_revision.fetch_add(1, Ordering::Release);
+    }
+
+    /// Clone of the committed arrangement, or `None` when the project has
+    /// none (docs/arrangement-lane-model-spec.md 6).
+    pub fn committed_arrangement(&self) -> Option<ProjectArrangement> {
+        self.pattern.arrangement.lock().unwrap().clone()
+    }
+
+    /// Clear the authored arrangement and its compiled song together.
+    ///
+    /// Project topology teardown must use this before removing tracks. An
+    /// arrangement's lanes are indexed by track, so leaving the old lanes
+    /// installed while a replacement project's tracks are added makes the
+    /// first track registration look like destructive topology drift.
+    pub fn clear_committed_arrangement(&self) {
+        *self.pattern.arrangement.lock().unwrap() = None;
+        self.install_committed_song(None);
+    }
+
+    /// Install `arrangement` and its compiled song together (spec 7).
+    ///
+    /// The arrangement is compiled against the **live** project scenes, which
+    /// is the only context that can see scene cells and timebases — compiling
+    /// against `SerializedSongContext` silently loses every scene-backdrop
+    /// phase override. A compile (or validation) failure installs *nothing*
+    /// and returns the error, so the committed song can never disagree with
+    /// the committed arrangement: the invariant is
+    /// `committed_arrangement() == Some(a)` implies
+    /// `committed_song() == Some(compile_arrangement(a, live scenes))`.
+    /// `None` clears both.
+    pub fn set_committed_arrangement(
+        &self,
+        arrangement: Option<ProjectArrangement>,
+    ) -> Result<(), String> {
+        let Some(arrangement) = arrangement else {
+            self.clear_committed_arrangement();
+            return Ok(());
+        };
+        // Borrowed, not cloned: `capture_project_scenes` would copy every
+        // pattern pool on every arrangement edit.
+        let compiled =
+            self.with_project_scenes(|scenes| compile_arrangement(&arrangement, scenes))?;
+        *self.pattern.arrangement.lock().unwrap() = Some(arrangement);
+        self.install_committed_song(Some(compiled));
+        Ok(())
+    }
+
+    /// Edit the committed arrangement in place (topology remaps). The song is
+    /// left alone; callers that change lane content must recompile through
+    /// `set_committed_arrangement`. Used by the remaps that already edit the
+    /// compiled song in place through `with_committed_song_mut`, so the two
+    /// stay in lockstep without a recompile.
+    pub(crate) fn with_committed_arrangement_mut<R>(
+        &self,
+        f: impl FnOnce(&mut Option<ProjectArrangement>) -> R,
+    ) -> R {
+        f(&mut self.pattern.arrangement.lock().unwrap())
     }
 
     /// Monotonic counter bumped on every committed-song change; per-frame UI
     /// code keys song-derived rebuild work off it (docs/song-mode-spec.md 12).
     pub fn committed_song_revision(&self) -> u64 {
         self.pattern.song_revision.load(Ordering::Acquire)
+    }
+
+    /// Monotonic counter bumped on every pool step/geometry write. UI code
+    /// that projects pool CONTENT (the arrangement lane dots) keys its
+    /// rebuild off it, so a note edit refreshes the timeline without a
+    /// committed-song change and without touching `pattern_epoch`
+    /// (docs/realtime-arrangement-feedback-spec.md 5.2).
+    pub fn pool_content_revision(&self) -> u64 {
+        self.pattern.pool_content_revision.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn bump_pool_content_revision(&self) {
+        self.pattern
+            .pool_content_revision
+            .fetch_add(1, Ordering::Release);
+    }
+
+    /// Run `f` against the live project scenes without cloning them. Read-only
+    /// seam for per-frame UI sync that derives scene-dependent projections
+    /// (docs/song-mode-spec.md 5.5); the scenes lock is held only for `f`.
+    pub fn with_project_scenes<R>(&self, f: impl FnOnce(&ProjectScenes) -> R) -> R {
+        f(&self.pattern.scenes.lock().unwrap())
     }
 
     /// Edit the committed song in place (topology remaps, future editing
@@ -455,9 +703,127 @@ impl SequencerState {
         result
     }
 
+    /// Copy `source`'s device snapshot onto `targets` within `track`'s
+    /// pattern pool, leaving every target's step content alone. The one
+    /// production seam for moving a sound between patterns: the explicit
+    /// propagation gestures (takes spec 16.5). Returns how many targets
+    /// actually changed hands.
+    pub(crate) fn copy_track_pattern_device_state(
+        &self,
+        track: usize,
+        source: PatternId,
+        targets: &[PatternId],
+    ) -> Result<usize, String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} does not exist", track + 1))?;
+        let sound = pool
+            .get(source)
+            .ok_or_else(|| format!("Pattern {} is not in the track's pool", source.0))?
+            .clone();
+        let mut copied = 0;
+        for target in targets {
+            if *target == source {
+                continue;
+            }
+            let Some(data) = pool.get_mut(*target) else {
+                continue;
+            };
+            data.copy_device_state_from(&sound);
+            copied += 1;
+        }
+        Ok(copied)
+    }
+
     #[cfg(test)]
     pub(crate) fn with_scenes_mut<R>(&self, f: impl FnOnce(&mut ProjectScenes) -> R) -> R {
         f(&mut self.pattern.scenes.lock().unwrap())
+    }
+
+    /// Bare-scene lazy materialization (takes spec 11.1): insert `data` into
+    /// `track`'s pool and assign it to the CURRENT scene's empty cell.
+    /// Returns `None` when the track is out of range or the cell already
+    /// holds a pattern (callers re-resolve instead of overwriting).
+    pub(crate) fn materialize_current_scene_pattern(
+        &self,
+        track: usize,
+        data: TrackPatternData,
+    ) -> Option<PatternId> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let current = scenes.current_scene;
+        if scenes
+            .scenes
+            .get(current)?
+            .cells
+            .get(track)
+            .copied()
+            .flatten()
+            .is_some()
+        {
+            return None;
+        }
+        let id = scenes.track_pools.get_mut(track)?.insert(data);
+        *scenes.scenes.get_mut(current)?.cells.get_mut(track)? = Some(id);
+        drop(scenes);
+        // The scene now resolves a pattern for this track; the launch-time
+        // silencing for the empty cell no longer applies.
+        self.set_scene_silenced(track, false);
+        self.stamp_free_run_song_offsets_for_new_lane(track, current, id);
+        Some(id)
+    }
+
+    /// A lane that just came into existence in `scene_idx` (a bare track
+    /// gaining its first pattern there) newly resolves in every committed
+    /// song row referencing that scene. Rows captured from a live
+    /// performance sit at unquantized beats and their other lanes carry
+    /// free-run phase stamps (takes spec 7.2/9.4); anchoring the new lane
+    /// at step 0 of each off-grid row start would play it out of time.
+    /// Stamp the same free-run phase as materialized overrides so the new
+    /// lane joins the grid like every captured lane. Rows aligned to the
+    /// pattern grid get offset 0 and are left untouched — anchored and
+    /// free-run agree there, so painted arrangements are unaffected.
+    /// Existing overrides for the track (including explicit-empty) are
+    /// always respected.
+    pub(crate) fn stamp_free_run_song_offsets_for_new_lane(
+        &self,
+        track: usize,
+        scene_idx: usize,
+        pattern: PatternId,
+    ) {
+        let mapping = self.with_project_scenes(|scenes| {
+            let data = scenes.track_pools.get(track)?.get(pattern)?;
+            let num_steps = data.track_params.num_steps.max(1);
+            let step_beats = data.track_params.timebase.step_beats(num_steps);
+            (step_beats > 0.0).then(|| (1.0 / step_beats, num_steps as f64))
+        });
+        let Some((steps_per_beat, num_steps)) = mapping else {
+            return;
+        };
+        self.with_committed_song_mut(|song| {
+            let Some(song) = song.as_mut() else {
+                return;
+            };
+            for row in &mut song.rows {
+                if row.scene != scene_idx
+                    || row.overrides.iter().any(|over| over.track == track)
+                {
+                    continue;
+                }
+                let offset = (row.start_beat * steps_per_beat).rem_euclid(num_steps);
+                if offset < 1e-9 || offset > num_steps - 1e-9 {
+                    continue;
+                }
+                row.overrides.push(ProjectSongTrackOverride {
+                    track,
+                    pattern_id: Some(pattern.0),
+                    take_id: None,
+                    offset_steps: offset,
+                });
+                row.overrides.sort_by_key(|over| over.track);
+            }
+        });
     }
 
     pub(crate) fn restore_project_scenes(

@@ -336,12 +336,44 @@ pub(crate) fn reactive_tick_and_render(
             ctx.frame.prev_master_recording = master_rec_on;
         }
         // Song-mode bindings (docs/song-mode-spec.md 12): diff-published each
-        // frame; `song-rows` rebuilds only on committed-song revision change.
+        // frame; the arrangement is re-read only on committed-song revision
+        // change, and the lane surfaces derived from it diff by value.
+        // The render-rate song position drives the transport readout and the
+        // arrangement playhead, so it publishes while either is visible.
+        let arrangement_visible = editor_has_visible_buffer(&editor, "*arrangement*");
+        // Clip selection is dormant while the timeline is off screen (takes
+        // spec 16.6), so the binding needs the view state before it resolves.
+        app.set_arrangement_view_visible(arrangement_visible);
+        // Sound binding (takes spec 16.2): keep the live device mirror on the
+        // bound source before anything reads it. This is where a song row
+        // transition (rule 2) re-binds the panel and the monitor sound, and
+        // where a lane released by a session save-back is reloaded.
+        app.sync_track_sound_bindings();
+        // A binding move rewrites the mirror's devices without touching the
+        // pattern epoch, so the panels would keep showing the old source's
+        // knobs (and the old badge) until some unrelated edit republished
+        // them. Drive the same rebuild a device change does.
+        if app.sound_binding_epoch != ctx.frame.prev_sound_binding_epoch {
+            ctx.frame.prev_sound_binding_epoch = app.sound_binding_epoch;
+            ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+            // The FX panels carry their values in the `effects` map, but every
+            // instrument knob reads a per-param `SEQ` value field that only a
+            // param sync republishes — without this the instrument panel keeps
+            // the previous source's knob positions while the FX panel updates.
+            needs_reactive_cycle |= sync_fx_param_binding_fields_with_neural_selection(
+                editor.runtime_mut(),
+                &app,
+                &ctx.shared.state,
+                ct,
+                &ctx.shared.selected_steps,
+                Some(&selected_neural_snapshot),
+            );
+        }
         needs_reactive_cycle |= sync_song_state(
             editor.runtime_mut(),
             &app,
             &mut ctx.frame.song,
-            transport_visible,
+            transport_visible || arrangement_visible,
         );
         if master_meter_visible && ctx.meters.cached_peak_l_level != ctx.frame.prev_peak_l_level {
             needs_reactive_cycle |= editor
@@ -562,7 +594,11 @@ pub(crate) fn reactive_tick_and_render(
         ) {
             needs_reactive_cycle = true;
         }
-        if epoch != ctx.frame.prev_pattern_epoch && !app.tracks.is_empty() {
+        let mirror_epoch = app.song_row_mirror_epoch;
+        if (epoch != ctx.frame.prev_pattern_epoch
+            || mirror_epoch != ctx.frame.prev_song_row_mirror_epoch)
+            && !app.tracks.is_empty()
+        {
             let profile_switch = pattern_switch_profile_enabled();
             let profile_total_started = Instant::now();
             let sync_names_pattern_elapsed;
@@ -692,6 +728,7 @@ pub(crate) fn reactive_tick_and_render(
                 );
             }
             ctx.frame.prev_pattern_epoch = epoch;
+            ctx.frame.prev_song_row_mirror_epoch = mirror_epoch;
             ctx.frame.prev_track_button_states = track_button_state_snapshot(&ctx.shared.state);
             needs_reactive_cycle = true;
             refresh_visible_mixer_after_cycle |= mixer_visible;
@@ -819,6 +856,15 @@ pub(crate) fn reactive_tick_and_render(
                 &ctx.shared.state,
                 ctx.shared.active_delete_target.lock().unwrap().as_ref(),
             );
+            if app.record_arm_sync_pending {
+                // Project load restored per-track arm flags (takes spec
+                // 8.1): push them INTO the shared vector once — the per-tick
+                // sync below runs the other way (shared -> app).
+                app.record_arm_sync_pending = false;
+                let mut armed = ctx.shared.record_armed.lock().unwrap();
+                armed.clear();
+                armed.extend(app.graph.record_armed.iter().copied());
+            }
             let armed = ctx.shared.record_armed.lock().unwrap();
             let record_armed_changed = armed.len() != app.graph.record_armed.len()
                 || armed

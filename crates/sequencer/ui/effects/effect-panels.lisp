@@ -156,6 +156,17 @@
   (instrument-header-tab-button "mods" (and (= instrument-panel-tab 0) instrument-mods-open) 4.0
     (lambda (info) (instrument-toggle-mods-view))))
 
+;; Sound-binding badge (takes spec 16.6): which source the panel below is
+;; actually showing and editing — `Take 2 - bars 1-3` vs `Pattern 2 (scene)`.
+;; Rides inside the existing header row so the panel's tuned height is
+;; unchanged, and collapses to nothing when the track has no binding.
+(def instrument-sound-binding-badge (inst)
+  (let ((binding (get inst :sound-binding)))
+    (if (= binding nil)
+      (box :width 0 :height 0 :bg :transparent)
+      (label (str "> " binding)
+        :font-size 9 :color :dim :bg :transparent))))
+
 (def instrument-keys-button ()
   (instrument-header-tab-button "keys" (= instrument-panel-tab 1) 4.0
     (lambda (info) (do (set! instrument-panel-tab 1) (set! instrument-mods-open false)))))

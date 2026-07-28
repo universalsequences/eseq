@@ -5426,10 +5426,7 @@
             scene,
             overrides: overrides
                 .into_iter()
-                .map(|(track, pattern_id)| crate::sequencer::ProjectSongTrackOverride {
-                    track,
-                    pattern_id,
-                })
+                .map(|(track, pattern_id)| crate::sequencer::ProjectSongTrackOverride::new(track, Some(pattern_id)))
                 .collect(),
         }
     }
@@ -5525,6 +5522,235 @@
             .row_ordinal
     }
 
+    fn start_runtime_at_beat(
+        song: Arc<crate::sequencer::RuntimeSong>,
+        beat: f64,
+        mailbox: &crate::sequencer::SongPlaybackMailbox,
+    ) -> crate::sequencer::SongPlaybackRuntime {
+        let samples_per_quarter = 24_000.0;
+        let mut runtime =
+            crate::sequencer::SongPlaybackRuntime::new(song, 0.0, samples_per_quarter)
+                .expect("song playback runtime");
+        let plan = runtime.next_chunk(
+            (beat * samples_per_quarter) as u64,
+            beat,
+            samples_per_quarter as usize,
+            mailbox,
+        );
+        assert!(matches!(
+            plan,
+            crate::sequencer::SongChunkPlan::Schedule { .. }
+        ));
+        mailbox.drain_notices();
+        runtime
+    }
+
+    #[test]
+    fn song_rebuild_remaps_from_clock_beat_and_preserves_the_sounding_anchor() {
+        let (state, _) = song_mode_fixture();
+        song_mode_commit(
+            &state,
+            vec![
+                song_mode_row(10, 0.0, 0, Vec::new()),
+                song_mode_row(11, 4.0, 1, Vec::new()),
+                song_mode_row(12, 8.0, 2, Vec::new()),
+            ],
+            12.0,
+            false,
+        );
+        let original = state.preflight_runtime_song().expect("preflight original");
+        let mut runtime = start_runtime_at_beat(
+            Arc::clone(&original),
+            5.0,
+            state.song_playback(),
+        );
+        assert_eq!(runtime.current_row(), 1);
+        assert!((runtime.row_clock_anchor(1).0 - 4.0).abs() < 1e-9);
+
+        // Move the governing row's start without changing what it resolves.
+        // A row-index-based rebuild would either retain ordinal 1 by accident
+        // or move its phase anchor to beat 2.
+        song_mode_commit(
+            &state,
+            vec![
+                song_mode_row(20, 0.0, 0, Vec::new()),
+                song_mode_row(21, 2.0, 1, Vec::new()),
+                song_mode_row(22, 7.0, 2, Vec::new()),
+            ],
+            12.0,
+            false,
+        );
+        let rebuilt = state.preflight_runtime_song().expect("preflight rebuild");
+        runtime.rebuild_song(Arc::clone(&rebuilt), 5.0);
+
+        assert!(
+            Arc::ptr_eq(runtime.song(), &rebuilt),
+            "identical sounding source/offset identity swaps immediately"
+        );
+        assert_eq!(
+            runtime.current_row(),
+            rebuilt.row_index_at_beat(5.0).unwrap(),
+            "the cursor is selected from the runtime clock beat"
+        );
+        assert!(
+            (runtime.row_clock_anchor(runtime.current_row()).0 - 4.0).abs() < 1e-9,
+            "an immediate remap must not move the sounding phase anchor"
+        );
+        assert!(
+            state.song_playback().drain_notices().is_empty(),
+            "an immediate identity-compatible remap never re-enters the row"
+        );
+    }
+
+    #[test]
+    fn song_rebuild_with_a_changed_current_row_waits_for_the_next_boundary() {
+        let (state, _) = song_mode_fixture();
+        song_mode_commit(
+            &state,
+            vec![
+                song_mode_row(10, 0.0, 0, Vec::new()),
+                song_mode_row(11, 4.0, 1, Vec::new()),
+                song_mode_row(12, 8.0, 2, Vec::new()),
+            ],
+            12.0,
+            false,
+        );
+        let original = state.preflight_runtime_song().expect("preflight original");
+        let mut runtime = start_runtime_at_beat(
+            Arc::clone(&original),
+            5.0,
+            state.song_playback(),
+        );
+
+        song_mode_commit(
+            &state,
+            vec![
+                song_mode_row(20, 0.0, 0, Vec::new()),
+                song_mode_row(21, 3.0, 2, Vec::new()),
+                song_mode_row(22, 10.0, 1, Vec::new()),
+            ],
+            12.0,
+            false,
+        );
+        let rebuilt = state.preflight_runtime_song().expect("preflight rebuild");
+        runtime.rebuild_song(Arc::clone(&rebuilt), 5.0);
+        assert!(
+            Arc::ptr_eq(runtime.song(), &original),
+            "changed sounding identity stays on the old immutable song"
+        );
+
+        let before_boundary = runtime.next_chunk(
+            7 * 24_000,
+            7.0,
+            24_000,
+            state.song_playback(),
+        );
+        assert!(matches!(
+            before_boundary,
+            crate::sequencer::SongChunkPlan::Schedule { row: 1, .. }
+        ));
+        assert!(Arc::ptr_eq(runtime.song(), &original));
+        assert!(
+            state.song_playback().drain_notices().is_empty(),
+            "the rebuilt row must not apply before the old row boundary"
+        );
+
+        let at_boundary = runtime.next_chunk(
+            8 * 24_000,
+            8.0,
+            24_000,
+            state.song_playback(),
+        );
+        assert!(matches!(
+            at_boundary,
+            crate::sequencer::SongChunkPlan::Schedule {
+                row_changed: true,
+                ..
+            }
+        ));
+        assert!(Arc::ptr_eq(runtime.song(), &rebuilt));
+        assert_eq!(runtime.current_row(), rebuilt.row_index_at_beat(8.0).unwrap());
+        let applied = song_row_applied(&state.song_playback().drain_notices());
+        assert_eq!(applied.len(), 1, "{applied:?}");
+        assert!((applied[0].effective_beat - 8.0).abs() < 1e-9);
+        assert!(!applied[0].wrapped);
+    }
+
+    #[test]
+    fn song_rebuild_past_the_new_end_uses_the_existing_end_and_loop_rules() {
+        let (state, _) = song_mode_fixture();
+        song_mode_commit(
+            &state,
+            vec![
+                song_mode_row(10, 0.0, 0, Vec::new()),
+                song_mode_row(11, 4.0, 1, Vec::new()),
+            ],
+            12.0,
+            false,
+        );
+        let original = state.preflight_runtime_song().expect("preflight original");
+
+        let exercise = |loop_enabled: bool| {
+            let mut runtime = start_runtime_at_beat(
+                Arc::clone(&original),
+                5.0,
+                state.song_playback(),
+            );
+            song_mode_commit(
+                &state,
+                vec![
+                    song_mode_row(20, 0.0, 0, Vec::new()),
+                    song_mode_row(21, 2.0, 2, Vec::new()),
+                ],
+                4.0,
+                loop_enabled,
+            );
+            let rebuilt = state.preflight_runtime_song().expect("preflight rebuild");
+            runtime.rebuild_song(rebuilt, 5.0);
+            let plan = runtime.next_chunk(
+                5 * 24_000,
+                5.0,
+                24_000,
+                state.song_playback(),
+            );
+            let notices = state.song_playback().drain_notices();
+            (plan, notices)
+        };
+
+        let (ended, notices) = exercise(false);
+        assert!(matches!(ended, crate::sequencer::SongChunkPlan::Ended));
+        assert!(
+            notices.iter().any(|notice| matches!(
+                notice,
+                crate::sequencer::SongPlaybackNotice::Ended { end_beat, .. }
+                    if (*end_beat - 4.0).abs() < 1e-9
+            )),
+            "{notices:?}"
+        );
+
+        let (wrapped, notices) = exercise(true);
+        assert!(matches!(
+            wrapped,
+            crate::sequencer::SongChunkPlan::Schedule {
+                wrapped: true,
+                ..
+            }
+        ));
+        assert!(
+            notices.iter().any(|notice| matches!(
+                notice,
+                crate::sequencer::SongPlaybackNotice::RowApplied(applied)
+                    if applied.wrapped && applied.effective_beat == 0.0
+            )),
+            "{notices:?}"
+        );
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| matches!(notice, crate::sequencer::SongPlaybackNotice::Ended { .. }))
+        );
+    }
+
     #[test]
     fn song_row_boundary_inside_block_splits_scheduling() {
         run_with_scheduler_stack(|| {
@@ -5576,6 +5802,681 @@
         });
     }
 
+    /// Repro for the arrtest3 "drone lane drops a loop at row boundaries"
+    /// report: track 1 is an 8-step pattern with ONLY step 0 active (a
+    /// half-bar clip whose trigger lands exactly on every even beat), pinned
+    /// to the same pool pattern across rows whose start beats — including
+    /// the exact fractional splice boundaries from the project file — often
+    /// coincide with its step-0 crossing. Every 2-beat loop must schedule
+    /// exactly one trigger, regardless of scheduler block size and of how
+    /// the lookahead pass is paced.
+    #[test]
+    fn song_boundary_coincident_drone_trigger_never_drops() {
+        {
+            let state = Arc::new(SequencerState::new(
+                2,
+                vec![default_empty_effect_chain(), default_empty_effect_chain()],
+            ));
+            let drone_id = state.with_scenes_mut(|scenes| {
+                let snapshots = vec![
+                    crate::sequencer::PatternSnapshot::new_default(2, &[]),
+                    crate::sequencer::PatternSnapshot::new_default(2, &[]),
+                    crate::sequencer::PatternSnapshot::new_default(2, &[]),
+                ];
+                *scenes = crate::sequencer::ProjectScenes::from_pattern_snapshots(&snapshots, 0);
+                for scene in 0..3 {
+                    let id = scenes.scenes[scene].cells[0].expect("scene cell");
+                    let data = scenes.track_pools[0].get_mut(id).expect("pool pattern");
+                    song_mode_configure_pattern(data, (scene + 1) as f32);
+                    let id = scenes.scenes[scene].cells[1].expect("scene cell");
+                    let data = scenes.track_pools[1].get_mut(id).expect("pool pattern");
+                    data.track_params.num_steps = 8;
+                    data.track_bits = [1, 0, 0, 0];
+                    data.step_data[0][StepParam::Transpose.index()] = 7.0;
+                    data.step_data[0][StepParam::Duration.index()] = 8.0;
+                }
+                scenes.scenes[0].cells[1].expect("drone cell")
+            });
+            let drone = |offset_steps: f64| crate::sequencer::ProjectSongTrackOverride {
+                track: 1,
+                pattern_id: Some(drone_id.0),
+                take_id: None,
+                offset_steps,
+            };
+            // Row starts and drone offsets lifted verbatim from
+            // projects/arrtest3.json (track 6), through beat 28.
+            let rows = vec![
+                song_mode_row(437, 0.0, 0, Vec::new()),
+                {
+                    let mut row = song_mode_row(481, 8.0, 0, Vec::new());
+                    row.overrides = vec![drone(0.0)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(459, 9.994709105451298, 0, Vec::new());
+                    row.overrides = vec![drone(7.978836421805191)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(476, 12.0, 0, Vec::new());
+                    row.overrides = vec![drone(0.0)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(439, 13.055999999917828, 1, Vec::new());
+                    row.overrides = vec![drone(4.223999999671314)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(475, 14.0, 1, Vec::new());
+                    row.overrides = vec![drone(0.0)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(440, 14.266308332895033, 0, Vec::new());
+                    row.overrides = vec![drone(1.0652333315801314)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(441, 14.393673416895028, 1, Vec::new());
+                    row.overrides = vec![drone(1.5746936675801138)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(480, 16.0, 1, Vec::new());
+                    row.overrides = vec![drone(0.0)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(442, 20.474304416895237, 1, Vec::new());
+                    row.overrides = vec![drone(1.8972176675809465)];
+                    row
+                },
+                {
+                    let mut row = song_mode_row(478, 26.0, 1, Vec::new());
+                    row.overrides = vec![drone(0.0)];
+                    row
+                },
+            ];
+            song_mode_commit(&state, rows, 28.0, false);
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let base = state.publish_scheduler_snapshot();
+            let samples_per_quarter = 48_000.0 * 60.0 / base.transport.bpm as f64;
+            let end_sample = (28.0 * samples_per_quarter) as u64;
+
+            for &block in &[128usize, 256, 480, 512, 1000, 16_000] {
+                let state = Arc::clone(&state);
+                let runtime = Arc::clone(&runtime);
+                let base = Arc::clone(&base);
+                let triggers: Vec<ObservedTrigger> = run_with_scheduler_stack(move || {
+                    let queue = Box::new(ScheduledEventQueue::<128>::new());
+                    let mut scheduler = SchedulerLookaheadState::new(48_000);
+                    scheduler.song = Some(
+                        crate::sequencer::SongPlaybackRuntime::new(
+                            runtime,
+                            0.0,
+                            samples_per_quarter,
+                        )
+                        .expect("song playback runtime"),
+                    );
+                    let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                        std::array::from_fn(|_| LiveMidiFxTrackState::default());
+                    let mut scratch_runtime = None;
+                    // Incremental pacing like production: `rendered` creeps
+                    // forward and every pass extends the horizon by at most
+                    // the 4-block lookahead window.
+                    let mut scheduled_until = 0_u64;
+                    let mut rendered = 0_u64;
+                    let mut triggers: Vec<ObservedTrigger> = Vec::new();
+                    while rendered < end_sample + 48_000 {
+                        let result = schedule_playing_lookahead(
+                            &mut scheduler,
+                            &state,
+                            &base,
+                            &queue,
+                            &mut scratch_runtime,
+                            &live_midi_fx_tracks,
+                            base.transport.pattern_epoch,
+                            rendered,
+                            (block * 4) as u64,
+                            48_000,
+                            block,
+                            samples_per_quarter,
+                            scheduled_until,
+                            false,
+                            false,
+                        );
+                        scheduled_until = result.scheduled_until_sample;
+                        triggers.extend(observed_triggers(queue.as_ref()));
+                        rendered += block as u64;
+                    }
+                    let _ = state.drain_song_playback_notices();
+                    triggers
+                });
+                let drone_hits: Vec<u64> = triggers
+                    .iter()
+                    .filter(|event| event.track == 1)
+                    .map(|event| event.sample_time)
+                    .collect();
+                // One trigger per 2-beat loop: beats 0, 2, 4, ... 26.
+                let expected: Vec<u64> = (0..14)
+                    .map(|loop_idx| (loop_idx as f64 * 2.0 * samples_per_quarter) as u64)
+                    .collect();
+                assert_eq!(
+                    drone_hits.len(),
+                    expected.len(),
+                    "block={block}: expected one drone trigger per loop, got {drone_hits:?}"
+                );
+                for (hit, want) in drone_hits.iter().zip(&expected) {
+                    let delta = hit.abs_diff(*want);
+                    assert!(
+                        delta <= 2,
+                        "block={block}: drone trigger at {hit} expected near {want} ({drone_hits:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Install a two-chunk take (256 + 40 = 296 steps, transposes 5/6) on
+    /// track 0 and return its id. Chunks are MAX_STEPS-long 16th-timebase
+    /// patterns, so one chunk spans 64 beats.
+    fn song_mode_install_take(state: &SequencerState) -> crate::sequencer::TakeId {
+        state.with_scenes_mut(|scenes| {
+            let mut chunk = scenes.track_pools[0]
+                .get(crate::sequencer::PatternId(1))
+                .expect("source pattern")
+                .clone();
+            chunk.track_params.num_steps = crate::sequencer::MAX_STEPS;
+            for step in 0..crate::sequencer::MAX_STEPS {
+                chunk.track_bits[step / 64] |= 1 << (step % 64);
+                chunk.step_data[step][StepParam::Transpose.index()] = 5.0;
+            }
+            let mut chunk_b = chunk.clone();
+            for step in 0..crate::sequencer::MAX_STEPS {
+                chunk_b.step_data[step][StepParam::Transpose.index()] = 6.0;
+            }
+            let chunk_a = scenes.track_pools[0].insert(chunk);
+            let chunk_b = scenes.track_pools[0].insert(chunk_b);
+            scenes.take_pools[0].insert(None, vec![chunk_a, chunk_b], 296)
+        })
+    }
+
+    /// Note edit-through (docs/realtime-arrangement-feedback-spec.md 5.1):
+    /// a step edit to the pattern the SOUNDING row resolves is audible inside
+    /// that row. `replace_song_in_place` swaps the row `Arc`s and the
+    /// Arrangement capture is OPEN-ENDED (docs/song-mode-spec.md 7.4): the
+    /// song end is not a stopping point while recording. A take that grooves
+    /// past the old song length used to be cut off there and committed —
+    /// `Ended` reaches `handle_song_playback_ended`, which for capture calls
+    /// the stop-COMMIT. Open-ended, the last row simply keeps playing and
+    /// the stop-commit extends `end_beat` to the Stop beat. Plain song
+    /// playback still ends exactly as before.
+    #[test]
+    fn open_ended_capture_plays_past_the_song_end_instead_of_ending() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            // Two rows, song ending at beat 8, NOT looping.
+            song_mode_commit(
+                &state,
+                vec![
+                    song_mode_row(0, 0.0, 0, Vec::new()),
+                    song_mode_row(1, 4.0, 1, Vec::new()),
+                ],
+                8.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            let samples_per_quarter = 24_000.0;
+            let mailbox = state.song_playback();
+
+            // Drive `next_chunk` from beat zero out past the song end. One
+            // beat per call, so the end boundary is crossed on the ninth.
+            let drive = |open_ended: bool| -> (Vec<bool>, usize) {
+                let mut playback = crate::sequencer::SongPlaybackRuntime::new(
+                    Arc::clone(&runtime),
+                    0.0,
+                    samples_per_quarter,
+                )
+                .expect("song playback runtime");
+                playback.set_open_ended(open_ended);
+                let mut ended = Vec::new();
+                for beat in 0..12 {
+                    let plan = playback.next_chunk(
+                        (beat as f64 * samples_per_quarter) as u64,
+                        beat as f64,
+                        samples_per_quarter as usize,
+                        mailbox,
+                    );
+                    ended.push(matches!(plan, crate::sequencer::SongChunkPlan::Ended));
+                }
+                let end_notices = mailbox
+                    .drain_notices()
+                    .iter()
+                    .filter(|notice| {
+                        matches!(notice, crate::sequencer::SongPlaybackNotice::Ended { .. })
+                    })
+                    .count();
+                (ended, end_notices)
+            };
+
+            let (ended, end_notices) = drive(true);
+            assert!(
+                ended.iter().all(|ended| !ended),
+                "open-ended capture must never stop at the song end: {ended:?}"
+            );
+            assert_eq!(
+                end_notices, 0,
+                "an Ended notice is what tears the capture down and commits it"
+            );
+
+            let (ended, end_notices) = drive(false);
+            assert!(
+                ended.iter().any(|ended| *ended),
+                "plain song playback still ends at the song end"
+            );
+            assert_eq!(end_notices, 1);
+        });
+    }
+
+    /// lookahead reads `row_snapshot(row)` per chunk, so steps ahead of the
+    /// playhead change while the row itself is never re-entered — no
+    /// retrigger, no clock disturbance — and the edit survives the loop wrap.
+    #[test]
+    fn song_step_edit_reaches_the_sounding_row_without_re_entering_it() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            // One 8-beat row looping on itself: the 4-beat scene-0 pattern
+            // (transpose 1) tiles twice per pass.
+            song_mode_commit(&state, vec![song_mode_row(0, 0.0, 0, Vec::new())], 8.0, true);
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let base = state.publish_scheduler_snapshot();
+            let samples_per_quarter = 48_000.0 * 60.0 / base.transport.bpm as f64;
+            let loop_samples = (8.0 * samples_per_quarter) as u64;
+
+            let queue = Box::new(ScheduledEventQueue::<128>::new());
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler.song = Some(
+                crate::sequencer::SongPlaybackRuntime::new(runtime, 0.0, samples_per_quarter)
+                    .expect("song playback runtime"),
+            );
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime = None;
+            let block = 4_800_usize;
+            let mut scheduled_until = 0_u64;
+            let mut rendered = 0_u64;
+            let mut triggers: Vec<ObservedTrigger> = Vec::new();
+            let mut applied: Vec<crate::sequencer::AudibleSongRowApplied> = Vec::new();
+            // The edit lands one beat in, while the row is sounding.
+            let edit_at = samples_per_quarter as u64;
+            let mut edited = false;
+            let mut edit_horizon = 0_u64;
+
+            while rendered < loop_samples * 2 {
+                let result = schedule_playing_lookahead(
+                    &mut scheduler,
+                    &state,
+                    &base,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    base.transport.pattern_epoch,
+                    rendered,
+                    (block * 4) as u64,
+                    48_000,
+                    block,
+                    samples_per_quarter,
+                    scheduled_until,
+                    false,
+                    false,
+                );
+                scheduled_until = result.scheduled_until_sample;
+                triggers.extend(observed_triggers(queue.as_ref()));
+                applied.extend(song_row_applied(&state.drain_song_playback_notices()));
+                rendered += block as u64;
+
+                if !edited && rendered >= edit_at {
+                    // The performer edits the pool pattern the sounding row
+                    // resolved, then the control thread re-preflights and
+                    // hands the rows over — the production `Refresh` path.
+                    state.with_scenes_mut(|scenes| {
+                        let id = scenes.scenes[0].cells[0].expect("scene 0 cell");
+                        let data = scenes.track_pools[0].get_mut(id).expect("pool pattern");
+                        for step in 0..16 {
+                            data.step_data[step][StepParam::Transpose.index()] = 7.0;
+                        }
+                    });
+                    let refreshed = state.preflight_runtime_song().expect("re-preflight");
+                    assert!(
+                        scheduler
+                            .song
+                            .as_mut()
+                            .expect("song runtime")
+                            .replace_song_in_place(refreshed),
+                        "a note edit keeps row layout identical, so the swap must succeed"
+                    );
+                    edited = true;
+                    // Everything already scheduled keeps the old content.
+                    edit_horizon = scheduled_until;
+                }
+            }
+
+            let track0: Vec<&ObservedTrigger> =
+                triggers.iter().filter(|event| event.track == 0).collect();
+            assert!(
+                track0
+                    .iter()
+                    .filter(|event| event.sample_time < edit_horizon)
+                    .all(|event| event.transpose == 1.0),
+                "already-scheduled steps must not be rewritten: {track0:#?}"
+            );
+            let after: Vec<&&ObservedTrigger> = track0
+                .iter()
+                .filter(|event| event.sample_time >= edit_horizon)
+                .collect();
+            assert!(
+                !after.is_empty() && after.iter().all(|event| event.transpose == 7.0),
+                "steps ahead of the playhead in the SOUNDING row carry the edit: {track0:#?}"
+            );
+            assert!(
+                after
+                    .iter()
+                    .any(|event| event.sample_time >= loop_samples),
+                "the edit must survive the loop wrap: {track0:#?}"
+            );
+
+            // The row is never re-entered off a boundary: only the initial
+            // application and the loop wraps apply it, all at beat zero.
+            assert!(
+                applied.iter().all(|record| record.row_ordinal == 0
+                    && record.effective_beat.abs() < 1e-9),
+                "no retrigger: rows apply only at their own start ({applied:?})"
+            );
+            let wraps = applied.iter().filter(|record| record.wrapped).count();
+            assert_eq!(
+                applied.len(),
+                wraps + 1,
+                "one initial application plus one per wrap ({applied:?})"
+            );
+        });
+    }
+
+    #[test]
+    fn song_rebuild_ahead_changes_future_playback_without_reentering_the_sounding_row() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            song_mode_commit(
+                &state,
+                vec![
+                    song_mode_row(10, 0.0, 0, Vec::new()),
+                    song_mode_row(11, 8.0, 1, Vec::new()),
+                ],
+                12.0,
+                false,
+            );
+            let original = state.preflight_runtime_song().expect("preflight original");
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let base = state.publish_scheduler_snapshot();
+            let samples_per_quarter = 48_000.0 * 60.0 / base.transport.bpm as f64;
+            let queue = Box::new(ScheduledEventQueue::<128>::new());
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler.song = Some(
+                crate::sequencer::SongPlaybackRuntime::new(
+                    original,
+                    0.0,
+                    samples_per_quarter,
+                )
+                .expect("song playback runtime"),
+            );
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime = None;
+            let block = 4_800_usize;
+            let mut scheduled_until = 0_u64;
+            let mut rendered = 0_u64;
+            let mut triggers = Vec::new();
+            let mut applied = Vec::new();
+            let edit_at = samples_per_quarter as u64;
+            let end_sample = (12.0 * samples_per_quarter) as u64;
+            let mut edited = false;
+
+            while rendered < end_sample {
+                let result = schedule_playing_lookahead(
+                    &mut scheduler,
+                    &state,
+                    &base,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    base.transport.pattern_epoch,
+                    rendered,
+                    (block * 4) as u64,
+                    48_000,
+                    block,
+                    samples_per_quarter,
+                    scheduled_until,
+                    false,
+                    false,
+                );
+                scheduled_until = result.scheduled_until_sample;
+                triggers.extend(observed_triggers(queue.as_ref()));
+                applied.extend(song_row_applied(&state.drain_song_playback_notices()));
+                rendered += block as u64;
+
+                if !edited && rendered >= edit_at {
+                    // The edit is seven beats ahead and outside the current
+                    // lookahead horizon. Scene 2 replaces scene 1 there.
+                    song_mode_commit(
+                        &state,
+                        vec![
+                            song_mode_row(20, 0.0, 0, Vec::new()),
+                            song_mode_row(21, 8.0, 2, Vec::new()),
+                        ],
+                        12.0,
+                        false,
+                    );
+                    let rebuilt = state.preflight_runtime_song().expect("preflight rebuild");
+                    let clock_beat = scheduler.clock.total_beats;
+                    scheduler
+                        .song
+                        .as_mut()
+                        .expect("song runtime")
+                        .rebuild_song(rebuilt, clock_beat);
+                    edited = true;
+                }
+            }
+
+            let after_boundary: Vec<_> = triggers
+                .iter()
+                .filter(|event| {
+                    event.track == 0
+                        && event.sample_time >= (8.0 * samples_per_quarter) as u64
+                })
+                .collect();
+            assert!(
+                !after_boundary.is_empty()
+                    && after_boundary
+                        .iter()
+                        .all(|event| event.transpose == 3.0),
+                "the edit ahead must govern when reached: {after_boundary:#?}"
+            );
+            let sounding_row_entries: Vec<_> = applied
+                .iter()
+                .filter(|notice| notice.effective_beat < 8.0)
+                .collect();
+            assert_eq!(
+                sounding_row_entries.len(),
+                1,
+                "the sounding row is entered once at Start, never by Rebuild: {applied:?}"
+            );
+            assert!(sounding_row_entries[0].effective_beat.abs() < 1e-9);
+            assert!(
+                applied
+                    .iter()
+                    .any(|notice| (notice.effective_beat - 8.0).abs() < 1e-9),
+                "the rebuilt future row applies at its ordinary boundary: {applied:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn preflight_expands_take_rows_at_chunk_boundaries_and_take_end() {
+        let (state, _) = song_mode_fixture();
+        let take = song_mode_install_take(&state);
+        let (chunk_a, chunk_b) = state.with_scenes_mut(|scenes| {
+            let take = scenes.take_pools[0].get(take).expect("take");
+            (take.chunks[0], take.chunks[1])
+        });
+        let mut row = song_mode_row(0, 0.0, 0, Vec::new());
+        row.overrides = vec![crate::sequencer::ProjectSongTrackOverride::new_take(
+            0,
+            take.0,
+            0.0,
+        )];
+        song_mode_commit(&state, vec![row], 100.0, false);
+        let runtime = state.preflight_runtime_song().expect("preflight");
+
+        // One project row expands to three runtime rows: chunk 0 at beat 0,
+        // chunk 1 at beat 64 (256 steps of a 16th timebase), and the silent
+        // tail at beat 74 (296 steps). All share the project row's id.
+        assert_eq!(runtime.rows.len(), 3);
+        assert!(runtime
+            .rows
+            .iter()
+            .all(|row| row.id == crate::sequencer::SongRowId(0)));
+        let starts: Vec<f64> = runtime.rows.iter().map(|row| row.start_beat).collect();
+        assert!((starts[0] - 0.0).abs() < 1e-9, "{starts:?}");
+        assert!((starts[1] - 64.0).abs() < 1e-9, "{starts:?}");
+        assert!((starts[2] - 74.0).abs() < 1e-9, "{starts:?}");
+
+        // Take lane: content is the governing chunk, identity is the TakeId,
+        // chunk-local offsets restart at 0, and the tail is silent (no wrap).
+        assert_eq!(runtime.rows[0].resolved_pattern_ids[0], Some(chunk_a));
+        assert_eq!(runtime.rows[1].resolved_pattern_ids[0], Some(chunk_b));
+        assert_eq!(runtime.rows[2].resolved_pattern_ids[0], None);
+        assert_eq!(
+            runtime.rows[0].resolved_sources[0],
+            crate::sequencer::LaneSource::Take(take)
+        );
+        assert_eq!(
+            runtime.rows[1].resolved_sources[0],
+            crate::sequencer::LaneSource::Take(take)
+        );
+        assert_eq!(
+            runtime.rows[2].resolved_sources[0],
+            crate::sequencer::LaneSource::Empty
+        );
+        assert!((runtime.rows[0].lane_offsets[0] - 0.0).abs() < 1e-6);
+        assert!((runtime.rows[1].lane_offsets[0] - 0.0).abs() < 1e-6);
+
+        // The scene-resolved lane on track 1 stays phase-continuous across
+        // the synthetic splits: 64 beats = 256 steps ≡ 0 (mod 16), 74 beats
+        // = 296 steps ≡ 8 (mod 16).
+        assert!((runtime.rows[1].lane_offsets[1] - 0.0).abs() < 1e-6);
+        assert!((runtime.rows[2].lane_offsets[1] - 8.0).abs() < 1e-6);
+        assert_eq!(
+            runtime.rows[1].resolved_sources[1],
+            crate::sequencer::LaneSource::Pattern(crate::sequencer::PatternId(1))
+        );
+
+        // Chunk boundaries are NOT a source change: no accumulator reset for
+        // the take lane (or anyone else). The take end IS one for the lane.
+        let mut resets = [false; MAX_TRACKS];
+        crate::scheduler::mark_song_row_accum_resets(&runtime.rows[0], &runtime.rows[1], &mut resets);
+        assert!(resets.iter().all(|reset| !reset), "{resets:?}");
+        crate::scheduler::mark_song_row_accum_resets(&runtime.rows[1], &runtime.rows[2], &mut resets);
+        assert!(resets[0], "take end silences the lane -> reset");
+        assert!(!resets[1], "unrelated lane keeps its accumulator");
+    }
+
+    #[test]
+    fn preflight_take_offset_resolves_mid_chunk_and_clips_short_spans() {
+        let (state, _) = song_mode_fixture();
+        let take = song_mode_install_take(&state);
+        // Row 0 plays scenes; row 1 at beat 10 re-enters the take at step
+        // 12.5; row 2 at beat 20 returns to the scene — the take span never
+        // reaches a chunk boundary, so no synthetic split is inserted.
+        let mut take_row = song_mode_row(1, 10.0, 0, Vec::new());
+        take_row.overrides = vec![crate::sequencer::ProjectSongTrackOverride::new_take(
+            0,
+            take.0,
+            12.5,
+        )];
+        song_mode_commit(
+            &state,
+            vec![
+                song_mode_row(0, 0.0, 0, Vec::new()),
+                take_row,
+                song_mode_row(2, 20.0, 1, Vec::new()),
+            ],
+            32.0,
+            false,
+        );
+        let runtime = state.preflight_runtime_song().expect("preflight");
+        assert_eq!(runtime.rows.len(), 3, "no synthetic splits");
+        assert_eq!(
+            runtime.rows[1].resolved_sources[0],
+            crate::sequencer::LaneSource::Take(take)
+        );
+        assert!((runtime.rows[1].lane_offsets[0] - 12.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn manual_latch_schedules_track_from_live_snapshot_until_cleared() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            // Live session state: track 0 plays a distinct pattern
+            // (transpose 9). Row content is scene 1 (transpose 2).
+            state
+                .apply_song_row(0, &[], 2, &[], &[], &[], &[], true)
+                .expect("seed live state from scene 0");
+            let live = state.with_scenes_mut(|scenes| {
+                scenes.track_pools[0]
+                    .get(crate::sequencer::PatternId(4))
+                    .expect("override pool pattern")
+                    .clone()
+            });
+            let mut live_snapshot = crate::sequencer::PatternSnapshot::new_default(2, &[]);
+            live_snapshot.set_track_pattern_data(0, live);
+            assert!(live_snapshot.restore_track(&state, 0));
+            song_mode_commit(
+                &state,
+                vec![song_mode_row(0, 0.0, 1, Vec::new())],
+                4.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+
+            // Latched: track 0 schedules from the LIVE snapshot (transpose
+            // 9, free-running), track 1 from the song row (transpose 2).
+            state.latch_song_manual_override([0]);
+            let (events, _) =
+                drive_song_lookahead(&state, Arc::clone(&runtime), 16_000, 48_000);
+            assert!(!events.is_empty());
+            for event in &events {
+                let expected = if event.track == 0 { 9.0 } else { 2.0 };
+                assert_eq!(
+                    event.transpose, expected,
+                    "latched track plays the live pattern: {event:?}"
+                );
+            }
+
+            // Back to Song: the row's content resumes for track 0.
+            state.clear_song_manual_latch();
+            let (events, _) = drive_song_lookahead(&state, runtime, 16_000, 48_000);
+            assert!(events.iter().any(|event| event.track == 0));
+            for event in &events {
+                assert_eq!(
+                    event.transpose, 2.0,
+                    "cleared latch restores song resolution: {event:?}"
+                );
+            }
+        });
+    }
+
     #[test]
     fn song_unquantized_row_boundary_keeps_sample_offset() {
         run_with_scheduler_stack(|| {
@@ -5607,7 +6508,9 @@
             assert_ne!(row1.effective_sample % 6_000, 0, "must not snap to the step grid");
             let boundary = row1.effective_sample;
             // The step just before the boundary still comes from the old
-            // row; the next step is scheduled from the new row.
+            // row. The new row anchors its lanes at its own start beat
+            // (takes spec 7.2: rows re-anchor, free-run is gone), so its
+            // step 0 fires exactly at the unquantized boundary sample.
             let track0: Vec<_> = events.iter().filter(|event| event.track == 0).collect();
             let before = track0
                 .iter()
@@ -5621,8 +6524,74 @@
                 .filter(|event| event.sample_time >= boundary)
                 .min_by_key(|event| event.sample_time)
                 .expect("step after the boundary");
-            assert!((41_999..=42_000).contains(&after.sample_time), "{after:?}");
+            assert!(
+                (36_008..=36_009).contains(&after.sample_time),
+                "the anchored row's step 0 must fire at the boundary: {after:?}"
+            );
             assert_eq!(after.transpose, 2.0);
+        });
+    }
+
+    /// Anchored clip phase (takes spec 7.1/7.2): a clip whose row starts at
+    /// a beat that is NOT a multiple of the pattern length plays step 0 at
+    /// its start beat (free-run would land mid-pattern), and a stored
+    /// `offset_steps` shifts the start point into the pattern.
+    #[test]
+    fn song_row_clip_anchors_step_zero_at_its_start_beat() {
+        run_with_scheduler_stack(|| {
+            let (state, override_id) = song_mode_fixture();
+            // Step-indexed transposes on the override pattern so a trigger
+            // identifies its step: transpose = 100 + step.
+            state.with_scenes_mut(|scenes| {
+                let data = scenes.track_pools[0].get_mut(override_id).expect("pool");
+                for step in 0..16 {
+                    data.step_data[step][StepParam::Transpose.index()] = 100.0 + step as f32;
+                }
+            });
+            // Row 1 starts at beat 5.0 — not a multiple of the 4-beat
+            // pattern cycle. Free-run would start at step 4.
+            song_mode_commit(
+                &state,
+                vec![
+                    song_mode_row(0, 0.0, 0, Vec::new()),
+                    song_mode_row(1, 5.0, 1, vec![(0, override_id.0)]),
+                ],
+                8.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            let (events, _) = drive_song_lookahead(&state, runtime, 16_000, 240_000);
+            let clip: Vec<_> = events
+                .iter()
+                .filter(|event| event.track == 0 && event.transpose >= 100.0)
+                .collect();
+            let first = clip.first().expect("clip triggers");
+            assert_eq!(first.sample_time, 120_000, "step 0 fires at the row start");
+            assert_eq!(first.transpose, 100.0, "clip starts at step 0, not free-run");
+            assert_eq!(clip[1].sample_time, 126_000);
+            assert_eq!(clip[1].transpose, 101.0);
+
+            // A stored offset starts the clip that many steps in.
+            let mut offset_row = song_mode_row(1, 5.0, 1, vec![(0, override_id.0)]);
+            offset_row.overrides[0].offset_steps = 4.0;
+            song_mode_commit(
+                &state,
+                vec![song_mode_row(0, 0.0, 0, Vec::new()), offset_row],
+                8.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            assert_eq!(runtime.rows[1].lane_offsets[0], 4.0);
+            let (events, _) = drive_song_lookahead(&state, runtime, 16_000, 240_000);
+            let first = events
+                .iter()
+                .find(|event| event.track == 0 && event.transpose >= 100.0)
+                .expect("clip triggers");
+            assert_eq!(first.sample_time, 120_000);
+            assert_eq!(
+                first.transpose, 104.0,
+                "offset 4 steps: the clip starts at step 4 at its start beat"
+            );
         });
     }
 
@@ -5673,6 +6642,102 @@
             assert!(events
                 .iter()
                 .any(|e| e.track == 1 && e.sample_time == boundary && e.transpose == 2.0));
+        });
+    }
+
+    #[test]
+    fn song_row_transition_accum_reset_is_diff_aware() {
+        run_with_scheduler_stack(|| {
+            let (state, override_id) = song_mode_fixture();
+            let mut silence_row = song_mode_row(2, 2.0, 0, Vec::new());
+            silence_row.overrides = vec![crate::sequencer::ProjectSongTrackOverride::new(1, None)];
+            song_mode_commit(
+                &state,
+                vec![
+                    song_mode_row(0, 0.0, 0, Vec::new()),
+                    // Row 1 changes ONLY track 0 (override); track 1 keeps
+                    // scene 0's pattern through the boundary.
+                    song_mode_row(1, 1.0, 0, vec![(0, override_id.0)]),
+                    // Row 2 drops the override (track 0 changes back) and
+                    // explicitly empties track 1.
+                    silence_row,
+                ],
+                3.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+
+            let mut resets = [false; MAX_TRACKS];
+            crate::scheduler::lookahead::mark_song_row_accum_resets(
+                &runtime.rows[0],
+                &runtime.rows[1],
+                &mut resets,
+            );
+            assert!(resets[0], "track 0's resolved pattern changed");
+            assert!(
+                !resets[1],
+                "track 1 plays the same pattern through the boundary and must keep \
+                 its accumulator state"
+            );
+
+            let mut resets = [false; MAX_TRACKS];
+            crate::scheduler::lookahead::mark_song_row_accum_resets(
+                &runtime.rows[1],
+                &runtime.rows[2],
+                &mut resets,
+            );
+            assert!(resets[0], "override removed: track 0 changes back");
+            assert!(resets[1], "explicit-empty is a pattern change for track 1");
+
+            // Marking is additive: an already-pending reset survives an
+            // unchanged-track boundary.
+            let mut resets = [false; MAX_TRACKS];
+            resets[1] = true;
+            crate::scheduler::lookahead::mark_song_row_accum_resets(
+                &runtime.rows[0],
+                &runtime.rows[1],
+                &mut resets,
+            );
+            assert!(resets[1], "pending flags are preserved");
+        });
+    }
+
+    #[test]
+    fn song_explicit_empty_override_silences_only_its_track() {
+        run_with_scheduler_stack(|| {
+            let (state, _override_id) = song_mode_fixture();
+            let mut silence_row = song_mode_row(1, 1.0, 0, Vec::new());
+            silence_row.overrides = vec![crate::sequencer::ProjectSongTrackOverride::new(0, None)];
+            song_mode_commit(
+                &state,
+                vec![song_mode_row(0, 0.0, 0, Vec::new()), silence_row],
+                2.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+            // Explicit-empty resolves to no pattern even though scene 0's
+            // cell for track 0 holds one.
+            assert_eq!(runtime.rows[1].resolved_pattern_ids[0], None);
+            assert!(runtime.rows[1].scheduler_snapshot.tracks[0].scene_silenced);
+            let (events, notices) = drive_song_lookahead(&state, runtime, 16_000, 48_000);
+            let applied = song_row_applied(&notices);
+            let boundary = applied
+                .iter()
+                .find(|record| record.row_ordinal == 1)
+                .expect("row 1 applied")
+                .effective_sample;
+            assert!(
+                events
+                    .iter()
+                    .all(|event| !(event.track == 0 && event.sample_time >= boundary)),
+                "track 0 must be silent from the boundary on: {events:#?}"
+            );
+            // Track 1 keeps playing scene 0's pattern through the boundary.
+            assert!(events
+                .iter()
+                .any(|event| event.track == 1
+                    && event.sample_time >= boundary
+                    && event.transpose == 1.0));
         });
     }
 
@@ -5825,7 +6890,7 @@
         let epoch_before = state.transport.pattern_epoch.load(Ordering::Relaxed);
         let version_before = state.scheduler_snapshot_version();
         let sample_ids = state
-            .apply_song_row(1, &[(0, override_id)], 2, &[], &[], &[], &[], true)
+            .apply_song_row(1, &[(0, Some(override_id))], 2, &[], &[], &[], &[], true)
             .expect("apply song row");
         assert_eq!(sample_ids.len(), 2);
         state.with_scenes_mut(|scenes| {
@@ -5853,4 +6918,439 @@
         assert!(err.contains("scene 8"), "{err}");
         assert_eq!(state.scheduler_snapshot_version(), version_before);
         assert_eq!(state.current_scene_index(), 1);
+
+        // Explicit-empty override: track 0 is scene-silenced without falling
+        // back to the scene cell; track 1 restores normally.
+        state
+            .apply_song_row(0, &[(0, None)], 2, &[], &[], &[], &[], true)
+            .expect("apply explicit-empty row");
+        assert!(state.is_scene_silenced(0));
+        assert!(!state.is_scene_silenced(1));
+    }
+
+    /// Regression: a quantized scene launch must sound the NEW pattern's
+    /// first step exactly at the quantize boundary. The old control-side
+    /// apply ran after the boundary had rendered — the epoch bump dropped
+    /// the in-flight events and the resync seek marked the boundary step as
+    /// already played, silencing every first-step hit. The scheduler now
+    /// splits the lookahead chunk at the boundary and schedules at/after it
+    /// from the launch's prebuilt snapshot (song-row semantics).
+    #[test]
+    fn boundary_launch_schedules_the_new_patterns_first_step_at_the_boundary() {
+        run_with_scheduler_stack(boundary_launch_first_step_body)
+    }
+
+    fn boundary_launch_first_step_body() {
+        use crate::quantized_launch::{
+            LaunchQuantize, PatternLaunchTarget, QuantizedLaunchOwner,
+        };
+        use crate::sequencer::PatternSnapshot;
+        use std::sync::Arc;
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        state.transport.playing.store(true, Ordering::Relaxed);
+        // Scene 0 (the base snapshot) has no active steps; the target scene's
+        // prebuilt snapshot has a hit on step 0. Any trigger the lookahead
+        // enqueues can therefore only come from the launched snapshot.
+        let base_snapshot = state.publish_scheduler_snapshot();
+        let mut prebuilt = (*state.latest_scheduler_snapshot()).clone();
+        Arc::make_mut(&mut prebuilt.tracks[0]).steps[0].active = true;
+        prebuilt.transport.playing = true;
+        prebuilt.transport.current_pattern = 1;
+        let prebuilt = Arc::new(prebuilt);
+
+        state
+            .quantized_launches()
+            .schedule(
+                PatternLaunchTarget::Scene { scene: 1 },
+                LaunchQuantize::Bar,
+                QuantizedLaunchOwner::Transport,
+                2,
+                1,
+                Some(Arc::clone(&prebuilt)),
+            )
+            .expect("schedule boundary launch");
+
+        let queue = ScheduledEventQueue::<64>::new();
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        // Session mode, playing: the request routes to the boundary-split
+        // machinery with a frontier-quantized deadline (bar boundary 4.0).
+        state.quantized_launches().process_scheduler(
+            &mut scheduler.quantized_launches,
+            0.0,
+            scheduler.clock.total_beats,
+            true,
+            false,
+        );
+        let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| LiveMidiFxTrackState::default());
+        let mut scratch_runtime = None;
+        // 120 BPM at 48k: samples_per_quarter 24_000, bar boundary at sample
+        // 96_000. Schedule far enough past it in one pass.
+        schedule_playing_lookahead(
+            &mut scheduler,
+            &state,
+            &base_snapshot,
+            &queue,
+            &mut scratch_runtime,
+            &live_midi_fx_tracks,
+            base_snapshot.transport.pattern_epoch,
+            0,
+            120_000,
+            48_000,
+            6_000,
+            24_000.0,
+            0,
+            false,
+            false,
+        );
+
+        let mut triggers = Vec::new();
+        while let Some(event) = queue.pop() {
+            if let ScheduledEventKind::ResolvedTrigger { track, step, .. } = event.kind {
+                triggers.push((event.sample_time, track, step));
+            }
+        }
+        // The boundary maps to samples with the same floor arithmetic song
+        // rows use (spec 8.2): exact up to ±1 sample of float accumulation.
+        let (first_sample, first_track, first_step) =
+            *triggers.first().expect("the launched pattern's step 0 must sound");
+        assert!(
+            first_sample.abs_diff(96_000) <= 1,
+            "the launched pattern's step 0 must sound at the bar boundary: {triggers:?}"
+        );
+        assert_eq!((first_track, first_step), (0, 0), "{triggers:?}");
+        // The boundary application reaches the control thread as a
+        // scheduler-applied due stamped with the boundary beat.
+        state.quantized_launches().process_scheduler(
+            &mut scheduler.quantized_launches,
+            4.0,
+            scheduler.clock.total_beats,
+            true,
+            false,
+        );
+        let due = state.quantized_launches().drain_valid_due();
+        assert_eq!(due.len(), 1);
+        assert!(due[0].scheduler_applied);
+        assert_eq!(due[0].deadline_beats, 4.0);
+        // Until the control-side mirror acknowledges, chunks schedule from
+        // the launch snapshot override.
+        assert!(scheduler
+            .quantized_launches
+            .session_snapshot(&base_snapshot)
+            .is_some_and(|snapshot| Arc::ptr_eq(&snapshot, &prebuilt)));
+        assert_eq!(scheduler.quantized_launches.adopted_pattern(), Some(1));
+        state
+            .quantized_launches()
+            .acknowledge_mirror(due[0].token)
+            .expect("ack");
+        state.quantized_launches().process_scheduler(
+            &mut scheduler.quantized_launches,
+            4.1,
+            scheduler.clock.total_beats,
+            true,
+            false,
+        );
+        assert!(scheduler
+            .quantized_launches
+            .session_snapshot(&base_snapshot)
+            .is_none());
+        // The ack releases the snapshot override but NOT the adoption: the
+        // control thread publishes the mirrored snapshot BEFORE it acks, and
+        // the worker drains the ack a whole loop iteration before it compares
+        // patterns. Releasing here would let the mirror's pattern change fire
+        // the resync (queue clear + seek) the boundary split exists to avoid.
+        assert_eq!(scheduler.quantized_launches.adopted_pattern(), Some(1));
+        assert!(
+            scheduler.quantized_launches.observe_pattern_switch(1),
+            "the mirrored pattern is adopted, not resynced"
+        );
+        assert_eq!(scheduler.quantized_launches.adopted_pattern(), None);
+        // Spent: a later switch back to the same scene resyncs normally.
+        assert!(!scheduler.quantized_launches.observe_pattern_switch(1));
+    }
+
+    /// Two owners quantized to the same boundary (a scene launch plus a track
+    /// launch) are BOTH made audible: every due is reported as
+    /// scheduler-applied, so the control-side mirror skips the epoch bump for
+    /// both and a single-slot override would silently drop one launch's
+    /// content.
+    #[test]
+    fn concurrent_boundary_launches_all_reach_the_chunk_snapshot() {
+        use crate::quantized_launch::{
+            LaunchQuantize, PatternLaunchTarget, QuantizedLaunchOwner,
+        };
+        use std::sync::Arc;
+
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        state.transport.playing.store(true, Ordering::Relaxed);
+        let base_snapshot = state.publish_scheduler_snapshot();
+        let mut scene_launch = (*state.latest_scheduler_snapshot()).clone();
+        Arc::make_mut(&mut scene_launch.tracks[0]).steps[0].active = true;
+        scene_launch.transport.current_pattern = 1;
+        let scene_launch = Arc::new(scene_launch);
+        let mut track_launch = (*state.latest_scheduler_snapshot()).clone();
+        Arc::make_mut(&mut track_launch.tracks[1]).steps[1].active = true;
+        let track_launch = Arc::new(track_launch);
+
+        state
+            .quantized_launches()
+            .schedule(
+                PatternLaunchTarget::Scene { scene: 1 },
+                LaunchQuantize::Quarter,
+                QuantizedLaunchOwner::Transport,
+                2,
+                2,
+                Some(Arc::clone(&scene_launch)),
+            )
+            .expect("schedule scene launch");
+        state
+            .quantized_launches()
+            .schedule(
+                PatternLaunchTarget::SceneTracks {
+                    scene: 0,
+                    tracks: vec![1],
+                },
+                LaunchQuantize::Quarter,
+                QuantizedLaunchOwner::SceneMacro(3),
+                2,
+                2,
+                Some(Arc::clone(&track_launch)),
+            )
+            .expect("schedule track launch");
+
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        state
+            .quantized_launches()
+            .process_scheduler(&mut scheduler.quantized_launches, 0.3, 0.3, true, false);
+        // Both land on the same quarter boundary (1.0) and install together.
+        let (_, install) = scheduler
+            .quantized_launches
+            .next_session_chunk(1.0, 1_000.0, 4_096);
+        assert!(matches!(
+            install,
+            crate::quantized_launch::SessionLaunchInstall::AllTracks
+        ));
+        let merged = scheduler
+            .quantized_launches
+            .session_snapshot(&base_snapshot)
+            .expect("both overrides");
+        assert!(
+            Arc::ptr_eq(&merged.tracks[0], &scene_launch.tracks[0]),
+            "the scene launch must still schedule its own tracks"
+        );
+        assert!(
+            Arc::ptr_eq(&merged.tracks[1], &track_launch.tracks[1]),
+            "the track launch overrides the scene launch on its mask"
+        );
+        assert_eq!(scheduler.quantized_launches.adopted_pattern(), Some(1));
+
+        // Both dues report scheduler-applied, and each ack releases only its
+        // own override.
+        state
+            .quantized_launches()
+            .process_scheduler(&mut scheduler.quantized_launches, 1.05, 1.05, true, false);
+        let due = state.quantized_launches().drain_valid_due();
+        assert_eq!(due.len(), 2);
+        assert!(due.iter().all(|entry| entry.scheduler_applied));
+        for entry in &due {
+            state
+                .quantized_launches()
+                .acknowledge_mirror(entry.token)
+                .expect("ack");
+        }
+        state
+            .quantized_launches()
+            .process_scheduler(&mut scheduler.quantized_launches, 1.1, 1.1, true, false);
+        assert!(scheduler
+            .quantized_launches
+            .session_snapshot(&base_snapshot)
+            .is_none());
+    }
+
+    /// A prebuilt launch snapshot freezes bpm/track count at preflight, up to
+    /// a whole quantize interval before the boundary. The clock derives its
+    /// beat rate from the chunk snapshot while the surrounding chunk math uses
+    /// the live one, so the live transport must win for the override window.
+    #[test]
+    fn boundary_launch_override_follows_the_live_tempo_not_the_preflight_one() {
+        use crate::quantized_launch::{
+            LaunchQuantize, PatternLaunchTarget, QuantizedLaunchOwner,
+        };
+        use std::sync::Arc;
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.transport.playing.store(true, Ordering::Relaxed);
+        state.transport.bpm.store(120, Ordering::Relaxed);
+        let mut prebuilt = (*state.publish_scheduler_snapshot()).clone();
+        Arc::make_mut(&mut prebuilt.tracks[0]).steps[0].active = true;
+        let prebuilt = Arc::new(prebuilt);
+        // Tempo edited while the launch waits for its boundary.
+        state.transport.bpm.store(90, Ordering::Relaxed);
+        let base_snapshot = state.publish_scheduler_snapshot();
+
+        state
+            .quantized_launches()
+            .schedule(
+                PatternLaunchTarget::Scene { scene: 0 },
+                LaunchQuantize::Quarter,
+                QuantizedLaunchOwner::Transport,
+                1,
+                1,
+                Some(Arc::clone(&prebuilt)),
+            )
+            .expect("schedule scene launch");
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        state
+            .quantized_launches()
+            .process_scheduler(&mut scheduler.quantized_launches, 0.3, 0.3, true, false);
+        scheduler
+            .quantized_launches
+            .next_session_chunk(1.0, 1_000.0, 4_096);
+        let override_snapshot = scheduler
+            .quantized_launches
+            .session_snapshot(&base_snapshot)
+            .expect("installed override");
+        assert_eq!(
+            override_snapshot.transport.bpm, 90,
+            "the override window must advance the clock at the live tempo"
+        );
+        assert_eq!(
+            override_snapshot.transport.num_tracks,
+            base_snapshot.transport.num_tracks
+        );
+        assert!(
+            Arc::ptr_eq(&override_snapshot.tracks[0], &prebuilt.tracks[0]),
+            "the launched content still comes from the prebuilt snapshot"
+        );
+    }
+
+    /// Track-mask boundary launches merge only the launched tracks over the
+    /// live base snapshot, and a transport stop degrades pending boundary
+    /// launches to the immediate control-side path.
+    #[test]
+    fn boundary_launch_track_mask_merges_over_base_and_stop_flushes_pending() {
+        use crate::quantized_launch::{
+            LaunchQuantize, PatternLaunchTarget, QuantizedLaunchOwner,
+        };
+        use std::sync::Arc;
+
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        state.transport.playing.store(true, Ordering::Relaxed);
+        let base_snapshot = state.publish_scheduler_snapshot();
+        let mut prebuilt = (*state.latest_scheduler_snapshot()).clone();
+        Arc::make_mut(&mut prebuilt.tracks[0]).steps[0].active = true;
+        Arc::make_mut(&mut prebuilt.tracks[1]).steps[0].active = true;
+        let prebuilt = Arc::new(prebuilt);
+
+        state
+            .quantized_launches()
+            .schedule(
+                PatternLaunchTarget::SceneTracks {
+                    scene: 0,
+                    tracks: vec![0],
+                },
+                LaunchQuantize::Quarter,
+                QuantizedLaunchOwner::Transport,
+                1,
+                2,
+                Some(Arc::clone(&prebuilt)),
+            )
+            .expect("schedule track launch");
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        state.quantized_launches().process_scheduler(
+            &mut scheduler.quantized_launches,
+            0.3,
+            0.3,
+            true,
+            false,
+        );
+        // Chunk clamps to the quarter boundary (1.0): 0.7 beats at 1_000
+        // samples per quarter.
+        let (frames, _) = scheduler
+            .quantized_launches
+            .next_session_chunk(0.3, 1_000.0, 4_096);
+        assert_eq!(frames, 700);
+        // On the boundary: install, launched track resets its accumulator.
+        let (frames, install) = scheduler
+            .quantized_launches
+            .next_session_chunk(1.0, 1_000.0, 4_096);
+        assert_eq!(frames, 4_096);
+        assert!(matches!(
+            install,
+            crate::quantized_launch::SessionLaunchInstall::Tracks(ref tracks)
+                if tracks == &vec![0]
+        ));
+        let merged = scheduler
+            .quantized_launches
+            .session_snapshot(&base_snapshot)
+            .expect("merged override");
+        assert!(Arc::ptr_eq(&merged.tracks[0], &prebuilt.tracks[0]));
+        assert!(Arc::ptr_eq(&merged.tracks[1], &base_snapshot.tracks[1]));
+        assert_eq!(
+            scheduler.quantized_launches.adopted_pattern(),
+            None,
+            "track launches never change the scene index"
+        );
+
+        // Second pending launch, then transport stop: it degrades to an
+        // immediately-due legacy launch (scheduler_applied false).
+        state
+            .quantized_launches()
+            .schedule(
+                PatternLaunchTarget::SceneTracks {
+                    scene: 0,
+                    tracks: vec![1],
+                },
+                LaunchQuantize::Bar,
+                QuantizedLaunchOwner::SceneMacro(9),
+                1,
+                2,
+                Some(Arc::clone(&prebuilt)),
+            )
+            .expect("schedule second launch");
+        state.quantized_launches().process_scheduler(
+            &mut scheduler.quantized_launches,
+            1.2,
+            1.2,
+            true,
+            false,
+        );
+        state.quantized_launches().process_scheduler(
+            &mut scheduler.quantized_launches,
+            1.3,
+            1.3,
+            false,
+            false,
+        );
+        let due = state.quantized_launches().drain_valid_due();
+        let second = due
+            .iter()
+            .find(|entry| {
+                entry.target
+                    == PatternLaunchTarget::SceneTracks {
+                        scene: 0,
+                        tracks: vec![1],
+                    }
+            })
+            .expect("stopped transport flushes the pending boundary launch");
+        assert!(!second.scheduler_applied);
+        // The stop also dropped the installed-but-unmirrored override.
+        assert!(scheduler
+            .quantized_launches
+            .session_snapshot(&base_snapshot)
+            .is_none());
     }
