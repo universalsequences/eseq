@@ -1522,13 +1522,20 @@ impl App {
         &mut self,
         target: &PatternLaunchTarget,
     ) -> Result<PatternLaunchOutcome, PatternLaunchError> {
-        self.apply_pattern_launch_at(target, None)
+        self.apply_pattern_launch_at(target, None, false)
     }
 
+    /// `mirror` marks the control-side mirror of a boundary launch the
+    /// scheduler already applied audibly via its chunk split: identical
+    /// state/graph work, but WITHOUT a pattern-epoch bump — a bump would
+    /// drop the in-flight scheduled events (including the boundary step the
+    /// split just scheduled), exactly like the song-row mirror
+    /// (`apply_song_row_control`).
     fn apply_pattern_launch_at(
         &mut self,
         target: &PatternLaunchTarget,
         audible_beats: Option<f64>,
+        mirror: bool,
     ) -> Result<PatternLaunchOutcome, PatternLaunchError> {
         let num_tracks = self.tracks.len();
         let scene = match target {
@@ -1544,8 +1551,8 @@ impl App {
                 if *scene != self.state.current_scene_index() {
                     self.switch_bus_pattern(*scene);
                 }
-                self.state
-                    .launch_scene(
+                let launched = if mirror {
+                    self.state.launch_scene_mirror(
                         *scene,
                         num_tracks,
                         &self.graph.track_buffer_ids,
@@ -1553,7 +1560,17 @@ impl App {
                         &self.tracks,
                         &self.graph.track_instrument_types,
                     )
-                    .ok_or(PatternLaunchError::SceneOutOfRange { scene: *scene })?
+                } else {
+                    self.state.launch_scene(
+                        *scene,
+                        num_tracks,
+                        &self.graph.track_buffer_ids,
+                        &self.graph.track_sample_rates,
+                        &self.tracks,
+                        &self.graph.track_instrument_types,
+                    )
+                };
+                launched.ok_or(PatternLaunchError::SceneOutOfRange { scene: *scene })?
             }
             PatternLaunchTarget::SceneTracks { scene, tracks } => {
                 if tracks.is_empty() {
@@ -1572,15 +1589,28 @@ impl App {
                         track,
                     });
                 }
-                if !self.state.launch_scene_tracks(
-                    *scene,
-                    tracks,
-                    num_tracks,
-                    &self.graph.track_buffer_ids,
-                    &self.graph.track_sample_rates,
-                    &self.tracks,
-                    &self.graph.track_instrument_types,
-                ) {
+                let launched = if mirror {
+                    self.state.launch_scene_tracks_mirror(
+                        *scene,
+                        tracks,
+                        num_tracks,
+                        &self.graph.track_buffer_ids,
+                        &self.graph.track_sample_rates,
+                        &self.tracks,
+                        &self.graph.track_instrument_types,
+                    )
+                } else {
+                    self.state.launch_scene_tracks(
+                        *scene,
+                        tracks,
+                        num_tracks,
+                        &self.graph.track_buffer_ids,
+                        &self.graph.track_sample_rates,
+                        &self.tracks,
+                        &self.graph.track_instrument_types,
+                    )
+                };
+                if !launched {
                     return Err(PatternLaunchError::MissingSceneCell {
                         scene: *scene,
                         track: tracks[0],
@@ -1686,15 +1716,32 @@ impl App {
                      token,
                      target,
                      deadline_beats,
+                     scheduler_applied,
                  }| {
                     // Quantized launches capture the scheduler-stamped
                     // audible boundary, not the drain time (spec 8.3).
-                    self.apply_pattern_launch_at(&target, Some(deadline_beats))
+                    // Scheduler-applied boundary launches are mirrored
+                    // without an epoch bump; the acknowledgement lets the
+                    // scheduler drop its snapshot override — sent even on a
+                    // failed mirror so the override never leaks.
+                    let result = self
+                        .apply_pattern_launch_at(&target, Some(deadline_beats), scheduler_applied)
                         .map(|mut outcome| {
                             self.note_scene_macro_launch_applied(token);
                             outcome.token = Some(token);
                             outcome
-                        })
+                        });
+                    if scheduler_applied {
+                        let _ = self.state.quantized_launches().acknowledge_mirror(token);
+                        if result.is_ok() {
+                            // No pattern-epoch bump on the mirror, so the UI's
+                            // epoch-keyed pattern resync (scene number, step
+                            // grids, device panels) rides the mirror-epoch
+                            // seam song rows use (reactive_tick).
+                            self.song_row_mirror_epoch += 1;
+                        }
+                    }
+                    result
                 },
             )
             .collect()

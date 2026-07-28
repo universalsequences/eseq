@@ -1529,18 +1529,19 @@ mod tests {
                 crate::quantized_launch::QuantizedLaunchOwner::Transport,
                 app.state.scene_count(),
                 app.tracks.len(),
+                None,
             )
             .expect("schedule succeeds");
         let mut pending = crate::quantized_launch::PendingQuantizedLaunches::default();
         app.state
             .quantized_launches()
-            .process_scheduler(&mut pending, 2.6, true);
+            .process_scheduler(&mut pending, 2.6, 2.6, true, false);
         // The launch becomes due after the boundary; the control thread
         // drains it late (rendered 4.2) — the quantized path through
         // `apply_pattern_launch` must still capture the stamped 4.0.
         app.state
             .quantized_launches()
-            .process_scheduler(&mut pending, 4.2, true);
+            .process_scheduler(&mut pending, 4.2, 4.2, true, false);
         app.state.set_scheduler_rendered_beats(4.2);
         let results = app.drain_due_pattern_launches();
         assert_eq!(results.len(), 1);
@@ -1557,6 +1558,78 @@ mod tests {
             vec![(0.0, 0, vec![(0, Some(1))]), (4.0, 2, vec![(0, Some(3))])],
             "the captured beat is the scheduled grid boundary"
         );
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    /// A session-mode quantized launch is applied by the scheduler at the
+    /// boundary (chunk split); the control drain must MIRROR it — same
+    /// state/graph work, scene index moves, but NO pattern-epoch bump (a
+    /// bump would drop the in-flight events including the boundary step) —
+    /// and acknowledge so the scheduler drops its snapshot override.
+    #[test]
+    fn scheduler_applied_boundary_launch_mirrors_without_epoch_bump() {
+        let mut app = test_app();
+        app.state.start_playback();
+
+        let token = app
+            .state
+            .schedule_quantized_pattern_launch(
+                PatternLaunchTarget::Scene { scene: 1 },
+                crate::quantized_launch::LaunchQuantize::Bar,
+                crate::quantized_launch::QuantizedLaunchOwner::Transport,
+            )
+            .expect("schedule while playing");
+        let epoch_before = app
+            .state
+            .transport
+            .pattern_epoch
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mirror_epoch_before = app.song_row_mirror_epoch;
+
+        // Scheduler side: the playing session request routes to the
+        // boundary machinery (the accessor preflighted a snapshot) and
+        // installs at the bar boundary.
+        let mut pending = crate::quantized_launch::PendingQuantizedLaunches::default();
+        app.state
+            .quantized_launches()
+            .process_scheduler(&mut pending, 0.5, 0.5, true, false);
+        app.state.set_scheduler_rendered_beats(4.0);
+        let (_, install) = pending.next_session_chunk(4.0, 1_000.0, 512);
+        assert!(matches!(
+            install,
+            crate::quantized_launch::SessionLaunchInstall::AllTracks
+        ));
+        app.state
+            .quantized_launches()
+            .process_scheduler(&mut pending, 4.0, 4.0, true, false);
+
+        // Control side: the due is a mirror, not a full launch.
+        let results = app.drain_due_pattern_launches();
+        assert_eq!(results.len(), 1);
+        let outcome = results[0].as_ref().expect("mirror applies");
+        assert_eq!(outcome.token, Some(token));
+        assert_eq!(app.state.current_scene_index(), 1);
+        assert_eq!(
+            app.state
+                .transport
+                .pattern_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            epoch_before,
+            "the mirror must not bump the pattern epoch"
+        );
+        assert_eq!(
+            app.song_row_mirror_epoch,
+            mirror_epoch_before + 1,
+            "the mirror drives the UI pattern resync through the mirror-epoch seam"
+        );
+
+        // The acknowledgement releases the scheduler's snapshot override.
+        app.state
+            .quantized_launches()
+            .process_scheduler(&mut pending, 4.1, 4.1, true, false);
+        let base = app.state.latest_scheduler_snapshot();
+        assert!(pending.session_snapshot(&base).is_none());
+        app.state.stop_playback();
         app.state.set_scheduler_rendered_beats(0.0);
     }
 

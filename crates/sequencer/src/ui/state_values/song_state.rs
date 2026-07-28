@@ -22,6 +22,10 @@ pub(crate) struct SongBindingsSnapshot {
     /// Current row stable id during song playback, else -1.
     pub(crate) current_row_id: f64,
     pub(crate) row_count: f64,
+    /// Arrangement insertion/start cursor, including while playback is
+    /// stopped. This is Rust-owned so transport UI does not depend on the
+    /// arrangement buffer's local `defstate`.
+    pub(crate) cursor_beats: f64,
     /// Smooth render-rate song position (spec 10.2); 0.0 while inactive.
     pub(crate) position_beats: f64,
     pub(crate) end_beat: f64,
@@ -645,6 +649,7 @@ pub(crate) fn build_song_bindings_snapshot(
         current_row,
         current_row_id,
         row_count: song.map(|song| song.rows.len()).unwrap_or(0) as f64,
+        cursor_beats: app.arrangement_cursor_beat,
         // Quantized to a milli-beat for display: still render-rate smooth,
         // but sub-display-precision jitter does not force a reactive cycle
         // every frame.
@@ -906,6 +911,11 @@ pub(crate) fn sync_song_state(
         Value::Number(next.current_row_id)
     );
     publish_on_change!("song-row-count", row_count, Value::Number(next.row_count));
+    publish_on_change!(
+        "song-cursor-beats",
+        cursor_beats,
+        Value::Number(next.cursor_beats)
+    );
     publish_on_change!("song-end-beat", end_beat, Value::Number(next.end_beat));
     publish_on_change!(
         "song-loop-enabled",

@@ -2516,7 +2516,7 @@ mod tests {
         assert_eq!(app.state.current_scene_index(), 0);
         app.state
             .quantized_launches()
-            .process_scheduler(&mut pending, 0.0, true);
+            .process_scheduler(&mut pending, 0.0, 0.0, true, false);
         let results = app.drain_due_pattern_launches();
         assert!(results[0].is_ok());
         assert_eq!(app.state.current_scene_index(), 1);
@@ -2529,7 +2529,7 @@ mod tests {
         );
         app.state
             .quantized_launches()
-            .process_scheduler(&mut pending, 0.0, true);
+            .process_scheduler(&mut pending, 0.0, 0.0, true, false);
         let results = app.drain_due_pattern_launches();
         assert!(results[0].is_ok());
         assert_eq!(app.state.current_scene_index(), 0);

@@ -194,6 +194,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let process_runtime = &mut scheduler.process_runtime;
     let graph_manifests = &mut scheduler.graph_manifests;
     let graph_runtimes = &mut scheduler.graph_runtimes;
+    let session_launches = &mut scheduler.quantized_launches;
     let mut debug_graph_drive_chunks = scheduler.debug_graph_drive_chunks;
     let mut debug_accum_invocations = scheduler.debug_accum_invocations;
     let song_playback = &mut scheduler.song;
@@ -237,7 +238,42 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             // A song that just stopped must not leave stale per-lane phase
             // anchors behind: session playback free-runs (anchor 0/0).
             clock.clear_track_anchors();
+            // Session-mode quantized launches: clamp the chunk to the next
+            // pending boundary and switch the chunk snapshot exactly at the
+            // boundary sample — the song-row chunk split (docs/song-mode-spec
+            // 10.2) applied to manual launches. No queue clear, no epoch
+            // bump, no clock seek: the boundary step's triggers come from
+            // the launched snapshot at the exact boundary sample.
+            let (frames, install) = session_launches.next_session_chunk(
+                clock.total_beats,
+                samples_per_quarter,
+                scheduler_block_size,
+            );
+            chunk_frames = frames;
+            match install {
+                crate::quantized_launch::SessionLaunchInstall::None => {}
+                crate::quantized_launch::SessionLaunchInstall::AllTracks => {
+                    // Scene launches restart accumulator evolution on every
+                    // track, matching the control-side launch path.
+                    *pending_accum_reset = [true; MAX_TRACKS];
+                }
+                crate::quantized_launch::SessionLaunchInstall::Tracks(tracks) => {
+                    for track in tracks {
+                        if track < MAX_TRACKS {
+                            pending_accum_reset[track] = true;
+                        }
+                    }
+                }
+            }
         }
+        // While a boundary launch awaits its control-side mirror, chunks
+        // schedule from its snapshot override (full scene) or a base+mask
+        // merge (track launches).
+        let session_launch_snapshot: Option<Arc<SequencerSnapshot>> = if song_playback.is_none() {
+            session_launches.session_snapshot(base_snapshot)
+        } else {
+            None
+        };
         if let Some(song) = song_playback.as_mut() {
             let prev_row = song.current_row();
             match song.next_chunk(
@@ -327,7 +363,10 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 }
             }
         }
-        let snapshot: &SequencerSnapshot = song_row_snapshot.as_deref().unwrap_or(base_snapshot);
+        let snapshot: &SequencerSnapshot = song_row_snapshot
+            .as_deref()
+            .or(session_launch_snapshot.as_deref())
+            .unwrap_or(base_snapshot);
         let chunk_start_beats = clock.total_beats;
         let triggers = clock.process_chunk(chunk_frames, snapshot, state);
         let chunk_end_beats = clock.total_beats;

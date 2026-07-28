@@ -714,7 +714,17 @@
       (h-stack
         (subtree :key "transport-clock"
           (h-stack :gap 0 :align :center :padding 0.5
-            (transport-clock :playhead (bind-seq "transport-playhead")
+            (transport-clock
+              ;; Session playback uses the reset-on-Play pattern clock. SONG
+              ;; mode shows the parked cursor while stopped, then the live
+              ;; absolute arrangement clock during playback/capture.
+              :playhead (bind-seq "transport-playhead")
+              :song-position-beats
+                (if (= SEQ.song-mode "session")
+                  (bind-seq "song-cursor-beats")
+                  (bind-seq "song-position-beats"))
+              :use-song-position
+                (or SEQ.use-arrangement (not (= SEQ.song-mode "session")))
               :font-size 15 :width 10 :height 1.2
               :color '(rgba 0.85 0.85 0.85 1)
               :bg :transparent)

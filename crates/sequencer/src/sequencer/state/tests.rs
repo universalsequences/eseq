@@ -3474,6 +3474,50 @@
         );
     }
 
+    /// Boundary-launch preflight (quantized session launches): the target
+    /// scene resolves to a complete snapshot without launching, saving, or
+    /// publishing anything — the launch may still be canceled.
+    #[test]
+    fn preflight_pattern_launch_snapshot_resolves_the_target_scene_read_only() {
+        let state = make_state_with_tracks(2);
+        let first = PatternSnapshot::new_default(2, &[]);
+        let second = snapshot_with_active_step(2, 0, 3);
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let version_before = state.scheduler_snapshot_version();
+        let epoch_before = state.transport.pattern_epoch.load(Ordering::Relaxed);
+
+        let snapshot = state
+            .preflight_pattern_launch_snapshot(
+                &crate::quantized_launch::PatternLaunchTarget::Scene { scene: 1 },
+            )
+            .expect("target scene resolves");
+        assert!(snapshot.transport.playing, "stamped playing for the clock");
+        assert_eq!(snapshot.transport.current_pattern, 1);
+        assert_eq!(snapshot.tracks.len(), 2);
+        assert!(
+            snapshot.tracks[0].steps[3].active,
+            "carries scene 1's pool content, not the live scene 0 state"
+        );
+        assert!(!snapshot.tracks[0].scene_silenced);
+
+        // Read-only: nothing launched, saved, or published.
+        assert_eq!(state.current_scene_index(), 0);
+        assert!(!state.pattern.patterns[0].is_active(3));
+        assert_eq!(state.scheduler_snapshot_version(), version_before);
+        assert_eq!(
+            state.transport.pattern_epoch.load(Ordering::Relaxed),
+            epoch_before
+        );
+
+        // Unresolvable targets fall back to the legacy control-side apply.
+        assert!(state
+            .preflight_pattern_launch_snapshot(
+                &crate::quantized_launch::PatternLaunchTarget::Scene { scene: 5 },
+            )
+            .is_none());
+    }
+
     #[test]
     fn masked_scene_launch_validates_first_and_updates_only_selected_tracks() {
         let state = make_state_with_tracks(2);

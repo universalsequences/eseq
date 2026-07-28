@@ -13020,6 +13020,7 @@
                 ("song-current-row", Value::Number(-1.0)),
                 ("song-current-row-id", Value::Number(-1.0)),
                 ("song-row-count", Value::Number(0.0)),
+                ("song-cursor-beats", Value::Number(0.0)),
                 ("song-position-beats", Value::Number(0.0)),
                 ("song-end-beat", Value::Number(0.0)),
                 ("song-loop-enabled", Value::Bool(false)),
@@ -19373,13 +19374,16 @@
     }
 
     #[test]
-    fn metal_seq_transport_playhead_is_render_bound() {
+    fn metal_seq_transport_clock_positions_are_render_bound() {
         let mut editor = full_grid_editor_for_scroll_tests();
         let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
 
         editor
             .runtime_mut()
             .set_reactive("SEQ", "transport-playhead", Value::Number(12.0));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "song-position-beats", Value::Number(513.5));
         editor.runtime_mut().run_reactive_cycle();
 
         assert!(
@@ -19387,7 +19391,84 @@
                 .runtime_mut()
                 .take_pending_buffer_widget_trees()
                 .is_empty(),
-            "bound transport playhead updates must not enqueue transport widget tree rebuilds"
+            "bound session and song clock updates must not enqueue transport tree rebuilds"
+        );
+    }
+
+    #[test]
+    fn metal_seq_transport_clock_selects_absolute_position_in_song_mode() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "transport-playhead", Value::Number(222.0));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "song-position-beats", Value::Number(513.5));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "song-mode",
+            Value::String("song-playback".to_string()),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*transport*")"#)
+            .expect("switch to transport buffer");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("transport layout");
+        let clock = find_layout_node_by_widget_type(&layout, "transport-clock")
+            .expect("transport clock");
+        assert_eq!(layout_prop_number(clock, "playhead"), Some(222.0));
+        assert_eq!(
+            layout_prop_number(clock, "song-position-beats"),
+            Some(513.5)
+        );
+        assert_eq!(
+            layout_prop_bool(clock, "use-song-position"),
+            Some(true),
+            "song playback must display the absolute arrangement position"
+        );
+
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "song-mode",
+            Value::String("session".to_string()),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("updated transport layout");
+        let clock = find_layout_node_by_widget_type(&layout, "transport-clock")
+            .expect("updated transport clock");
+        assert_eq!(
+            layout_prop_bool(clock, "use-song-position"),
+            Some(false),
+            "session playback must retain the elapsed pattern clock"
+        );
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "use-arrangement", Value::Bool(true));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "song-cursor-beats", Value::Number(512.0));
+        editor
+            .runtime_mut()
+            .eval_str("(set! arrangement-cursor-time 512)")
+            .expect("park stopped arrangement cursor at bar 129");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("stopped song transport layout");
+        let clock = find_layout_node_by_widget_type(&layout, "transport-clock")
+            .expect("stopped song transport clock");
+        assert_eq!(
+            layout_prop_number(clock, "song-position-beats"),
+            Some(512.0)
+        );
+        assert_eq!(
+            layout_prop_bool(clock, "use-song-position"),
+            Some(true),
+            "stopped SONG mode must display the parked arrangement cursor"
         );
     }
 
@@ -19803,6 +19884,7 @@
         test_app
             .arr_replace_rows(vec![row(0.0, 0), row(4.0, 1), row(8.0, 2)], 16.0, true)
             .expect("song committed");
+        test_app.set_arrangement_cursor(12.0, -1);
 
         let mut frame = SongFrameState::default();
         assert!(
@@ -19821,6 +19903,10 @@
         assert_eq!(read(&mut editor, "SEQ.song-mode"), Value::String("session".into()));
         assert_eq!(read(&mut editor, "SEQ.use-arrangement"), Value::Bool(false));
         assert_eq!(read(&mut editor, "SEQ.song-row-count"), Value::Number(3.0));
+        assert_eq!(
+            read(&mut editor, "SEQ.song-cursor-beats"),
+            Value::Number(12.0)
+        );
         assert_eq!(read(&mut editor, "SEQ.song-end-beat"), Value::Number(16.0));
         assert_eq!(read(&mut editor, "SEQ.song-loop-enabled"), Value::Bool(true));
         assert_eq!(read(&mut editor, "SEQ.song-current-row"), Value::Number(-1.0));

@@ -93,6 +93,32 @@ impl SequencerState {
         .map(|result| result.sample_ids)
     }
 
+    /// `launch_scene` for the control-side mirror of a scheduler-applied
+    /// boundary launch: no pattern-epoch bump (the audio callback drops
+    /// in-flight scheduled events whose stamped epoch no longer matches, and
+    /// the scheduler already made the scene audible at the boundary from its
+    /// prebuilt snapshot — the same contract as `apply_song_row`).
+    pub fn launch_scene_mirror(
+        &self,
+        scene_idx: usize,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> Option<Vec<(i32, String, u32)>> {
+        self.launch_scene_profiled_with_epoch(
+            scene_idx,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+            false,
+        )
+        .map(|result| result.sample_ids)
+    }
+
     pub fn launch_scene_profiled(
         &self,
         scene_idx: usize,
@@ -101,6 +127,28 @@ impl SequencerState {
         sample_rates: &[u32],
         names: &[String],
         instrument_types: &[InstrumentType],
+    ) -> Option<PatternSwitchResult> {
+        self.launch_scene_profiled_with_epoch(
+            scene_idx,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_scene_profiled_with_epoch(
+        &self,
+        scene_idx: usize,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+        bump_pattern_epoch: bool,
     ) -> Option<PatternSwitchResult> {
         let total_started = Instant::now();
         let mut profile = PatternSwitchProfile::default();
@@ -158,7 +206,9 @@ impl SequencerState {
             self.pattern
                 .num_patterns
                 .store(scenes.scene_count() as u32, Ordering::Relaxed);
-            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            if bump_pattern_epoch {
+                self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            }
             profile.update_pattern_atoms = started.elapsed();
 
             let metadata = scenes.current_scene_metadata();
@@ -259,6 +309,56 @@ impl SequencerState {
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> bool {
+        self.launch_scene_tracks_with_epoch(
+            scene,
+            tracks,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+            true,
+        )
+    }
+
+    /// `launch_scene_tracks` for the control-side mirror of a
+    /// scheduler-applied boundary launch — no pattern-epoch bump (see
+    /// `launch_scene_mirror`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_scene_tracks_mirror(
+        &self,
+        scene: usize,
+        tracks: &[usize],
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> bool {
+        self.launch_scene_tracks_with_epoch(
+            scene,
+            tracks,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_scene_tracks_with_epoch(
+        &self,
+        scene: usize,
+        tracks: &[usize],
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+        bump_pattern_epoch: bool,
+    ) -> bool {
         if tracks.is_empty() || tracks.iter().any(|track| *track >= num_tracks) {
             return false;
         }
@@ -301,9 +401,109 @@ impl SequencerState {
             data.restore_to(self, track);
             self.set_scene_silenced(track, false);
         }
-        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        if bump_pattern_epoch {
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        }
         self.publish_scheduler_snapshot();
         true
+    }
+
+    /// Prebuild the scheduler snapshot a quantized launch would make audible
+    /// (the per-row preflight pattern, docs/song-mode-spec.md 9, applied to
+    /// session launches): the target scene's cells resolved against the
+    /// pattern pools, materialized as one complete `Arc<SequencerSnapshot>`
+    /// outside the audio path. The scheduler swaps to it exactly at the
+    /// quantize boundary; the control-side mirror follows via the due drain.
+    ///
+    /// Read-only — nothing is launched, saved, or published here; the launch
+    /// may still be replaced or canceled before its boundary.
+    ///
+    /// For a `SceneTracks` target the snapshot still carries the full target
+    /// scene; the scheduler merges only the masked tracks over the live base
+    /// snapshot per chunk. Returns `None` when the target does not fully
+    /// resolve (missing scene, missing masked cell) — the caller falls back
+    /// to the legacy control-side apply, which surfaces the launch error.
+    pub fn preflight_pattern_launch_snapshot(
+        &self,
+        target: &crate::quantized_launch::PatternLaunchTarget,
+    ) -> Option<Arc<SequencerSnapshot>> {
+        use crate::quantized_launch::PatternLaunchTarget;
+        let (scene_idx, mask) = match target {
+            PatternLaunchTarget::Scene { scene } => (*scene, None),
+            PatternLaunchTarget::SceneTracks { scene, tracks } => (*scene, Some(tracks)),
+        };
+        let staged = {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let scene = scenes.scenes.get(scene_idx)?;
+            let track_count = scenes.track_pools.len();
+            let placeholder = PatternSnapshot::new_default(1, &[]).track_pattern_data(0)?;
+            let mut track_data = Vec::with_capacity(track_count);
+            let mut silenced = Vec::with_capacity(track_count);
+            for track in 0..track_count {
+                let cell = scene.cells.get(track).copied().flatten();
+                match cell {
+                    Some(id) => {
+                        let Some(data) = scenes
+                            .track_pools
+                            .get(track)
+                            .and_then(|pool| pool.get(id))
+                            .cloned()
+                        else {
+                            // A launched cell that doesn't resolve: bail so
+                            // the control-side apply reports the error.
+                            if mask.is_none_or(|tracks| tracks.contains(&track)) {
+                                return None;
+                            }
+                            track_data.push(placeholder.clone());
+                            silenced.push(true);
+                            continue;
+                        };
+                        track_data.push(data);
+                        silenced.push(false);
+                    }
+                    None => {
+                        // A track-mask launch requires every masked cell
+                        // (`MissingSceneCell` on the apply path).
+                        if mask.is_some_and(|tracks| tracks.contains(&track)) {
+                            return None;
+                        }
+                        track_data.push(placeholder.clone());
+                        silenced.push(true);
+                    }
+                }
+            }
+            (
+                track_data,
+                silenced,
+                scene.mod_connections.clone(),
+                scene.neural_networks.clone(),
+                scene.graph_overrides.clone(),
+                scene.project_process_chain.clone(),
+            )
+        };
+        let (track_data, silenced, mod_connections, neural_networks, graph_overrides, chain) =
+            staged;
+        let mut snapshot = SequencerSnapshot::capture_from_track_pattern_data(
+            self,
+            &track_data,
+            mod_connections,
+            neural_networks,
+            graph_overrides,
+            chain,
+        );
+        // Only ever scheduled while the transport is playing; stamp it so
+        // the deterministic clock treats it as playing regardless of the
+        // transport state at preflight time (mirrors song-row preflight).
+        snapshot.transport.playing = true;
+        snapshot.transport.current_pattern = scene_idx;
+        for (track, silenced) in silenced.iter().enumerate() {
+            if *silenced {
+                let mut track_snapshot = (*snapshot.tracks[track]).clone();
+                track_snapshot.scene_silenced = true;
+                snapshot.tracks[track] = Arc::new(track_snapshot);
+            }
+        }
+        Some(Arc::new(snapshot))
     }
 
     /// Apply one song row as a single operation (docs/song-mode-spec.md 9):

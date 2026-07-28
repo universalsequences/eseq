@@ -318,7 +318,12 @@ pub fn spawn_scheduler_thread(
                 state.quantized_launches().process_scheduler(
                     &mut lookahead_state.quantized_launches,
                     rendered_total_beats,
+                    // Boundary-launch deadlines quantize against the
+                    // scheduling frontier so the chunk split always lands on
+                    // a not-yet-scheduled boundary.
+                    lookahead_state.clock.total_beats,
                     playing,
+                    song_playback_active,
                 );
                 if !playing {
                     let live_active = schedule_live_midi_fx(
@@ -467,9 +472,19 @@ pub fn spawn_scheduler_thread(
                         .process_runtime
                         .reset_transport(lookahead_state.clock.total_beats);
                     state.set_neural_visualization(lookahead_state.neural_runtime.visualization_snapshot());
-                } else if !song_playback_active && last_pattern != pattern {
+                } else if !song_playback_active
+                    && last_pattern != pattern
+                    && lookahead_state.quantized_launches.adopted_pattern() != Some(pattern)
+                {
                     // Pattern switches should replace future scheduled content without
                     // disturbing the current musical phase.
+                    //
+                    // A pattern index matching an installed boundary launch is
+                    // excluded above: the scheduler already switched audibly
+                    // at the boundary via the chunk split and this publish is
+                    // the control-side mirror — resyncing here would clear
+                    // the queue and mark the boundary step as already played
+                    // (the skipped-first-trigger bug).
                     let previous_scheduled_until = scheduled_until_sample;
                     queue.clear();
                     lookahead_state.midi_fx_quantizer_state.reset();

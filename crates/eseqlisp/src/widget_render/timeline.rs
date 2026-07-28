@@ -171,11 +171,9 @@ struct TimelineView {
     view_duration: f64,
     zoom_min_duration: f64,
     zoom_max_duration: f64,
-    /// `:grid-density` — divides the zoom-adaptive grid step, so `2` gives
-    /// twice as many grid cells at every zoom. Both the drawn grid and every
-    /// `:grid` snap (marquee, resize) follow it, so a host that wants finer
-    /// selection without zooming in raises this. Default `1` leaves the stock
-    /// ladder, which is what the piano roll and every other host get.
+    /// `:grid-density` — asks the zoom-adaptive grid for a finer initial
+    /// candidate. Crowded candidates are promoted to a readable aligned
+    /// interval; the resolved interval drives both drawing and `:grid` snaps.
     grid_density: f64,
     content_length: Option<f64>,
     content_length_min: f64,
@@ -7711,13 +7709,11 @@ mod tests {
         assert_eq!(action_type(&action), "clear-selection");
     }
 
-    /// `:grid-density` divides the zoom-adaptive grid step, so a host can get
-    /// a finer grid — and finer `:grid` snapping — without zooming in. The
-    /// ladder rungs are powers of two, so the denser grid stays aligned to the
-    /// coarser one: bar lines never move, lines appear between them. Hosts
-    /// that pass nothing (the piano roll) keep the stock ladder exactly.
+    /// `:grid-density` requests a finer initial candidate. When that would
+    /// crowd the view, the shared rendering/editing grid promotes it back to
+    /// a readable power-of-two interval.
     #[test]
-    fn grid_density_subdivides_the_ladder_without_moving_bar_lines() {
+    fn grid_density_never_crowds_or_moves_bar_lines() {
         let step_for = |density: Option<f64>, view_duration: f64| {
             let mut props = HashMap::from([
                 ("view-start".to_string(), number_value(0.0)),
@@ -7753,14 +7749,14 @@ mod tests {
                 stock,
                 "density 1 is the stock ladder"
             );
-            assert_eq!(
-                step_for(Some(2.0), duration),
-                stock / 2.0,
-                "density 2 is exactly one rung finer at view {duration}"
-            );
-            // Every rung divides or multiplies the 4-beat bar, so bar lines
-            // survive at any density: the denser step still lands on beat 4.
             let dense = step_for(Some(2.0), duration);
+            assert!(
+                dense == stock || dense == stock / 2.0,
+                "density 2 may select one finer rung only when it remains readable \
+                 (stock {stock}, dense {dense}, view {duration})"
+            );
+            // Every resolved rung divides or multiplies the 4-beat bar, so
+            // bar lines survive at any density.
             let ratio = 4.0 / dense;
             assert!(
                 (ratio - ratio.round()).abs() < 1e-9 || (dense / 4.0).fract() < 1e-9,
@@ -7769,6 +7765,48 @@ mod tests {
         }
         // Clamped to something sane rather than trusted blindly.
         assert_eq!(step_for(Some(0.1), 64.0), step_for(None, 64.0));
+    }
+
+    #[test]
+    fn zoomed_out_cursor_and_marquee_share_the_sparse_visible_grid() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(512.0)),
+            ("grid-density".to_string(), number_value(2.0)),
+            ("marquee-snap".to_string(), keyword_value("grid")),
+            (
+                "time-ruler".to_string(),
+                map_value_raw(vec![
+                    ("mode", keyword_value("bars-beats")),
+                    ("beats-per-bar", number_value(4.0)),
+                ]),
+            ),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 96.0,
+                height: 8.0,
+            },
+        );
+
+        assert_eq!(
+            view.alignment_helper_grid_step(),
+            32.0,
+            "the visible grid is one mark every eight bars"
+        );
+        assert_eq!(
+            view.cursor_snap_time(70.0),
+            64.0,
+            "cursor placement uses the same eight-bar interval"
+        );
+        assert_eq!(
+            view.marquee_span(70.0, 140.0),
+            (64.0, 160.0),
+            "selection bounds floor/ceil to that same interval"
+        );
     }
 
     /// docs/arrangement-region-editing-spec.md 3.2: `:width` on a dot is

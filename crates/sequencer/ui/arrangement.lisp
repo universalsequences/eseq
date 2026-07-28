@@ -63,13 +63,11 @@
 ;; with the UI zoom like the lane heights above. 0 gives the square clips
 ;; every other timeline host draws.
 (def arrangement-clip-corner-radius 0.22)
-;; Divides the timeline's zoom-adaptive grid step: 2 means one ladder rung
-;; finer than the default at every zoom, so bar lines stay put and a line
-;; appears halfway between them. Both the drawn grid and :grid snapping
-;; (region marquee, clip resize) follow it, which is what lets you grab a
-;; half-bar without zooming all the way in. Every arrangement lane passes the
-;; same value or the ruler and the lanes would quantize differently; hosts
-;; that want the stock ladder (the piano roll) pass nothing.
+;; Requests one finer candidate from the timeline's zoom-adaptive grid. The
+;; widget promotes crowded candidates to a readable aligned interval, and that
+;; one resolved interval drives lines, labels, cursor placement, marquee, and
+;; resize snapping. Every arrangement lane passes the same value or the ruler
+;; and lanes would quantize differently; the piano roll uses the stock density.
 (def arrangement-grid-density 2)
 ;; Fixed width for the composed seqv-track-header column so every lane's time
 ;; axis starts at the same x; the scene lane leads with a spacer of the same

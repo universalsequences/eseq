@@ -289,12 +289,26 @@ impl SequencerState {
         crate::quantized_launch::QuantizedLaunchToken,
         crate::quantized_launch::QuantizedLaunchSubmitError,
     > {
+        // Session-mode quantized launches are applied by the scheduler
+        // itself (chunk split at the boundary, song-row semantics), which
+        // needs the target prebuilt as a snapshot. A failed preflight falls
+        // back to the legacy control-side apply so the launch error still
+        // surfaces at the boundary.
+        let snapshot = if quantize != crate::quantized_launch::LaunchQuantize::Off
+            && self.is_playing()
+            && !self.song_playback.shared().is_active()
+        {
+            self.preflight_pattern_launch_snapshot(&target)
+        } else {
+            None
+        };
         self.quantized_launches.schedule(
             target,
             quantize,
             owner,
             self.scene_count(),
             self.active_track_count(),
+            snapshot,
         )
     }
 

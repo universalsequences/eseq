@@ -2016,6 +2016,7 @@ pub(crate) fn init_runtime(
                 ("song-current-row", Value::Number(-1.0)),
                 ("song-current-row-id", Value::Number(-1.0)),
                 ("song-row-count", Value::Number(0.0)),
+                ("song-cursor-beats", Value::Number(0.0)),
                 ("song-position-beats", Value::Number(0.0)),
                 ("song-end-beat", Value::Number(0.0)),
                 ("song-loop-enabled", Value::Bool(false)),
