@@ -929,7 +929,13 @@ unsafe extern "C" fn filterbank_process(
             ])
             .enumerate()
         {
-            let gained = x * sm_input_gain;
+            // Hi EQ: ±6 dB high shelf @ ~3 kHz, PRE-drive — the hardware's
+            // HF switch sits in the amplifier circuit, so Boost doesn't just
+            // brighten the output, it pushes the highs harder into the
+            // saturation and changes the fuzz texture itself.
+            *shelf_lp += shelf_coeff * (x - *shelf_lp);
+            let shelved = x + sm_shelf_gain * (x - *shelf_lp);
+            let gained = shelved * sm_input_gain;
             let mut shaped_down = 0.0;
             for k_os in 0..2 {
                 let stuffed = if k_os == 0 { gained * 2.0 } else { 0.0 };
@@ -944,9 +950,7 @@ unsafe extern "C" fn filterbank_process(
                 *dc_y1 = y;
                 y
             };
-            // Hi EQ: ±6 dB high shelf @ ~3 kHz (post-drive per spec §12).
-            *shelf_lp += shelf_coeff * (blocked - *shelf_lp);
-            post[ch] = blocked + sm_shelf_gain * (blocked - *shelf_lp);
+            post[ch] = blocked;
         }
         let post_mono = 0.5 * (post[0] + post[1]);
 
@@ -1711,6 +1715,38 @@ mod tests {
         let x = sine(80.0, 0.8, n);
         let (out_l, _) = render(&mut state, &x, &x);
         assert!(rms(&out_l) > 1.0e-3, "bleed path should pass signal");
+    }
+
+    // ── 2c. Hi EQ is pre-drive: Boost raises the distortion ratio, not
+    // just the level (a post-drive shelf would scale fundamental and
+    // harmonics equally, leaving the ratio unchanged) ──
+    #[test]
+    fn hi_eq_shapes_saturation_not_just_level() {
+        let run = |hi_eq: f32| -> (f32, f32) {
+            let mut state = init_state();
+            state[STATE_ENABLED] = 1.0;
+            state[STATE_SENSE] = 0.0;
+            state[STATE_HI_EQ] = hi_eq;
+            state[STATE_INPUT_DB] = 18.0;
+            state[STATE_F1_FREQ] = 16_000.0;
+            state[STATE_SM_F1_FREQ] = 16_000.0;
+            state[STATE_F2_FREQ] = 16_000.0;
+            state[STATE_SM_F2_FREQ] = 16_000.0;
+            let n = 8192;
+            let x = sine(5_000.0, 0.3, n);
+            let (out_l, _) = render(&mut state, &x, &x);
+            let fund = tone_magnitude(&out_l[n / 2..], 5_000.0);
+            let third = tone_magnitude(&out_l[n / 2..], 15_000.0);
+            (fund, third)
+        };
+        let (cut_fund, cut_third) = run(0.0);
+        let (boost_fund, boost_third) = run(2.0);
+        let cut_ratio = cut_third / cut_fund.max(1.0e-9);
+        let boost_ratio = boost_third / boost_fund.max(1.0e-9);
+        assert!(
+            boost_ratio > cut_ratio * 1.5,
+            "Boost should saturate the highs harder (distortion ratio {boost_ratio} vs {cut_ratio})"
+        );
     }
 
     // ── 8e. second-wave mod targets: sense and lfo depth ──

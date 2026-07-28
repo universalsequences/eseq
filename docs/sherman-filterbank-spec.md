@@ -53,8 +53,12 @@ envelopes/LFO detected from the mono sum), with a **Stereo Split** toggle
   sounds "already hairy"). Use `roar::shaper_transfer` Tube/Diode-flavored
   curve at 2× oversampling around the nonlinearity (space-echo record-head
   pattern, `space_echo.rs:725`).
-- **Hi EQ** — 3-way option Cut / Flat / Boost: ±6 dB high shelf (~3 kHz) in
-  the drive stage, matching the hardware's amplifier HF switch.
+- **Hi EQ** — 3-way option Cut / Flat / Boost: ±6 dB high shelf (~3 kHz)
+  applied **pre-drive**, matching the hardware's amplifier HF switch: Boost
+  pushes the highs harder into the saturation and changes the fuzz texture,
+  not just the tone (test: `hi_eq_shapes_saturation_not_just_level`).
+  Audible mainly with drive up and/or HP/BP filter settings — an LP at low
+  cutoff discards what the shelf changed.
 - **Sense** — envelope-trigger threshold, 0–100%. The input's own envelope
   (post-drive) crossing Sense fires the ADSR and resets the LFO (if LFO Trig
   on). Hysteresis ~3 dB + 20 ms retrigger holdoff so sustained material
@@ -382,5 +386,5 @@ tests only per the house test workflow.
   through the link? (Specced: both, pre-link.)
 - Real clock:cutoff ratio in the Sherman — LTC1060 supports 50:1/100:1;
   Crunch's 100→25 range assumes we want *more* grit available than stock.
-- Whether input drive is pre or post the Hi EQ switch (specced: drive
-  first).
+- ~~Whether input drive is pre or post the Hi EQ switch~~ — resolved:
+  shelf is pre-drive (amplifier-circuit reading), settled by break-testing.
