@@ -32386,6 +32386,169 @@
         );
     }
 
+    fn test_filterbank_params() -> Vec<Value> {
+        let harmonics = vec![
+            "Free", "1", "1.5", "2", "3", "4", "5", "6", "8", "9", "12", "16",
+        ];
+        vec![
+            Value::Map(test_param_map("enabled", 0, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("input", 1, 0.0, -12.0, 30.0)),
+            Value::Map(test_enum_param_map(
+                "hi eq",
+                2,
+                1.0,
+                vec!["Cut", "Flat", "Boost"],
+            )),
+            Value::Map(test_param_map("sense", 3, 30.0, 0.0, 100.0)),
+            Value::Map(test_param_map("noise", 4, 0.0, 0.0, 100.0)),
+            Value::Map(test_param_map("feedback", 5, 0.0, 0.0, 100.0)),
+            Value::Map(test_param_map("crunch", 6, 25.0, 0.0, 100.0)),
+            Value::Map(test_param_map("correction", 7, 0.0, 0.0, 100.0)),
+            Value::Map(test_param_map("ser/par", 8, 100.0, 0.0, 100.0)),
+            Value::Map(test_enum_param_map("harmonics", 9, 0.0, harmonics)),
+            Value::Map(test_param_map("fm amount", 10, 0.0, 0.0, 100.0)),
+            Value::Map(test_enum_param_map("fm source", 11, 0.0, vec!["off"])),
+            Value::Map(test_param_map("am depth", 12, 0.0, 0.0, 100.0)),
+            Value::Map(test_enum_param_map("am source", 13, 0.0, vec!["off"])),
+            Value::Map(test_enum_param_map(
+                "env mode",
+                14,
+                0.0,
+                vec!["ADSR", "Follower"],
+            )),
+            Value::Map(test_param_map("attack", 15, 5.0, 0.5, 4000.0)),
+            Value::Map(test_param_map("decay", 16, 200.0, 1.0, 4000.0)),
+            Value::Map(test_param_map("sustain", 17, 0.0, -100.0, 100.0)),
+            Value::Map(test_param_map("release", 18, 300.0, 1.0, 8000.0)),
+            Value::Map(test_param_map("env f1", 19, 50.0, -100.0, 100.0)),
+            Value::Map(test_param_map("env f2", 20, 50.0, -100.0, 100.0)),
+            Value::Map(test_param_map("res bleed", 21, 10.0, 0.0, 100.0)),
+            Value::Map(test_param_map("lfo rate", 22, 0.5, 0.01, 2000.0)),
+            Value::Map(test_enum_param_map(
+                "lfo wave",
+                23,
+                1.0,
+                vec!["Sine", "Saw", "Ramp", "Square"],
+            )),
+            Value::Map(test_param_map("lfo depth", 24, 0.0, -100.0, 100.0)),
+            Value::Map(test_param_map("lfo trig", 25, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("lfo sync", 26, 0.0, 0.0, 1.0)),
+            Value::Map(test_enum_param_map(
+                "lfo div",
+                27,
+                6.0,
+                vec![
+                    "1/32", "1/16", "1/16t", "1/8", "1/8t", "1/8.", "1/4", "1/4t", "1/4.", "1/2",
+                    "1",
+                ],
+            )),
+            Value::Map(test_param_map("ar attack", 28, 5.0, 0.5, 2000.0)),
+            Value::Map(test_param_map("ar release", 29, 200.0, 1.0, 4000.0)),
+            Value::Map(test_param_map("ar depth", 30, 0.0, 0.0, 100.0)),
+            Value::Map(test_param_map("stereo split", 31, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("output", 32, 0.0, -24.0, 24.0)),
+            Value::Map(test_param_map("dry/wet", 33, 100.0, 0.0, 100.0)),
+            Value::Map(test_param_map("f1 freq", 34, 500.0, 20.0, 16000.0)),
+            Value::Map(test_param_map("f1 res", 35, 20.0, 0.0, 110.0)),
+            Value::Map(test_param_map("f1 mode", 36, 0.0, 0.0, 100.0)),
+            Value::Map(test_param_map("f2 freq", 37, 500.0, 20.0, 16000.0)),
+            Value::Map(test_param_map("f2 res", 38, 20.0, 0.0, 110.0)),
+            Value::Map(test_param_map("f2 mode", 39, 0.0, 0.0, 100.0)),
+        ]
+    }
+
+    #[test]
+    fn metal_seq_fx_filterbank_layout_contains_dual_filters_and_harmonics() {
+        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Filterbank".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "Filterbank",
+                        0,
+                        test_filterbank_params(),
+                    ))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        let ui_probe = editor
+            .runtime_mut()
+            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("probe filterbank ui")
+            .expect("filterbank ui probe value");
+        assert!(
+            value_contains_string(&ui_probe, "HARMONICS"),
+            "filterbank custom UI probe should contain the harmonics link column: {ui_probe:?}"
+        );
+        assert!(
+            value_contains_string(&ui_probe, "Free"),
+            "harmonics dropdown should show the current ratio option"
+        );
+        assert!(value_contains_string(&ui_probe, "FILTER 1"));
+        assert!(value_contains_string(&ui_probe, "FILTER 2"));
+        assert!(value_contains_string(&ui_probe, "freq"));
+        assert!(value_contains_string(&ui_probe, "ser/par"));
+        assert!(value_contains_string(&ui_probe, "crunch"));
+        assert!(value_contains_string(&ui_probe, "bleed"));
+        assert!(value_contains_string(&ui_probe, "ADSR"));
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("filterbank fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(128, 20);
+        let layout = editor.widget_layout().expect("filterbank fx layout");
+        assert!(
+            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Filterbank"),
+            "layout should contain the built-in Filterbank panel"
+        );
+    }
+
     #[test]
     fn metal_seq_fx_multiverb_layout_contains_modes_presets_and_live_knobs() {
         let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");

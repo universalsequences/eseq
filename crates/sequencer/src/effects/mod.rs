@@ -16,6 +16,8 @@ pub(crate) mod eq8;
 #[allow(dead_code)]
 pub(crate) mod filter;
 #[allow(dead_code)]
+pub mod filterbank;
+#[allow(dead_code)]
 pub(crate) mod gatepitch;
 #[allow(dead_code)]
 pub(crate) mod limiter;
@@ -345,7 +347,8 @@ mod tests {
 
     use super::{
         tensor_param_descriptors_from_manifest, EffectDescriptor, EffectSlotSnapshot,
-        EffectSlotState, ParamDescriptor, ParamKind, ParamScaling, TensorParamDescriptor,
+        EffectSlotState, HostControl, ParamDescriptor, ParamKind, ParamScaling,
+        TensorParamDescriptor,
     };
     use crate::lisp_host::{TensorInit, TensorMeta};
     use crate::neural::ParamNodeId;
@@ -1372,7 +1375,8 @@ mod tests {
                 "Compressor",
                 "OTT",
                 "Limiter",
-                "Tape"
+                "Tape",
+                "Filterbank"
             ]
         );
         assert_eq!(
@@ -1627,6 +1631,157 @@ mod tests {
                 target_names.iter().filter(|n| **n == name).count(),
                 4,
                 "{name} should have 4 modulation slots"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_filterbank_exposes_sherman_params_and_mod_targets() {
+        let desc = EffectDescriptor::builtin_insert("Filterbank").unwrap();
+        assert_eq!(desc.name, "Filterbank");
+        // 0/1 audio, 2..5 ext-mod sources, 6/7 FM/AM sidechains.
+        assert_eq!(
+            desc.input_channels,
+            2 + crate::instruments::voice_modulator::NUM_OUTPUTS + 2
+        );
+        assert_eq!(desc.output_channels, 2);
+        assert_eq!(desc.instrument_modulators.len(), 4);
+
+        let names: Vec<&str> = desc.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            &names[..40],
+            vec![
+                "enabled",
+                "input",
+                "hi eq",
+                "sense",
+                "noise",
+                "feedback",
+                "crunch",
+                "correction",
+                "ser/par",
+                "harmonics",
+                "fm amount",
+                "fm source",
+                "am depth",
+                "am source",
+                "env mode",
+                "attack",
+                "decay",
+                "sustain",
+                "release",
+                "env f1",
+                "env f2",
+                "res bleed",
+                "lfo rate",
+                "lfo wave",
+                "lfo depth",
+                "lfo trig",
+                "lfo sync",
+                "lfo div",
+                "ar attack",
+                "ar release",
+                "ar depth",
+                "stereo split",
+                "output",
+                "dry/wet",
+                "f1 freq",
+                "f1 res",
+                "f1 mode",
+                "f2 freq",
+                "f2 res",
+                "f2 mode",
+            ]
+        );
+
+        // FM/AM sources are host-routed sidechains on ports 6/7.
+        assert!(matches!(
+            desc.params[11].host_control,
+            Some(HostControl::FxSidechain { input_channel })
+                if input_channel == crate::effects::filterbank::FILTERBANK_FM_INPUT_CHANNEL
+        ));
+        assert!(matches!(
+            desc.params[13].host_control,
+            Some(HostControl::FxSidechain { input_channel })
+                if input_channel == crate::effects::filterbank::FILTERBANK_AM_INPUT_CHANNEL
+        ));
+
+        match &desc.params[9].kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(labels.len(), 12);
+                assert_eq!(labels[0], "Free");
+                assert_eq!(labels[11], "16");
+            }
+            other => panic!("harmonics should be enum, got {other:?}"),
+        }
+        match &desc.params[2].kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(
+                    labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                    vec!["Cut", "Flat", "Boost"]
+                );
+            }
+            other => panic!("hi eq should be enum, got {other:?}"),
+        }
+        match &desc.params[23].kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(
+                    labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                    vec!["Sine", "Saw", "Ramp", "Square"]
+                );
+            }
+            other => panic!("lfo wave should be enum, got {other:?}"),
+        }
+
+        // §5a: 10 targets × 4 slots, base params resolved by name.
+        assert_eq!(desc.instrument_modulation_targets.len(), 40);
+        let target_names: Vec<&str> = desc
+            .instrument_modulation_targets
+            .iter()
+            .map(|target| desc.params[target.base_param_idx].name.as_str())
+            .collect();
+        for name in [
+            "f1 freq", "f2 freq", "f1 res", "f2 res", "f1 mode", "f2 mode", "fm amount",
+            "am depth", "ser/par", "crunch",
+        ] {
+            assert_eq!(
+                target_names.iter().filter(|n| **n == name).count(),
+                4,
+                "{name} should have 4 modulation slots"
+            );
+        }
+        for target in &desc.instrument_modulation_targets {
+            let depth = &desc.params[target.depth_param_idx];
+            assert!(depth.name.starts_with("mod "), "depth param {:?}", depth.name);
+            assert_eq!((depth.min, depth.max), (-1.0, 1.0));
+        }
+
+        // LFO tempo sync: division enum next to the other LFO controls.
+        match &desc.params[27].kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(labels.len(), 11);
+                assert_eq!(labels[6], "1/4");
+            }
+            other => panic!("lfo div should be enum, got {other:?}"),
+        }
+
+        // Every non-modulator param writes inside the node state array.
+        for param in &desc.params {
+            if param.node_param_idx == u32::MAX {
+                continue; // host-routed sidechain selectors
+            }
+            if !crate::instruments::voice_modulator::is_source_param(param.node_param_idx) {
+                assert!(
+                    (param.node_param_idx as usize)
+                        < crate::effects::filterbank::FILTERBANK_STATE_SIZE,
+                    "param {:?} writes outside the Filterbank state array",
+                    param.name
+                );
+            }
+            assert!(
+                param.default >= param.min && param.default <= param.max,
+                "param {:?} default out of range",
+                param.name
             );
         }
     }
@@ -2113,6 +2268,7 @@ impl EffectDescriptor {
             "OTT",
             "Limiter",
             "Tape",
+            "Filterbank",
         ]
     }
 
@@ -2165,6 +2321,7 @@ impl EffectDescriptor {
             "OTT" => Some(Self::builtin_ott()),
             "Limiter" => Some(Self::builtin_limiter()),
             "Tape" => Some(Self::builtin_tape()),
+            "Filterbank" => Some(Self::builtin_filterbank()),
             _ => None,
         }
     }
@@ -3402,6 +3559,560 @@ impl EffectDescriptor {
             host_control: None,
             ui_metadata: None,
         });
+
+        desc
+    }
+
+    /// Sherman Filterbank 2 style dual-filter mangler (spec:
+    /// docs/sherman-filterbank-spec.md). Inputs 0/1 carry the track signal,
+    /// 2..5 the host ext-mod sources, 6/7 the FM/AM sidechains.
+    pub fn builtin_filterbank() -> Self {
+        use crate::effects::filterbank as fb;
+
+        fn continuous(
+            name: &str,
+            min: f32,
+            max: f32,
+            default: f32,
+            unit: Option<&str>,
+            scaling: ParamScaling,
+            node_param_idx: u64,
+        ) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min,
+                max,
+                default,
+                kind: ParamKind::Continuous {
+                    unit: unit.map(str::to_string),
+                },
+                scaling,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+
+        fn toggle(name: &str, default: f32, node_param_idx: u64) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min: 0.0,
+                max: 1.0,
+                default,
+                kind: ParamKind::Boolean,
+                scaling: ParamScaling::Linear,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+
+        fn options(
+            name: &str,
+            labels: &[&str],
+            default: f32,
+            node_param_idx: u64,
+        ) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min: 0.0,
+                max: (labels.len() - 1) as f32,
+                default,
+                kind: ParamKind::Enum {
+                    labels: labels.iter().map(|label| label.to_string()).collect(),
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+
+        // Host-routed sidechain source (compressor precedent). Labels are
+        // patched with the track list wherever the descriptor is
+        // instantiated; `input_channel` picks the node input port.
+        fn sidechain(name: &str, input_channel: usize) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min: 0.0,
+                max: 0.0,
+                default: 0.0,
+                kind: ParamKind::Enum {
+                    labels: vec!["off".to_string()],
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: u32::MAX,
+                node_param_span: 1,
+                host_control: Some(HostControl::FxSidechain { input_channel }),
+                ui_metadata: None,
+            }
+        }
+
+        let harmonics_labels = [
+            "Free", "1", "1.5", "2", "3", "4", "5", "6", "8", "9", "12", "16",
+        ];
+
+        let mut desc = Self {
+            name: "Filterbank".to_string(),
+            // 0/1 audio, 2..5 ext-mod sources, 6/7 FM/AM sidechains.
+            input_channels: 2
+                + crate::instruments::voice_modulator::NUM_OUTPUTS
+                + 2,
+            output_channels: 2,
+            instrument_modulators: (1..=crate::instruments::voice_modulator::SLOT_COUNT)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![
+                Self::enabled_param(fb::FILTERBANK_PARAM_ENABLED as u32, 1.0),
+                continuous(
+                    "input",
+                    -12.0,
+                    30.0,
+                    0.0,
+                    Some("dB"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_INPUT_DB,
+                ),
+                options("hi eq", &["Cut", "Flat", "Boost"], 1.0, fb::FILTERBANK_PARAM_HI_EQ),
+                continuous(
+                    "sense",
+                    0.0,
+                    100.0,
+                    30.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_SENSE,
+                ),
+                continuous(
+                    "noise",
+                    0.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_NOISE,
+                ),
+                continuous(
+                    "feedback",
+                    0.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_FEEDBACK,
+                ),
+                continuous(
+                    "crunch",
+                    0.0,
+                    100.0,
+                    25.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_CRUNCH,
+                ),
+                continuous(
+                    "correction",
+                    0.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_CORRECTION,
+                ),
+                continuous(
+                    "ser/par",
+                    0.0,
+                    100.0,
+                    100.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_SER_PAR,
+                ),
+                options(
+                    "harmonics",
+                    &harmonics_labels,
+                    0.0,
+                    fb::FILTERBANK_PARAM_HARMONICS,
+                ),
+                continuous(
+                    "fm amount",
+                    0.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_FM_AMOUNT,
+                ),
+                sidechain("fm source", fb::FILTERBANK_FM_INPUT_CHANNEL),
+                continuous(
+                    "am depth",
+                    0.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_AM_DEPTH,
+                ),
+                sidechain("am source", fb::FILTERBANK_AM_INPUT_CHANNEL),
+                options(
+                    "env mode",
+                    &["ADSR", "Follower"],
+                    0.0,
+                    fb::FILTERBANK_PARAM_ENV_MODE,
+                ),
+                continuous(
+                    "attack",
+                    0.5,
+                    4000.0,
+                    5.0,
+                    Some("ms"),
+                    ParamScaling::Exponential,
+                    fb::FILTERBANK_PARAM_ATTACK_MS,
+                ),
+                continuous(
+                    "decay",
+                    1.0,
+                    4000.0,
+                    200.0,
+                    Some("ms"),
+                    ParamScaling::Exponential,
+                    fb::FILTERBANK_PARAM_DECAY_MS,
+                ),
+                continuous(
+                    "sustain",
+                    -100.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_SUSTAIN,
+                ),
+                continuous(
+                    "release",
+                    1.0,
+                    8000.0,
+                    300.0,
+                    Some("ms"),
+                    ParamScaling::Exponential,
+                    fb::FILTERBANK_PARAM_RELEASE_MS,
+                ),
+                continuous(
+                    "env f1",
+                    -100.0,
+                    100.0,
+                    50.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_ENV_F1,
+                ),
+                continuous(
+                    "env f2",
+                    -100.0,
+                    100.0,
+                    50.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_ENV_F2,
+                ),
+                continuous(
+                    "res bleed",
+                    0.0,
+                    100.0,
+                    10.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_RES_BLEED,
+                ),
+                continuous(
+                    "lfo rate",
+                    0.01,
+                    2000.0,
+                    0.5,
+                    Some("Hz"),
+                    ParamScaling::Exponential,
+                    fb::FILTERBANK_PARAM_LFO_RATE,
+                ),
+                options(
+                    "lfo wave",
+                    &["Sine", "Saw", "Ramp", "Square"],
+                    1.0,
+                    fb::FILTERBANK_PARAM_LFO_WAVE,
+                ),
+                continuous(
+                    "lfo depth",
+                    -100.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_LFO_DEPTH,
+                ),
+                toggle("lfo trig", 0.0, fb::FILTERBANK_PARAM_LFO_TRIG),
+                toggle("lfo sync", 0.0, fb::FILTERBANK_PARAM_LFO_SYNC),
+                options(
+                    "lfo div",
+                    &[
+                        "1/32", "1/16", "1/16t", "1/8", "1/8t", "1/8.", "1/4", "1/4t", "1/4.",
+                        "1/2", "1",
+                    ],
+                    6.0,
+                    fb::FILTERBANK_PARAM_LFO_DIV,
+                ),
+                continuous(
+                    "ar attack",
+                    0.5,
+                    2000.0,
+                    5.0,
+                    Some("ms"),
+                    ParamScaling::Exponential,
+                    fb::FILTERBANK_PARAM_AR_ATTACK_MS,
+                ),
+                continuous(
+                    "ar release",
+                    1.0,
+                    4000.0,
+                    200.0,
+                    Some("ms"),
+                    ParamScaling::Exponential,
+                    fb::FILTERBANK_PARAM_AR_RELEASE_MS,
+                ),
+                continuous(
+                    "ar depth",
+                    0.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_AR_DEPTH,
+                ),
+                toggle("stereo split", 0.0, fb::FILTERBANK_PARAM_STEREO_SPLIT),
+                continuous(
+                    "output",
+                    -24.0,
+                    24.0,
+                    0.0,
+                    Some("dB"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_OUTPUT_DB,
+                ),
+                continuous(
+                    "dry/wet",
+                    0.0,
+                    100.0,
+                    100.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_DRY_WET,
+                ),
+                continuous(
+                    "f1 freq",
+                    20.0,
+                    16000.0,
+                    500.0,
+                    Some("Hz"),
+                    ParamScaling::Exponential,
+                    fb::FILTERBANK_PARAM_F1_FREQ,
+                ),
+                continuous(
+                    "f1 res",
+                    0.0,
+                    110.0,
+                    20.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_F1_RES,
+                ),
+                continuous(
+                    "f1 mode",
+                    0.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_F1_MODE,
+                ),
+                continuous(
+                    "f2 freq",
+                    20.0,
+                    16000.0,
+                    500.0,
+                    Some("Hz"),
+                    ParamScaling::Exponential,
+                    fb::FILTERBANK_PARAM_F2_FREQ,
+                ),
+                continuous(
+                    "f2 res",
+                    0.0,
+                    110.0,
+                    20.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_F2_RES,
+                ),
+                continuous(
+                    "f2 mode",
+                    0.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_F2_MODE,
+                ),
+            ],
+        };
+        desc.params
+            .extend(crate::instruments::voice_modulator::effect_param_descriptors());
+
+        // §5a host mod targets: 10 targets × 4 slots, space-echo convention
+        // (depth params + InstrumentModulationTarget entries the mod-wrapper
+        // UI consumes).
+        let mut append_depth_targets =
+            |base_param_name: &str,
+             destination_name: &str,
+             depth_params: [u64; crate::instruments::voice_modulator::SLOT_COUNT]| {
+                let base_param_idx = desc
+                    .params
+                    .iter()
+                    .position(|param| param.name == base_param_name)
+                    .unwrap_or_else(|| {
+                        panic!("built-in Filterbank {base_param_name} param should exist")
+                    });
+                for (slot, node_param_idx) in depth_params.into_iter().enumerate() {
+                    let depth_param_idx = desc.params.len();
+                    desc.params.push(ParamDescriptor {
+                        name: format!("mod {destination_name} slot {} amt", slot + 1),
+                        min: -1.0,
+                        max: 1.0,
+                        default: 0.0,
+                        kind: ParamKind::Continuous { unit: None },
+                        scaling: ParamScaling::Linear,
+                        node_param_idx: node_param_idx as u32,
+                        node_param_span: 1,
+                        host_control: None,
+                        ui_metadata: None,
+                    });
+                    desc.instrument_modulation_targets
+                        .push(InstrumentModulationTarget {
+                            base_param_idx,
+                            source_param_idx: None,
+                            modulator_slot: slot + 1,
+                            depth_param_idx,
+                            active_param_idx: None,
+                            depth_min: -1.0,
+                            depth_max: 1.0,
+                            depth_unit: None,
+                        });
+                }
+            };
+
+        append_depth_targets(
+            "f1 freq",
+            "f1 freq",
+            [
+                fb::FILTERBANK_PARAM_MOD_F1_FREQ_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_F1_FREQ_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_F1_FREQ_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_F1_FREQ_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "f2 freq",
+            "f2 freq",
+            [
+                fb::FILTERBANK_PARAM_MOD_F2_FREQ_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_F2_FREQ_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_F2_FREQ_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_F2_FREQ_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "f1 res",
+            "f1 res",
+            [
+                fb::FILTERBANK_PARAM_MOD_F1_RES_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_F1_RES_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_F1_RES_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_F1_RES_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "f2 res",
+            "f2 res",
+            [
+                fb::FILTERBANK_PARAM_MOD_F2_RES_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_F2_RES_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_F2_RES_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_F2_RES_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "f1 mode",
+            "f1 mode",
+            [
+                fb::FILTERBANK_PARAM_MOD_F1_MODE_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_F1_MODE_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_F1_MODE_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_F1_MODE_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "f2 mode",
+            "f2 mode",
+            [
+                fb::FILTERBANK_PARAM_MOD_F2_MODE_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_F2_MODE_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_F2_MODE_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_F2_MODE_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "fm amount",
+            "fm",
+            [
+                fb::FILTERBANK_PARAM_MOD_FM_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_FM_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_FM_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_FM_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "am depth",
+            "am",
+            [
+                fb::FILTERBANK_PARAM_MOD_AM_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_AM_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_AM_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_AM_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "ser/par",
+            "ser/par",
+            [
+                fb::FILTERBANK_PARAM_MOD_SER_PAR_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_SER_PAR_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_SER_PAR_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_SER_PAR_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "crunch",
+            "crunch",
+            [
+                fb::FILTERBANK_PARAM_MOD_CRUNCH_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_CRUNCH_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_CRUNCH_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_CRUNCH_DEPTH_4,
+            ],
+        );
 
         desc
     }

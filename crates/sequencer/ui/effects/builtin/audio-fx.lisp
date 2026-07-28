@@ -31,4 +31,6 @@
                   (builtin-fx-tape-ui fx)
                   (if (= (get fx :name) "Convolution Reverb")
                     (builtin-fx-convolution-reverb-ui fx)
-                    false))))))))))))))))
+                    (if (= (get fx :name) "Filterbank")
+                      (builtin-fx-filterbank-ui fx)
+                      false)))))))))))))))))

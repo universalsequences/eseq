@@ -3298,6 +3298,11 @@ impl App {
             status
         };
         eprintln!("project-load: finish complete status={status}");
+        // Effect slots restore before the full track list settles, so any
+        // FxSidechain enum (Compressor, Filterbank FM/AM sources) may still
+        // hold its "off"-only placeholder labels — re-patch with the loaded
+        // track names.
+        self.refresh_effect_sidechain_labels();
         self.ui.recording = false;
         self.recording_history = None;
         self.history.reset();

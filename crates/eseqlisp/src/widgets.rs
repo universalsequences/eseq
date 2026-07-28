@@ -54,6 +54,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "phaser-notch",
     "roar-shaper",
     "roar-filter",
+    "gate-led",
     "scroll",
     "tree",
 ];

@@ -8,6 +8,7 @@ pub mod eq8_editor;
 pub mod event_view;
 #[cfg(target_os = "macos")]
 pub mod focus_decoration;
+pub mod gate_led;
 pub mod grid;
 pub mod hslider;
 pub mod hstack;
@@ -951,6 +952,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &compressor_display::COMPRESSOR_DISPLAY_WIDGET,
     &roar_shaper::ROAR_SHAPER_WIDGET,
     &roar_filter::ROAR_FILTER_WIDGET,
+    &gate_led::GATE_LED_WIDGET,
     &vstack::VSTACK_WIDGET,
     &wrap::WRAP_WIDGET,
     &hstack::HSTACK_WIDGET,
