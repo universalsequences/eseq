@@ -3038,8 +3038,14 @@ impl VM {
         self.register_static_inline_widgets(&spanned_exprs, source_revision);
 
         let entry_idx = self.chunks.len();
-        let existing = self.chunks.clone();
-        let names = self.global_names.clone();
+        let names_len = self.global_names.len();
+        // Move the program into the compiler instead of cloning it: this path
+        // runs on every shortcut eval, and cloning (then dropping) thousands
+        // of chunks made every keyboard action pay ~10 ms. The compiler only
+        // appends chunks and global names, so an error restores the moved
+        // state exactly by truncating to the pre-eval lengths.
+        let existing = std::mem::take(&mut self.chunks);
+        let names = std::mem::take(&mut self.global_names);
         let reactive_namespaces = self.reactive_namespaces.clone();
         let derived_bindings = self.derived_bindings.clone();
         let state_bindings = self.state_bindings.clone();
@@ -3061,17 +3067,25 @@ impl VM {
         match compiler.compile() {
             Ok(chunks) => {
                 self.chunks = chunks;
-                self.global_names = compiler.global_names();
-                self.derived_bindings = compiler.derived_bindings();
-                self.state_bindings = compiler.state_bindings();
+                self.global_names = compiler.take_global_names();
+                self.derived_bindings = compiler.take_derived_bindings();
+                self.state_bindings = compiler.take_state_bindings();
                 self.dag.next_id = compiler.next_node_id();
-                // Merge any new macro definitions back into the VM
-                for (name, def) in compiler.macros() {
-                    self.macros.insert(name.clone(), def.clone());
-                }
+                // The compiler's macro table started from this VM's, so
+                // taking it wholesale keeps every existing macro and merges
+                // any new definitions.
+                self.macros = compiler.take_macros();
                 self.execute_from(entry_idx)
             }
-            Err(_) => Err(VMError::CompileError),
+            Err(_) => {
+                let mut chunks = compiler.take_chunks();
+                chunks.truncate(entry_idx);
+                self.chunks = chunks;
+                let mut names = compiler.take_global_names();
+                names.truncate(names_len);
+                self.global_names = names;
+                Err(VMError::CompileError)
+            }
         }
     }
 
@@ -3216,8 +3230,12 @@ impl VM {
         profile.ast = ast_started.elapsed();
 
         let entry_idx = self.chunks.len();
-        let existing = self.chunks.clone();
-        let names = self.global_names.clone();
+        let names_len = self.global_names.len();
+        // Same move-instead-of-clone contract as `eval_str`: the compiler
+        // only appends chunks and global names, so truncating to the pre-eval
+        // lengths restores the moved state exactly on a compile error.
+        let existing = std::mem::take(&mut self.chunks);
+        let names = std::mem::take(&mut self.global_names);
         let reactive_namespaces = self.reactive_namespaces.clone();
         let derived_bindings = self.derived_bindings.clone();
         let state_bindings = self.state_bindings.clone();
@@ -3237,14 +3255,24 @@ impl VM {
             macros,
             source_module,
         );
-        let chunks = compiler.compile().map_err(|_| VMError::CompileError)?;
-        self.chunks = chunks;
-        self.global_names = compiler.global_names();
-        self.derived_bindings = compiler.derived_bindings();
-        self.state_bindings = compiler.state_bindings();
-        self.dag.next_id = compiler.next_node_id();
-        for (name, def) in compiler.macros() {
-            self.macros.insert(name.clone(), def.clone());
+        match compiler.compile() {
+            Ok(chunks) => {
+                self.chunks = chunks;
+                self.global_names = compiler.take_global_names();
+                self.derived_bindings = compiler.take_derived_bindings();
+                self.state_bindings = compiler.take_state_bindings();
+                self.dag.next_id = compiler.next_node_id();
+                self.macros = compiler.take_macros();
+            }
+            Err(_) => {
+                let mut chunks = compiler.take_chunks();
+                chunks.truncate(entry_idx);
+                self.chunks = chunks;
+                let mut names = compiler.take_global_names();
+                names.truncate(names_len);
+                self.global_names = names;
+                return Err(VMError::CompileError);
+            }
         }
         profile.compile = compile_started.elapsed();
 

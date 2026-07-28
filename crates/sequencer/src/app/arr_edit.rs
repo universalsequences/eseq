@@ -98,8 +98,11 @@ impl App {
         self.require_song_edit_unlocked()?;
         let before = self.require_arrangement()?;
         let mut after = before.clone();
-        let scenes = self.state.capture_project_scenes();
-        edit(&mut after, &scenes)?;
+        // Borrow the live scenes for the edit instead of cloning the whole
+        // project pattern store: the clone was ~11 ms on a realistic project
+        // and ran on every single-clip primitive.
+        self.state
+            .with_project_scenes(|scenes| edit(&mut after, scenes))?;
         if after == before {
             // Exact no-op: no install, no history entry.
             return Ok(());
@@ -137,7 +140,6 @@ impl App {
             return Err(format!("Track {} has no arrangement lane", track + 1));
         }
         let mut after = before.clone();
-        let scenes = self.state.capture_project_scenes();
         let id = after.allocate_clip_id()?;
         let mut clip = ArrClip::new(id, start_beat, end_beat, None);
         match source {
@@ -146,7 +148,9 @@ impl App {
             LaneSource::Take(take) => clip.take_id = Some(take.0),
         }
         clip.offset_steps = offset_steps;
-        occlude_span(&mut after, &scenes, track, start_beat, end_beat)?;
+        self.state.with_project_scenes(|scenes| {
+            occlude_span(&mut after, scenes, track, start_beat, end_beat)
+        })?;
         insert_clip_sorted(&mut after, track, clip);
         self.commit_arrangement_edit("Create clip", Some(before), Some(after))?;
         Ok(id)
@@ -237,9 +241,12 @@ impl App {
             let arrangement = self.require_arrangement()?;
             let (track, clip) = Self::locate_clip(&arrangement, clip_id)?;
             // Re-stamp first: the playable length depends on the offset the
-            // trimmed clip will actually carry.
-            let scenes = self.state.capture_project_scenes();
-            match restamped_clip(&scenes, track, &clip, new_start_beat) {
+            // trimmed clip will actually carry. Borrow the scenes — cloning
+            // the whole pattern store here doubled the cost of every resize.
+            let restamped = self
+                .state
+                .with_project_scenes(|scenes| restamped_clip(scenes, track, &clip, new_start_beat));
+            match restamped {
                 Some(restamped) => match self.take_clip_playable_end(track, &restamped) {
                     Some(limit) => new_end_beat.min(limit).max(new_start_beat),
                     None => new_end_beat,
@@ -287,14 +294,16 @@ impl App {
             ));
         }
         let mut after = before.clone();
-        let scenes = self.state.capture_project_scenes();
         let right_id = after.allocate_clip_id()?;
         // A right half with nothing left to play (a take past its end) is not
         // stored: that span is silent, and silence is a gap.
-        let right = restamped_clip(&scenes, track, &clip, beat).map(|mut right| {
-            right.id = right_id;
-            right
-        });
+        let right = self
+            .state
+            .with_project_scenes(|scenes| restamped_clip(scenes, track, &clip, beat))
+            .map(|mut right| {
+                right.id = right_id;
+                right
+            });
         {
             let lane = &mut after.track_lanes[track];
             let index = lane

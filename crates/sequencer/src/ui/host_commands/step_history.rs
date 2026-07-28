@@ -466,9 +466,13 @@ pub(super) fn handle(
                 Ok((app::edit::EditOutcome::Applied(_), steps)) => {
                     *auto_follow_override_until.lock().unwrap() =
                         Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-                    ui_invalidations.push(UiInvalidation::Pattern(
-                        PatternInvalidation::WholeTrack { track },
-                    ));
+                    // Only the deleted steps changed, so invalidate them as a
+                    // batch (the same contract the step-move path relies on)
+                    // instead of resyncing every visible track.
+                    ui_invalidations.push(UiInvalidation::StepBatch {
+                        track,
+                        steps: steps.clone(),
+                    });
                     ui_invalidations.push(UiInvalidation::StepSelection {
                         track,
                         changed_steps: steps,

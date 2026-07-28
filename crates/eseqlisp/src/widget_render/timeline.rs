@@ -103,6 +103,10 @@ enum TimelineItemContent {
         dots: Vec<TimelineDot>,
         cycle: f64,
         phase: f64,
+        /// Whether the phase wraps around the source cycle when a live
+        /// start-edge ghost shifts it (patterns loop; takes clamp at their
+        /// beginning — `:wrap false`).
+        wrap: bool,
     },
     Peaks(Vec<PeakBucket>),
 }
@@ -441,6 +445,24 @@ impl WidgetDefinition for TimelineWidget {
             "background-color",
             "item-label-font-size",
             "item-label-color",
+            // Shared arrangement time axis: scroll/zoom repaint every lane
+            // without rerunning any effect (UI_PERFORMANCE_TUNING.md).
+            "view-start",
+            "view-duration",
+            "content-length",
+            // Live gesture ghost for THIS lane's items (move/resize/region
+            // move) and the live/committed region highlight — per-lane float
+            // channels so one drag tick dirties only the affected widgets.
+            "ghost-kind",
+            "ghost-id",
+            "ghost-time",
+            "ghost-region-a",
+            "ghost-region-b",
+            "region-a",
+            "region-b",
+            "region-on",
+            "selected-id",
+            "bound-id",
         ]
     }
 
@@ -1880,7 +1902,9 @@ fn push_item_content_primitives(
         return;
     }
     match &item.content {
-        Some(TimelineItemContent::Dots { dots, cycle, phase }) => {
+        Some(TimelineItemContent::Dots {
+            dots, cycle, phase, ..
+        }) => {
             let span = item.end - item.start;
             if span <= 0.0 {
                 return;
@@ -2027,7 +2051,13 @@ impl TimelineView {
                 .and_then(get_map)
                 .and_then(|map| get_time_ruler(&map)),
             playhead_time: props.get("playhead-time").and_then(as_number),
-            cursor_time: props.get("cursor-time").and_then(as_number),
+            // Negative cursor times mean "no cursor in this lane": the
+            // arrangement publishes the per-lane cursor as a bound float, and
+            // floats have no nil.
+            cursor_time: props
+                .get("cursor-time")
+                .and_then(as_number)
+                .filter(|time| *time >= 0.0),
             cursor_marker_visible: props
                 .get("cursor-marker-visible")
                 .and_then(as_bool)
@@ -2116,7 +2146,126 @@ impl TimelineView {
             },
         };
         view.lane_scroll = view.clamp_lane_scroll(view.lane_scroll);
+        view.apply_bound_channels(props);
         view
+    }
+
+    /// Per-lane bound float channels (UI_PERFORMANCE_TUNING.md ownership
+    /// boundary: gesture-only state must not be globally reactive). The
+    /// arrangement publishes live drag ghosts, the click selection, the sound
+    /// binding and the region highlight as reactive floats, so a drag tick
+    /// repaints only the affected lane widgets instead of rerunning the
+    /// arrangement effect. The geometry below is an exact port of the Lisp
+    /// ghost projection it replaces (arrangement-track-ghost-clip): move is
+    /// rigid, the end edge clamps to [start+1, content-length], the start
+    /// edge clamps to [0, end-1] and re-anchors the content phase by the
+    /// split rule (patterns wrap, takes clamp at zero).
+    fn apply_bound_channels(&mut self, props: &HashMap<String, Value>) {
+        let selected_id = get_num(props, "selected-id", -1.0);
+        if selected_id >= 0.0 {
+            self.selection.push(Value::Number(selected_id));
+        }
+        let bound_id = get_num(props, "bound-id", -1.0);
+        if bound_id >= 0.0 {
+            self.selection.push(Value::Number(bound_id));
+        }
+        let ghost_region_a = get_num(props, "ghost-region-a", f64::NAN);
+        let ghost_region_b = get_num(props, "ghost-region-b", f64::NAN);
+        let ghost_kind = get_num(props, "ghost-kind", 0.0);
+        // Region highlight: the in-flight marquee/region ghost wins over the
+        // committed region; either overrides a static :selection-rect prop.
+        if ghost_kind >= 3.5 && ghost_kind < 4.5 && ghost_region_a.is_finite() {
+            self.selection_rect = Some(TimelineSelectionRect {
+                time_a: ghost_region_a,
+                time_b: ghost_region_b,
+                lane_a: 0,
+                lane_b: 0,
+            });
+        } else if get_num(props, "region-on", 0.0) > 0.5 {
+            self.selection_rect = Some(TimelineSelectionRect {
+                time_a: get_num(props, "region-a", 0.0),
+                time_b: get_num(props, "region-b", 0.0),
+                lane_a: 0,
+                lane_b: 0,
+            });
+        }
+        if ghost_kind < 0.5 {
+            return;
+        }
+        let ghost_time = get_num(props, "ghost-time", f64::NAN);
+        if !ghost_time.is_finite() {
+            return;
+        }
+        // Region move (kind 5): every item the SOURCE rectangle covers slides
+        // by the drag delta; the shifted rectangle is the region highlight.
+        if ghost_kind >= 4.5 {
+            if !ghost_region_a.is_finite() || !ghost_region_b.is_finite() {
+                return;
+            }
+            for item in &mut self.items {
+                if item.end > ghost_region_a && item.start < ghost_region_b {
+                    item.start += ghost_time;
+                    item.end += ghost_time;
+                }
+            }
+            self.selection_rect = Some(TimelineSelectionRect {
+                time_a: ghost_region_a + ghost_time,
+                time_b: ghost_region_b + ghost_time,
+                lane_a: 0,
+                lane_b: 0,
+            });
+            return;
+        }
+        if ghost_kind >= 3.5 {
+            // Kind 4 is the marquee rect alone, handled above.
+            return;
+        }
+        let ghost_id = get_num(props, "ghost-id", f64::NAN);
+        let max_end = self.content_length.unwrap_or(f64::INFINITY);
+        let Some(item) = self
+            .items
+            .iter_mut()
+            .find(|item| matches!(item.id, Value::Number(id) if id == ghost_id))
+        else {
+            return;
+        };
+        let old_span = (item.end - item.start).max(1e-9);
+        if ghost_kind < 1.5 {
+            // Move: rigid slide, content untouched.
+            let new_start = ghost_time.max(0.0);
+            let delta = new_start - item.start;
+            item.start = new_start;
+            item.end += delta;
+        } else if ghost_kind < 2.5 {
+            // Start-edge resize: phase re-anchors by the split rule.
+            let new_start = ghost_time.max(0.0).min(item.end - 1.0);
+            let delta = new_start - item.start;
+            item.start = new_start;
+            let new_span = (item.end - item.start).max(1e-9);
+            if let Some(TimelineItemContent::Dots {
+                cycle, phase, wrap, ..
+            }) = item.content.as_mut()
+            {
+                let length_beats = *cycle * old_span;
+                if length_beats > 0.0 {
+                    let shifted = *phase + delta / length_beats;
+                    *phase = if *wrap {
+                        shifted.rem_euclid(1.0)
+                    } else {
+                        shifted.max(0.0)
+                    };
+                }
+                *cycle = (*cycle * old_span / new_span).max(1e-9);
+            }
+        } else {
+            // End-edge resize: pure occlusion, clamped to the song end.
+            let new_end = ghost_time.min(max_end).max(item.start + 1.0);
+            item.end = new_end;
+            let new_span = (item.end - item.start).max(1e-9);
+            if let Some(TimelineItemContent::Dots { cycle, .. }) = item.content.as_mut() {
+                *cycle = (*cycle * old_span / new_span).max(1e-9);
+            }
+        }
     }
 
     fn content_rect(&self) -> Rect {
@@ -3665,6 +3814,10 @@ fn get_sidebar_style(props: &HashMap<String, Value>) -> SidebarStyle {
 fn get_num(props: &HashMap<String, Value>, key: &str, default: f64) -> f64 {
     match props.get(key) {
         Some(Value::Number(n)) => *n,
+        // Bindable props arrive as reactive float refs; resolving here lets
+        // high-rate props (the shared arrangement view axis, live gesture
+        // ghosts) update by widget repaint instead of an effect rerun.
+        Some(Value::ReactiveRef { slot, .. }) => crate::reactive::read_float_slot(slot),
         _ => default,
     }
 }
@@ -3769,7 +3922,13 @@ fn parse_item_content(value: &Value) -> Option<TimelineItemContent> {
             .filter(|phase| phase.is_finite())
             .map(|phase| phase.rem_euclid(1.0))
             .unwrap_or(0.0);
-        return Some(TimelineItemContent::Dots { dots, cycle, phase });
+        let wrap = !matches!(map.get("wrap"), Some(Value::Bool(false)));
+        return Some(TimelineItemContent::Dots {
+            dots,
+            cycle,
+            phase,
+            wrap,
+        });
     }
     if let Some(Value::List(entries)) = map.get("peaks") {
         let peaks = entries
@@ -3914,6 +4073,116 @@ fn list_value(items: Vec<Value>) -> Value {
 mod tests {
     use super::*;
 
+    /// The bound ghost channels must reproduce the arrangement's Lisp ghost
+    /// projection exactly: rigid move, clamped end resize with cycle
+    /// rescaling, and start resize with the split-rule phase re-anchor
+    /// (patterns wrap, takes clamp at zero).
+    #[test]
+    fn bound_ghost_channels_transform_items_like_the_lisp_projection() {
+        let base_items = || {
+            list_value_raw(vec![map_value_raw(vec![
+                ("id", number_value(7.0)),
+                ("lane", number_value(0.0)),
+                ("start", number_value(8.0)),
+                ("end", number_value(16.0)),
+                (
+                    "content",
+                    map_value_raw(vec![
+                        (
+                            "dots",
+                            list_value_raw(vec![map_value_raw(vec![
+                                ("offset", number_value(0.0)),
+                                ("value", number_value(0.5)),
+                            ])]),
+                        ),
+                        ("cycle", number_value(0.5)),
+                        ("phase", number_value(0.25)),
+                    ]),
+                ),
+            ])])
+        };
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 32.0,
+            height: 8.0,
+        };
+        let view_with = |ghost: Vec<(&str, Value)>| {
+            let mut props = HashMap::from([
+                ("items".to_string(), base_items()),
+                ("view-start".to_string(), number_value(0.0)),
+                ("view-duration".to_string(), number_value(64.0)),
+                ("content-length".to_string(), number_value(32.0)),
+            ]);
+            for (key, value) in ghost {
+                props.insert(key.to_string(), value);
+            }
+            TimelineView::from_props(&props, rect)
+        };
+
+        // Kind 1: rigid move — span slides, content untouched.
+        let view = view_with(vec![
+            ("ghost-kind", number_value(1.0)),
+            ("ghost-id", number_value(7.0)),
+            ("ghost-time", number_value(20.0)),
+        ]);
+        assert_eq!(view.items[0].start, 20.0);
+        assert_eq!(view.items[0].end, 28.0);
+        let Some(TimelineItemContent::Dots { cycle, phase, .. }) = &view.items[0].content else {
+            panic!("dots content");
+        };
+        assert_eq!((*cycle, *phase), (0.5, 0.25));
+
+        // Kind 3: end resize — clamped to content-length, cycle rescales so
+        // the drawn repetition length stays the same in beats.
+        let view = view_with(vec![
+            ("ghost-kind", number_value(3.0)),
+            ("ghost-id", number_value(7.0)),
+            ("ghost-time", number_value(40.0)),
+        ]);
+        assert_eq!(view.items[0].end, 32.0, "end clamps to the song end");
+        let Some(TimelineItemContent::Dots { cycle, .. }) = &view.items[0].content else {
+            panic!("dots content");
+        };
+        // length_beats = 0.5 * 8 = 4 -> cycle over the 24-beat span = 1/6.
+        assert!((cycle - 4.0 / 24.0).abs() < 1e-9);
+
+        // Kind 2: start resize — the split rule re-anchors the phase:
+        // delta = +4 beats over length_beats 4 -> phase 0.25 + 1 wraps to
+        // 0.25.
+        let view = view_with(vec![
+            ("ghost-kind", number_value(2.0)),
+            ("ghost-id", number_value(7.0)),
+            ("ghost-time", number_value(12.0)),
+        ]);
+        assert_eq!(view.items[0].start, 12.0);
+        let Some(TimelineItemContent::Dots { cycle, phase, .. }) = &view.items[0].content else {
+            panic!("dots content");
+        };
+        assert!((phase - 0.25).abs() < 1e-9, "a whole-cycle trim wraps back");
+        assert!((cycle - 1.0).abs() < 1e-9, "cycle rescales to the new span");
+
+        // Kind 5: region move — every item intersecting the source rect
+        // slides by the delta, and the highlight rect follows.
+        let view = view_with(vec![
+            ("ghost-kind", number_value(5.0)),
+            ("ghost-time", number_value(4.0)),
+            ("ghost-region-a", number_value(0.0)),
+            ("ghost-region-b", number_value(32.0)),
+        ]);
+        assert_eq!(view.items[0].start, 12.0);
+        assert_eq!(view.items[0].end, 20.0);
+        let rect = view.selection_rect.as_ref().expect("region rect");
+        assert_eq!((rect.time_a, rect.time_b), (4.0, 36.0));
+
+        // Selection channels: selected-id / bound-id merge into the
+        // selection set; negative means unset.
+        let view = view_with(vec![("selected-id", number_value(7.0))]);
+        assert!(view.selection.iter().any(|id| id == &number_value(7.0)));
+        let view = view_with(vec![("selected-id", number_value(-1.0))]);
+        assert!(view.selection.is_empty());
+    }
+
     fn keyword_value(name: &str) -> Value {
         Value::Keyword(name.to_string())
     }
@@ -4043,7 +4312,10 @@ mod tests {
         assert!(items[0].content.is_none());
 
         assert_eq!(items[1].kind, Some(TimelineItemKind::Midi));
-        let Some(TimelineItemContent::Dots { dots, cycle, phase }) = &items[1].content else {
+        let Some(TimelineItemContent::Dots {
+            dots, cycle, phase, ..
+        }) = &items[1].content
+        else {
             panic!("expected dots content");
         };
         assert_eq!(dots.len(), 2, "malformed dot entries are skipped");
