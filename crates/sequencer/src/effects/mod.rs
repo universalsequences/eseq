@@ -1733,8 +1733,8 @@ mod tests {
             other => panic!("lfo wave should be enum, got {other:?}"),
         }
 
-        // §5a: 10 targets × 4 slots, base params resolved by name.
-        assert_eq!(desc.instrument_modulation_targets.len(), 40);
+        // §5a: 19 targets × 4 slots, base params resolved by name.
+        assert_eq!(desc.instrument_modulation_targets.len(), 76);
         let target_names: Vec<&str> = desc
             .instrument_modulation_targets
             .iter()
@@ -1742,7 +1742,8 @@ mod tests {
             .collect();
         for name in [
             "f1 freq", "f2 freq", "f1 res", "f2 res", "f1 mode", "f2 mode", "fm amount",
-            "am depth", "ser/par", "crunch",
+            "am depth", "ser/par", "crunch", "sense", "attack", "decay", "sustain", "release",
+            "lfo rate", "lfo depth", "ar attack", "ar release",
         ] {
             assert_eq!(
                 target_names.iter().filter(|n| **n == name).count(),
@@ -4111,6 +4112,97 @@ impl EffectDescriptor {
                 fb::FILTERBANK_PARAM_MOD_CRUNCH_DEPTH_2,
                 fb::FILTERBANK_PARAM_MOD_CRUNCH_DEPTH_3,
                 fb::FILTERBANK_PARAM_MOD_CRUNCH_DEPTH_4,
+            ],
+        );
+        // Second wave: performance controls (sense, envelope shapes, LFO).
+        append_depth_targets(
+            "sense",
+            "sense",
+            [
+                fb::FILTERBANK_PARAM_MOD_SENSE_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_SENSE_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_SENSE_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_SENSE_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "attack",
+            "attack",
+            [
+                fb::FILTERBANK_PARAM_MOD_ATTACK_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_ATTACK_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_ATTACK_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_ATTACK_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "decay",
+            "decay",
+            [
+                fb::FILTERBANK_PARAM_MOD_DECAY_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_DECAY_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_DECAY_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_DECAY_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "sustain",
+            "sustain",
+            [
+                fb::FILTERBANK_PARAM_MOD_SUSTAIN_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_SUSTAIN_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_SUSTAIN_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_SUSTAIN_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "release",
+            "release",
+            [
+                fb::FILTERBANK_PARAM_MOD_RELEASE_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_RELEASE_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_RELEASE_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_RELEASE_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "lfo rate",
+            "lfo rate",
+            [
+                fb::FILTERBANK_PARAM_MOD_LFO_RATE_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_LFO_RATE_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_LFO_RATE_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_LFO_RATE_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "lfo depth",
+            "lfo depth",
+            [
+                fb::FILTERBANK_PARAM_MOD_LFO_DEPTH_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_LFO_DEPTH_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_LFO_DEPTH_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_LFO_DEPTH_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "ar attack",
+            "ar attack",
+            [
+                fb::FILTERBANK_PARAM_MOD_AR_ATTACK_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_AR_ATTACK_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_AR_ATTACK_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_AR_ATTACK_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "ar release",
+            "ar release",
+            [
+                fb::FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_4,
             ],
         );
 

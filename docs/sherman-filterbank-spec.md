@@ -201,9 +201,22 @@ all applications are per-sample (freq targets need no smoothing — the
 clocked SVF eats steps by design; the linear targets get the standard
 one-pole ~2 ms lag to avoid zippering, matching space-echo).
 
-Everything else (input, envelope times, LFO params, AR, dry/wet, output)
-stays p-lock-only; if one proves missed in use, adding a target is a
-mechanical 4-slot addition.
+**Second wave (added after break-testing)** — 9 performance-control targets:
+
+| Target | Application | Why |
+|---|---|---|
+| `sense` | linear add, block rate | dynamics-reactive triggering |
+| `attack` / `decay` / `release` | exponential time scale ±3 oct, block rate | envelope shapes riding a sidechain |
+| `sustain` | linear add ±100, block rate | duck-depth as a gesture |
+| `lfo rate` | exponential ±3 oct, block rate; **ignored while synced** (p-lock the division instead) | sweep-speed rides |
+| `lfo depth` | linear ±100, per-sample (2 ms lag) | wobble amount as a fader |
+| `ar attack` / `ar release` | exponential ±3 oct, block rate | gate shape morphing |
+
+Block rate = the mod sources sampled once per audio block (1–10 ms); these
+params feed per-block envelope/threshold coefficients, so per-sample
+application would buy nothing audible. Total: 19 targets × 4 = 76 depth
+slots. Everything still p-lock-only: input, hi eq, noise, feedback,
+correction, env f1/f2, res bleed, ar depth, output, dry/wet.
 
 ## 6. Output section
 

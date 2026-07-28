@@ -160,7 +160,22 @@ const STATE_LFO_SYNC: usize = 167; // 0 free, 1 tempo-synced
 const STATE_LFO_DIV: usize = 168; // index into SYNC_BEATS
 const STATE_BPM: usize = 169; // host-pushed transport BPM
 
-pub const FILTERBANK_STATE_SIZE: usize = 170;
+// Second wave of §5a mod targets (performance controls). Time targets and
+// sense/lfo-rate apply at block rate (their coefficients are per-block);
+// lfo depth is per-sample like the other linear targets.
+const STATE_MOD_SENSE_DEPTH_1: usize = 170;
+const STATE_MOD_ATTACK_DEPTH_1: usize = 174;
+const STATE_MOD_DECAY_DEPTH_1: usize = 178;
+const STATE_MOD_SUSTAIN_DEPTH_1: usize = 182;
+const STATE_MOD_RELEASE_DEPTH_1: usize = 186;
+const STATE_MOD_LFO_RATE_DEPTH_1: usize = 190;
+const STATE_MOD_LFO_DEPTH_DEPTH_1: usize = 194;
+const STATE_MOD_AR_ATTACK_DEPTH_1: usize = 198;
+const STATE_MOD_AR_RELEASE_DEPTH_1: usize = 202;
+// Per-sample lag for the lfo-depth target (runtime; zeroed in bypass).
+const STATE_LAG_LFO_DEPTH: usize = 206;
+
+pub const FILTERBANK_STATE_SIZE: usize = 207;
 // Bypass resets [FIRST_RUNTIME_RESET, RUNTIME_RESET_END): SVF blocks through
 // SPLIT_PREV. The appended param slots above survive.
 const RUNTIME_RESET_END: usize = STATE_LFO_SYNC;
@@ -250,6 +265,42 @@ pub const FILTERBANK_PARAM_MOD_CRUNCH_DEPTH_1: u64 = STATE_MOD_CRUNCH_DEPTH_1 as
 pub const FILTERBANK_PARAM_MOD_CRUNCH_DEPTH_2: u64 = STATE_MOD_CRUNCH_DEPTH_1 as u64 + 1;
 pub const FILTERBANK_PARAM_MOD_CRUNCH_DEPTH_3: u64 = STATE_MOD_CRUNCH_DEPTH_1 as u64 + 2;
 pub const FILTERBANK_PARAM_MOD_CRUNCH_DEPTH_4: u64 = STATE_MOD_CRUNCH_DEPTH_1 as u64 + 3;
+pub const FILTERBANK_PARAM_MOD_SENSE_DEPTH_1: u64 = STATE_MOD_SENSE_DEPTH_1 as u64;
+pub const FILTERBANK_PARAM_MOD_SENSE_DEPTH_2: u64 = STATE_MOD_SENSE_DEPTH_1 as u64 + 1;
+pub const FILTERBANK_PARAM_MOD_SENSE_DEPTH_3: u64 = STATE_MOD_SENSE_DEPTH_1 as u64 + 2;
+pub const FILTERBANK_PARAM_MOD_SENSE_DEPTH_4: u64 = STATE_MOD_SENSE_DEPTH_1 as u64 + 3;
+pub const FILTERBANK_PARAM_MOD_ATTACK_DEPTH_1: u64 = STATE_MOD_ATTACK_DEPTH_1 as u64;
+pub const FILTERBANK_PARAM_MOD_ATTACK_DEPTH_2: u64 = STATE_MOD_ATTACK_DEPTH_1 as u64 + 1;
+pub const FILTERBANK_PARAM_MOD_ATTACK_DEPTH_3: u64 = STATE_MOD_ATTACK_DEPTH_1 as u64 + 2;
+pub const FILTERBANK_PARAM_MOD_ATTACK_DEPTH_4: u64 = STATE_MOD_ATTACK_DEPTH_1 as u64 + 3;
+pub const FILTERBANK_PARAM_MOD_DECAY_DEPTH_1: u64 = STATE_MOD_DECAY_DEPTH_1 as u64;
+pub const FILTERBANK_PARAM_MOD_DECAY_DEPTH_2: u64 = STATE_MOD_DECAY_DEPTH_1 as u64 + 1;
+pub const FILTERBANK_PARAM_MOD_DECAY_DEPTH_3: u64 = STATE_MOD_DECAY_DEPTH_1 as u64 + 2;
+pub const FILTERBANK_PARAM_MOD_DECAY_DEPTH_4: u64 = STATE_MOD_DECAY_DEPTH_1 as u64 + 3;
+pub const FILTERBANK_PARAM_MOD_SUSTAIN_DEPTH_1: u64 = STATE_MOD_SUSTAIN_DEPTH_1 as u64;
+pub const FILTERBANK_PARAM_MOD_SUSTAIN_DEPTH_2: u64 = STATE_MOD_SUSTAIN_DEPTH_1 as u64 + 1;
+pub const FILTERBANK_PARAM_MOD_SUSTAIN_DEPTH_3: u64 = STATE_MOD_SUSTAIN_DEPTH_1 as u64 + 2;
+pub const FILTERBANK_PARAM_MOD_SUSTAIN_DEPTH_4: u64 = STATE_MOD_SUSTAIN_DEPTH_1 as u64 + 3;
+pub const FILTERBANK_PARAM_MOD_RELEASE_DEPTH_1: u64 = STATE_MOD_RELEASE_DEPTH_1 as u64;
+pub const FILTERBANK_PARAM_MOD_RELEASE_DEPTH_2: u64 = STATE_MOD_RELEASE_DEPTH_1 as u64 + 1;
+pub const FILTERBANK_PARAM_MOD_RELEASE_DEPTH_3: u64 = STATE_MOD_RELEASE_DEPTH_1 as u64 + 2;
+pub const FILTERBANK_PARAM_MOD_RELEASE_DEPTH_4: u64 = STATE_MOD_RELEASE_DEPTH_1 as u64 + 3;
+pub const FILTERBANK_PARAM_MOD_LFO_RATE_DEPTH_1: u64 = STATE_MOD_LFO_RATE_DEPTH_1 as u64;
+pub const FILTERBANK_PARAM_MOD_LFO_RATE_DEPTH_2: u64 = STATE_MOD_LFO_RATE_DEPTH_1 as u64 + 1;
+pub const FILTERBANK_PARAM_MOD_LFO_RATE_DEPTH_3: u64 = STATE_MOD_LFO_RATE_DEPTH_1 as u64 + 2;
+pub const FILTERBANK_PARAM_MOD_LFO_RATE_DEPTH_4: u64 = STATE_MOD_LFO_RATE_DEPTH_1 as u64 + 3;
+pub const FILTERBANK_PARAM_MOD_LFO_DEPTH_DEPTH_1: u64 = STATE_MOD_LFO_DEPTH_DEPTH_1 as u64;
+pub const FILTERBANK_PARAM_MOD_LFO_DEPTH_DEPTH_2: u64 = STATE_MOD_LFO_DEPTH_DEPTH_1 as u64 + 1;
+pub const FILTERBANK_PARAM_MOD_LFO_DEPTH_DEPTH_3: u64 = STATE_MOD_LFO_DEPTH_DEPTH_1 as u64 + 2;
+pub const FILTERBANK_PARAM_MOD_LFO_DEPTH_DEPTH_4: u64 = STATE_MOD_LFO_DEPTH_DEPTH_1 as u64 + 3;
+pub const FILTERBANK_PARAM_MOD_AR_ATTACK_DEPTH_1: u64 = STATE_MOD_AR_ATTACK_DEPTH_1 as u64;
+pub const FILTERBANK_PARAM_MOD_AR_ATTACK_DEPTH_2: u64 = STATE_MOD_AR_ATTACK_DEPTH_1 as u64 + 1;
+pub const FILTERBANK_PARAM_MOD_AR_ATTACK_DEPTH_3: u64 = STATE_MOD_AR_ATTACK_DEPTH_1 as u64 + 2;
+pub const FILTERBANK_PARAM_MOD_AR_ATTACK_DEPTH_4: u64 = STATE_MOD_AR_ATTACK_DEPTH_1 as u64 + 3;
+pub const FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_1: u64 = STATE_MOD_AR_RELEASE_DEPTH_1 as u64;
+pub const FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_2: u64 = STATE_MOD_AR_RELEASE_DEPTH_1 as u64 + 1;
+pub const FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_3: u64 = STATE_MOD_AR_RELEASE_DEPTH_1 as u64 + 2;
+pub const FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_4: u64 = STATE_MOD_AR_RELEASE_DEPTH_1 as u64 + 3;
 
 // Meter tail (read-only for the host).
 pub const FILTERBANK_METER_INPUT_DB: usize = STATE_METER_INPUT_DB;
@@ -599,6 +650,7 @@ unsafe extern "C" fn filterbank_process(
             *s.add(i) = 0.0;
         }
         *s.add(STATE_METER_INPUT_DB) = -90.0;
+        *s.add(STATE_LAG_LFO_DEPTH) = 0.0; // runtime slot past the reset span
         std::ptr::copy_nonoverlapping(in0 as *const f32, out0, nf);
         std::ptr::copy_nonoverlapping(in1 as *const f32, out1, nf);
         return;
@@ -679,6 +731,46 @@ unsafe extern "C" fn filterbank_process(
     let d_am = read_depths(STATE_MOD_AM_DEPTH_1);
     let d_ser_par = read_depths(STATE_MOD_SER_PAR_DEPTH_1);
     let d_crunch = read_depths(STATE_MOD_CRUNCH_DEPTH_1);
+    let d_sense = read_depths(STATE_MOD_SENSE_DEPTH_1);
+    let d_attack = read_depths(STATE_MOD_ATTACK_DEPTH_1);
+    let d_decay = read_depths(STATE_MOD_DECAY_DEPTH_1);
+    let d_sustain = read_depths(STATE_MOD_SUSTAIN_DEPTH_1);
+    let d_release = read_depths(STATE_MOD_RELEASE_DEPTH_1);
+    let d_lfo_rate = read_depths(STATE_MOD_LFO_RATE_DEPTH_1);
+    let d_lfo_depth = read_depths(STATE_MOD_LFO_DEPTH_DEPTH_1);
+    let d_ar_attack = read_depths(STATE_MOD_AR_ATTACK_DEPTH_1);
+    let d_ar_release = read_depths(STATE_MOD_AR_RELEASE_DEPTH_1);
+
+    // ── Block-rate mod targets (§5a second wave) ──
+    // These params feed per-block coefficients, so their modulation samples
+    // the mod sources once per block (1–10 ms — inaudible for envelope
+    // times/threshold). Times and LFO rate scale exponentially (±3 oct at
+    // full depth: musical, and immune to the linear-add "stuck at zero"
+    // problem near short times); sense and sustain add linearly.
+    let mod_block = [
+        (*mod_inputs[0]).clamp(-1.0, 1.0),
+        (*mod_inputs[1]).clamp(-1.0, 1.0),
+        (*mod_inputs[2]).clamp(-1.0, 1.0),
+        (*mod_inputs[3]).clamp(-1.0, 1.0),
+    ];
+    let block_mod = |d: &[f32; 4]| -> f32 {
+        d[0] * mod_block[0] + d[1] * mod_block[1] + d[2] * mod_block[2] + d[3] * mod_block[3]
+    };
+    let time_scale = |d: &[f32; 4]| -> f32 { (2.0_f32).powf(block_mod(d).clamp(-1.0, 1.0) * 3.0) };
+    let attack_ms = (attack_ms * time_scale(&d_attack)).clamp(0.5, 4000.0);
+    let decay_ms = (decay_ms * time_scale(&d_decay)).clamp(1.0, 4000.0);
+    let release_ms = (release_ms * time_scale(&d_release)).clamp(1.0, 8000.0);
+    let ar_attack_ms = (ar_attack_ms * time_scale(&d_ar_attack)).clamp(0.5, 2000.0);
+    let ar_release_ms = (ar_release_ms * time_scale(&d_ar_release)).clamp(1.0, 4000.0);
+    let sustain = (sustain + block_mod(&d_sustain)).clamp(-1.0, 1.0);
+    let sense = (sense + block_mod(&d_sense)).clamp(0.0, 1.0);
+    // Free-rate LFO scales ±3 oct; synced mode keeps the grid (rate mod is
+    // deliberately ignored while synced — p-lock the division instead).
+    let lfo_rate = if *s.add(STATE_LFO_SYNC) > 0.5 {
+        lfo_rate
+    } else {
+        (lfo_rate * time_scale(&d_lfo_rate)).clamp(0.01, 2000.0)
+    };
 
     // ── Coefficients ──
     let smooth_coeff = one_pole_coef(20.0, sr);
@@ -763,6 +855,7 @@ unsafe extern "C" fn filterbank_process(
     let mut lag_am = *s.add(STATE_LAG_AM);
     let mut lag_ser_par = *s.add(STATE_LAG_SER_PAR);
     let mut lag_crunch = *s.add(STATE_LAG_CRUNCH);
+    let mut lag_lfo_depth = *s.add(STATE_LAG_LFO_DEPTH);
     let mut meter_input = *s.add(STATE_METER_INPUT_DB);
     if noise_seed == 0.0 {
         noise_seed = 0x2f_6e_2b as f32;
@@ -905,8 +998,9 @@ unsafe extern "C" fn filterbank_process(
         // ── LFO (§5): audio-rate; negative depth inverts on F2 only ──
         lfo_phase = (lfo_phase + lfo_inc).fract();
         let lfo = lfo_wave_value(lfo_wave, lfo_phase);
-        let lfo_f1_oct = lfo * sm_lfo_depth.abs() * 4.0;
-        let lfo_f2_oct = lfo * sm_lfo_depth * 4.0;
+        let lfo_depth_eff = (sm_lfo_depth + lag_lfo_depth).clamp(-1.0, 1.0);
+        let lfo_f1_oct = lfo * lfo_depth_eff.abs() * 4.0;
+        let lfo_f2_oct = lfo * lfo_depth_eff * 4.0;
 
         // ── §5a host mod: raw per-sample sums, lag on linear targets ──
         let mod_now = [
@@ -928,6 +1022,7 @@ unsafe extern "C" fn filterbank_process(
         lag_am += lag_coeff * (mod_sum(&d_am) - lag_am);
         lag_ser_par += lag_coeff * (mod_sum(&d_ser_par) - lag_ser_par);
         lag_crunch += lag_coeff * (mod_sum(&d_crunch) - lag_crunch);
+        lag_lfo_depth += lag_coeff * (mod_sum(&d_lfo_depth) - lag_lfo_depth);
 
         // ── FM (§5): normalled to the post-drive input unless ext active ──
         let fm_eff = (sm_fm + lag_fm).clamp(0.0, 1.0);
@@ -1141,6 +1236,7 @@ unsafe extern "C" fn filterbank_process(
     *s.add(STATE_LAG_AM) = lag_am;
     *s.add(STATE_LAG_SER_PAR) = lag_ser_par;
     *s.add(STATE_LAG_CRUNCH) = lag_crunch;
+    *s.add(STATE_LAG_LFO_DEPTH) = lag_lfo_depth;
 
     // ── §9 live-meter tail ──
     *s.add(STATE_METER_INPUT_DB) = meter_input;
@@ -1573,6 +1669,54 @@ mod tests {
         let x = sine(80.0, 0.8, n);
         let (out_l, _) = render(&mut state, &x, &x);
         assert!(rms(&out_l) > 1.0e-3, "bleed path should pass signal");
+    }
+
+    // ── 8e. second-wave mod targets: sense and lfo depth ──
+    #[test]
+    fn sense_and_lfo_depth_mod_targets_apply() {
+        // Sense mod: a quiet burst below the base threshold fires the gate
+        // only when DC on port 2 pushes sense up through the mod target.
+        let run = |sense_depth: f32| -> f32 {
+            let mut state = init_state();
+            state[STATE_ENABLED] = 1.0;
+            state[STATE_SENSE] = 0.0; // least sensitive: threshold -3 dBFS
+            state[STATE_MOD_SENSE_DEPTH_1] = sense_depth;
+            let n = 4096;
+            let mut burst = vec![0.0_f32; n];
+            for (i, x) in sine(200.0, 0.25, 2048).iter().enumerate() {
+                burst[i] = *x; // ~-12 dBFS: under the unmodded threshold
+            }
+            let dc = vec![1.0_f32; n];
+            let z = vec![0.0_f32; n];
+            process_block(&mut state, &[&burst, &burst, &dc, &z, &z, &z, &z, &z]);
+            state[STATE_TRIG_COUNT]
+        };
+        assert_eq!(run(0.0), 0.0, "quiet burst must not trigger at sense 0");
+        assert!(run(1.0) >= 1.0, "full sense mod should fire the gate");
+
+        // LFO-depth mod: base depth 0, DC-driven depth swings the effective
+        // F1 cutoff (visible in the meter tail).
+        let mut state = init_state();
+        state[STATE_ENABLED] = 1.0;
+        state[STATE_SENSE] = 0.0;
+        state[STATE_LFO_RATE] = 8.0;
+        state[STATE_LFO_DEPTH] = 0.0;
+        state[STATE_MOD_LFO_DEPTH_DEPTH_1] = 1.0;
+        let n = 4096;
+        let x = sine(200.0, 0.3, n);
+        let dc = vec![1.0_f32; n];
+        let z = vec![0.0_f32; n];
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            process_block(&mut state, &[&x, &x, &dc, &z, &z, &z, &z, &z]);
+            seen.push(state[FILTERBANK_METER_F1_HZ]);
+        }
+        let min = seen.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max = seen.iter().cloned().fold(0.0_f32, f32::max);
+        assert!(
+            max > min * 2.0,
+            "lfo-depth mod should sweep F1 cutoff (saw {min}..{max} Hz)"
+        );
     }
 
     // ── 8d. LFO tempo sync: one cycle per division at host BPM ──
