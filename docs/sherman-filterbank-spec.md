@@ -139,6 +139,15 @@ between updates:
   At Crunch 0 the clock model is still active but polite (100:1, no bleed) —
   fully "clean" is not on the menu, this is a Sherman.
 
+- **Clock-tracking smoothing** (second break-testing fix): the raw digital
+  ZOH exaggerated the hardware — real switched-cap systems band-limit the
+  input before the sampled core (sampling network + input-stage bandwidth)
+  and the staircase gets smoothed by op-amp physics after. Two one-poles
+  per SVF block, corners riding f_clk (AA at 0.45·f_clk pre-core,
+  reconstruction at 0.5·f_clk post-hold): transparent at normal cutoffs,
+  progressively engaging as the clock falls into the audible band. Low
+  cutoffs now sound analog-grungy instead of decimator-digital. Test:
+  `low_cutoff_clock_departs_from_clean_svf_without_raw_plateaus`.
 - **Continuous HP feedthrough** (fidelity fix from break-testing): only the
   lp/bp integrator outputs are ZOH-held — the hp output is recomputed every
   host sample as `x − k·bp_held − lp_held` from the **live** input. On the

@@ -194,8 +194,16 @@ const STATE_DEEMPH_LP_L: usize = 217;
 const STATE_DEEMPH_LP_R: usize = 218;
 const STATE_BIAS_ENV_L: usize = 219;
 const STATE_BIAS_ENV_R: usize = 220;
+// Clock-tracking smoothing per SVF block (aa_in, recon_lp, recon_bp): the
+// analog physics the raw ZOH lacks — input band-limiting before the sampled
+// core and reconstruction of the staircase after it (§4).
+const SVF_SMOOTH_LEN: usize = 3;
+const STATE_F1L_SMOOTH: usize = 221;
+const STATE_F1R_SMOOTH: usize = 224;
+const STATE_F2L_SMOOTH: usize = 227;
+const STATE_F2R_SMOOTH: usize = 230;
 
-pub const FILTERBANK_STATE_SIZE: usize = 221;
+pub const FILTERBANK_STATE_SIZE: usize = 233;
 // Bypass resets [FIRST_RUNTIME_RESET, RUNTIME_RESET_END): SVF blocks through
 // SPLIT_PREV. The appended param slots above survive.
 const RUNTIME_RESET_END: usize = STATE_LFO_SYNC;
@@ -481,6 +489,7 @@ pub(crate) fn svf_clocked_tick(
     sr: f32,
     k: f32,
     st: &mut [f32; SVF_BLOCK_LEN],
+    sm: &mut [f32; SVF_SMOOTH_LEN],
 ) -> (f32, f32, f32) {
     let f_clk = ratio * fc;
     if f_clk >= sr {
@@ -489,21 +498,36 @@ pub(crate) fn svf_clocked_tick(
         st[SVF_HOLD_LP] = lp;
         st[SVF_HOLD_BP] = bp;
         st[SVF_HOLD_HP] = hp;
+        // Keep the smoothers primed so the branch crossover is seamless.
+        sm[0] = x;
+        sm[1] = lp;
+        sm[2] = bp;
         return (lp, bp, hp);
     }
     let f_clk = f_clk.max(FCLK_FLOOR_HZ);
+    // Analog physics the raw ZOH lacks (both corners track the clock, so
+    // these are transparent at normal cutoffs and only engage as f_clk
+    // drops into the audible band):
+    // - input band-limiting before the sampled core: the chip's sampling
+    //   network + input-stage bandwidth keep most of the program from
+    //   folding down as inharmonic aliasing;
+    // - reconstruction after the hold: op-amp bandwidth/strays roll the
+    //   staircase images off instead of leaving a perfect ZOH comb.
+    let aa_coeff = one_pole_coef(0.45 * f_clk, sr);
+    sm[0] += aa_coeff * (x - sm[0]);
     st[SVF_CLK_PHASE] += f_clk / sr;
     if st[SVF_CLK_PHASE] >= 1.0 {
         st[SVF_CLK_PHASE] -= 1.0;
         let g = (std::f32::consts::PI / ratio.max(2.1)).tan();
-        let (lp, bp, _) = svf_core(x, g, k, st);
+        let (lp, bp, _) = svf_core(sm[0], g, k, st);
         st[SVF_HOLD_LP] = lp;
         st[SVF_HOLD_BP] = bp;
     }
-    let lp = st[SVF_HOLD_LP];
-    let bp = st[SVF_HOLD_BP];
+    let r_coeff = one_pole_coef(0.5 * f_clk, sr);
+    sm[1] += r_coeff * (st[SVF_HOLD_LP] - sm[1]);
+    sm[2] += r_coeff * (st[SVF_HOLD_BP] - sm[2]);
     // Continuous input feedthrough: live x against the sampled lp/bp.
-    (lp, bp, x - k * bp - lp)
+    (sm[1], sm[2], x - k * sm[2] - sm[1])
 }
 
 /// Mode morph weights (§3): 0 = LP, 0.5 = BP, 1 = HP.
@@ -690,6 +714,7 @@ unsafe fn drive_channel(
 unsafe fn filter_channel(
     s: *mut f32,
     base: usize,
+    smooth_base: usize,
     x: f32,
     fc: f32,
     ratio: f32,
@@ -700,7 +725,8 @@ unsafe fn filter_channel(
     bleed_level: f32,
 ) -> f32 {
     let st = &mut *(s.add(base) as *mut [f32; SVF_BLOCK_LEN]);
-    let (lp, bp, hp) = svf_clocked_tick(x, fc, ratio, sr, k, st);
+    let sm = &mut *(s.add(smooth_base) as *mut [f32; SVF_SMOOTH_LEN]);
+    let (lp, bp, hp) = svf_clocked_tick(x, fc, ratio, sr, k, st, sm);
     let mut out = weights.0 * lp + weights.1 * bp + weights.2 * hp - correction * bp;
     // Clock bleed: square-ish tone at f_clk (its ZOH aliases come free),
     // keyed to Crunch and rising as the clock drops into the audible band.
@@ -1200,10 +1226,30 @@ unsafe extern "C" fn filterbank_process(
         if stereo_split {
             // Forced parallel: wet L = filter 1 only, wet R = filter 2 only.
             let o1 = filter_channel(
-                s, STATE_F1L, xin_l, f1_hz, ratio, sr, k1, w1, correction, bleed1,
+                s,
+                STATE_F1L,
+                STATE_F1L_SMOOTH,
+                xin_l,
+                f1_hz,
+                ratio,
+                sr,
+                k1,
+                w1,
+                correction,
+                bleed1,
             );
             let o2 = filter_channel(
-                s, STATE_F2R, xin_r, f2_hz, ratio, sr, k2, w2, correction, bleed2,
+                s,
+                STATE_F2R,
+                STATE_F2R_SMOOTH,
+                xin_r,
+                f2_hz,
+                ratio,
+                sr,
+                k2,
+                w2,
+                correction,
+                bleed2,
             );
             wet_l = o1;
             wet_r = o2;
@@ -1212,20 +1258,60 @@ unsafe extern "C" fn filterbank_process(
         } else {
             let sp = (sm_ser_par + lag_ser_par).clamp(0.0, 1.0); // 1 = parallel
             let o1_l = filter_channel(
-                s, STATE_F1L, xin_l, f1_hz, ratio, sr, k1, w1, correction, bleed1,
+                s,
+                STATE_F1L,
+                STATE_F1L_SMOOTH,
+                xin_l,
+                f1_hz,
+                ratio,
+                sr,
+                k1,
+                w1,
+                correction,
+                bleed1,
             );
             let o1_r = filter_channel(
-                s, STATE_F1R, xin_r, f1_hz, ratio, sr, k1, w1, correction, bleed1,
+                s,
+                STATE_F1R,
+                STATE_F1R_SMOOTH,
+                xin_r,
+                f1_hz,
+                ratio,
+                sr,
+                k1,
+                w1,
+                correction,
+                bleed1,
             );
             // F2 runs once per channel, fed the crossfaded blend of input
             // (parallel) and F1 output (serial).
             let f2_in_l = sp * xin_l + (1.0 - sp) * o1_l;
             let f2_in_r = sp * xin_r + (1.0 - sp) * o1_r;
             let o2_l = filter_channel(
-                s, STATE_F2L, f2_in_l, f2_hz, ratio, sr, k2, w2, correction, bleed2,
+                s,
+                STATE_F2L,
+                STATE_F2L_SMOOTH,
+                f2_in_l,
+                f2_hz,
+                ratio,
+                sr,
+                k2,
+                w2,
+                correction,
+                bleed2,
             );
             let o2_r = filter_channel(
-                s, STATE_F2R, f2_in_r, f2_hz, ratio, sr, k2, w2, correction, bleed2,
+                s,
+                STATE_F2R,
+                STATE_F2R_SMOOTH,
+                f2_in_r,
+                f2_hz,
+                ratio,
+                sr,
+                k2,
+                w2,
+                correction,
+                bleed2,
             );
             wet_l = (1.0 - sp) * o2_l + sp * 0.5 * (o1_l + o2_l);
             wet_r = (1.0 - sp) * o2_r + sp * 0.5 * (o1_r + o2_r);
@@ -1432,12 +1518,13 @@ mod tests {
         let k = 1.0;
         let input = sine(300.0, 0.05, 4096);
         let mut st = [0.0_f32; SVF_BLOCK_LEN];
+        let mut sm = [0.0_f32; SVF_SMOOTH_LEN];
         // filter.rs-style per-sample reference (no bp limiter — the small
         // input keeps the tanh in its linear region).
         let g = (std::f32::consts::PI * fc / SR).tan();
         let (mut ic1, mut ic2) = (0.0_f32, 0.0_f32);
         for &x in &input {
-            let (lp, _, _) = svf_clocked_tick(x, fc, ratio, SR, k, &mut st);
+            let (lp, _, _) = svf_clocked_tick(x, fc, ratio, SR, k, &mut st, &mut sm);
             let a1 = 1.0 / (1.0 + g * (g + k));
             let a2 = g * a1;
             let a3 = g * a2;
@@ -1453,23 +1540,39 @@ mod tests {
         }
     }
 
-    // ── 2. low cutoff → ZOH plateaus (consecutive equal samples) ──
+    // ── 2. low cutoff → clock character present but analog-smoothed: the
+    // clocked branch departs measurably from a clean per-sample SVF (the
+    // sampled-core grit survives), yet the raw ZOH staircase is gone (the
+    // tracking reconstruction filter smooths the hold) ──
     #[test]
-    fn low_cutoff_shows_zoh_plateaus() {
+    fn low_cutoff_clock_departs_from_clean_svf_without_raw_plateaus() {
         let fc = 30.0;
-        let ratio = 100.0; // f_clk = 3 kHz → ~16-sample holds at 48 kHz
+        let ratio = 100.0; // f_clk = 3 kHz at 48 kHz host rate
         let mut st = [0.0_f32; SVF_BLOCK_LEN];
+        let mut sm = [0.0_f32; SVF_SMOOTH_LEN];
+        let mut clean = [0.0_f32; SVF_BLOCK_LEN];
         let input = sine(500.0, 0.5, 4096);
-        let mut outputs = Vec::with_capacity(input.len());
+        let g_clean = (std::f32::consts::PI * fc / SR).tan();
+        let mut clocked_out = Vec::with_capacity(input.len());
+        let mut diff = 0.0_f64;
+        let mut norm = 0.0_f64;
         for &x in &input {
-            let (lp, _, _) = svf_clocked_tick(x, fc, ratio, SR, 1.0, &mut st);
-            outputs.push(lp);
+            let (lp, _, _) = svf_clocked_tick(x, fc, ratio, SR, 1.0, &mut st, &mut sm);
+            let (lp_clean, _, _) = svf_core(x, g_clean, 1.0, &mut clean);
+            clocked_out.push(lp);
+            diff += f64::from((lp - lp_clean) * (lp - lp_clean));
+            norm += f64::from(lp_clean * lp_clean).max(1.0e-12);
+            let _ = lp_clean;
         }
-        let held = outputs.windows(2).filter(|w| w[0] == w[1]).count();
         assert!(
-            held > outputs.len() / 2,
-            "expected ZOH plateaus, only {held}/{} held pairs",
-            outputs.len()
+            diff > norm * 0.01,
+            "clocked branch should keep audible clock character (diff {diff} vs norm {norm})"
+        );
+        let held = clocked_out.windows(2).filter(|w| w[0] == w[1]).count();
+        assert!(
+            held < clocked_out.len() / 20,
+            "raw ZOH plateaus should be smoothed by reconstruction ({held}/{})",
+            clocked_out.len()
         );
     }
 
@@ -1482,10 +1585,11 @@ mod tests {
         let fc = 20.0;
         let ratio = 100.0; // f_clk = 2 kHz
         let mut st = [0.0_f32; SVF_BLOCK_LEN];
+        let mut sm = [0.0_f32; SVF_SMOOTH_LEN];
         let input = sine(1000.0, 0.5, 4096);
         let mut hp_out = Vec::with_capacity(input.len());
         for &x in &input {
-            let (_, _, hp) = svf_clocked_tick(x, fc, ratio, SR, 1.9, &mut st);
+            let (_, _, hp) = svf_clocked_tick(x, fc, ratio, SR, 1.9, &mut st, &mut sm);
             hp_out.push(hp);
         }
         // No ZOH plateaus on hp...
@@ -1511,13 +1615,14 @@ mod tests {
             let k = res_to_k(105.0); // = -0.1
             let ratio = 100.0; // per-sample branch at these cutoffs
             let mut st = [0.0_f32; SVF_BLOCK_LEN];
+            let mut sm = [0.0_f32; SVF_SMOOTH_LEN];
             let total = (2.0 * SR) as usize;
             let mut bp_tail = Vec::with_capacity(total / 2);
             for i in 0..total {
                 // Short burst rather than a 1-sample impulse: in the clocked
                 // branch a single sample can fall between clock updates.
                 let x = if i < 16 { 1.0 } else { 0.0 };
-                let (_, bp, _) = svf_clocked_tick(x, fc, ratio, SR, k, &mut st);
+                let (_, bp, _) = svf_clocked_tick(x, fc, ratio, SR, k, &mut st, &mut sm);
                 if i >= total / 2 {
                     bp_tail.push(bp);
                 }
