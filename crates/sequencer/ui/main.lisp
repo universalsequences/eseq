@@ -780,11 +780,14 @@
     (do
       (set! seq-main-view view)
       (if (= seq-layout-mode :lower-panel)
-        (do
-          (if (not (= old-buffer (seq-visible-main-panel-buffer)))
+        ;; Reapplying the layout when nothing changed clobbers incremental
+        ;; relayout dirty tracking (e.g. expand/collapse row diffs), so only
+        ;; refresh when the visible main panel actually switched buffers.
+        (if (not (= old-buffer (seq-visible-main-panel-buffer)))
+          (do
             (set-window-buffer-for old-buffer (seq-visible-main-panel-buffer))
-            nil)
-          (seq-refresh-current-layout))
+            (seq-refresh-current-layout))
+          nil)
         ;; An explicit view switch leaves the instrument patcher workspace and
         ;; returns to the normal sequencer workspace.
         (seq-apply-fx-layout)))))

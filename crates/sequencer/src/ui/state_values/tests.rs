@@ -18240,9 +18240,9 @@
         );
         assert_eq!(
             editor.active_leaf().selected_tab,
-            // Static tabs are Seq (0) and Arr (1); the registered fake tab
-            // appends after them.
-            Some(2),
+            // Seq (0) is the only static tab now that the arrangement lives in
+            // a dedicated main view; the registered fake tab appends after it.
+            Some(1),
             "the visible selected tab should remain the clicked step tab"
         );
     }
@@ -18365,18 +18365,12 @@
         editor.refresh_runtime_side_effects();
 
         let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
-        let transport = frame
+        let transport_tile = frame
             .tiles
             .iter()
             .find(|tile| tile.frame.buffer_name == "*transport*")
-            .expect("transport tile")
-            .rect;
-        editor
-            .runtime_mut()
-            .eval_str(r#"(set-window-buffer "*transport*")"#)
-            .expect("switch to transport");
-        editor.refresh_runtime_side_effects();
-        let layout = editor.widget_layout().expect("transport layout");
+            .expect("transport tile");
+        let transport = transport_tile.rect;
         fn find_picker(
             node: &eseqlisp::layout::LayoutNode,
         ) -> Option<eseqlisp::layout::LayoutNode> {
@@ -18385,6 +18379,15 @@
             }
             node.children.iter().find_map(find_picker)
         }
+        // Read the picker rect from the transport tile's own rendered layout so
+        // the click coordinates stay tile-local; the transport bar now fills
+        // its viewport, so a layout built for another tile's size no longer
+        // lines up with the top transport bar.
+        let layout = transport_tile
+            .frame
+            .widget_layout
+            .clone()
+            .expect("transport tile layout");
         let picker = find_picker(layout.as_ref()).expect("bpm picker");
         let click_col = transport.col + picker.rect.col + picker.rect.width * 0.5;
         let click_row = transport.row + picker.rect.row + picker.rect.height * 0.5;

@@ -1274,15 +1274,19 @@ fn hot_reload_preserves_existing_defstate_values() {
             .as_deref(),
         Some("changed")
     );
+    // Direct programmatic reloads bypass the interactive authoring path, so no
+    // AuthoringTransactionBegin/End pair should be emitted; the pair is the
+    // responsibility of `evaluate_buffer_transactional` and is covered by
+    // `eval_current_buffer_native_uses_transactional_reload`.
     let commands = editor.drain_host_commands();
-    assert!(matches!(
-        commands.get(commands.len().saturating_sub(2)),
-        Some(crate::host::HostCommand::AuthoringTransactionBegin { .. })
-    ));
-    assert!(matches!(
-        commands.last(),
-        Some(crate::host::HostCommand::AuthoringTransactionEnd { success: true, .. })
-    ));
+    assert!(
+        commands.iter().all(|command| !matches!(
+            command,
+            crate::host::HostCommand::AuthoringTransactionBegin { .. }
+                | crate::host::HostCommand::AuthoringTransactionEnd { .. }
+        )),
+        "programmatic hot reload should not emit authoring transaction markers"
+    );
 }
 
 #[test]

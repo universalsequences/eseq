@@ -56,12 +56,12 @@ failing test's subject overlaps your diff at all; if it does not, verify the
 failure pre-exists by running that one test in a temporary `git worktree` of
 HEAD (see "Working tree safety"), then report it as pre-existing and move on.
 
-Known pre-existing failures (July 2026, do not re-investigate; unrelated to
-effects/DSP work):
-
-- `tui::effects::tests::bus_effect_wiring_resolves_graph_nodes_by_bus_id_after_reordering`
-- `tui::graph::tests::rack_rebuild_defers_old_sampler_nodes_until_forced_reap`
-- `tui::graph::tests::replacing_expanded_rack_instrument_preserves_slot_fx_and_defers_old_engine`
+Known pre-existing failures: none. As of 2026-07-28 the full suite
+(`cargo nextest run -p sequencer -p eseqlisp`) is green: 3310 passed,
+18 skipped (`#[ignore]`d benchmarks/captures). If a broader run fails, treat it
+as a real signal — verify against a clean-HEAD worktree as described above, and
+if a failure genuinely pre-exists your change, update this list with the test
+name and evidence rather than leaving it undocumented.
 
 ## Working tree safety
 

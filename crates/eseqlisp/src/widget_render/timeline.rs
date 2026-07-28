@@ -4390,19 +4390,22 @@ mod tests {
             ),
         ]);
 
+        // 128 cells over 16 units = 8 cells per unit: wide enough that the
+        // readability promotion in `grid_spec` resolves the shared grid at
+        // the 1.0 step this scenario is written against.
         let view = TimelineView::from_props(
             &props,
             Rect {
                 row: 0.0,
                 col: 0.0,
-                width: 32.0,
+                width: 128.0,
                 height: 8.0,
             },
         );
 
-        let gesture = view.begin_gesture(8.2, 2.0).expect("gesture");
+        let gesture = view.begin_gesture(35.2, 2.0).expect("gesture");
         let action = view
-            .handle_pointer_drag(8.95, 2.0, Some(&gesture))
+            .handle_pointer_drag(38.2, 2.0, Some(&gesture))
             .expect("fractional move action");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -4414,7 +4417,7 @@ mod tests {
         assert!((start - 4.625).abs() < 0.0001, "start was {start}");
 
         let action = view
-            .handle_pointer_drag(9.7, 2.0, Some(&gesture))
+            .handle_pointer_drag(41.6, 2.0, Some(&gesture))
             .expect("grid move action");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -4425,7 +4428,7 @@ mod tests {
         );
 
         let action = view
-            .handle_pointer_drag(8.95, 2.0, Some(&gesture))
+            .handle_pointer_drag(38.2, 2.0, Some(&gesture))
             .expect("latched grid move action");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -4466,19 +4469,20 @@ mod tests {
             ),
         ]);
 
+        // 8 cells per unit so the promoted shared grid stays at step 1.0.
         let view = TimelineView::from_props(
             &props,
             Rect {
                 row: 0.0,
                 col: 0.0,
-                width: 32.0,
+                width: 128.0,
                 height: 8.0,
             },
         );
 
-        let gesture = view.begin_gesture(8.2, 2.0).expect("gesture");
+        let gesture = view.begin_gesture(32.8, 2.0).expect("gesture");
         let action = view
-            .handle_pointer_drag(7.2, 2.0, Some(&gesture))
+            .handle_pointer_drag(28.8, 2.0, Some(&gesture))
             .expect("backwards fractional move action");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -4490,7 +4494,7 @@ mod tests {
         assert!((start - 3.5).abs() < 0.0001, "start was {start}");
 
         let action = view
-            .handle_pointer_drag(6.6, 2.0, Some(&gesture))
+            .handle_pointer_drag(26.4, 2.0, Some(&gesture))
             .expect("backwards snapped move action");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -4501,7 +4505,7 @@ mod tests {
         );
 
         let action = view
-            .handle_pointer_drag(7.2, 2.0, Some(&gesture))
+            .handle_pointer_drag(28.8, 2.0, Some(&gesture))
             .expect("latched backwards snapped move action");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -4542,19 +4546,20 @@ mod tests {
             ),
         ]);
 
+        // 8 cells per unit so the promoted shared grid stays at step 1.0.
         let view = TimelineView::from_props(
             &props,
             Rect {
                 row: 0.0,
                 col: 0.0,
-                width: 32.0,
+                width: 128.0,
                 height: 8.0,
             },
         );
 
-        let gesture = view.begin_gesture(8.6, 2.0).expect("gesture");
+        let gesture = view.begin_gesture(34.4, 2.0).expect("gesture");
         let action = view
-            .handle_pointer_drag(8.3, 2.0, Some(&gesture))
+            .handle_pointer_drag(33.2, 2.0, Some(&gesture))
             .expect("fractional move action");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -4566,7 +4571,7 @@ mod tests {
         assert!((start - 4.1).abs() < 0.0001, "start was {start}");
 
         let action = view
-            .handle_pointer_drag(7.9, 2.0, Some(&gesture))
+            .handle_pointer_drag(31.6, 2.0, Some(&gesture))
             .expect("current-grid snapped move action");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -4577,7 +4582,7 @@ mod tests {
         );
 
         let action = view
-            .handle_pointer_drag(7.1, 2.0, Some(&gesture))
+            .handle_pointer_drag(28.4, 2.0, Some(&gesture))
             .expect("current-grid sticky move action");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -4588,7 +4593,7 @@ mod tests {
         );
 
         let action = view
-            .handle_pointer_drag(6.5, 2.0, Some(&gesture))
+            .handle_pointer_drag(26.0, 2.0, Some(&gesture))
             .expect("previous-grid snapped move action");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -5906,19 +5911,20 @@ mod tests {
             ),
         ]);
 
+        // 8 cells per unit so the promoted shared grid stays at step 1.0.
         let view = TimelineView::from_props(
             &props,
             Rect {
                 row: 0.0,
                 col: 0.0,
-                width: 32.0,
+                width: 128.0,
                 height: 8.0,
             },
         );
 
-        let gesture = view.begin_gesture(10.0, 2.0).expect("gesture");
+        let gesture = view.begin_gesture(40.0, 2.0).expect("gesture");
         let action = view
-            .handle_pointer_drag(10.8, 2.0, Some(&gesture))
+            .handle_pointer_drag(43.2, 2.0, Some(&gesture))
             .expect("fractional resize action");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -5929,7 +5935,7 @@ mod tests {
         assert!((time - 5.4).abs() < 0.0001, "time was {time}");
 
         let action = view
-            .handle_pointer_drag(12.2, 2.0, Some(&gesture))
+            .handle_pointer_drag(48.8, 2.0, Some(&gesture))
             .expect("snapped resize action");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -5940,7 +5946,7 @@ mod tests {
         );
 
         let action = view
-            .handle_pointer_drag(10.8, 2.0, Some(&gesture))
+            .handle_pointer_drag(43.2, 2.0, Some(&gesture))
             .expect("latched snapped resize action");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -5981,19 +5987,20 @@ mod tests {
             ),
         ]);
 
+        // 8 cells per unit so the promoted shared grid stays at step 1.0.
         let view = TimelineView::from_props(
             &props,
             Rect {
                 row: 0.0,
                 col: 0.0,
-                width: 32.0,
+                width: 128.0,
                 height: 8.0,
             },
         );
 
-        let gesture = view.begin_gesture(10.0, 2.0).expect("gesture");
+        let gesture = view.begin_gesture(40.0, 2.0).expect("gesture");
         let action = view
-            .handle_pointer_drag(9.7, 2.0, Some(&gesture))
+            .handle_pointer_drag(38.8, 2.0, Some(&gesture))
             .expect("fractional resize action");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -6004,7 +6011,7 @@ mod tests {
         assert!((time - 5.1).abs() < 0.0001, "time was {time}");
 
         let action = view
-            .handle_pointer_drag(9.4, 2.0, Some(&gesture))
+            .handle_pointer_drag(37.6, 2.0, Some(&gesture))
             .expect("current-grid snapped resize action");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -6015,7 +6022,7 @@ mod tests {
         );
 
         let action = view
-            .handle_pointer_drag(8.6, 2.0, Some(&gesture))
+            .handle_pointer_drag(34.4, 2.0, Some(&gesture))
             .expect("current-grid sticky resize action");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -6026,7 +6033,7 @@ mod tests {
         );
 
         let action = view
-            .handle_pointer_drag(7.8, 2.0, Some(&gesture))
+            .handle_pointer_drag(31.2, 2.0, Some(&gesture))
             .expect("previous-grid snapped resize action");
         let Value::Map(map) = action else {
             panic!("expected action map");
