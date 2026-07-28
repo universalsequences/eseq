@@ -443,7 +443,16 @@ fn svf_core(x: f32, g: f32, k: f32, st: &mut [f32; SVF_BLOCK_LEN]) -> (f32, f32,
 /// meets the host rate and this degenerates to a conventional per-sample SVF
 /// with `g = tan(π·fc/sr)` (fc clamped below Nyquist) — identical math,
 /// no fidelity or CPU cliff at high cutoffs. Below that, `f_clk` is floored
-/// at 200 Hz so the filter never stalls. Returns held (lp, bp, hp).
+/// at 200 Hz so the filter never stalls.
+///
+/// Returns (lp, bp, hp) where lp/bp are the ZOH-held integrator outputs —
+/// genuinely sampled nodes on the LTC1060 — but **hp is recomputed every
+/// host sample from the live input**: on the real chip the HP node is a
+/// continuous-time op-amp sum (input feeds through resistors, only the
+/// integrator contributions are sampled). Holding the input too would
+/// resample the entire dry signal at f_clk — HP mode at 20 Hz would
+/// bitcrush the whole program to ~2 kHz, which is neither the hardware nor
+/// musical.
 #[inline]
 pub(crate) fn svf_clocked_tick(
     x: f32,
@@ -467,12 +476,14 @@ pub(crate) fn svf_clocked_tick(
     if st[SVF_CLK_PHASE] >= 1.0 {
         st[SVF_CLK_PHASE] -= 1.0;
         let g = (std::f32::consts::PI / ratio.max(2.1)).tan();
-        let (lp, bp, hp) = svf_core(x, g, k, st);
+        let (lp, bp, _) = svf_core(x, g, k, st);
         st[SVF_HOLD_LP] = lp;
         st[SVF_HOLD_BP] = bp;
-        st[SVF_HOLD_HP] = hp;
     }
-    (st[SVF_HOLD_LP], st[SVF_HOLD_BP], st[SVF_HOLD_HP])
+    let lp = st[SVF_HOLD_LP];
+    let bp = st[SVF_HOLD_BP];
+    // Continuous input feedthrough: live x against the sampled lp/bp.
+    (lp, bp, x - k * bp - lp)
 }
 
 /// Mode morph weights (§3): 0 = LP, 0.5 = BP, 1 = HP.
@@ -1372,6 +1383,37 @@ mod tests {
             held > outputs.len() / 2,
             "expected ZOH plateaus, only {held}/{} held pairs",
             outputs.len()
+        );
+    }
+
+    // ── 2b. HP passes the live input at low cutoff (continuous feedthrough):
+    // the LTC1060's HP node sums the input in continuous time, so HP mode at
+    // 20 Hz must NOT resample the program to f_clk (the "whole break through
+    // a 2 kHz bitcrusher" regression) ──
+    #[test]
+    fn hp_at_low_cutoff_passes_live_input_unheld() {
+        let fc = 20.0;
+        let ratio = 100.0; // f_clk = 2 kHz
+        let mut st = [0.0_f32; SVF_BLOCK_LEN];
+        let input = sine(1000.0, 0.5, 4096);
+        let mut hp_out = Vec::with_capacity(input.len());
+        for &x in &input {
+            let (_, _, hp) = svf_clocked_tick(x, fc, ratio, SR, 1.9, &mut st);
+            hp_out.push(hp);
+        }
+        // No ZOH plateaus on hp...
+        let held = hp_out.windows(2).filter(|w| w[0] == w[1]).count();
+        assert!(
+            held < hp_out.len() / 20,
+            "hp output shows ZOH plateaus ({held}/{})",
+            hp_out.len()
+        );
+        // ...and the 1 kHz tone passes essentially unattenuated.
+        let mag_in = tone_magnitude(&input[2048..], 1000.0);
+        let mag_out = tone_magnitude(&hp_out[2048..], 1000.0);
+        assert!(
+            mag_out > mag_in * 0.7,
+            "hp at 20 Hz should pass 1 kHz nearly unity: {mag_out} vs {mag_in}"
         );
     }
 

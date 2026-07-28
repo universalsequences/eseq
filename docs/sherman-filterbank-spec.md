@@ -128,6 +128,15 @@ between updates:
   At Crunch 0 the clock model is still active but polite (100:1, no bleed) —
   fully "clean" is not on the menu, this is a Sherman.
 
+- **Continuous HP feedthrough** (fidelity fix from break-testing): only the
+  lp/bp integrator outputs are ZOH-held — the hp output is recomputed every
+  host sample as `x − k·bp_held − lp_held` from the **live** input. On the
+  LTC1060 the HP node is a continuous-time op-amp sum (input arrives through
+  resistors; only integrator contributions are sampled). Holding the input
+  too resamples the whole program at f_clk — HP mode at 20 Hz turned entire
+  breaks into a 2 kHz bitcrush. Regression test
+  `hp_at_low_cutoff_passes_live_input_unheld`.
+
 No oversampling around the filters — the aliasing is the instrument. The
 input-drive nonlinearity keeps its 2× (§2) so the *drive* stays creamy while
 the *filters* crunch.
