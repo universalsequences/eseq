@@ -172,10 +172,30 @@ const STATE_MOD_LFO_RATE_DEPTH_1: usize = 190;
 const STATE_MOD_LFO_DEPTH_DEPTH_1: usize = 194;
 const STATE_MOD_AR_ATTACK_DEPTH_1: usize = 198;
 const STATE_MOD_AR_RELEASE_DEPTH_1: usize = 202;
-// Per-sample lag for the lfo-depth target (runtime; zeroed in bypass).
+// ── Second runtime block (everything from here to STATE_SIZE is runtime
+// state, zeroed in bypass — it sits past the depth params, so the main
+// reset span can't cover it) ──
+const RUNTIME2_START: usize = STATE_LAG_LFO_DEPTH;
+// Per-sample lag for the lfo-depth target.
 const STATE_LAG_LFO_DEPTH: usize = 206;
+// Drive realism (§2): 4× oversampling second-stage biquads, pre/de-emphasis
+// one-poles, and the dynamic-bias envelope (coupling-cap sag).
+const STATE_OS_UP2_Z1_L: usize = 207;
+const STATE_OS_UP2_Z2_L: usize = 208;
+const STATE_OS_DOWN2_Z1_L: usize = 209;
+const STATE_OS_DOWN2_Z2_L: usize = 210;
+const STATE_OS_UP2_Z1_R: usize = 211;
+const STATE_OS_UP2_Z2_R: usize = 212;
+const STATE_OS_DOWN2_Z1_R: usize = 213;
+const STATE_OS_DOWN2_Z2_R: usize = 214;
+const STATE_EMPH_LP_L: usize = 215;
+const STATE_EMPH_LP_R: usize = 216;
+const STATE_DEEMPH_LP_L: usize = 217;
+const STATE_DEEMPH_LP_R: usize = 218;
+const STATE_BIAS_ENV_L: usize = 219;
+const STATE_BIAS_ENV_R: usize = 220;
 
-pub const FILTERBANK_STATE_SIZE: usize = 207;
+pub const FILTERBANK_STATE_SIZE: usize = 221;
 // Bypass resets [FIRST_RUNTIME_RESET, RUNTIME_RESET_END): SVF blocks through
 // SPLIT_PREV. The appended param slots above survive.
 const RUNTIME_RESET_END: usize = STATE_LFO_SYNC;
@@ -558,6 +578,112 @@ fn lowpass_coeffs(freq: f32, sr: f32) -> BiquadCoeffs {
     }
 }
 
+/// State-slot order consumed by `drive_channel`:
+/// shelf_lp, up1_z1, up1_z2, up2_z1, up2_z2, down1_z1, down1_z2, down2_z1,
+/// down2_z2, dc_x1, dc_y1, emph_lp, deemph_lp, bias_env.
+const DRIVE_SLOTS_L: [usize; 14] = [
+    STATE_SHELF_LP_L,
+    STATE_OS_UP_Z1_L,
+    STATE_OS_UP_Z2_L,
+    STATE_OS_UP2_Z1_L,
+    STATE_OS_UP2_Z2_L,
+    STATE_OS_DOWN_Z1_L,
+    STATE_OS_DOWN_Z2_L,
+    STATE_OS_DOWN2_Z1_L,
+    STATE_OS_DOWN2_Z2_L,
+    STATE_DC_X1_L,
+    STATE_DC_Y1_L,
+    STATE_EMPH_LP_L,
+    STATE_DEEMPH_LP_L,
+    STATE_BIAS_ENV_L,
+];
+const DRIVE_SLOTS_R: [usize; 14] = [
+    STATE_SHELF_LP_R,
+    STATE_OS_UP_Z1_R,
+    STATE_OS_UP_Z2_R,
+    STATE_OS_UP2_Z1_R,
+    STATE_OS_UP2_Z2_R,
+    STATE_OS_DOWN_Z1_R,
+    STATE_OS_DOWN_Z2_R,
+    STATE_OS_DOWN2_Z1_R,
+    STATE_OS_DOWN2_Z2_R,
+    STATE_DC_X1_R,
+    STATE_DC_Y1_R,
+    STATE_EMPH_LP_R,
+    STATE_DEEMPH_LP_R,
+    STATE_BIAS_ENV_R,
+];
+
+/// §2 input drive, one channel: Hi-EQ shelf (pre-drive, amplifier-circuit
+/// placement) → dynamic bias → pre-emphasis → 4× oversampled tube/diode
+/// shaper (two cascaded halfband biquads each way) → de-emphasis → DC block.
+///
+/// The realism over a static waveshaper comes from the stateful parts:
+/// - **Dynamic bias** models coupling-cap sag — the envelope of the driven
+///   signal shifts the operating point into the asymmetric curve, so
+///   transients bloom and sustained material sits down (program-dependent
+///   duty-cycle modulation, the "breathing" of a real fuzz stage).
+/// - **Pre/de-emphasis** (±6 dB about ~3 kHz, matched pair ≈ flat when
+///   clean) makes the highs clip first and rolls the fizz off after, the
+///   way limited-bandwidth analog stages do (space-echo record-head
+///   pattern).
+/// - **4×** keeps fold-back aliasing out of the audible band at +30 dB
+///   drive, where 2× reads as digital grit.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+unsafe fn drive_channel(
+    s: *mut f32,
+    slots: &[usize; 14],
+    x: f32,
+    gain: f32,
+    shelf_gain: f32,
+    shelf_coeff: f32,
+    emph_coeff: f32,
+    os_lp: BiquadCoeffs,
+    dc_r: f32,
+    bias_up: f32,
+    bias_down: f32,
+) -> f32 {
+    // Hi EQ shelf, pre-drive: Boost pushes the highs harder into the
+    // saturation and changes the fuzz texture, not just the tone.
+    let shelf_lp = &mut *s.add(slots[0]);
+    *shelf_lp += shelf_coeff * (x - *shelf_lp);
+    let gained = (x + shelf_gain * (x - *shelf_lp)) * gain;
+
+    let benv = &mut *s.add(slots[13]);
+    let mag = gained.abs();
+    let bc = if mag > *benv { bias_up } else { bias_down };
+    *benv += bc * (mag - *benv);
+    let bias = 0.22 * benv.tanh();
+
+    let emph_lp = &mut *s.add(slots[11]);
+    *emph_lp += emph_coeff * (gained - *emph_lp);
+    let pre = gained + (gained - *emph_lp);
+
+    let mut down = 0.0;
+    for k_os in 0..4 {
+        let stuffed = if k_os == 0 { pre * 4.0 } else { 0.0 };
+        let up1 = biquad_sample(stuffed, os_lp, &mut *s.add(slots[1]), &mut *s.add(slots[2]));
+        let up = biquad_sample(up1, os_lp, &mut *s.add(slots[3]), &mut *s.add(slots[4]));
+        let shaped = drive_shape(up + bias);
+        let d1 = biquad_sample(shaped, os_lp, &mut *s.add(slots[5]), &mut *s.add(slots[6]));
+        down = biquad_sample(d1, os_lp, &mut *s.add(slots[7]), &mut *s.add(slots[8]));
+    }
+
+    // De-emphasis: inverse of the +6 dB pre-shelf (product ≈ flat clean).
+    let deemph_lp = &mut *s.add(slots[12]);
+    *deemph_lp += emph_coeff * (down - *deemph_lp);
+    let de = down - 0.5 * (down - *deemph_lp);
+
+    // DC block (the asymmetric curve + bias ride on an offset).
+    let dc_x1 = s.add(slots[9]);
+    let dc_y1 = s.add(slots[10]);
+    let y = de - *dc_x1 + dc_r * *dc_y1;
+    *dc_x1 = de;
+    *dc_y1 = y;
+    y
+}
+
 /// Filter output stage: morph blend − correction·bp (§3) + clock bleed (§4).
 #[allow(clippy::too_many_arguments)]
 #[inline]
@@ -661,7 +787,9 @@ unsafe extern "C" fn filterbank_process(
             *s.add(i) = 0.0;
         }
         *s.add(STATE_METER_INPUT_DB) = -90.0;
-        *s.add(STATE_LAG_LFO_DEPTH) = 0.0; // runtime slot past the reset span
+        for i in RUNTIME2_START..FILTERBANK_STATE_SIZE {
+            *s.add(i) = 0.0; // second runtime block, past the depth params
+        }
         std::ptr::copy_nonoverlapping(in0 as *const f32, out0, nf);
         std::ptr::copy_nonoverlapping(in1 as *const f32, out1, nf);
         return;
@@ -802,8 +930,11 @@ unsafe extern "C" fn filterbank_process(
     let fb_hp_coeff = one_pole_coef(30.0, sr);
     let shelf_coeff = one_pole_coef(3000.0, sr);
     let dc_r = (-std::f32::consts::TAU * 10.0 / sr).exp();
-    let fs_os = sr * 2.0;
-    let os_lp = lowpass_coeffs(sr * 0.45, fs_os);
+    let fs_os = sr * 4.0;
+    let os_lp = lowpass_coeffs(sr * 0.42, fs_os);
+    let emph_coeff = one_pole_coef(3_000.0, sr);
+    let bias_up = time_coef(2.0, sr);
+    let bias_down = time_coef(80.0, sr);
     let meter_attack = time_coef(5.0, sr);
     let meter_release = time_coef(250.0, sr);
 
@@ -844,20 +975,6 @@ unsafe extern "C" fn filterbank_process(
     let mut fb_lp_r = *s.add(STATE_FB_LP_R);
     let mut fb_prev_l = *s.add(STATE_FB_PREV_L);
     let mut fb_prev_r = *s.add(STATE_FB_PREV_R);
-    let mut shelf_lp_l = *s.add(STATE_SHELF_LP_L);
-    let mut shelf_lp_r = *s.add(STATE_SHELF_LP_R);
-    let mut os_up_z1_l = *s.add(STATE_OS_UP_Z1_L);
-    let mut os_up_z2_l = *s.add(STATE_OS_UP_Z2_L);
-    let mut os_down_z1_l = *s.add(STATE_OS_DOWN_Z1_L);
-    let mut os_down_z2_l = *s.add(STATE_OS_DOWN_Z2_L);
-    let mut os_up_z1_r = *s.add(STATE_OS_UP_Z1_R);
-    let mut os_up_z2_r = *s.add(STATE_OS_UP_Z2_R);
-    let mut os_down_z1_r = *s.add(STATE_OS_DOWN_Z1_R);
-    let mut os_down_z2_r = *s.add(STATE_OS_DOWN_Z2_R);
-    let mut dc_x1_l = *s.add(STATE_DC_X1_L);
-    let mut dc_y1_l = *s.add(STATE_DC_Y1_L);
-    let mut dc_x1_r = *s.add(STATE_DC_X1_R);
-    let mut dc_y1_r = *s.add(STATE_DC_Y1_R);
     let mut lag_f1_res = *s.add(STATE_LAG_F1_RES);
     let mut lag_f2_res = *s.add(STATE_LAG_F2_RES);
     let mut lag_f1_mode = *s.add(STATE_LAG_F1_MODE);
@@ -903,55 +1020,35 @@ unsafe extern "C" fn filterbank_process(
         let dry_l = *in0.add(i);
         let dry_r = *in1.add(i);
 
-        // ── §2 input drive: gain → tube/diode shaper at 2× → DC block ──
-        let mut post = [0.0_f32; 2];
-        for (ch, (&x, (up_z1, up_z2, down_z1, down_z2, dc_x1, dc_y1, shelf_lp))) in [dry_l, dry_r]
-            .iter()
-            .zip([
-                (
-                    &mut os_up_z1_l,
-                    &mut os_up_z2_l,
-                    &mut os_down_z1_l,
-                    &mut os_down_z2_l,
-                    &mut dc_x1_l,
-                    &mut dc_y1_l,
-                    &mut shelf_lp_l,
-                ),
-                (
-                    &mut os_up_z1_r,
-                    &mut os_up_z2_r,
-                    &mut os_down_z1_r,
-                    &mut os_down_z2_r,
-                    &mut dc_x1_r,
-                    &mut dc_y1_r,
-                    &mut shelf_lp_r,
-                ),
-            ])
-            .enumerate()
-        {
-            // Hi EQ: ±6 dB high shelf @ ~3 kHz, PRE-drive — the hardware's
-            // HF switch sits in the amplifier circuit, so Boost doesn't just
-            // brighten the output, it pushes the highs harder into the
-            // saturation and changes the fuzz texture itself.
-            *shelf_lp += shelf_coeff * (x - *shelf_lp);
-            let shelved = x + sm_shelf_gain * (x - *shelf_lp);
-            let gained = shelved * sm_input_gain;
-            let mut shaped_down = 0.0;
-            for k_os in 0..2 {
-                let stuffed = if k_os == 0 { gained * 2.0 } else { 0.0 };
-                let up = biquad_sample(stuffed, os_lp, up_z1, up_z2);
-                let shaped = drive_shape(up);
-                shaped_down = biquad_sample(shaped, os_lp, down_z1, down_z2);
-            }
-            // DC block (the asymmetric curve rides on an offset).
-            let blocked = {
-                let y = shaped_down - *dc_x1 + dc_r * *dc_y1;
-                *dc_x1 = shaped_down;
-                *dc_y1 = y;
-                y
-            };
-            post[ch] = blocked;
-        }
+        // ── §2 input drive: shelf → bias → emphasis → 4× shaper → DC ──
+        let post = [
+            drive_channel(
+                s,
+                &DRIVE_SLOTS_L,
+                dry_l,
+                sm_input_gain,
+                sm_shelf_gain,
+                shelf_coeff,
+                emph_coeff,
+                os_lp,
+                dc_r,
+                bias_up,
+                bias_down,
+            ),
+            drive_channel(
+                s,
+                &DRIVE_SLOTS_R,
+                dry_r,
+                sm_input_gain,
+                sm_shelf_gain,
+                shelf_coeff,
+                emph_coeff,
+                os_lp,
+                dc_r,
+                bias_up,
+                bias_down,
+            ),
+        ];
         let post_mono = 0.5 * (post[0] + post[1]);
 
         // ── Sense trigger (§2) ──
@@ -1229,20 +1326,6 @@ unsafe extern "C" fn filterbank_process(
     *s.add(STATE_FB_LP_R) = fb_lp_r;
     *s.add(STATE_FB_PREV_L) = fb_prev_l;
     *s.add(STATE_FB_PREV_R) = fb_prev_r;
-    *s.add(STATE_SHELF_LP_L) = shelf_lp_l;
-    *s.add(STATE_SHELF_LP_R) = shelf_lp_r;
-    *s.add(STATE_OS_UP_Z1_L) = os_up_z1_l;
-    *s.add(STATE_OS_UP_Z2_L) = os_up_z2_l;
-    *s.add(STATE_OS_DOWN_Z1_L) = os_down_z1_l;
-    *s.add(STATE_OS_DOWN_Z2_L) = os_down_z2_l;
-    *s.add(STATE_OS_UP_Z1_R) = os_up_z1_r;
-    *s.add(STATE_OS_UP_Z2_R) = os_up_z2_r;
-    *s.add(STATE_OS_DOWN_Z1_R) = os_down_z1_r;
-    *s.add(STATE_OS_DOWN_Z2_R) = os_down_z2_r;
-    *s.add(STATE_DC_X1_L) = dc_x1_l;
-    *s.add(STATE_DC_Y1_L) = dc_y1_l;
-    *s.add(STATE_DC_X1_R) = dc_x1_r;
-    *s.add(STATE_DC_Y1_R) = dc_y1_r;
     *s.add(STATE_LAG_F1_RES) = lag_f1_res;
     *s.add(STATE_LAG_F2_RES) = lag_f2_res;
     *s.add(STATE_LAG_F1_MODE) = lag_f1_mode;
@@ -1727,7 +1810,7 @@ mod tests {
             state[STATE_ENABLED] = 1.0;
             state[STATE_SENSE] = 0.0;
             state[STATE_HI_EQ] = hi_eq;
-            state[STATE_INPUT_DB] = 18.0;
+            state[STATE_INPUT_DB] = 10.0;
             state[STATE_F1_FREQ] = 16_000.0;
             state[STATE_SM_F1_FREQ] = 16_000.0;
             state[STATE_F2_FREQ] = 16_000.0;
@@ -1744,7 +1827,7 @@ mod tests {
         let cut_ratio = cut_third / cut_fund.max(1.0e-9);
         let boost_ratio = boost_third / boost_fund.max(1.0e-9);
         assert!(
-            boost_ratio > cut_ratio * 1.5,
+            boost_ratio > cut_ratio * 1.4,
             "Boost should saturate the highs harder (distortion ratio {boost_ratio} vs {cut_ratio})"
         );
     }

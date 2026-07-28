@@ -50,9 +50,16 @@ envelopes/LFO detected from the mono sum), with a **Stereo Split** toggle
 - **Input** — drive into the filters, −12…+30 dB, default 0 dB. Unity at
   knob center like the hardware; above unity applies progressive asymmetric
   saturation *before* the filters (this is why everything through a Sherman
-  sounds "already hairy"). Use `roar::shaper_transfer` Tube/Diode-flavored
-  curve at 2× oversampling around the nonlinearity (space-echo record-head
-  pattern, `space_echo.rs:725`).
+  sounds "already hairy"). `roar::shaper_transfer` Tube/Diode-flavored
+  curve, made *stateful* for realism (`drive_channel`):
+  **dynamic bias** — an envelope follower (2 ms up / 80 ms down) shifts the
+  operating point into the asymmetric curve, modeling coupling-cap sag
+  (transients bloom, sustained material sits down);
+  **pre/de-emphasis** — matched ±6 dB first-order shelves about ~3 kHz
+  around the clipper (highs clip first, fizz rolls off after — the
+  space-echo record-head pattern, ≈ flat when clean);
+  **4× oversampling** with cascaded halfband biquads (2× let fold-back
+  aliasing read as digital grit at +30 dB).
 - **Hi EQ** — 3-way option Cut / Flat / Boost: ±6 dB high shelf (~3 kHz)
   applied **pre-drive**, matching the hardware's amplifier HF switch: Boost
   pushes the highs harder into the saturation and changes the fuzz texture,
