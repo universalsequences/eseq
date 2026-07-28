@@ -2,20 +2,34 @@
 
 ## Test selection and runtime policy
 
+Prefer `cargo nextest run` over `cargo test` when nextest is installed (`brew
+install cargo-nextest`; check with `cargo nextest --version`). It runs each
+test in its own process, which isolates tests that touch shared global state
+(e.g. the shared `$TMPDIR/sequencer_dgenlisp` compile output dir), reports
+per-test wall times, and schedules the suite better. Fall back to `cargo test`
+if nextest is unavailable.
+
 Use the narrowest test target that validates the behavior changed. Do not run a
 full package or workspace test suite as a default validation or finishing step.
 
-For a unit test in a library, select both the library target and the exact test:
+For a unit test in a library, select the exact test:
 
 ```sh
-cargo test -p <package> --lib <fully-qualified-test-name> -- --exact
+cargo nextest run -p <package> -E 'test(=<fully-qualified-test-name>)'
+# or: cargo test -p <package> --lib <fully-qualified-test-name> -- --exact
 ```
 
 For an integration test, select the integration-test binary and the exact test:
 
 ```sh
-cargo test -p <package> --test <test-target> <test-name> -- --exact
+cargo nextest run -p <package> -E 'binary(<test-target>) and test(=<test-name>)'
+# or: cargo test -p <package> --test <test-target> <test-name> -- --exact
 ```
+
+nextest notes: use `--no-capture` where a `cargo test` command would use
+`-- --nocapture`; `-E 'test(/regex/)'` selects by regex; nextest does not run
+doctests (this repo's tests are all unit/integration tests, so that does not
+matter here).
 
 Do not run any of the following unless the user explicitly requests exhaustive
 testing, or the change is genuinely cross-cutting and no narrower validation

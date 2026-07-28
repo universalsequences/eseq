@@ -39,7 +39,7 @@ pub(crate) mod tape;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::neural::ParamNodeId;
 use crate::sequencer::MAX_STEPS;
@@ -6274,10 +6274,17 @@ impl EffectDescriptor {
 /// Per-slot per-step parameter overrides.
 /// NaN = no override (use slot default).
 /// No internal clamping — callers pass clamped values.
-pub struct SlotPLockData {
+/// Cell storage for one slot's plocks, allocated on the first write.
+/// A slot with no plocks (the overwhelmingly common case) never pays the
+/// MAX_STEPS * max_params * 3-array allocation.
+struct PLockCells {
     data: Vec<AtomicU32>,
     id_logical_ids: Vec<AtomicU64>,
     id_node_param_indices: Vec<AtomicU32>,
+}
+
+pub struct SlotPLockData {
+    cells: OnceLock<PLockCells>,
     max_params: usize,
     /// Number of non-NaN cells. Lets snapshot capture/restore and per-step
     /// plock masks take O(1) fast paths for the common plock-free slot.
@@ -6289,19 +6296,29 @@ pub struct SlotPLockData {
 
 impl SlotPLockData {
     pub fn new(max_params: usize) -> Self {
-        let size = MAX_STEPS * max_params;
-        let data: Vec<AtomicU32> = (0..size).map(|_| AtomicU32::new(NAN_BITS)).collect();
-        let id_logical_ids: Vec<AtomicU64> = (0..size).map(|_| AtomicU64::new(0)).collect();
-        let id_node_param_indices: Vec<AtomicU32> =
-            (0..size).map(|_| AtomicU32::new(u32::MAX)).collect();
         Self {
-            data,
-            id_logical_ids,
-            id_node_param_indices,
+            cells: OnceLock::new(),
             max_params,
             plock_count: AtomicU32::new(0),
             step_counts: (0..MAX_STEPS).map(|_| AtomicU32::new(0)).collect(),
         }
+    }
+
+    /// Cell arrays, if any write has materialized them. Absent arrays read as
+    /// all-empty (every value NaN, every param id cleared).
+    fn cells(&self) -> Option<&PLockCells> {
+        self.cells.get()
+    }
+
+    fn cells_or_alloc(&self) -> &PLockCells {
+        self.cells.get_or_init(|| {
+            let size = MAX_STEPS * self.max_params;
+            PLockCells {
+                data: (0..size).map(|_| AtomicU32::new(NAN_BITS)).collect(),
+                id_logical_ids: (0..size).map(|_| AtomicU64::new(0)).collect(),
+                id_node_param_indices: (0..size).map(|_| AtomicU32::new(u32::MAX)).collect(),
+            }
+        })
     }
 
     fn index(&self, step: usize, param_idx: usize) -> usize {
@@ -6342,10 +6359,12 @@ impl SlotPLockData {
         if !self.has_any_plock() {
             return;
         }
-        for idx in 0..self.data.len() {
-            self.data[idx].store(NAN_BITS, Ordering::Relaxed);
-            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+        if let Some(cells) = self.cells() {
+            for idx in 0..cells.data.len() {
+                cells.data[idx].store(NAN_BITS, Ordering::Relaxed);
+                cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+            }
         }
         self.plock_count.store(0, Ordering::Relaxed);
         for count in &self.step_counts {
@@ -6354,11 +6373,12 @@ impl SlotPLockData {
     }
 
     pub fn get(&self, step: usize, param_idx: usize) -> Option<f32> {
+        let cells = self.cells()?;
         let idx = self.index(step, param_idx);
-        if idx >= self.data.len() {
+        if idx >= cells.data.len() {
             return None;
         }
-        let bits = self.data[idx].load(Ordering::Relaxed);
+        let bits = cells.data[idx].load(Ordering::Relaxed);
         let val = f32::from_bits(bits);
         if val.is_nan() {
             None
@@ -6368,32 +6388,40 @@ impl SlotPLockData {
     }
 
     pub fn set(&self, step: usize, param_idx: usize, val: f32) {
+        if self.cells().is_none() && val.is_nan() {
+            // Writing "no override" into a slot with no cells is a no-op;
+            // don't materialize the arrays for it.
+            return;
+        }
+        let cells = self.cells_or_alloc();
         let idx = self.index(step, param_idx);
-        if idx < self.data.len() {
-            let old_bits = self.data[idx].swap(val.to_bits(), Ordering::Relaxed);
+        if idx < cells.data.len() {
+            let old_bits = cells.data[idx].swap(val.to_bits(), Ordering::Relaxed);
             self.note_cell_transition(step, old_bits, val.to_bits());
-            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+            cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+            cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
         }
     }
 
     pub fn set_with_id(&self, step: usize, param_idx: usize, val: f32, param_id: ParamNodeId) {
+        let cells = self.cells_or_alloc();
         let idx = self.index(step, param_idx);
-        if idx < self.data.len() {
-            let old_bits = self.data[idx].swap(val.to_bits(), Ordering::Relaxed);
+        if idx < cells.data.len() {
+            let old_bits = cells.data[idx].swap(val.to_bits(), Ordering::Relaxed);
             self.note_cell_transition(step, old_bits, val.to_bits());
-            self.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
-            self.id_node_param_indices[idx].store(param_id.node_param_idx, Ordering::Relaxed);
+            cells.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
+            cells.id_node_param_indices[idx].store(param_id.node_param_idx, Ordering::Relaxed);
         }
     }
 
     pub fn get_id(&self, step: usize, param_idx: usize) -> Option<ParamNodeId> {
+        let cells = self.cells()?;
         let idx = self.index(step, param_idx);
-        if idx >= self.data.len() {
+        if idx >= cells.data.len() {
             return None;
         }
-        let logical_id = self.id_logical_ids[idx].load(Ordering::Relaxed);
-        let node_param_idx = self.id_node_param_indices[idx].load(Ordering::Relaxed);
+        let logical_id = cells.id_logical_ids[idx].load(Ordering::Relaxed);
+        let node_param_idx = cells.id_node_param_indices[idx].load(Ordering::Relaxed);
         if logical_id == 0 || node_param_idx == u32::MAX {
             None
         } else {
@@ -6408,24 +6436,30 @@ impl SlotPLockData {
         if self.step_count(step) == 0 {
             return;
         }
+        let Some(cells) = self.cells() else {
+            return;
+        };
         for p in 0..self.max_params {
             let idx = self.index(step, p);
-            if idx < self.data.len() {
-                let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+            if idx < cells.data.len() {
+                let old_bits = cells.data[idx].swap(NAN_BITS, Ordering::Relaxed);
                 self.note_cell_transition(step, old_bits, NAN_BITS);
-                self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-                self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+                cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
             }
         }
     }
 
     pub fn clear_param(&self, step: usize, param_idx: usize) {
+        let Some(cells) = self.cells() else {
+            return;
+        };
         let idx = self.index(step, param_idx);
-        if idx < self.data.len() {
-            let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+        if idx < cells.data.len() {
+            let old_bits = cells.data[idx].swap(NAN_BITS, Ordering::Relaxed);
             self.note_cell_transition(step, old_bits, NAN_BITS);
-            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+            cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+            cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
         }
     }
 
@@ -6441,6 +6475,9 @@ impl SlotPLockData {
             // allocating MAX_STEPS * num_params Options per slot.
             return (Vec::new(), Vec::new());
         }
+        let Some(cells) = self.cells() else {
+            return (Vec::new(), Vec::new());
+        };
         let read_np = num_params.min(self.max_params);
         let mut plocks = Vec::with_capacity(MAX_STEPS);
         let mut plock_param_ids = Vec::with_capacity(MAX_STEPS);
@@ -6457,13 +6494,13 @@ impl SlotPLockData {
             let mut id_row = vec![None; num_params];
             for p in 0..read_np {
                 let idx = base + p;
-                let val = f32::from_bits(self.data[idx].load(Ordering::Relaxed));
+                let val = f32::from_bits(cells.data[idx].load(Ordering::Relaxed));
                 if !val.is_nan() {
                     row[p] = Some(val);
                 }
-                let logical_id = self.id_logical_ids[idx].load(Ordering::Relaxed);
+                let logical_id = cells.id_logical_ids[idx].load(Ordering::Relaxed);
                 if logical_id != 0 {
-                    let node_param_idx = self.id_node_param_indices[idx].load(Ordering::Relaxed);
+                    let node_param_idx = cells.id_node_param_indices[idx].load(Ordering::Relaxed);
                     if node_param_idx != u32::MAX {
                         id_row[p] = Some(ParamNodeId {
                             logical_id,
@@ -6493,6 +6530,19 @@ impl SlotPLockData {
             self.clear_all();
             return;
         }
+        let has_values = plocks
+            .iter()
+            .any(|row| row.iter().any(|value| value.is_some()));
+        let cells = if has_values {
+            self.cells_or_alloc()
+        } else {
+            // All-None rows only clear; with no cells there is nothing to
+            // clear, so skip materializing the arrays.
+            match self.cells() {
+                Some(cells) => cells,
+                None => return,
+            }
+        };
         let np = num_params.min(self.max_params);
         for (step, row) in plocks.iter().enumerate().take(MAX_STEPS) {
             if row.is_empty() {
@@ -6513,26 +6563,26 @@ impl SlotPLockData {
                 match row[p] {
                     Some(val) => {
                         let param_id = id_row.and_then(|ids| ids.get(p)).copied().flatten();
-                        let old_bits = self.data[idx].swap(val.to_bits(), Ordering::Relaxed);
+                        let old_bits = cells.data[idx].swap(val.to_bits(), Ordering::Relaxed);
                         self.note_cell_transition(step, old_bits, val.to_bits());
                         match param_id {
                             Some(param_id) => {
-                                self.id_logical_ids[idx]
+                                cells.id_logical_ids[idx]
                                     .store(param_id.logical_id, Ordering::Relaxed);
-                                self.id_node_param_indices[idx]
+                                cells.id_node_param_indices[idx]
                                     .store(param_id.node_param_idx, Ordering::Relaxed);
                             }
                             None => {
-                                self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-                                self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+                                cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                                cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
                             }
                         }
                     }
                     None => {
-                        let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+                        let old_bits = cells.data[idx].swap(NAN_BITS, Ordering::Relaxed);
                         self.note_cell_transition(step, old_bits, NAN_BITS);
-                        self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-                        self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+                        cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                        cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
                     }
                 }
             }
@@ -6565,9 +6615,9 @@ impl SlotPLockData {
 }
 
 pub struct SlotKeyLockData {
-    data: Vec<AtomicU32>,
-    id_logical_ids: Vec<AtomicU64>,
-    id_node_param_indices: Vec<AtomicU32>,
+    /// Cell arrays, allocated on the first write (see `PLockCells`); absent
+    /// arrays read as all-empty.
+    cells: OnceLock<PLockCells>,
     max_params: usize,
     lock_count: AtomicU32,
     note_counts: Vec<AtomicU32>,
@@ -6575,19 +6625,27 @@ pub struct SlotKeyLockData {
 
 impl SlotKeyLockData {
     pub fn new(max_params: usize) -> Self {
-        let size = MAX_MIDI_NOTES * max_params;
-        let data: Vec<AtomicU32> = (0..size).map(|_| AtomicU32::new(NAN_BITS)).collect();
-        let id_logical_ids: Vec<AtomicU64> = (0..size).map(|_| AtomicU64::new(0)).collect();
-        let id_node_param_indices: Vec<AtomicU32> =
-            (0..size).map(|_| AtomicU32::new(u32::MAX)).collect();
         Self {
-            data,
-            id_logical_ids,
-            id_node_param_indices,
+            cells: OnceLock::new(),
             max_params,
             lock_count: AtomicU32::new(0),
             note_counts: (0..MAX_MIDI_NOTES).map(|_| AtomicU32::new(0)).collect(),
         }
+    }
+
+    fn cells(&self) -> Option<&PLockCells> {
+        self.cells.get()
+    }
+
+    fn cells_or_alloc(&self) -> &PLockCells {
+        self.cells.get_or_init(|| {
+            let size = MAX_MIDI_NOTES * self.max_params;
+            PLockCells {
+                data: (0..size).map(|_| AtomicU32::new(NAN_BITS)).collect(),
+                id_logical_ids: (0..size).map(|_| AtomicU64::new(0)).collect(),
+                id_node_param_indices: (0..size).map(|_| AtomicU32::new(u32::MAX)).collect(),
+            }
+        })
     }
 
     fn index(&self, note: u8, param_idx: usize) -> usize {
@@ -6625,10 +6683,12 @@ impl SlotKeyLockData {
         if !self.has_any_lock() {
             return;
         }
-        for idx in 0..self.data.len() {
-            self.data[idx].store(NAN_BITS, Ordering::Relaxed);
-            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+        if let Some(cells) = self.cells() {
+            for idx in 0..cells.data.len() {
+                cells.data[idx].store(NAN_BITS, Ordering::Relaxed);
+                cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+            }
         }
         self.lock_count.store(0, Ordering::Relaxed);
         for count in &self.note_counts {
@@ -6637,41 +6697,49 @@ impl SlotKeyLockData {
     }
 
     pub fn get(&self, note: u8, param_idx: usize) -> Option<f32> {
+        let cells = self.cells()?;
         let idx = self.index(note, param_idx);
-        if idx >= self.data.len() {
+        if idx >= cells.data.len() {
             return None;
         }
-        let value = f32::from_bits(self.data[idx].load(Ordering::Relaxed));
+        let value = f32::from_bits(cells.data[idx].load(Ordering::Relaxed));
         (!value.is_nan()).then_some(value)
     }
 
     pub fn set(&self, note: u8, param_idx: usize, value: f32) {
+        if self.cells().is_none() && value.is_nan() {
+            // Writing "no override" into a slot with no cells is a no-op.
+            return;
+        }
+        let cells = self.cells_or_alloc();
         let idx = self.index(note, param_idx);
-        if idx < self.data.len() {
-            let old_bits = self.data[idx].swap(value.to_bits(), Ordering::Relaxed);
+        if idx < cells.data.len() {
+            let old_bits = cells.data[idx].swap(value.to_bits(), Ordering::Relaxed);
             self.note_cell_transition(note, old_bits, value.to_bits());
-            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+            cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+            cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
         }
     }
 
     pub fn set_with_id(&self, note: u8, param_idx: usize, value: f32, param_id: ParamNodeId) {
+        let cells = self.cells_or_alloc();
         let idx = self.index(note, param_idx);
-        if idx < self.data.len() {
-            let old_bits = self.data[idx].swap(value.to_bits(), Ordering::Relaxed);
+        if idx < cells.data.len() {
+            let old_bits = cells.data[idx].swap(value.to_bits(), Ordering::Relaxed);
             self.note_cell_transition(note, old_bits, value.to_bits());
-            self.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
-            self.id_node_param_indices[idx].store(param_id.node_param_idx, Ordering::Relaxed);
+            cells.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
+            cells.id_node_param_indices[idx].store(param_id.node_param_idx, Ordering::Relaxed);
         }
     }
 
     pub fn get_id(&self, note: u8, param_idx: usize) -> Option<ParamNodeId> {
+        let cells = self.cells()?;
         let idx = self.index(note, param_idx);
-        if idx >= self.data.len() {
+        if idx >= cells.data.len() {
             return None;
         }
-        let logical_id = self.id_logical_ids[idx].load(Ordering::Relaxed);
-        let node_param_idx = self.id_node_param_indices[idx].load(Ordering::Relaxed);
+        let logical_id = cells.id_logical_ids[idx].load(Ordering::Relaxed);
+        let node_param_idx = cells.id_node_param_indices[idx].load(Ordering::Relaxed);
         if logical_id == 0 || node_param_idx == u32::MAX {
             None
         } else {
@@ -6686,24 +6754,30 @@ impl SlotKeyLockData {
         if self.note_count(note) == 0 {
             return;
         }
+        let Some(cells) = self.cells() else {
+            return;
+        };
         for param_idx in 0..self.max_params {
             let idx = self.index(note, param_idx);
-            if idx < self.data.len() {
-                let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+            if idx < cells.data.len() {
+                let old_bits = cells.data[idx].swap(NAN_BITS, Ordering::Relaxed);
                 self.note_cell_transition(note, old_bits, NAN_BITS);
-                self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-                self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+                cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
             }
         }
     }
 
     pub fn clear_param(&self, note: u8, param_idx: usize) {
+        let Some(cells) = self.cells() else {
+            return;
+        };
         let idx = self.index(note, param_idx);
-        if idx < self.data.len() {
-            let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+        if idx < cells.data.len() {
+            let old_bits = cells.data[idx].swap(NAN_BITS, Ordering::Relaxed);
             self.note_cell_transition(note, old_bits, NAN_BITS);
-            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+            cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+            cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
         }
     }
 
@@ -6726,6 +6800,9 @@ impl SlotKeyLockData {
         if !self.has_any_lock() {
             return (locks, lock_ids);
         }
+        let Some(cells) = self.cells() else {
+            return (locks, lock_ids);
+        };
         let read_np = num_params.min(self.max_params);
         for note in 0..MAX_MIDI_NOTES {
             let note = note as u8;
@@ -6737,13 +6814,13 @@ impl SlotKeyLockData {
             let mut id_row = vec![None; num_params];
             for param_idx in 0..read_np {
                 let idx = base + param_idx;
-                let value = f32::from_bits(self.data[idx].load(Ordering::Relaxed));
+                let value = f32::from_bits(cells.data[idx].load(Ordering::Relaxed));
                 if !value.is_nan() {
                     row[param_idx] = Some(value);
                 }
-                let logical_id = self.id_logical_ids[idx].load(Ordering::Relaxed);
+                let logical_id = cells.id_logical_ids[idx].load(Ordering::Relaxed);
                 if logical_id != 0 {
-                    let node_param_idx = self.id_node_param_indices[idx].load(Ordering::Relaxed);
+                    let node_param_idx = cells.id_node_param_indices[idx].load(Ordering::Relaxed);
                     if node_param_idx != u32::MAX {
                         id_row[param_idx] = Some(ParamNodeId {
                             logical_id,
@@ -6767,10 +6844,17 @@ impl SlotKeyLockData {
         num_params: usize,
     ) {
         self.clear_all();
+        let has_values = locks
+            .values()
+            .any(|row| row.iter().any(|value| value.is_some()));
+        if !has_values {
+            return;
+        }
+        let cells = self.cells_or_alloc();
         let np = num_params.min(self.max_params);
         for (&note, row) in locks {
             let base = note as usize * self.max_params;
-            if base >= self.data.len() {
+            if base >= cells.data.len() {
                 continue;
             }
             let id_row = lock_ids.get(&note);
@@ -6779,17 +6863,17 @@ impl SlotKeyLockData {
                     continue;
                 };
                 let idx = base + param_idx;
-                let old_bits = self.data[idx].swap(value.to_bits(), Ordering::Relaxed);
+                let old_bits = cells.data[idx].swap(value.to_bits(), Ordering::Relaxed);
                 self.note_cell_transition(note, old_bits, value.to_bits());
                 match id_row.and_then(|ids| ids.get(param_idx)).copied().flatten() {
                     Some(param_id) => {
-                        self.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
-                        self.id_node_param_indices[idx]
+                        cells.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
+                        cells.id_node_param_indices[idx]
                             .store(param_id.node_param_idx, Ordering::Relaxed);
                     }
                     None => {
-                        self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-                        self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+                        cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                        cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
                     }
                 }
             }
@@ -6858,7 +6942,9 @@ pub struct SlotTensorParamData {
     flat_offsets: Vec<AtomicU32>,
     lengths: Vec<AtomicU32>,
     defaults: Vec<AtomicU32>,
-    plocks: Vec<AtomicU32>,
+    /// MAX_STEPS * MAX_SLOT_TENSOR_CELLS plock cells, allocated on the first
+    /// plock write; absent reads as all-NaN (no plocks).
+    plocks: OnceLock<Vec<AtomicU32>>,
     plock_count: AtomicU32,
     step_counts: Vec<AtomicU32>,
 }
@@ -6880,9 +6966,7 @@ impl SlotTensorParamData {
             defaults: (0..MAX_SLOT_TENSOR_CELLS)
                 .map(|_| AtomicU32::new(0.0_f32.to_bits()))
                 .collect(),
-            plocks: (0..MAX_STEPS * MAX_SLOT_TENSOR_CELLS)
-                .map(|_| AtomicU32::new(NAN_BITS))
-                .collect(),
+            plocks: OnceLock::new(),
             plock_count: AtomicU32::new(0),
             step_counts: (0..MAX_STEPS).map(|_| AtomicU32::new(0)).collect(),
         }
@@ -6902,13 +6986,27 @@ impl SlotTensorParamData {
         step * MAX_SLOT_TENSOR_CELLS + flat_offset + cell_idx
     }
 
+    fn plock_cells(&self) -> Option<&Vec<AtomicU32>> {
+        self.plocks.get()
+    }
+
+    fn plock_cells_or_alloc(&self) -> &Vec<AtomicU32> {
+        self.plocks.get_or_init(|| {
+            (0..MAX_STEPS * MAX_SLOT_TENSOR_CELLS)
+                .map(|_| AtomicU32::new(NAN_BITS))
+                .collect()
+        })
+    }
+
     fn has_plock_for_meta(&self, step: usize, meta: &SlotTensorParamMeta) -> bool {
         if step >= MAX_STEPS || meta.len == 0 {
             return false;
         }
+        let Some(plocks) = self.plock_cells() else {
+            return false;
+        };
         let idx = Self::plock_index(step, meta.flat_offset, 0);
-        idx < self.plocks.len()
-            && !f32::from_bits(self.plocks[idx].load(Ordering::Relaxed)).is_nan()
+        idx < plocks.len() && !f32::from_bits(plocks[idx].load(Ordering::Relaxed)).is_nan()
     }
 
     fn note_plock_transition(&self, step: usize, old_set: bool, new_set: bool) {
@@ -6933,8 +7031,10 @@ impl SlotTensorParamData {
         if !self.has_any_plock() {
             return;
         }
-        for value in &self.plocks {
-            value.store(NAN_BITS, Ordering::Relaxed);
+        if let Some(plocks) = self.plock_cells() {
+            for value in plocks {
+                value.store(NAN_BITS, Ordering::Relaxed);
+            }
         }
         self.plock_count.store(0, Ordering::Relaxed);
         for count in &self.step_counts {
@@ -7025,10 +7125,11 @@ impl SlotTensorParamData {
         if !self.has_plock_for_meta(step, &meta) {
             return None;
         }
+        let plocks = self.plock_cells()?;
         let mut values = Vec::with_capacity(meta.len);
         for cell_idx in 0..meta.len {
             let idx = Self::plock_index(step, meta.flat_offset, cell_idx);
-            values.push(f32::from_bits(self.plocks[idx].load(Ordering::Relaxed)));
+            values.push(f32::from_bits(plocks[idx].load(Ordering::Relaxed)));
         }
         Some(values)
     }
@@ -7077,9 +7178,10 @@ impl SlotTensorParamData {
             return false;
         }
         let had_plock = self.has_plock_for_meta(step, &meta);
+        let plocks = self.plock_cells_or_alloc();
         for (cell_idx, value) in values.iter().copied().enumerate() {
             let idx = Self::plock_index(step, meta.flat_offset, cell_idx);
-            self.plocks[idx].store(clamped_tensor_cell(value).to_bits(), Ordering::Relaxed);
+            plocks[idx].store(clamped_tensor_cell(value).to_bits(), Ordering::Relaxed);
         }
         self.note_plock_transition(step, had_plock, true);
         true
@@ -7113,9 +7215,12 @@ impl SlotTensorParamData {
         if !had_plock {
             return true;
         }
+        let Some(plocks) = self.plock_cells() else {
+            return true;
+        };
         for cell_idx in 0..meta.len {
             let idx = Self::plock_index(step, meta.flat_offset, cell_idx);
-            self.plocks[idx].store(NAN_BITS, Ordering::Relaxed);
+            plocks[idx].store(NAN_BITS, Ordering::Relaxed);
         }
         self.note_plock_transition(step, true, false);
         true
