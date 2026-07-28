@@ -8020,9 +8020,18 @@ impl Editor {
         }
 
         if let Some(delta) = self.runtime.take_pending_resize_window() {
-            if let Some(split) = self.tile_root.find_parent_split(self.active_tile) {
-                split.ratio = (split.ratio + delta as f32).clamp(0.1, 0.9);
-                if let Some(remember_key) = split.remember_key.clone() {
+            let resized = self
+                .tile_root
+                .find_parent_split(self.active_tile)
+                .map(|split| {
+                    split.ratio = (split.ratio + delta as f32).clamp(0.1, 0.9);
+                    split.remember_key.clone()
+                });
+            if let Some(remember_key) = resized {
+                self.enforce_min_sizes_recursive();
+                if let Some(remember_key) = remember_key
+                    && let Some(split) = self.tile_root.find_parent_split(self.active_tile)
+                {
                     self.remembered_split_ratios
                         .insert(remember_key, split.ratio);
                 }

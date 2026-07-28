@@ -4463,12 +4463,28 @@ mod tests {
 
         assert_eq!(predecessor, 204, "effect must follow the target bus gate");
         assert_eq!(successor, 205, "effect must precede the target bus volume");
+        assert_eq!(existing, None);
+
+        app.buses.swap(0, 1);
+        app.graph.bus_node_ids.swap(0, 1);
+        let (
+            reordered_slot_id,
+            reordered_predecessor,
+            _,
+            reordered_successor,
+            _,
+            reordered_existing,
+        ) = app
+            .resolve_bus_effect_slot_wiring(1, 0)
+            .expect("the same stable bus id should resolve after both collections reorder");
+
         assert_eq!(
-            slot_id,
-            (crate::sequencer::MAX_TRACKS + target_id.0 as usize) * MAX_CUSTOM_FX,
+            reordered_slot_id, slot_id,
             "effect instance identity must be stable across bus reordering"
         );
-        assert_eq!(existing, None);
+        assert_eq!(reordered_predecessor, 204);
+        assert_eq!(reordered_successor, 205);
+        assert_eq!(reordered_existing, None);
     }
 
     #[test]

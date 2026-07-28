@@ -7214,6 +7214,66 @@ fn remembered_layout_split_restores_its_user_resized_ratio() {
 }
 
 #[test]
+fn resize_window_remembers_the_constraint_clamped_ratio() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*main*", "");
+    editor.open_scratch_buffer("*fx*", "");
+    editor.open_scratch_buffer("*piano-roll*", "");
+
+    let piano_roll_layout = r#"
+        (set-layout
+          (list :rows :remember "lower:piano-roll"
+            0.6 "*main*"
+            0.4 (list :buf "*piano-roll*" :min-height 40)))
+    "#;
+    editor.runtime_mut().eval_str(piano_roll_layout).unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(100, 100);
+    let root_height = editor
+        .tile_root_rect()
+        .expect("piano-roll layout root rect")
+        .height;
+    assert!(editor.switch_active_tile_to_buffer_named("*piano-roll*"));
+
+    editor
+        .runtime_mut()
+        .eval_str("(resize-window 0.3)")
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    let resized_ratio = match &editor.tile_root {
+        crate::tile::TileNode::Split(split) => split.ratio,
+        crate::tile::TileNode::Leaf(_) => panic!("piano-roll layout should build a split"),
+    };
+    let expected_ratio = 1.0 - 40.0 / root_height;
+    assert!(
+        (resized_ratio - expected_ratio).abs() < f32::EPSILON,
+        "resize-window should clamp the lower pane to its minimum height: {resized_ratio}"
+    );
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"(set-layout
+                (list :rows :remember "lower:fx"
+                  0.7 "*main*"
+                  0.3 "*fx*"))"#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.runtime_mut().eval_str(piano_roll_layout).unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let restored_ratio = match &editor.tile_root {
+        crate::tile::TileNode::Split(split) => split.ratio,
+        crate::tile::TileNode::Leaf(_) => panic!("piano-roll layout should build a split"),
+    };
+    assert!(
+        (restored_ratio - resized_ratio).abs() < f32::EPSILON,
+        "restored layout should use the clamped ratio that was actually displayed: resized={resized_ratio}, restored={restored_ratio}"
+    );
+}
+
+#[test]
 fn fixed_pane_collapses_only_after_dragging_through_its_threshold() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
     editor.open_scratch_buffer("*main*", "");

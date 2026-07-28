@@ -472,9 +472,11 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
     custom_engine_pools[4].add_voice(30);
     custom_engine_pools[4].voices[0].active = true;
     custom_engine_pools[4].voices[0].assigned_track = Some(0);
+    custom_engine_pools[4].voices[0].assigned_route = Some(released_pool_id);
     custom_engine_pools[6].add_voice(40);
     custom_engine_pools[6].voices[0].active = true;
     custom_engine_pools[6].voices[0].assigned_track = Some(0);
+    custom_engine_pools[6].voices[0].assigned_route = Some(unrelated_pool_id);
     countdown_events.push(CountdownEvent {
         remaining_samples: 32.0,
         period_samples: 0.0,
