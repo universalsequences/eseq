@@ -284,51 +284,53 @@
         :bg :transparent))))
 
 (def piano-roll-timeline ()
-  ;; Flex child of the panel row (the arrangement-lane idiom): the timeline
-  ;; absorbs exactly the width left of the clip panel — without :width 0
-  ;; :flex 1 an h-stack child lays out against an INFINITE max width.
-  (timeline
-    :width 0 :flex 1
-    :height piano-roll-timeline-height
-    :focusable true
-    :sidebar-width 5
-    :sidebar-style :piano
-    :header-height piano-roll-header-height
-    :time-ruler (dict :mode :bars-beats :beats-per-bar 4)
-    :item-color (piano-roll-current-track-color)
-    :loop-color (piano-roll-current-track-color)
-    :tool piano-roll-tool
-    :playhead-time (bind-seq "piano-roll-playhead")
-    :cursor-time piano-roll-cursor-time
-    :lanes SEQ.piano-roll-lanes
-    :items SEQ.piano-roll-items
-    :selection SEQ.piano-roll-selection
-    :selection-rect piano-roll-selection-rect
-    :view-start piano-roll-view-start
-    :view-duration piano-roll-view-duration
-    :zoom-min-duration piano-roll-min-view-duration
-    :zoom-max-duration piano-roll-max-view-duration
-    :content-length (piano-roll-num-steps)
-    :content-length-min 1
-    :content-length-max 256
-    ;; Loop-window gestures + overlay (clip-edit-target spec 5): only a
-    ;; pinned clip has a window to slide or mark.
-    :band-slide (= SEQ.focus-clip-kind :pattern)
-    :window-marker SEQ.focus-window-marker
-    :window-span SEQ.focus-window-span
-    :window-repeat SEQ.focus-window-repeat
-    :lane-scroll piano-roll-lane-scroll
-    :lane-height (piano-roll-lane-height-value)
-    :scroll-viewport-height (- piano-roll-default-pane-height piano-roll-focus-header-height)
-    :snap 1
-    :min-duration 0.03125
-    :create-duration piano-roll-create-duration
-    :move-snap-mode :alignment-helper
-    :resize-snap :grid
-    :snap-mode :floor
-    :resize-snap-mode :alignment-helper
-    :scroll-mode :smooth
-    :on-action |event| (piano-roll-action event)))
+  (box :height :fill :flex 1 :width 0
+    ;; Flex child of the panel row (the arrangement-lane idiom): the timeline
+    ;; absorbs exactly the width left of the clip panel — without :width 0
+    ;; :flex 1 an h-stack child lays out against an INFINITE max width.
+    (timeline
+      :width :fill 
+      :height :fill 
+      :focusable true
+      :sidebar-width 5
+      :sidebar-style :piano
+      :header-height piano-roll-header-height
+      :time-ruler (dict :mode :bars-beats :beats-per-bar 4)
+      :item-color (piano-roll-current-track-color)
+      :loop-color (piano-roll-current-track-color)
+      :tool piano-roll-tool
+      :playhead-time (bind-seq "piano-roll-playhead")
+      :cursor-time piano-roll-cursor-time
+      :lanes SEQ.piano-roll-lanes
+      :items SEQ.piano-roll-items
+      :selection SEQ.piano-roll-selection
+      :selection-rect piano-roll-selection-rect
+      :view-start piano-roll-view-start
+      :view-duration piano-roll-view-duration
+      :zoom-min-duration piano-roll-min-view-duration
+      :zoom-max-duration piano-roll-max-view-duration
+      :content-length (piano-roll-num-steps)
+      :content-length-min 1
+      :content-length-max 256
+      ;; Loop-window gestures + overlay (clip-edit-target spec 5): only a
+      ;; pinned clip has a window to slide or mark.
+      :band-slide (= SEQ.focus-clip-kind :pattern)
+      :window-marker SEQ.focus-window-marker
+      :window-span SEQ.focus-window-span
+      :window-repeat SEQ.focus-window-repeat
+      :lane-scroll piano-roll-lane-scroll
+      :lane-height (piano-roll-lane-height-value)
+      :scroll-viewport-height (- piano-roll-default-pane-height piano-roll-focus-header-height)
+      :snap 1
+      :min-duration 0.03125
+      :create-duration piano-roll-create-duration
+      :move-snap-mode :alignment-helper
+      :resize-snap :grid
+      :snap-mode :floor
+      :resize-snap-mode :alignment-helper
+      :scroll-mode :smooth
+      :on-action |event| (piano-roll-action event)))
+  )
 
 ;; ── Clip panel (clip-edit-target spec 6) ───────────────────────────────────
 ;; Ableton-style numeric column left of the piano roll: source identity,
@@ -336,17 +338,17 @@
 ;; Offset only exist for a pinned clip; in follow mode the column shows the
 ;; session identity, the live length and the loop row.
 
-(def piano-roll-clip-panel-width 14)
+(def piano-roll-clip-panel-width 24)
 
 (def piano-roll-panel-row (name body)
-  (h-stack :gap 0.3 :align :center
-    (box :width 4.6 :height 1.3
+  (h-stack :gap 0.3 :align :baseline
+    (box :width 4.6 :height 1.0
       (label name :font-size 10 :color :dim :bg :transparent))
     body))
 
 (def piano-roll-panel-static (name text key)
   (piano-roll-panel-row name
-    (box :width 8 :height 1.3
+    (box :width 8 :height 1.0
       (label text :key key :font-size 10 :color :white :bg :transparent))))
 
 ;; Signed display (spec 6): an offset in the top half of the pattern reads as
@@ -360,50 +362,55 @@
   (if (= SEQ.focus-clip-start nil)
     (box :width 0 :height 0 :bg :transparent)
     (v-stack :gap 0.2
-      (piano-roll-panel-row "Start"
-        (number-picker :key "piano-roll-panel-start"
-          :value SEQ.focus-clip-start
-          :min 0 :max 512 :decimals 0
-          :on-change (lambda (v)
-            (if (= v SEQ.focus-clip-start)
-              nil
-              (host-command "focus-clip-resize"
-                (dict :track SEQ.current-track
-                  :start-beat v :end-beat SEQ.focus-clip-end))))
-          :width 8 :height 1.3 :font-size 10))
-      (piano-roll-panel-row "End"
-        (number-picker :key "piano-roll-panel-end"
-          :value SEQ.focus-clip-end
-          :min 0 :max 512 :decimals 0
-          :on-change (lambda (v)
-            (if (= v SEQ.focus-clip-end)
-              nil
-              (host-command "focus-clip-resize"
-                (dict :track SEQ.current-track
-                  :start-beat SEQ.focus-clip-start :end-beat v))))
-          :width 8 :height 1.3 :font-size 10))
-      (piano-roll-panel-row "Offset"
-        (number-picker :key "piano-roll-panel-offset"
-          ;; Signed pickup display is a PATTERN-wrap idea (spec 6); a take's
-          ;; offset clamps at 0 and never wraps, so it reads raw.
-          :value (if (= SEQ.focus-clip-kind :pattern)
-                   (piano-roll-signed-offset SEQ.focus-clip-offset)
-                   SEQ.focus-clip-offset)
-          :min (if (= SEQ.focus-clip-kind :pattern) -256 0) :max 256 :decimals 0
-          :on-change (lambda (v)
-            (if (= v (if (= SEQ.focus-clip-kind :pattern)
-                       (piano-roll-signed-offset SEQ.focus-clip-offset)
-                       SEQ.focus-clip-offset))
-              nil
-              (host-command "focus-set-offset"
-                (dict :track SEQ.current-track :offset-steps v))))
-          :width 8 :height 1.3 :font-size 10)))))
+      (h-stack
+        (piano-roll-panel-row "Start"
+          (number-picker :key "piano-roll-panel-start"
+            :value SEQ.focus-clip-start
+            :min 0 :max 512 :decimals 0
+            :background-color :buffer-bg
+            :on-change (lambda (v)
+              (if (= v SEQ.focus-clip-start)
+                nil
+                (host-command "focus-clip-resize"
+                  (dict :track SEQ.current-track
+                    :start-beat v :end-beat SEQ.focus-clip-end))))
+            :width 5 :height 1.0 :font-size 8))
+        (piano-roll-panel-row "End"
+          (number-picker :key "piano-roll-panel-end"
+            :value SEQ.focus-clip-end
+            :min 0 :max 512 :decimals 0
+            :background-color :buffer-bg
+            :on-change (lambda (v)
+              (if (= v SEQ.focus-clip-end)
+                nil
+                (host-command "focus-clip-resize"
+                  (dict :track SEQ.current-track
+                    :start-beat SEQ.focus-clip-start :end-beat v))))
+            :width 5 :height 1.0 :font-size 8))
+        )
+        (piano-roll-panel-row "Offset"
+          (number-picker :key "piano-roll-panel-offset"
+            ;; Signed pickup display is a PATTERN-wrap idea (spec 6); a take's
+            ;; offset clamps at 0 and never wraps, so it reads raw.
+            :background-color :buffer-bg
+            :value (if (= SEQ.focus-clip-kind :pattern)
+              (piano-roll-signed-offset SEQ.focus-clip-offset)
+              SEQ.focus-clip-offset)
+            :min (if (= SEQ.focus-clip-kind :pattern) -256 0) :max 256 :decimals 0
+            :on-change (lambda (v)
+              (if (= v (if (= SEQ.focus-clip-kind :pattern)
+                    (piano-roll-signed-offset SEQ.focus-clip-offset)
+                    SEQ.focus-clip-offset))
+                nil
+                (host-command "focus-set-offset"
+                  (dict :track SEQ.current-track :offset-steps v))))
+            :width 5 :height 1.0 :font-size 8)))))
 
 (def piano-roll-panel-length-row ()
   (piano-roll-panel-row "Length"
     (if (= SEQ.focus-kind :take)
       ;; A take's length is owned by recording/splice (spec 6): read-only.
-      (box :width 8 :height 1.3
+      (box :width 8 :height 1.0
         (label (fmt "{}" (piano-roll-num-steps))
           :key "piano-roll-panel-length-static"
           :font-size 10 :color :white :bg :transparent))
@@ -420,25 +427,47 @@
             (do
               (cool-off-follow)
               (seq-set-track-param :num-steps v))))
-        :width 8 :height 1.3 :font-size 10))))
+        :width 5 :height 1.0 :font-size 8))))
 
 (def piano-roll-clip-panel ()
-  (v-stack :padding 0.3 :gap 0.25 :width piano-roll-clip-panel-width
-    (box :width :fill :height 1.3
-      (label SEQ.focus-label
-        :key "piano-roll-panel-source"
-        :font-size 10 :color :white :bg :transparent))
-    (piano-roll-clip-panel-rows)
-    (piano-roll-panel-length-row)
-    ;; Informational in v1 (spec 6): states the pattern/take duality; layout
-    ;; leaves room for Position/Length when sub-pattern windows land (5.1).
-    (piano-roll-panel-static "Loop"
-      (if (= SEQ.focus-kind :take) "off" "on")
-      "piano-roll-panel-loop")))
+  (let ((color (piano-roll-current-track-color)))
+    (box :height :fill 
+      (v-stack 
+        :height :fill
+        :padding 0 :width piano-roll-clip-panel-width
+        (box 
+          :height 1
+          :width :fill
+          :background-color (rgba (nth color 0) (nth color 1) (nth color 2) 1.0)          
+          (h-stack (box :width 0.5)
+            (label 
+              (nth SEQ.track-names SEQ.current-track)
+              :font-size 10 :bg :transparent :color :black))
+          )
+        
+        (box :width :fill :height 1.0
+          :background-color :gray
+          (h-stack (box :width 0.5)
+            (label SEQ.focus-label
+              :key "piano-roll-panel-source"
+              :font-size 10 :color :white :bg :transparent
+              )
+            ))
+        
+        (box :padding 1  :height 5 
+          :width piano-roll-clip-panel-width
+          (v-stack :gap 0.25
+            
+            (piano-roll-clip-panel-rows)
+            (piano-roll-panel-length-row)
+            ;; Informational in v1 (spec 6): states the pattern/take duality; layout
+            ;; leaves room for Position/Length when sub-pattern windows land (5.1).
+            (piano-roll-panel-static "Loop"
+              (if (= SEQ.focus-kind :take) "off" "on")
+              "piano-roll-panel-loop")))))))
 
 (effect-buffer "*piano-roll*"
-  (v-stack :padding 0.0 :gap 0.0
-    (piano-roll-focus-header)
-    (h-stack :width :fill :gap 0.0
+  (box :width :fill :height :fill 
+    (h-stack :width :fill :gap 0.0 :height :fill
       (piano-roll-clip-panel)
       (piano-roll-timeline))))
