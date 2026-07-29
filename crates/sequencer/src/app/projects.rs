@@ -2606,13 +2606,29 @@ impl App {
                                 .project
                                 .current_pattern
                                 .min(pending.project.patterns.len().saturating_sub(1));
+                            // Rack slot topology and effects are instance state
+                            // (one rack_effects chain per slot regardless of
+                            // scene), but the snapshot is stored per pattern and
+                            // scenes without a presence cell for this track save
+                            // it as None. Fall back to any pattern that has one
+                            // so loading with a bare current scene doesn't drop
+                            // the slot state and fail instance validation.
                             let rack_pattern = pending
                                 .project
                                 .patterns
                                 .get(current_pattern_idx)
                                 .and_then(|pattern| pattern.rack_tracks.get(track_idx))
                                 .and_then(|rack| rack.as_ref())
-                                .cloned();
+                                .cloned()
+                                .or_else(|| {
+                                    pending.project.patterns.iter().find_map(|pattern| {
+                                        pattern
+                                            .rack_tracks
+                                            .get(track_idx)
+                                            .and_then(|rack| rack.as_ref())
+                                            .cloned()
+                                    })
+                                });
                             let mut prepared_customs = Vec::new();
                             let mut prepared_sources = Vec::with_capacity(slots.len());
                             for (slot_idx, slot) in slots.iter().enumerate() {
