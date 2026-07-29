@@ -18240,9 +18240,9 @@
         );
         assert_eq!(
             editor.active_leaf().selected_tab,
-            // Static tabs are Seq (0) and Arr (1); the registered fake tab
-            // appends after them.
-            Some(2),
+            // Seq (0) is the only static tab now that the arrangement lives in
+            // a dedicated main view; the registered fake tab appends after it.
+            Some(1),
             "the visible selected tab should remain the clicked step tab"
         );
     }
@@ -18365,18 +18365,12 @@
         editor.refresh_runtime_side_effects();
 
         let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
-        let transport = frame
+        let transport_tile = frame
             .tiles
             .iter()
             .find(|tile| tile.frame.buffer_name == "*transport*")
-            .expect("transport tile")
-            .rect;
-        editor
-            .runtime_mut()
-            .eval_str(r#"(set-window-buffer "*transport*")"#)
-            .expect("switch to transport");
-        editor.refresh_runtime_side_effects();
-        let layout = editor.widget_layout().expect("transport layout");
+            .expect("transport tile");
+        let transport = transport_tile.rect;
         fn find_picker(
             node: &eseqlisp::layout::LayoutNode,
         ) -> Option<eseqlisp::layout::LayoutNode> {
@@ -18385,6 +18379,15 @@
             }
             node.children.iter().find_map(find_picker)
         }
+        // Read the picker rect from the transport tile's own rendered layout so
+        // the click coordinates stay tile-local; the transport bar now fills
+        // its viewport, so a layout built for another tile's size no longer
+        // lines up with the top transport bar.
+        let layout = transport_tile
+            .frame
+            .widget_layout
+            .clone()
+            .expect("transport tile layout");
         let picker = find_picker(layout.as_ref()).expect("bpm picker");
         let click_col = transport.col + picker.rect.col + picker.rect.width * 0.5;
         let click_row = transport.row + picker.rect.row + picker.rect.height * 0.5;
@@ -20975,16 +20978,43 @@
             "(arrangement-track-action 0 (dict :type :resize-item-absolute :id 0 :ids (list 0) :edge :end :time 6))",
         );
         assert_eq!(recorded.lock().unwrap().len(), 5, "live drags never commit");
+        // The live preview rides the per-lane ghost channels; the widget
+        // applies them at render (UI_PERFORMANCE_TUNING.md ownership
+        // boundary: a drag tick repaints the lane, it does not rebuild
+        // items). The drag state carries the same values for the commit.
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :end)"),
+            read(
+                &mut editor,
+                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-kind\" 0))"
+            ),
+            Value::Number(3.0),
+            "an end-edge drag publishes the resize-end ghost"
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-time\" 0))"
+            ),
             Value::Number(6.0),
-            "resize ghost previews the clip's new end"
+            "the ghost channel previews the clip's new end"
+        );
+        assert_eq!(
+            read(&mut editor, "(get arrangement-track-drag :time)"),
+            Value::Number(6.0)
         );
         eval(
             &mut editor,
             "(arrangement-track-action 0 (dict :type :finish-resize-items :id 0 :ids (list 0)))",
         );
-        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        assert_eq!(read(&mut editor, "arrangement-track-drag"), Value::Nil);
+        assert_eq!(
+            read(
+                &mut editor,
+                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-kind\" 0))"
+            ),
+            Value::Number(0.0),
+            "the release clears the lane ghost channel"
+        );
         {
             let recorded = recorded.lock().unwrap();
             assert_eq!(recorded.len(), 6);
@@ -21128,21 +21158,29 @@
             "(arrangement-track-action 0 (dict :type :resize-item-absolute :id 2 :ids (list 2) :edge :start :time 10))",
         );
         assert_eq!(recorded.lock().unwrap().len(), 9, "live drags never commit");
+        // The live start-edge preview rides the lane ghost channel (kind 2);
+        // the widget shifts the drawn start and re-anchors the phase.
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :start)"),
-            Value::Number(10.0),
-            "start ghost previews the clip's new start"
+            read(
+                &mut editor,
+                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-kind\" 0))"
+            ),
+            Value::Number(2.0),
+            "a start-edge drag publishes the resize-start ghost"
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :end)"),
-            Value::Number(12.0),
-            "and leaves its end alone"
+            read(
+                &mut editor,
+                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-time\" 0))"
+            ),
+            Value::Number(10.0),
+            "the ghost channel previews the clip's new start"
         );
         eval(
             &mut editor,
             "(arrangement-track-action 0 (dict :type :finish-resize-items :id 2 :ids (list 2)))",
         );
-        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        assert_eq!(read(&mut editor, "arrangement-track-drag"), Value::Nil);
         {
             let recorded = recorded.lock().unwrap();
             assert_eq!(recorded.len(), 10);
@@ -21210,21 +21248,29 @@
             "(arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 20 :lane 0))",
         );
         assert_eq!(recorded.lock().unwrap().len(), 12, "live drags never commit");
+        // The rigid-move preview rides the lane ghost channel (kind 1): the
+        // widget slides the drawn span, keeping its length and phase.
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :start)"),
-            Value::Number(20.0),
-            "move ghost previews the clip's new start"
+            read(
+                &mut editor,
+                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-kind\" 0))"
+            ),
+            Value::Number(1.0),
+            "a title-bar drag publishes the move ghost"
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :end)"),
-            Value::Number(24.0),
-            "the move is rigid: the span keeps its length"
+            read(
+                &mut editor,
+                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-time\" 0))"
+            ),
+            Value::Number(20.0),
+            "the ghost channel previews the clip's new start"
         );
         eval(
             &mut editor,
             "(arrangement-track-action 0 (dict :type :finish-move-items :ids (list 2)))",
         );
-        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        assert_eq!(read(&mut editor, "arrangement-track-drag"), Value::Nil);
         {
             let recorded = recorded.lock().unwrap();
             assert_eq!(recorded.len(), 13);
@@ -21245,7 +21291,7 @@
             "(do (arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 20 :lane 0)) \
              (arrangement-track-action 1 (dict :type :finish-move-items :ids (list 2))))",
         );
-        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        assert_eq!(read(&mut editor, "arrangement-track-drag"), Value::Nil);
         assert_eq!(recorded.lock().unwrap().len(), 13);
 
         // A drag on a clip inside a region that reaches BEYOND it moves the
@@ -21270,7 +21316,7 @@
             "(arrangement-track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 12 :lane 0))",
         );
         assert_eq!(
-            read(&mut editor, "(= (arrangement-ghost-kind) :region-move)"),
+            read(&mut editor, "(= (arrangement-track-drag-kind) :region-move)"),
             Value::Bool(true)
         );
         assert_eq!(
@@ -21282,22 +21328,37 @@
             read(&mut editor, "(get arrangement-region-ghost :end)"),
             Value::Number(20.0)
         );
-        // ...and so does every clip the rectangle covers: clip 0 spans [0,8)
-        // and clip 2 spans [8,12), both intersect [4,16), both slide by 4.
+        // ...and the covered lanes carry the region-move channel (kind 5)
+        // with the drag delta and the SOURCE rectangle: the widget slides
+        // every covered clip and the rectangle by the delta at render.
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 0) :start)"),
-            Value::Number(4.0),
-            "a covered clip previews the slide, not just the rectangle"
+            read(
+                &mut editor,
+                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-kind\" 0))"
+            ),
+            Value::Number(5.0),
+            "a covered lane previews the slide through its channel"
         );
         assert_eq!(
-            read(&mut editor, "(get (nth (arrangement-track-items 0) 1) :start)"),
-            Value::Number(12.0)
+            read(
+                &mut editor,
+                "(reactive-get \"SEQV\" (arrangement-channel \"ghost-time\" 0))"
+            ),
+            Value::Number(4.0)
+        );
+        assert_eq!(
+            read(
+                &mut editor,
+                "(get (arrangement-lane-region-rect 0) :time-a)"
+            ),
+            Value::Number(8.0),
+            "the reconstructed rect is the source rectangle plus the delta"
         );
         eval(
             &mut editor,
             "(arrangement-track-action 0 (dict :type :finish-move-items :ids (list 2)))",
         );
-        assert_eq!(read(&mut editor, "arrangement-ghost"), Value::Nil);
+        assert_eq!(read(&mut editor, "arrangement-track-drag"), Value::Nil);
         assert_eq!(read(&mut editor, "arrangement-region-ghost"), Value::Nil);
         {
             let recorded = recorded.lock().unwrap();
@@ -21974,7 +22035,9 @@
         );
         editor
             .runtime_mut()
-            .eval_str("(do (set! arrangement-view-start 0) (set! arrangement-view-duration 64))")
+            .eval_str(
+                "(do (set! arrangement-view-duration 64) (set-arrangement-view-start 0 64))",
+            )
             .expect("restore the view for the resize check");
         editor.refresh_runtime_side_effects();
         let _ = editor.widget_layout();
@@ -22139,21 +22202,9 @@
             Value::Number(2.0),
             "a clip shorter than its pattern exposes a partial source cycle"
         );
-        assert_eq!(
-            read(
-                &mut editor,
-                "(do \
-                   (set! arrangement-ghost \
-                     (dict :kind :track-resize :track 0 :clip-id 0 \
-                       :edge :start :time 3)) \
-                   (get (arrangement-track-ghost-clip \
-                          0 (nth (arrangement-track-clips 0) 0)) \
-                     :offset-steps))"
-            ),
-            Value::Number(4.0),
-            "live left-edge trim advances and wraps the pattern offset"
-        );
-        read(&mut editor, "(set! arrangement-ghost nil)");
+        // The live left-edge trim preview (offset re-stamp) moved into the
+        // timeline widget's bound ghost channel; its wrap/clamp arithmetic
+        // is covered by eseqlisp's timeline unit tests.
         let dots = "(get (get (nth (arrangement-track-items 0) 0) :content) :dots)";
         assert_eq!(
             read(&mut editor, &format!("(len {dots})")),
@@ -22665,8 +22716,7 @@
             .runtime_mut()
             .eval_str(
                 "(do (seq-open-arrangement) \
-                 (set! arrangement-cursor-time 6) \
-                 (set! arrangement-cursor-track 0))",
+                 (set-arrangement-cursor 6 0))",
             )
             .expect("open arrangement view");
         editor.refresh_runtime_side_effects();
@@ -23234,12 +23284,12 @@
                 .expect("expr returns a value")
         };
         assert_ne!(
-            read(&mut editor, "(arrangement-region-for-track 2)"),
+            read(&mut editor, "(arrangement-lane-region-rect 2)"),
             Value::Nil,
             "the lane between the drag ends is highlighted too"
         );
         assert_eq!(
-            read(&mut editor, "(arrangement-region-for-track 4)"),
+            read(&mut editor, "(arrangement-lane-region-rect 4)"),
             Value::Nil,
             "lanes outside the sweep stay unhighlighted"
         );
@@ -23502,12 +23552,12 @@
             );
         editor.runtime_mut().run_reactive_cycle();
         assert_ne!(
-            read(&mut editor, "(arrangement-region-for-track 1)"),
+            read(&mut editor, "(arrangement-lane-region-rect 1)"),
             Value::Nil,
             "the clicked track lights its region"
         );
         assert_eq!(
-            read(&mut editor, "(arrangement-region-for-track 0)"),
+            read(&mut editor, "(arrangement-lane-region-rect 0)"),
             Value::Nil,
             "other tracks do not"
         );
@@ -32333,6 +32383,169 @@
         assert!(
             layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Space Echo"),
             "layout should contain the built-in Space Echo panel"
+        );
+    }
+
+    fn test_filterbank_params() -> Vec<Value> {
+        let harmonics = vec![
+            "Free", "1", "1.5", "2", "3", "4", "5", "6", "8", "9", "12", "16",
+        ];
+        vec![
+            Value::Map(test_param_map("enabled", 0, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("input", 1, 0.0, -12.0, 30.0)),
+            Value::Map(test_enum_param_map(
+                "hi eq",
+                2,
+                1.0,
+                vec!["Cut", "Flat", "Boost"],
+            )),
+            Value::Map(test_param_map("sense", 3, 30.0, 0.0, 100.0)),
+            Value::Map(test_param_map("noise", 4, 0.0, 0.0, 100.0)),
+            Value::Map(test_param_map("feedback", 5, 0.0, 0.0, 100.0)),
+            Value::Map(test_param_map("crunch", 6, 25.0, 0.0, 100.0)),
+            Value::Map(test_param_map("correction", 7, 0.0, 0.0, 100.0)),
+            Value::Map(test_param_map("ser/par", 8, 100.0, 0.0, 100.0)),
+            Value::Map(test_enum_param_map("harmonics", 9, 0.0, harmonics)),
+            Value::Map(test_param_map("fm amount", 10, 0.0, 0.0, 100.0)),
+            Value::Map(test_enum_param_map("fm source", 11, 0.0, vec!["off"])),
+            Value::Map(test_param_map("am depth", 12, 0.0, 0.0, 100.0)),
+            Value::Map(test_enum_param_map("am source", 13, 0.0, vec!["off"])),
+            Value::Map(test_enum_param_map(
+                "env mode",
+                14,
+                0.0,
+                vec!["ADSR", "Follower"],
+            )),
+            Value::Map(test_param_map("attack", 15, 5.0, 0.5, 4000.0)),
+            Value::Map(test_param_map("decay", 16, 200.0, 1.0, 4000.0)),
+            Value::Map(test_param_map("sustain", 17, 0.0, -100.0, 100.0)),
+            Value::Map(test_param_map("release", 18, 300.0, 1.0, 8000.0)),
+            Value::Map(test_param_map("env f1", 19, 50.0, -100.0, 100.0)),
+            Value::Map(test_param_map("env f2", 20, 50.0, -100.0, 100.0)),
+            Value::Map(test_param_map("res bleed", 21, 10.0, 0.0, 100.0)),
+            Value::Map(test_param_map("lfo rate", 22, 0.5, 0.01, 2000.0)),
+            Value::Map(test_enum_param_map(
+                "lfo wave",
+                23,
+                1.0,
+                vec!["Sine", "Saw", "Ramp", "Square"],
+            )),
+            Value::Map(test_param_map("lfo depth", 24, 0.0, -100.0, 100.0)),
+            Value::Map(test_param_map("lfo trig", 25, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("lfo sync", 26, 0.0, 0.0, 1.0)),
+            Value::Map(test_enum_param_map(
+                "lfo div",
+                27,
+                6.0,
+                vec![
+                    "1/32", "1/16", "1/16t", "1/8", "1/8t", "1/8.", "1/4", "1/4t", "1/4.", "1/2",
+                    "1",
+                ],
+            )),
+            Value::Map(test_param_map("ar attack", 28, 5.0, 0.5, 2000.0)),
+            Value::Map(test_param_map("ar release", 29, 200.0, 1.0, 4000.0)),
+            Value::Map(test_param_map("ar depth", 30, 0.0, 0.0, 100.0)),
+            Value::Map(test_param_map("stereo split", 31, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("output", 32, 0.0, -24.0, 24.0)),
+            Value::Map(test_param_map("dry/wet", 33, 100.0, 0.0, 100.0)),
+            Value::Map(test_param_map("f1 freq", 34, 500.0, 20.0, 16000.0)),
+            Value::Map(test_param_map("f1 res", 35, 20.0, 0.0, 110.0)),
+            Value::Map(test_param_map("f1 mode", 36, 0.0, 0.0, 100.0)),
+            Value::Map(test_param_map("f2 freq", 37, 500.0, 20.0, 16000.0)),
+            Value::Map(test_param_map("f2 res", 38, 20.0, 0.0, 110.0)),
+            Value::Map(test_param_map("f2 mode", 39, 0.0, 0.0, 100.0)),
+        ]
+    }
+
+    #[test]
+    fn metal_seq_fx_filterbank_layout_contains_dual_filters_and_harmonics() {
+        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Filterbank".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "Filterbank",
+                        0,
+                        test_filterbank_params(),
+                    ))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        let ui_probe = editor
+            .runtime_mut()
+            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("probe filterbank ui")
+            .expect("filterbank ui probe value");
+        assert!(
+            value_contains_string(&ui_probe, "HARMONICS"),
+            "filterbank custom UI probe should contain the harmonics link column: {ui_probe:?}"
+        );
+        assert!(
+            value_contains_string(&ui_probe, "Free"),
+            "harmonics dropdown should show the current ratio option"
+        );
+        assert!(value_contains_string(&ui_probe, "FILTER 1"));
+        assert!(value_contains_string(&ui_probe, "FILTER 2"));
+        assert!(value_contains_string(&ui_probe, "freq"));
+        assert!(value_contains_string(&ui_probe, "ser/par"));
+        assert!(value_contains_string(&ui_probe, "crunch"));
+        assert!(value_contains_string(&ui_probe, "bleed"));
+        assert!(value_contains_string(&ui_probe, "ADSR"));
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("filterbank fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(128, 20);
+        let layout = editor.widget_layout().expect("filterbank fx layout");
+        assert!(
+            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Filterbank"),
+            "layout should contain the built-in Filterbank panel"
         );
     }
 

@@ -17,20 +17,110 @@
 ;; Track-clip selection (spec 9.2 extension): ids are the first row-id of a
 ;; merged clip, valid only within the owning track's lane. Selecting in any
 ;; lane clears the other kind so Backspace is never ambiguous.
-(defstate arrangement-track-selection '())
-(defstate arrangement-selected-track -1)
-;; Live-drag preview state (spec 9.1): live gesture actions update this ghost
-;; only; the terminal :finish-* action lowers to exactly one song primitive
-;; via seq-arrangement-action and clears it. A primitive rejection reports on
-;; the status line and, because items derive from the committed song, the
-;; view snaps back on its own.
+(def arrangement-track-selection '())
+(def arrangement-selected-track -1)
+;; Live-drag preview state for the SCENE lane (spec 9.1): live gesture
+;; actions update this ghost only; the terminal :finish-* action lowers to
+;; exactly one song primitive via seq-arrangement-action and clears it. A
+;; primitive rejection reports on the status line and, because items derive
+;; from the committed song, the view snaps back on its own.
 (defstate arrangement-ghost nil)
+;; TRACK-lane drag state is deliberately NOT reactive
+;; (UI_PERFORMANCE_TUNING.md: gesture-only variables must not be defstate).
+;; The commit data lives in this plain global; the live preview rides the
+;; per-lane SEQV float channels below, which repaint only the affected
+;; timeline widgets instead of rerunning any effect per pointer tick.
+(def arrangement-track-drag nil)
 ;; Live region-drag preview (region spec 4.4): a transient
 ;; {track-a track-b start end} updated per :marquee-select frame. The
 ;; COMMITTED region lives in Rust (SEQ.song-region) so it survives view
 ;; switches; this is only what the pointer is currently sweeping, and the
-;; ghost wins over the committed region while it is set.
-(defstate arrangement-region-ghost nil)
+;; ghost wins over the committed region while it is set. Plain global for
+;; the same reason as arrangement-track-drag; lanes render it through the
+;; SEQV region channels.
+(def arrangement-region-ghost nil)
+
+;; ── Per-lane widget channels (UI_PERFORMANCE_TUNING.md boundaries) ─────────
+;; Each track lane binds these SEQV floats as timeline props. reactive-set
+;; marks only the bound widget dirty, so scroll/zoom, drag ghosts, the click
+;; selection, the sound binding and the region highlight all update without
+;; rerunning the arrangement effect. Ghost kinds match the widget decoder:
+;; 0 none, 1 move, 2 resize-start, 3 resize-end, 4 marquee rect,
+;; 5 region-move.
+(def arrangement-channel (name i) (str "arr-" name "-" i))
+
+(def arrangement-publish-view ()
+  (do
+    (reactive-set "SEQV" "arr-view-start" arrangement-view-start)
+    (reactive-set "SEQV" "arr-view-duration" arrangement-view-duration)))
+
+(def arrangement-clear-lane-ghost (i)
+  (reactive-set "SEQV" (arrangement-channel "ghost-kind" i) 0))
+
+(def arrangement-publish-lane-ghost (i kind clip-id time)
+  (do
+    (reactive-set "SEQV" (arrangement-channel "ghost-id" i) clip-id)
+    (reactive-set "SEQV" (arrangement-channel "ghost-time" i) time)
+    (reactive-set "SEQV" (arrangement-channel "ghost-kind" i) kind)))
+
+(def arrangement-publish-lane-region-ghost (i kind time-a time-b delta)
+  (do
+    (reactive-set "SEQV" (arrangement-channel "ghost-region-a" i) time-a)
+    (reactive-set "SEQV" (arrangement-channel "ghost-region-b" i) time-b)
+    (reactive-set "SEQV" (arrangement-channel "ghost-time" i) delta)
+    (reactive-set "SEQV" (arrangement-channel "ghost-kind" i) kind)))
+
+;; Publish a region ghost rect to every visible lane: kind over the covered
+;; span, cleared elsewhere. `kind` is 4 for a marquee sweep, 5 for a region
+;; move (delta shifts the covered clips too).
+(def arrangement-publish-region-ghost (region kind delta)
+  (map
+    (lambda (i)
+      (if (and (not (= region nil))
+            (>= i (min (get region :track-a) (get region :track-b)))
+            (<= i (max (get region :track-a) (get region :track-b))))
+        (arrangement-publish-lane-region-ghost i kind
+          (get region :start) (get region :end) delta)
+        (arrangement-clear-lane-ghost i)))
+    (seq-visible-track-indices)))
+
+(def arrangement-clear-region-ghost ()
+  (arrangement-publish-region-ghost nil 0 0))
+
+(def arrangement-publish-selection (track clip-id)
+  (map
+    (lambda (i)
+      (reactive-set "SEQV" (arrangement-channel "selected-clip" i)
+        (if (= i track) clip-id -1)))
+    (seq-visible-track-indices)))
+
+(def arrangement-publish-cursor (time track)
+  (map
+    (lambda (i)
+      (reactive-set "SEQV" (arrangement-channel "cursor" i)
+        (if (= i track) time -1)))
+    (seq-visible-track-indices)))
+
+;; Seed every channel a lane can bind before the first layout, so unbound
+;; slots do not read as "clip 0 selected" or "cursor at beat 0".
+(map
+  (lambda (i)
+    (do
+      (reactive-set "SEQV" (arrangement-channel "ghost-kind" i) 0)
+      (reactive-set "SEQV" (arrangement-channel "ghost-id" i) -1)
+      (reactive-set "SEQV" (arrangement-channel "ghost-time" i) -1)
+      (reactive-set "SEQV" (arrangement-channel "ghost-region-a" i) 0)
+      (reactive-set "SEQV" (arrangement-channel "ghost-region-b" i) 0)
+      (reactive-set "SEQV" (arrangement-channel "selected-clip" i) -1)
+      (reactive-set "SEQV" (arrangement-channel "bound-clip" i) -1)
+      (reactive-set "SEQV" (arrangement-channel "region-a" i) 0)
+      (reactive-set "SEQV" (arrangement-channel "region-b" i) 0)
+      (reactive-set "SEQV" (arrangement-channel "region-on" i) 0)
+      (reactive-set "SEQV" (arrangement-channel "cursor" i) -1)))
+  (range 0 128))
+(reactive-set "SEQV" "arr-view-start" 0)
+(reactive-set "SEQV" "arr-view-duration" 64)
+(reactive-set "SEQV" "arr-content-length" 64)
 
 (def arrangement-min-view-duration 4)
 (def arrangement-max-view-duration 1024)
@@ -93,8 +183,10 @@
   (max 0 (- (+ (arrangement-scroll-extent) arrangement-view-padding) duration)))
 
 (def set-arrangement-view-start (start duration)
-  (set! arrangement-view-start
-    (max 0 (min (arrangement-max-view-start duration) start))))
+  (do
+    (set! arrangement-view-start
+      (max 0 (min (arrangement-max-view-start duration) start)))
+    (arrangement-publish-view)))
 
 (def set-arrangement-zoom (event)
   (let ((cur-duration arrangement-view-duration)
@@ -109,6 +201,7 @@
                   (max 0 (min 1 (/ (- anchor arrangement-view-start) cur-duration))))))
           (do
             (set! arrangement-view-duration next-duration)
+            ;; set-arrangement-view-start publishes both view channels.
             (set-arrangement-view-start
               (- anchor (* anchor-ratio next-duration))
               next-duration)))))))
@@ -119,6 +212,9 @@
     (do
       (set! arrangement-cursor-time (max 0 time))
       (set! arrangement-cursor-track track)
+      ;; Track lanes render the cursor through their bound channel; only the
+      ;; owning lane repaints.
+      (arrangement-publish-cursor (max 0 time) track)
       ;; Mirror into Rust (region spec 5.3): Cmd-V is handled Rust-side and
       ;; pastes at the cursor, so the paste target cannot live only here.
       (seq-song-set-arr-cursor (max 0 time) track))))
@@ -233,6 +329,7 @@
   (if (= (arrangement-ghost-kind) :end)
     (get arrangement-ghost :length)
     (arrangement-scroll-extent)))
+
 
 ;; The furthest beat any stored clip runs to (0 when the lanes are empty).
 (def arrangement-last-clip-end ()
@@ -360,15 +457,18 @@
                   (nth (nth events 0) 1) events))
             (hi (reduce |acc event| (max acc (nth event 1))
                   (nth (nth events 0) 1) events)))
-        (get
-          (reduce |acc event|
-            (let ((offset (max 0 (min 0.999 (/ (- (nth event 0) from) span)))))
-              (let ((bucket (floor (* offset arrangement-dot-cap))))
-                (if (= bucket (get acc :last))
-                  acc
-                  (dict :last bucket
-                    :dots (append (get acc :dots)
-                            (list (dict :offset offset
+        ;; Accumulate with cons + one final reverse: `append` copies the
+        ;; whole accumulated list per event, which is quadratic at the
+        ;; 256-dot cap and runs once per clip per rebuild.
+        (reverse
+          (get
+            (reduce |acc event|
+              (let ((offset (max 0 (min 0.999 (/ (- (nth event 0) from) span)))))
+                (let ((bucket (floor (* offset arrangement-dot-cap))))
+                  (if (= bucket (get acc :last))
+                    acc
+                    (dict :last bucket
+                      :dots (cons (dict :offset offset
                                     :value (arrangement-dot-value (nth event 1) lo hi)
                                     ;; Real note length normalized to the
                                     ;; drawn window, clamped so a note never
@@ -376,10 +476,11 @@
                                     :width (max 0
                                              (min (- 1 offset)
                                                (/ (arrangement-event-duration event)
-                                                 span))))))))))
-            (dict :last -1 :dots '())
-            events)
-          :dots)))))
+                                                 span))))
+                              (get acc :dots))))))
+              (dict :last -1 :dots '())
+              events)
+            :dots))))))
 
 (def arrangement-pattern-dots (entry)
   (arrangement-windowed-dots entry 0 (max 1 (get entry :num-steps))))
@@ -454,94 +555,10 @@
             :cycle (if (= (get clip :take-id) nil)
                      (arrangement-clip-cycle entry clip)
                      1)
-            :phase (arrangement-clip-phase entry clip)))))))
-
-;; Start-edge preview offset (spec 8): the commit re-stamps `offset-steps` so
-;; the surviving part keeps playing what it played there. Pattern offsets
-;; wrap; take offsets advance linearly and clamp at zero. The live preview
-;; must use the same rules or its dots jump when the gesture commits.
-(def arrangement-ghost-offset-steps (i clip new-start)
-  (let ((entry (if (= (get clip :take-id) nil)
-                 (arrangement-lane-pattern-events i (get clip :pattern-id))
-                 (arrangement-lane-take-events i (get clip :take-id)))))
-    (if (or (= entry nil)
-          (<= (get entry :num-steps) 0)
-          (<= (get entry :length-beats) 0))
-      (get clip :offset-steps)
-      (let ((step-beats (/ (get entry :length-beats) (get entry :num-steps))))
-        (let ((shifted (+ (or (get clip :offset-steps) 0)
-                         (/ (- new-start (get clip :start-beat)) step-beats))))
-          (if (= (get clip :take-id) nil)
-            ;; Euclidean wrap expressed with floor because Lisp `mod` is a
-            ;; signed remainder and a left-edge grow can make `shifted`
-            ;; negative.
-            (- shifted (* (get entry :num-steps)
-                         (floor (/ shifted (get entry :num-steps)))))
-            (max 0 shifted)))))))
-
-;; Live move/resize ghost for a track clip. A move is RIGID (region spec 6.1 /
-;; takes spec 7.4): the span slides, its length and `offset-steps` do not
-;; change, so the preview draws the same music somewhere else.
-(def arrangement-track-move-ghost-clip (i clip)
-  (let ((new-start (max 0 (get arrangement-ghost :start))))
-    (dict
-      :clip-id (get clip :clip-id)
-      :start-beat new-start
-      :end-beat (+ new-start (- (get clip :end-beat) (get clip :start-beat)))
-      :pattern-id (get clip :pattern-id)
-      :take-id (get clip :take-id)
-      :offset-steps (get clip :offset-steps))))
-
-;; Region move: every clip the dragged RECTANGLE covers slides with it, in
-;; every lane the rectangle spans — the rect ghost alone shows where the music
-;; will land but not what lands there.
-(def arrangement-region-ghost-covers? (i clip)
-  (and (= (arrangement-ghost-kind) :region-move)
-    (>= i (get arrangement-ghost :track-a))
-    (<= i (get arrangement-ghost :track-b))
-    (> (get clip :end-beat) (get arrangement-ghost :start))
-    (< (get clip :start-beat) (get arrangement-ghost :end))))
-
-(def arrangement-region-ghost-clip (i clip)
-  (let ((delta (get arrangement-ghost :delta)))
-    (dict
-      :clip-id (get clip :clip-id)
-      :start-beat (+ (get clip :start-beat) delta)
-      :end-beat (+ (get clip :end-beat) delta)
-      :pattern-id (get clip :pattern-id)
-      :take-id (get clip :take-id)
-      :offset-steps (get clip :offset-steps))))
-
-(def arrangement-track-ghost-clip (i clip)
-  (if (and (= (arrangement-ghost-kind) :track-move)
-        (= (get arrangement-ghost :track) i)
-        (= (get arrangement-ghost :clip-id) (get clip :clip-id)))
-    (arrangement-track-move-ghost-clip i clip)
-  (if (arrangement-region-ghost-covers? i clip)
-    (arrangement-region-ghost-clip i clip)
-  (if (and (= (arrangement-ghost-kind) :track-resize)
-        (= (get arrangement-ghost :track) i)
-        (= (get arrangement-ghost :clip-id) (get clip :clip-id)))
-    (if (= (get arrangement-ghost :edge) :start)
-      (let ((new-start (max 0
-                         (min (- (get clip :end-beat) 1)
-                           (get arrangement-ghost :time)))))
-        (dict
-          :clip-id (get clip :clip-id)
-          :start-beat new-start
-          :end-beat (get clip :end-beat)
-          :pattern-id (get clip :pattern-id)
-          :take-id (get clip :take-id)
-          :offset-steps (arrangement-ghost-offset-steps i clip new-start)))
-      (dict
-        :clip-id (get clip :clip-id)
-        :start-beat (get clip :start-beat)
-        :end-beat (max (+ (get clip :start-beat) 1)
-                    (min SEQ.song-end-beat (get arrangement-ghost :time)))
-        :pattern-id (get clip :pattern-id)
-        :take-id (get clip :take-id)
-        :offset-steps (get clip :offset-steps)))
-    clip))))
+            :phase (arrangement-clip-phase entry clip)
+            ;; The widget's live start-edge ghost wraps a pattern's phase and
+            ;; clamps a take's at zero (takes spec 8).
+            :wrap (= (get clip :take-id) nil)))))))
 
 ;; Track-lane items (lane spec 12): the stored clips, and nothing else. A gap
 ;; between clips produces NO item — the lane really is silent there.
@@ -554,8 +571,8 @@
 
 (def arrangement-track-clip-items (i)
   (map
-    (lambda (raw)
-      (let ((clip (arrangement-track-ghost-clip i raw)))
+    (lambda (clip)
+      (let ((clip clip))
         (dict
           :id (get clip :clip-id)
           :lane 0
@@ -725,13 +742,19 @@
 ;; The bound clip (takes spec 16.6) is Rust-side persistent timeline state,
 ;; so it carries the highlight after a view switch, when this buffer's own
 ;; selection defstate has been reset.
+;; Selection surface for one lane, read back from the published channels
+;; (the widgets render straight from the bound floats; this helper exists for
+;; handlers and tests). Only the owning track shows its click selection; the
+;; bound clip (takes spec 16.6) is Rust-side persistent timeline state, so it
+;; carries the highlight after a view switch.
 (def arrangement-lane-selection (i)
-  (if (= arrangement-selected-track i)
-    arrangement-track-selection
-    (if (and (not (= SEQ.song-bound-clip nil))
-          (= (nth SEQ.song-bound-clip 0) i))
-      (list (nth SEQ.song-bound-clip 1))
-      '())))
+  (let ((selected (reactive-get "SEQV" (arrangement-channel "selected-clip" i)))
+        (bound (reactive-get "SEQV" (arrangement-channel "bound-clip" i))))
+    (append
+      (if (and (not (= selected nil)) (>= selected 0)) (list selected) '())
+      (if (and (not (= bound nil)) (>= bound 0) (not (= bound selected)))
+        (list bound)
+        '()))))
 
 ;; ── Region selection (region spec 4) ───────────────────────────────────────
 
@@ -794,6 +817,7 @@
 (def arrangement-region-commit (region)
   (do
     (set! arrangement-region-ghost nil)
+    (arrangement-clear-region-ghost)
     (if (= region nil)
       (seq-song-clear-region)
       (seq-song-set-region
@@ -820,6 +844,7 @@
 (def arrangement-region-clear ()
   (do
     (set! arrangement-region-ghost nil)
+    (arrangement-clear-region-ghost)
     (seq-song-clear-region)))
 
 ;; The scene lane draws its own marquee echo while a drag is live, then keeps
@@ -833,24 +858,6 @@
       (dict :time-a (nth SEQ.song-region 2) :time-b (nth SEQ.song-region 3)
         :lane-a 0 :lane-b 0)
       nil)))
-
-;; The rect one lane draws: the ghost while a drag is live, else the committed
-;; Rust-owned region, else nothing. Full lane height over [start, end) — the
-;; lane is single-lane, so lane-a/lane-b are always 0 (spec 4.4).
-(def arrangement-region-for-track (i)
-  (let ((ghost arrangement-region-ghost))
-    (if (not (= ghost nil))
-      (if (and (>= i (min (get ghost :track-a) (get ghost :track-b)))
-            (<= i (max (get ghost :track-a) (get ghost :track-b))))
-        (dict :time-a (get ghost :start) :time-b (get ghost :end)
-          :lane-a 0 :lane-b 0)
-        nil)
-      (if (= SEQ.song-region nil)
-        nil
-        (if (and (>= i (nth SEQ.song-region 0)) (<= i (nth SEQ.song-region 1)))
-          (dict :time-a (nth SEQ.song-region 2) :time-b (nth SEQ.song-region 3)
-            :lane-a 0 :lane-b 0)
-          nil)))))
 
 ;; ── Action handlers ────────────────────────────────────────────────────────
 
@@ -874,6 +881,7 @@
         (set! arrangement-selection-rect nil)
         (set! arrangement-track-selection '())
         (set! arrangement-selected-track -1)
+        (arrangement-publish-selection -1 -1)
         ;; Provisional captured launches carry no id (realtime feedback spec
         ;; 3.4), so only real scene events can enter the selection.
         (set! arrangement-selection (arrangement-real-scene-ids (get event :ids)))
@@ -898,7 +906,8 @@
       :marquee-select
       (do
         (set! arrangement-selection-rect event)
-        (set! arrangement-region-ghost (arrangement-region-all-tracks event)))
+        (set! arrangement-region-ghost (arrangement-region-all-tracks event))
+        (arrangement-publish-region-ghost arrangement-region-ghost 4 0))
       :finish-marquee-select
       (do
         (set! arrangement-selection-rect nil)
@@ -1028,12 +1037,13 @@
             :end (get clip :end-beat)))))))
 
 (def arrangement-track-resize-finish (i)
-  (let ((clip-id (get arrangement-ghost :clip-id))
-        (edge (get arrangement-ghost :edge))
-        (time (get arrangement-ghost :time)))
+  (let ((clip-id (get arrangement-track-drag :clip-id))
+        (edge (get arrangement-track-drag :edge))
+        (time (get arrangement-track-drag :time)))
     (let ((clip (arrangement-find-track-clip i clip-id)))
       (do
-        (set! arrangement-ghost nil)
+        (set! arrangement-track-drag nil)
+        (arrangement-clear-lane-ghost i)
         (if (= clip nil)
           nil
           (if (= edge :start)
@@ -1078,17 +1088,16 @@
 (def arrangement-track-move-ghost (i event)
   (let ((clip (arrangement-find-track-clip i (get event :anchor-id))))
     (if (= clip nil)
-      (set! arrangement-ghost nil)
+      (set! arrangement-track-drag nil)
       (if (arrangement-clip-drags-region? i clip)
-        ;; Region move: the ghost is the whole rectangle shifted by the drag
-        ;; delta, clamped so it can never run before beat 0 (the primitive
-        ;; rejects that rather than truncating the leading clips). It carries
-        ;; the SOURCE rectangle too, so every covered lane can preview its own
-        ;; clips sliding with it.
+        ;; Region move: the widget shifts every covered clip and the region
+        ;; rect by the published delta, clamped so the rectangle can never
+        ;; run before beat 0 (the primitive rejects that rather than
+        ;; truncating the leading clips).
         (let ((delta (max (- 0 (nth SEQ.song-region 2))
                        (- (get event :start) (get clip :start-beat)))))
           (do
-            (set! arrangement-ghost
+            (set! arrangement-track-drag
               (dict :kind :region-move :track i :delta delta
                 :track-a (nth SEQ.song-region 0)
                 :track-b (nth SEQ.song-region 1)
@@ -1099,40 +1108,76 @@
                 :track-b (nth SEQ.song-region 1)
                 :start (+ (nth SEQ.song-region 2) delta)
                 :end (+ (nth SEQ.song-region 3) delta)
-                :scene-lane (nth SEQ.song-region 4)))))
-        (set! arrangement-ghost
-          (dict :kind :track-move :track i
-            :clip-id (get clip :clip-id)
-            :start (max 0 (get event :start))))))))
+                :scene-lane (nth SEQ.song-region 4)))
+            (arrangement-publish-region-ghost
+              (dict :track-a (nth SEQ.song-region 0)
+                :track-b (nth SEQ.song-region 1)
+                :start (nth SEQ.song-region 2)
+                :end (nth SEQ.song-region 3))
+              5 delta)))
+        (do
+          (set! arrangement-track-drag
+            (dict :kind :track-move :track i
+              :clip-id (get clip :clip-id)
+              :start (max 0 (get event :start))))
+          (arrangement-publish-lane-ghost i 1
+            (get clip :clip-id) (max 0 (get event :start))))))))
 
 ;; Release: one primitive from the ghost's final values, and never a stale
 ;; ghost on any path (including the guard failures).
+;; Test/introspection surface: the region rect one lane currently renders,
+;; reconstructed from its published channels the same way the widget does
+;; (the in-flight ghost wins over the committed region).
+(def arrangement-lane-region-rect (i)
+  (let ((kind (reactive-get "SEQV" (arrangement-channel "ghost-kind" i))))
+    (if (and (not (= kind nil)) (>= kind 4))
+      (let ((delta (if (>= kind 5)
+                     (reactive-get "SEQV" (arrangement-channel "ghost-time" i))
+                     0)))
+        (dict
+          :time-a (+ (reactive-get "SEQV" (arrangement-channel "ghost-region-a" i)) delta)
+          :time-b (+ (reactive-get "SEQV" (arrangement-channel "ghost-region-b" i)) delta)))
+      (if (= (reactive-get "SEQV" (arrangement-channel "region-on" i)) 1)
+        (dict
+          :time-a (reactive-get "SEQV" (arrangement-channel "region-a" i))
+          :time-b (reactive-get "SEQV" (arrangement-channel "region-b" i)))
+        nil))))
+
+(def arrangement-track-drag-kind ()
+  (if (= arrangement-track-drag nil) nil (get arrangement-track-drag :kind)))
+
 (def arrangement-track-move-finish (i)
-  (let ((kind (arrangement-ghost-kind))
-        (track (get arrangement-ghost :track)))
+  (let ((kind (arrangement-track-drag-kind))
+        (track (get arrangement-track-drag :track)))
     (if (and (= kind :region-move) (= track i))
-      (let ((delta (get arrangement-ghost :delta)))
+      (let ((delta (get arrangement-track-drag :delta)))
         (do
           (set! arrangement-region-ghost nil)
+          (set! arrangement-track-drag nil)
+          (arrangement-clear-region-ghost)
           (if (= delta 0)
-            (set! arrangement-ghost nil)
+            nil
             (arrangement-edit-finish (dict :type :region-move :delta delta)))))
       (if (and (= kind :track-move) (= track i))
-        (let ((clip (arrangement-find-track-clip i (get arrangement-ghost :clip-id)))
-              (start (get arrangement-ghost :start)))
+        (let ((clip (arrangement-find-track-clip i (get arrangement-track-drag :clip-id)))
+              (start (get arrangement-track-drag :start)))
           (do
-            (set! arrangement-ghost nil)
+            (set! arrangement-track-drag nil)
+            (arrangement-clear-lane-ghost i)
             (if (or (= clip nil) (= start (get clip :start-beat)))
               nil
               (arrangement-clip-edit i clip
                 (dict :type :clip-move :start start)))))
         (do
           (set! arrangement-region-ghost nil)
-          (set! arrangement-ghost nil))))))
+          (set! arrangement-track-drag nil)
+          (arrangement-clear-region-ghost)
+          (arrangement-clear-lane-ghost i))))))
 
 (def arrangement-track-delete (i ids)
   (do
     (set! arrangement-track-selection '())
+    (arrangement-publish-selection -1 -1)
     ;; Deleting the clip deletes what the selection pointed at: the region
     ;; goes with it, or the highlight would stay lit over empty lane (region
     ;; spec 4.1 — a clip selection IS its region).
@@ -1166,8 +1211,11 @@
             ;; the Rust side drops the region too, this clears the in-flight
             ;; ghost.
             (set! arrangement-region-ghost nil)
+            (arrangement-clear-region-ghost)
             (set! arrangement-selected-track i)
             (set! arrangement-track-selection ids)
+            (arrangement-publish-selection i
+              (if (= (len ids) 0) -1 (nth ids 0)))
             ;; Selecting a clip is the explicit sound-binding gesture (takes
             ;; spec 16.2/16.6): it re-binds this track's device panel, monitor
             ;; sound and take punch-in template. The binding lives in Rust so
@@ -1187,6 +1235,7 @@
       (do
         (seqv-select-track-for-edit i)
         (set! arrangement-track-selection '())
+        (arrangement-publish-selection -1 -1)
         (arrangement-region-clear)
         (seq-song-deselect-clip)
         (set-arrangement-cursor (get event :time) i))
@@ -1197,22 +1246,30 @@
       ;; Cross-track region sweep (region spec 4.2/4.4): live frames update
       ;; the ghost only; the release commits the Rust-owned region.
       :marquee-select
-      (set! arrangement-region-ghost (arrangement-region-from-event i event))
+      (do
+        (set! arrangement-region-ghost (arrangement-region-from-event i event))
+        (arrangement-publish-region-ghost arrangement-region-ghost 4 0))
       :finish-marquee-select
       (arrangement-region-commit (arrangement-region-from-event i event))
       ;; Live edge drag: ghost preview only (spec 9.1). Either edge; the
       ;; ghost carries which one so the preview and the commit agree.
       :resize-item-absolute
-      (set! arrangement-ghost
-        (dict :kind :track-resize :track i
-          :clip-id (get event :id)
-          :edge (if (= (get event :edge) :start) :start :end)
-          :time (get event :time)))
+      (do
+        (set! arrangement-track-drag
+          (dict :kind :track-resize :track i
+            :clip-id (get event :id)
+            :edge (if (= (get event :edge) :start) :start :end)
+            :time (get event :time)))
+        (arrangement-publish-lane-ghost i
+          (if (= (get event :edge) :start) 2 3)
+          (get event :id) (get event :time)))
       :finish-resize-items
-      (if (and (= (arrangement-ghost-kind) :track-resize)
-            (= (get arrangement-ghost :track) i))
+      (if (and (= (arrangement-track-drag-kind) :track-resize)
+            (= (get arrangement-track-drag :track) i))
         (arrangement-track-resize-finish i)
-        (set! arrangement-ghost nil))
+        (do
+          (set! arrangement-track-drag nil)
+          (arrangement-clear-lane-ghost i)))
       :delete-items
       (arrangement-track-delete i (get event :ids))
       ;; Clipboard (region spec 5.3): the widget emits these when a lane has
@@ -1294,11 +1351,11 @@
     :items (arrangement-scene-items)
     :selection arrangement-selection
     :selection-rect (arrangement-scene-region-rect)
-    :view-start arrangement-view-start
-    :view-duration arrangement-view-duration
+    :view-start (bind "SEQV" "arr-view-start")
+    :view-duration (bind "SEQV" "arr-view-duration")
     :zoom-min-duration arrangement-min-view-duration
     :zoom-max-duration arrangement-max-view-duration
-    :content-length (arrangement-content-length)
+    :content-length (bind "SEQV" "arr-content-length")
     :content-length-min (arrangement-content-length-min)
     :content-length-max 8192
     :lane-scroll 0
@@ -1343,26 +1400,36 @@
     :grid-density arrangement-grid-density
     :focusable true
     :playhead-time (bind-seq "song-position-beats")
-    :cursor-time (arrangement-lane-cursor-time i)
+    ;; Every fast-changing surface below is a BOUND channel: the cursor, the
+    ;; live drag ghost, the click selection, the sound binding and the region
+    ;; highlight update by repainting this one widget, never by rerunning the
+    ;; arrangement effect (UI_PERFORMANCE_TUNING.md ownership boundaries).
+    :cursor-time (bind "SEQV" (arrangement-channel "cursor" i))
     :cursor-marker-visible false
     :cursor-line-visible true
     :cursor-color arrangement-cursor-color
     :drop-types (list "transport-scene")
     :on-drop (lambda (event) (arrangement-drop-scene event))
     :items (arrangement-track-items i)
-    :selection (arrangement-lane-selection i)
-    ;; Region highlight (region spec 4.4): the ghost while a drag is live,
-    ;; else the committed Rust-owned region. Empty lanes light up too — the
-    ;; region is a rectangle over time, not over clips. `:region` style lights
-    ;; the lane and each covered clip's BODY instead of washing a translucent
-    ;; marquee over the top of everything (Ableton).
-    :selection-rect (arrangement-region-for-track i)
+    :selected-id (bind "SEQV" (arrangement-channel "selected-clip" i))
+    :bound-id (bind "SEQV" (arrangement-channel "bound-clip" i))
+    :ghost-kind (bind "SEQV" (arrangement-channel "ghost-kind" i))
+    :ghost-id (bind "SEQV" (arrangement-channel "ghost-id" i))
+    :ghost-time (bind "SEQV" (arrangement-channel "ghost-time" i))
+    :ghost-region-a (bind "SEQV" (arrangement-channel "ghost-region-a" i))
+    :ghost-region-b (bind "SEQV" (arrangement-channel "ghost-region-b" i))
+    ;; Region highlight (region spec 4.4): the ghost channel while a drag is
+    ;; live, else the committed region bridged from Rust. Empty lanes light
+    ;; up too — the region is a rectangle over time, not over clips.
+    :region-a (bind "SEQV" (arrangement-channel "region-a" i))
+    :region-b (bind "SEQV" (arrangement-channel "region-b" i))
+    :region-on (bind "SEQV" (arrangement-channel "region-on" i))
     :selection-rect-style :region
-    :view-start arrangement-view-start
-    :view-duration arrangement-view-duration
+    :view-start (bind "SEQV" "arr-view-start")
+    :view-duration (bind "SEQV" "arr-view-duration")
     :zoom-min-duration arrangement-min-view-duration
     :zoom-max-duration arrangement-max-view-duration
-    :content-length (arrangement-content-length)
+    :content-length (bind "SEQV" "arr-content-length")
     :lane-scroll 0
     :snap arrangement-snap
     :min-duration 1
@@ -1421,18 +1488,63 @@
         :key "arrangement-edit-error-label"
         :font-size 10.5 :color (rgba 1.0 0.78 0.72 1.0) :bg :transparent))))
 
+;; ── Channel bridge: Rust-owned song state -> per-lane channels ─────────────
+;; Reruns cost microseconds (a handful of float publishes); the lanes that
+;; bind the channels just repaint. Without this bridge every lane subtree
+;; would read SEQ.song-bound-clip / SEQ.song-region / SEQ.song-end-beat
+;; directly and a clip click would rebuild every lane's item list. It lives
+;; as an invisible subtree INSIDE the buffer (not a bare top-level effect):
+;; subtree reruns ride the widget-flush machinery and cannot disturb the
+;; active buffer's layout.
+(def arrangement-publish-bridge ()
+  (do
+    (let ((bound SEQ.song-bound-clip))
+      (map
+        (lambda (i)
+          (reactive-set "SEQV" (arrangement-channel "bound-clip" i)
+            (if (and (not (= bound nil)) (= (nth bound 0) i))
+              (nth bound 1)
+              -1)))
+        (seq-visible-track-indices)))
+    (let ((region SEQ.song-region))
+      (map
+        (lambda (i)
+          (if (and (not (= region nil))
+                (>= i (nth region 0))
+                (<= i (nth region 1)))
+            (do
+              (reactive-set "SEQV" (arrangement-channel "region-a" i)
+                (nth region 2))
+              (reactive-set "SEQV" (arrangement-channel "region-b" i)
+                (nth region 3))
+              (reactive-set "SEQV" (arrangement-channel "region-on" i) 1))
+            (reactive-set "SEQV" (arrangement-channel "region-on" i) 0)))
+        (seq-visible-track-indices)))
+    (reactive-set "SEQV" "arr-content-length" (arrangement-content-length))))
+
 (effect-buffer "*arrangement*"
   (v-stack :padding 0.0 :gap 0.0
-    (if SEQ.song-exists
-      (box :width 0 :height 0 :bg :transparent)
-      (arrangement-empty-banner))
-    (arrangement-error-banner)
-    (box :width :fill
-      (h-stack :width :fill :align :start
-        (box :key "arrangement-scene-header-spacer"
-          :width arrangement-header-width :height arrangement-scene-lane-height
-          :bg :transparent)
-        (arrangement-scene-lane)))
+    ;; Every root-level read lives inside its own subtree: a whole-list read
+    ;; (like the scene lane's content-length-min reduce over SEQ.song-lanes)
+    ;; at the root would turn each song publish into a full-buffer rerun and
+    ;; defeat the per-track index-aware invalidation of the lane subtrees.
+    (subtree :key "arr-channel-bridge"
+      (do
+        (arrangement-publish-bridge)
+        (box :width 0 :height 0 :bg :transparent)))
+    (subtree :key "arr-empty-banner"
+      (if SEQ.song-exists
+        (box :width 0 :height 0 :bg :transparent)
+        (arrangement-empty-banner)))
+    (subtree :key "arr-error-banner"
+      (arrangement-error-banner))
+    (subtree :key "arr-scene-row"
+      (box :width :fill
+        (h-stack :width :fill :align :start
+          (box :key "arrangement-scene-header-spacer"
+            :width arrangement-header-width :height arrangement-scene-lane-height
+            :bg :transparent)
+          (arrangement-scene-lane))))
     (box :width :fill :height 0.1 :background-color :bg)
     (scroll :key "arrangement-track-scroll" :width :fill :flex 1
       (v-stack :width :fill :gap 0.0

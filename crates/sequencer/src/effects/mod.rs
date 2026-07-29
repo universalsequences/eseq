@@ -16,6 +16,8 @@ pub(crate) mod eq8;
 #[allow(dead_code)]
 pub(crate) mod filter;
 #[allow(dead_code)]
+pub mod filterbank;
+#[allow(dead_code)]
 pub(crate) mod gatepitch;
 #[allow(dead_code)]
 pub(crate) mod limiter;
@@ -39,7 +41,7 @@ pub(crate) mod tape;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::neural::ParamNodeId;
 use crate::sequencer::MAX_STEPS;
@@ -345,7 +347,8 @@ mod tests {
 
     use super::{
         tensor_param_descriptors_from_manifest, EffectDescriptor, EffectSlotSnapshot,
-        EffectSlotState, ParamDescriptor, ParamKind, ParamScaling, TensorParamDescriptor,
+        EffectSlotState, HostControl, ParamDescriptor, ParamKind, ParamScaling,
+        TensorParamDescriptor,
     };
     use crate::lisp_host::{TensorInit, TensorMeta};
     use crate::neural::ParamNodeId;
@@ -1372,7 +1375,8 @@ mod tests {
                 "Compressor",
                 "OTT",
                 "Limiter",
-                "Tape"
+                "Tape",
+                "Filterbank"
             ]
         );
         assert_eq!(
@@ -1627,6 +1631,158 @@ mod tests {
                 target_names.iter().filter(|n| **n == name).count(),
                 4,
                 "{name} should have 4 modulation slots"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_filterbank_exposes_sherman_params_and_mod_targets() {
+        let desc = EffectDescriptor::builtin_insert("Filterbank").unwrap();
+        assert_eq!(desc.name, "Filterbank");
+        // 0/1 audio, 2..5 ext-mod sources, 6/7 FM/AM sidechains.
+        assert_eq!(
+            desc.input_channels,
+            2 + crate::instruments::voice_modulator::NUM_OUTPUTS + 2
+        );
+        assert_eq!(desc.output_channels, 2);
+        assert_eq!(desc.instrument_modulators.len(), 4);
+
+        let names: Vec<&str> = desc.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            &names[..40],
+            vec![
+                "enabled",
+                "input",
+                "hi eq",
+                "sense",
+                "noise",
+                "feedback",
+                "crunch",
+                "correction",
+                "ser/par",
+                "harmonics",
+                "fm amount",
+                "fm source",
+                "am depth",
+                "am source",
+                "env mode",
+                "attack",
+                "decay",
+                "sustain",
+                "release",
+                "env f1",
+                "env f2",
+                "res bleed",
+                "lfo rate",
+                "lfo wave",
+                "lfo depth",
+                "lfo trig",
+                "lfo sync",
+                "lfo div",
+                "ar attack",
+                "ar release",
+                "ar depth",
+                "stereo split",
+                "output",
+                "dry/wet",
+                "f1 freq",
+                "f1 res",
+                "f1 mode",
+                "f2 freq",
+                "f2 res",
+                "f2 mode",
+            ]
+        );
+
+        // FM/AM sources are host-routed sidechains on ports 6/7.
+        assert!(matches!(
+            desc.params[11].host_control,
+            Some(HostControl::FxSidechain { input_channel })
+                if input_channel == crate::effects::filterbank::FILTERBANK_FM_INPUT_CHANNEL
+        ));
+        assert!(matches!(
+            desc.params[13].host_control,
+            Some(HostControl::FxSidechain { input_channel })
+                if input_channel == crate::effects::filterbank::FILTERBANK_AM_INPUT_CHANNEL
+        ));
+
+        match &desc.params[9].kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(labels.len(), 12);
+                assert_eq!(labels[0], "Free");
+                assert_eq!(labels[11], "16");
+            }
+            other => panic!("harmonics should be enum, got {other:?}"),
+        }
+        match &desc.params[2].kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(
+                    labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                    vec!["Cut", "Flat", "Boost"]
+                );
+            }
+            other => panic!("hi eq should be enum, got {other:?}"),
+        }
+        match &desc.params[23].kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(
+                    labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                    vec!["Sine", "Saw", "Ramp", "Square"]
+                );
+            }
+            other => panic!("lfo wave should be enum, got {other:?}"),
+        }
+
+        // §5a: 19 targets × 4 slots, base params resolved by name.
+        assert_eq!(desc.instrument_modulation_targets.len(), 76);
+        let target_names: Vec<&str> = desc
+            .instrument_modulation_targets
+            .iter()
+            .map(|target| desc.params[target.base_param_idx].name.as_str())
+            .collect();
+        for name in [
+            "f1 freq", "f2 freq", "f1 res", "f2 res", "f1 mode", "f2 mode", "fm amount",
+            "am depth", "ser/par", "crunch", "sense", "attack", "decay", "sustain", "release",
+            "lfo rate", "lfo depth", "ar attack", "ar release",
+        ] {
+            assert_eq!(
+                target_names.iter().filter(|n| **n == name).count(),
+                4,
+                "{name} should have 4 modulation slots"
+            );
+        }
+        for target in &desc.instrument_modulation_targets {
+            let depth = &desc.params[target.depth_param_idx];
+            assert!(depth.name.starts_with("mod "), "depth param {:?}", depth.name);
+            assert_eq!((depth.min, depth.max), (-1.0, 1.0));
+        }
+
+        // LFO tempo sync: division enum next to the other LFO controls.
+        match &desc.params[27].kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(labels.len(), 11);
+                assert_eq!(labels[6], "1/4");
+            }
+            other => panic!("lfo div should be enum, got {other:?}"),
+        }
+
+        // Every non-modulator param writes inside the node state array.
+        for param in &desc.params {
+            if param.node_param_idx == u32::MAX {
+                continue; // host-routed sidechain selectors
+            }
+            if !crate::instruments::voice_modulator::is_source_param(param.node_param_idx) {
+                assert!(
+                    (param.node_param_idx as usize)
+                        < crate::effects::filterbank::FILTERBANK_STATE_SIZE,
+                    "param {:?} writes outside the Filterbank state array",
+                    param.name
+                );
+            }
+            assert!(
+                param.default >= param.min && param.default <= param.max,
+                "param {:?} default out of range",
+                param.name
             );
         }
     }
@@ -2113,6 +2269,7 @@ impl EffectDescriptor {
             "OTT",
             "Limiter",
             "Tape",
+            "Filterbank",
         ]
     }
 
@@ -2165,6 +2322,7 @@ impl EffectDescriptor {
             "OTT" => Some(Self::builtin_ott()),
             "Limiter" => Some(Self::builtin_limiter()),
             "Tape" => Some(Self::builtin_tape()),
+            "Filterbank" => Some(Self::builtin_filterbank()),
             _ => None,
         }
     }
@@ -3402,6 +3560,651 @@ impl EffectDescriptor {
             host_control: None,
             ui_metadata: None,
         });
+
+        desc
+    }
+
+    /// Sherman Filterbank 2 style dual-filter mangler (spec:
+    /// docs/sherman-filterbank-spec.md). Inputs 0/1 carry the track signal,
+    /// 2..5 the host ext-mod sources, 6/7 the FM/AM sidechains.
+    pub fn builtin_filterbank() -> Self {
+        use crate::effects::filterbank as fb;
+
+        fn continuous(
+            name: &str,
+            min: f32,
+            max: f32,
+            default: f32,
+            unit: Option<&str>,
+            scaling: ParamScaling,
+            node_param_idx: u64,
+        ) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min,
+                max,
+                default,
+                kind: ParamKind::Continuous {
+                    unit: unit.map(str::to_string),
+                },
+                scaling,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+
+        fn toggle(name: &str, default: f32, node_param_idx: u64) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min: 0.0,
+                max: 1.0,
+                default,
+                kind: ParamKind::Boolean,
+                scaling: ParamScaling::Linear,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+
+        fn options(
+            name: &str,
+            labels: &[&str],
+            default: f32,
+            node_param_idx: u64,
+        ) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min: 0.0,
+                max: (labels.len() - 1) as f32,
+                default,
+                kind: ParamKind::Enum {
+                    labels: labels.iter().map(|label| label.to_string()).collect(),
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: node_param_idx as u32,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }
+        }
+
+        // Host-routed sidechain source (compressor precedent). Labels are
+        // patched with the track list wherever the descriptor is
+        // instantiated; `input_channel` picks the node input port.
+        fn sidechain(name: &str, input_channel: usize) -> ParamDescriptor {
+            ParamDescriptor {
+                name: name.to_string(),
+                min: 0.0,
+                max: 0.0,
+                default: 0.0,
+                kind: ParamKind::Enum {
+                    labels: vec!["off".to_string()],
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: u32::MAX,
+                node_param_span: 1,
+                host_control: Some(HostControl::FxSidechain { input_channel }),
+                ui_metadata: None,
+            }
+        }
+
+        let harmonics_labels = [
+            "Free", "1", "1.5", "2", "3", "4", "5", "6", "8", "9", "12", "16",
+        ];
+
+        let mut desc = Self {
+            name: "Filterbank".to_string(),
+            // 0/1 audio, 2..5 ext-mod sources, 6/7 FM/AM sidechains.
+            input_channels: 2
+                + crate::instruments::voice_modulator::NUM_OUTPUTS
+                + 2,
+            output_channels: 2,
+            instrument_modulators: (1..=crate::instruments::voice_modulator::SLOT_COUNT)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![
+                Self::enabled_param(fb::FILTERBANK_PARAM_ENABLED as u32, 1.0),
+                continuous(
+                    "input",
+                    -12.0,
+                    30.0,
+                    0.0,
+                    Some("dB"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_INPUT_DB,
+                ),
+                options("hi eq", &["Cut", "Flat", "Boost"], 1.0, fb::FILTERBANK_PARAM_HI_EQ),
+                continuous(
+                    "sense",
+                    0.0,
+                    100.0,
+                    30.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_SENSE,
+                ),
+                continuous(
+                    "noise",
+                    0.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_NOISE,
+                ),
+                continuous(
+                    "feedback",
+                    0.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_FEEDBACK,
+                ),
+                continuous(
+                    "crunch",
+                    0.0,
+                    100.0,
+                    25.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_CRUNCH,
+                ),
+                continuous(
+                    "correction",
+                    0.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_CORRECTION,
+                ),
+                continuous(
+                    "ser/par",
+                    0.0,
+                    100.0,
+                    100.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_SER_PAR,
+                ),
+                options(
+                    "harmonics",
+                    &harmonics_labels,
+                    0.0,
+                    fb::FILTERBANK_PARAM_HARMONICS,
+                ),
+                continuous(
+                    "fm amount",
+                    0.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_FM_AMOUNT,
+                ),
+                sidechain("fm source", fb::FILTERBANK_FM_INPUT_CHANNEL),
+                continuous(
+                    "am depth",
+                    0.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_AM_DEPTH,
+                ),
+                sidechain("am source", fb::FILTERBANK_AM_INPUT_CHANNEL),
+                options(
+                    "env mode",
+                    &["ADSR", "Follower"],
+                    0.0,
+                    fb::FILTERBANK_PARAM_ENV_MODE,
+                ),
+                continuous(
+                    "attack",
+                    0.5,
+                    4000.0,
+                    5.0,
+                    Some("ms"),
+                    ParamScaling::Exponential,
+                    fb::FILTERBANK_PARAM_ATTACK_MS,
+                ),
+                continuous(
+                    "decay",
+                    1.0,
+                    4000.0,
+                    200.0,
+                    Some("ms"),
+                    ParamScaling::Exponential,
+                    fb::FILTERBANK_PARAM_DECAY_MS,
+                ),
+                continuous(
+                    "sustain",
+                    -100.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_SUSTAIN,
+                ),
+                continuous(
+                    "release",
+                    1.0,
+                    8000.0,
+                    300.0,
+                    Some("ms"),
+                    ParamScaling::Exponential,
+                    fb::FILTERBANK_PARAM_RELEASE_MS,
+                ),
+                continuous(
+                    "env f1",
+                    -100.0,
+                    100.0,
+                    50.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_ENV_F1,
+                ),
+                continuous(
+                    "env f2",
+                    -100.0,
+                    100.0,
+                    50.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_ENV_F2,
+                ),
+                continuous(
+                    "res bleed",
+                    0.0,
+                    100.0,
+                    10.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_RES_BLEED,
+                ),
+                continuous(
+                    "lfo rate",
+                    0.01,
+                    2000.0,
+                    0.5,
+                    Some("Hz"),
+                    ParamScaling::Exponential,
+                    fb::FILTERBANK_PARAM_LFO_RATE,
+                ),
+                options(
+                    "lfo wave",
+                    &["Sine", "Saw", "Ramp", "Square"],
+                    1.0,
+                    fb::FILTERBANK_PARAM_LFO_WAVE,
+                ),
+                continuous(
+                    "lfo depth",
+                    -100.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_LFO_DEPTH,
+                ),
+                toggle("lfo trig", 0.0, fb::FILTERBANK_PARAM_LFO_TRIG),
+                toggle("lfo sync", 0.0, fb::FILTERBANK_PARAM_LFO_SYNC),
+                options(
+                    "lfo div",
+                    &[
+                        "1/32", "1/16", "1/16t", "1/8", "1/8t", "1/8.", "1/4", "1/4t", "1/4.",
+                        "1/2", "1",
+                    ],
+                    6.0,
+                    fb::FILTERBANK_PARAM_LFO_DIV,
+                ),
+                continuous(
+                    "ar attack",
+                    0.5,
+                    2000.0,
+                    5.0,
+                    Some("ms"),
+                    ParamScaling::Exponential,
+                    fb::FILTERBANK_PARAM_AR_ATTACK_MS,
+                ),
+                continuous(
+                    "ar release",
+                    1.0,
+                    4000.0,
+                    200.0,
+                    Some("ms"),
+                    ParamScaling::Exponential,
+                    fb::FILTERBANK_PARAM_AR_RELEASE_MS,
+                ),
+                continuous(
+                    "ar depth",
+                    0.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_AR_DEPTH,
+                ),
+                toggle("stereo split", 0.0, fb::FILTERBANK_PARAM_STEREO_SPLIT),
+                continuous(
+                    "output",
+                    -24.0,
+                    24.0,
+                    0.0,
+                    Some("dB"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_OUTPUT_DB,
+                ),
+                continuous(
+                    "dry/wet",
+                    0.0,
+                    100.0,
+                    100.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_DRY_WET,
+                ),
+                continuous(
+                    "f1 freq",
+                    20.0,
+                    16000.0,
+                    500.0,
+                    Some("Hz"),
+                    ParamScaling::Exponential,
+                    fb::FILTERBANK_PARAM_F1_FREQ,
+                ),
+                continuous(
+                    "f1 res",
+                    0.0,
+                    110.0,
+                    20.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_F1_RES,
+                ),
+                continuous(
+                    "f1 mode",
+                    0.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_F1_MODE,
+                ),
+                continuous(
+                    "f2 freq",
+                    20.0,
+                    16000.0,
+                    500.0,
+                    Some("Hz"),
+                    ParamScaling::Exponential,
+                    fb::FILTERBANK_PARAM_F2_FREQ,
+                ),
+                continuous(
+                    "f2 res",
+                    0.0,
+                    110.0,
+                    20.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_F2_RES,
+                ),
+                continuous(
+                    "f2 mode",
+                    0.0,
+                    100.0,
+                    0.0,
+                    Some("%"),
+                    ParamScaling::Linear,
+                    fb::FILTERBANK_PARAM_F2_MODE,
+                ),
+            ],
+        };
+        desc.params
+            .extend(crate::instruments::voice_modulator::effect_param_descriptors());
+
+        // §5a host mod targets: 10 targets × 4 slots, space-echo convention
+        // (depth params + InstrumentModulationTarget entries the mod-wrapper
+        // UI consumes).
+        let mut append_depth_targets =
+            |base_param_name: &str,
+             destination_name: &str,
+             depth_params: [u64; crate::instruments::voice_modulator::SLOT_COUNT]| {
+                let base_param_idx = desc
+                    .params
+                    .iter()
+                    .position(|param| param.name == base_param_name)
+                    .unwrap_or_else(|| {
+                        panic!("built-in Filterbank {base_param_name} param should exist")
+                    });
+                for (slot, node_param_idx) in depth_params.into_iter().enumerate() {
+                    let depth_param_idx = desc.params.len();
+                    desc.params.push(ParamDescriptor {
+                        name: format!("mod {destination_name} slot {} amt", slot + 1),
+                        min: -1.0,
+                        max: 1.0,
+                        default: 0.0,
+                        kind: ParamKind::Continuous { unit: None },
+                        scaling: ParamScaling::Linear,
+                        node_param_idx: node_param_idx as u32,
+                        node_param_span: 1,
+                        host_control: None,
+                        ui_metadata: None,
+                    });
+                    desc.instrument_modulation_targets
+                        .push(InstrumentModulationTarget {
+                            base_param_idx,
+                            source_param_idx: None,
+                            modulator_slot: slot + 1,
+                            depth_param_idx,
+                            active_param_idx: None,
+                            depth_min: -1.0,
+                            depth_max: 1.0,
+                            depth_unit: None,
+                        });
+                }
+            };
+
+        append_depth_targets(
+            "f1 freq",
+            "f1 freq",
+            [
+                fb::FILTERBANK_PARAM_MOD_F1_FREQ_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_F1_FREQ_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_F1_FREQ_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_F1_FREQ_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "f2 freq",
+            "f2 freq",
+            [
+                fb::FILTERBANK_PARAM_MOD_F2_FREQ_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_F2_FREQ_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_F2_FREQ_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_F2_FREQ_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "f1 res",
+            "f1 res",
+            [
+                fb::FILTERBANK_PARAM_MOD_F1_RES_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_F1_RES_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_F1_RES_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_F1_RES_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "f2 res",
+            "f2 res",
+            [
+                fb::FILTERBANK_PARAM_MOD_F2_RES_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_F2_RES_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_F2_RES_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_F2_RES_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "f1 mode",
+            "f1 mode",
+            [
+                fb::FILTERBANK_PARAM_MOD_F1_MODE_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_F1_MODE_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_F1_MODE_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_F1_MODE_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "f2 mode",
+            "f2 mode",
+            [
+                fb::FILTERBANK_PARAM_MOD_F2_MODE_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_F2_MODE_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_F2_MODE_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_F2_MODE_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "fm amount",
+            "fm",
+            [
+                fb::FILTERBANK_PARAM_MOD_FM_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_FM_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_FM_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_FM_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "am depth",
+            "am",
+            [
+                fb::FILTERBANK_PARAM_MOD_AM_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_AM_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_AM_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_AM_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "ser/par",
+            "ser/par",
+            [
+                fb::FILTERBANK_PARAM_MOD_SER_PAR_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_SER_PAR_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_SER_PAR_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_SER_PAR_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "crunch",
+            "crunch",
+            [
+                fb::FILTERBANK_PARAM_MOD_CRUNCH_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_CRUNCH_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_CRUNCH_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_CRUNCH_DEPTH_4,
+            ],
+        );
+        // Second wave: performance controls (sense, envelope shapes, LFO).
+        append_depth_targets(
+            "sense",
+            "sense",
+            [
+                fb::FILTERBANK_PARAM_MOD_SENSE_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_SENSE_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_SENSE_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_SENSE_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "attack",
+            "attack",
+            [
+                fb::FILTERBANK_PARAM_MOD_ATTACK_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_ATTACK_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_ATTACK_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_ATTACK_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "decay",
+            "decay",
+            [
+                fb::FILTERBANK_PARAM_MOD_DECAY_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_DECAY_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_DECAY_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_DECAY_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "sustain",
+            "sustain",
+            [
+                fb::FILTERBANK_PARAM_MOD_SUSTAIN_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_SUSTAIN_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_SUSTAIN_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_SUSTAIN_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "release",
+            "release",
+            [
+                fb::FILTERBANK_PARAM_MOD_RELEASE_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_RELEASE_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_RELEASE_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_RELEASE_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "lfo rate",
+            "lfo rate",
+            [
+                fb::FILTERBANK_PARAM_MOD_LFO_RATE_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_LFO_RATE_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_LFO_RATE_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_LFO_RATE_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "lfo depth",
+            "lfo depth",
+            [
+                fb::FILTERBANK_PARAM_MOD_LFO_DEPTH_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_LFO_DEPTH_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_LFO_DEPTH_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_LFO_DEPTH_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "ar attack",
+            "ar attack",
+            [
+                fb::FILTERBANK_PARAM_MOD_AR_ATTACK_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_AR_ATTACK_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_AR_ATTACK_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_AR_ATTACK_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "ar release",
+            "ar release",
+            [
+                fb::FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_4,
+            ],
+        );
 
         desc
     }
@@ -6274,10 +7077,17 @@ impl EffectDescriptor {
 /// Per-slot per-step parameter overrides.
 /// NaN = no override (use slot default).
 /// No internal clamping — callers pass clamped values.
-pub struct SlotPLockData {
+/// Cell storage for one slot's plocks, allocated on the first write.
+/// A slot with no plocks (the overwhelmingly common case) never pays the
+/// MAX_STEPS * max_params * 3-array allocation.
+struct PLockCells {
     data: Vec<AtomicU32>,
     id_logical_ids: Vec<AtomicU64>,
     id_node_param_indices: Vec<AtomicU32>,
+}
+
+pub struct SlotPLockData {
+    cells: OnceLock<PLockCells>,
     max_params: usize,
     /// Number of non-NaN cells. Lets snapshot capture/restore and per-step
     /// plock masks take O(1) fast paths for the common plock-free slot.
@@ -6289,19 +7099,29 @@ pub struct SlotPLockData {
 
 impl SlotPLockData {
     pub fn new(max_params: usize) -> Self {
-        let size = MAX_STEPS * max_params;
-        let data: Vec<AtomicU32> = (0..size).map(|_| AtomicU32::new(NAN_BITS)).collect();
-        let id_logical_ids: Vec<AtomicU64> = (0..size).map(|_| AtomicU64::new(0)).collect();
-        let id_node_param_indices: Vec<AtomicU32> =
-            (0..size).map(|_| AtomicU32::new(u32::MAX)).collect();
         Self {
-            data,
-            id_logical_ids,
-            id_node_param_indices,
+            cells: OnceLock::new(),
             max_params,
             plock_count: AtomicU32::new(0),
             step_counts: (0..MAX_STEPS).map(|_| AtomicU32::new(0)).collect(),
         }
+    }
+
+    /// Cell arrays, if any write has materialized them. Absent arrays read as
+    /// all-empty (every value NaN, every param id cleared).
+    fn cells(&self) -> Option<&PLockCells> {
+        self.cells.get()
+    }
+
+    fn cells_or_alloc(&self) -> &PLockCells {
+        self.cells.get_or_init(|| {
+            let size = MAX_STEPS * self.max_params;
+            PLockCells {
+                data: (0..size).map(|_| AtomicU32::new(NAN_BITS)).collect(),
+                id_logical_ids: (0..size).map(|_| AtomicU64::new(0)).collect(),
+                id_node_param_indices: (0..size).map(|_| AtomicU32::new(u32::MAX)).collect(),
+            }
+        })
     }
 
     fn index(&self, step: usize, param_idx: usize) -> usize {
@@ -6342,10 +7162,12 @@ impl SlotPLockData {
         if !self.has_any_plock() {
             return;
         }
-        for idx in 0..self.data.len() {
-            self.data[idx].store(NAN_BITS, Ordering::Relaxed);
-            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+        if let Some(cells) = self.cells() {
+            for idx in 0..cells.data.len() {
+                cells.data[idx].store(NAN_BITS, Ordering::Relaxed);
+                cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+            }
         }
         self.plock_count.store(0, Ordering::Relaxed);
         for count in &self.step_counts {
@@ -6354,11 +7176,12 @@ impl SlotPLockData {
     }
 
     pub fn get(&self, step: usize, param_idx: usize) -> Option<f32> {
+        let cells = self.cells()?;
         let idx = self.index(step, param_idx);
-        if idx >= self.data.len() {
+        if idx >= cells.data.len() {
             return None;
         }
-        let bits = self.data[idx].load(Ordering::Relaxed);
+        let bits = cells.data[idx].load(Ordering::Relaxed);
         let val = f32::from_bits(bits);
         if val.is_nan() {
             None
@@ -6368,32 +7191,40 @@ impl SlotPLockData {
     }
 
     pub fn set(&self, step: usize, param_idx: usize, val: f32) {
+        if self.cells().is_none() && val.is_nan() {
+            // Writing "no override" into a slot with no cells is a no-op;
+            // don't materialize the arrays for it.
+            return;
+        }
+        let cells = self.cells_or_alloc();
         let idx = self.index(step, param_idx);
-        if idx < self.data.len() {
-            let old_bits = self.data[idx].swap(val.to_bits(), Ordering::Relaxed);
+        if idx < cells.data.len() {
+            let old_bits = cells.data[idx].swap(val.to_bits(), Ordering::Relaxed);
             self.note_cell_transition(step, old_bits, val.to_bits());
-            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+            cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+            cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
         }
     }
 
     pub fn set_with_id(&self, step: usize, param_idx: usize, val: f32, param_id: ParamNodeId) {
+        let cells = self.cells_or_alloc();
         let idx = self.index(step, param_idx);
-        if idx < self.data.len() {
-            let old_bits = self.data[idx].swap(val.to_bits(), Ordering::Relaxed);
+        if idx < cells.data.len() {
+            let old_bits = cells.data[idx].swap(val.to_bits(), Ordering::Relaxed);
             self.note_cell_transition(step, old_bits, val.to_bits());
-            self.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
-            self.id_node_param_indices[idx].store(param_id.node_param_idx, Ordering::Relaxed);
+            cells.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
+            cells.id_node_param_indices[idx].store(param_id.node_param_idx, Ordering::Relaxed);
         }
     }
 
     pub fn get_id(&self, step: usize, param_idx: usize) -> Option<ParamNodeId> {
+        let cells = self.cells()?;
         let idx = self.index(step, param_idx);
-        if idx >= self.data.len() {
+        if idx >= cells.data.len() {
             return None;
         }
-        let logical_id = self.id_logical_ids[idx].load(Ordering::Relaxed);
-        let node_param_idx = self.id_node_param_indices[idx].load(Ordering::Relaxed);
+        let logical_id = cells.id_logical_ids[idx].load(Ordering::Relaxed);
+        let node_param_idx = cells.id_node_param_indices[idx].load(Ordering::Relaxed);
         if logical_id == 0 || node_param_idx == u32::MAX {
             None
         } else {
@@ -6408,24 +7239,30 @@ impl SlotPLockData {
         if self.step_count(step) == 0 {
             return;
         }
+        let Some(cells) = self.cells() else {
+            return;
+        };
         for p in 0..self.max_params {
             let idx = self.index(step, p);
-            if idx < self.data.len() {
-                let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+            if idx < cells.data.len() {
+                let old_bits = cells.data[idx].swap(NAN_BITS, Ordering::Relaxed);
                 self.note_cell_transition(step, old_bits, NAN_BITS);
-                self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-                self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+                cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
             }
         }
     }
 
     pub fn clear_param(&self, step: usize, param_idx: usize) {
+        let Some(cells) = self.cells() else {
+            return;
+        };
         let idx = self.index(step, param_idx);
-        if idx < self.data.len() {
-            let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+        if idx < cells.data.len() {
+            let old_bits = cells.data[idx].swap(NAN_BITS, Ordering::Relaxed);
             self.note_cell_transition(step, old_bits, NAN_BITS);
-            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+            cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+            cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
         }
     }
 
@@ -6441,6 +7278,9 @@ impl SlotPLockData {
             // allocating MAX_STEPS * num_params Options per slot.
             return (Vec::new(), Vec::new());
         }
+        let Some(cells) = self.cells() else {
+            return (Vec::new(), Vec::new());
+        };
         let read_np = num_params.min(self.max_params);
         let mut plocks = Vec::with_capacity(MAX_STEPS);
         let mut plock_param_ids = Vec::with_capacity(MAX_STEPS);
@@ -6457,13 +7297,13 @@ impl SlotPLockData {
             let mut id_row = vec![None; num_params];
             for p in 0..read_np {
                 let idx = base + p;
-                let val = f32::from_bits(self.data[idx].load(Ordering::Relaxed));
+                let val = f32::from_bits(cells.data[idx].load(Ordering::Relaxed));
                 if !val.is_nan() {
                     row[p] = Some(val);
                 }
-                let logical_id = self.id_logical_ids[idx].load(Ordering::Relaxed);
+                let logical_id = cells.id_logical_ids[idx].load(Ordering::Relaxed);
                 if logical_id != 0 {
-                    let node_param_idx = self.id_node_param_indices[idx].load(Ordering::Relaxed);
+                    let node_param_idx = cells.id_node_param_indices[idx].load(Ordering::Relaxed);
                     if node_param_idx != u32::MAX {
                         id_row[p] = Some(ParamNodeId {
                             logical_id,
@@ -6493,6 +7333,19 @@ impl SlotPLockData {
             self.clear_all();
             return;
         }
+        let has_values = plocks
+            .iter()
+            .any(|row| row.iter().any(|value| value.is_some()));
+        let cells = if has_values {
+            self.cells_or_alloc()
+        } else {
+            // All-None rows only clear; with no cells there is nothing to
+            // clear, so skip materializing the arrays.
+            match self.cells() {
+                Some(cells) => cells,
+                None => return,
+            }
+        };
         let np = num_params.min(self.max_params);
         for (step, row) in plocks.iter().enumerate().take(MAX_STEPS) {
             if row.is_empty() {
@@ -6513,26 +7366,26 @@ impl SlotPLockData {
                 match row[p] {
                     Some(val) => {
                         let param_id = id_row.and_then(|ids| ids.get(p)).copied().flatten();
-                        let old_bits = self.data[idx].swap(val.to_bits(), Ordering::Relaxed);
+                        let old_bits = cells.data[idx].swap(val.to_bits(), Ordering::Relaxed);
                         self.note_cell_transition(step, old_bits, val.to_bits());
                         match param_id {
                             Some(param_id) => {
-                                self.id_logical_ids[idx]
+                                cells.id_logical_ids[idx]
                                     .store(param_id.logical_id, Ordering::Relaxed);
-                                self.id_node_param_indices[idx]
+                                cells.id_node_param_indices[idx]
                                     .store(param_id.node_param_idx, Ordering::Relaxed);
                             }
                             None => {
-                                self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-                                self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+                                cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                                cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
                             }
                         }
                     }
                     None => {
-                        let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+                        let old_bits = cells.data[idx].swap(NAN_BITS, Ordering::Relaxed);
                         self.note_cell_transition(step, old_bits, NAN_BITS);
-                        self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-                        self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+                        cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                        cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
                     }
                 }
             }
@@ -6565,9 +7418,9 @@ impl SlotPLockData {
 }
 
 pub struct SlotKeyLockData {
-    data: Vec<AtomicU32>,
-    id_logical_ids: Vec<AtomicU64>,
-    id_node_param_indices: Vec<AtomicU32>,
+    /// Cell arrays, allocated on the first write (see `PLockCells`); absent
+    /// arrays read as all-empty.
+    cells: OnceLock<PLockCells>,
     max_params: usize,
     lock_count: AtomicU32,
     note_counts: Vec<AtomicU32>,
@@ -6575,19 +7428,27 @@ pub struct SlotKeyLockData {
 
 impl SlotKeyLockData {
     pub fn new(max_params: usize) -> Self {
-        let size = MAX_MIDI_NOTES * max_params;
-        let data: Vec<AtomicU32> = (0..size).map(|_| AtomicU32::new(NAN_BITS)).collect();
-        let id_logical_ids: Vec<AtomicU64> = (0..size).map(|_| AtomicU64::new(0)).collect();
-        let id_node_param_indices: Vec<AtomicU32> =
-            (0..size).map(|_| AtomicU32::new(u32::MAX)).collect();
         Self {
-            data,
-            id_logical_ids,
-            id_node_param_indices,
+            cells: OnceLock::new(),
             max_params,
             lock_count: AtomicU32::new(0),
             note_counts: (0..MAX_MIDI_NOTES).map(|_| AtomicU32::new(0)).collect(),
         }
+    }
+
+    fn cells(&self) -> Option<&PLockCells> {
+        self.cells.get()
+    }
+
+    fn cells_or_alloc(&self) -> &PLockCells {
+        self.cells.get_or_init(|| {
+            let size = MAX_MIDI_NOTES * self.max_params;
+            PLockCells {
+                data: (0..size).map(|_| AtomicU32::new(NAN_BITS)).collect(),
+                id_logical_ids: (0..size).map(|_| AtomicU64::new(0)).collect(),
+                id_node_param_indices: (0..size).map(|_| AtomicU32::new(u32::MAX)).collect(),
+            }
+        })
     }
 
     fn index(&self, note: u8, param_idx: usize) -> usize {
@@ -6625,10 +7486,12 @@ impl SlotKeyLockData {
         if !self.has_any_lock() {
             return;
         }
-        for idx in 0..self.data.len() {
-            self.data[idx].store(NAN_BITS, Ordering::Relaxed);
-            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+        if let Some(cells) = self.cells() {
+            for idx in 0..cells.data.len() {
+                cells.data[idx].store(NAN_BITS, Ordering::Relaxed);
+                cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+            }
         }
         self.lock_count.store(0, Ordering::Relaxed);
         for count in &self.note_counts {
@@ -6637,41 +7500,49 @@ impl SlotKeyLockData {
     }
 
     pub fn get(&self, note: u8, param_idx: usize) -> Option<f32> {
+        let cells = self.cells()?;
         let idx = self.index(note, param_idx);
-        if idx >= self.data.len() {
+        if idx >= cells.data.len() {
             return None;
         }
-        let value = f32::from_bits(self.data[idx].load(Ordering::Relaxed));
+        let value = f32::from_bits(cells.data[idx].load(Ordering::Relaxed));
         (!value.is_nan()).then_some(value)
     }
 
     pub fn set(&self, note: u8, param_idx: usize, value: f32) {
+        if self.cells().is_none() && value.is_nan() {
+            // Writing "no override" into a slot with no cells is a no-op.
+            return;
+        }
+        let cells = self.cells_or_alloc();
         let idx = self.index(note, param_idx);
-        if idx < self.data.len() {
-            let old_bits = self.data[idx].swap(value.to_bits(), Ordering::Relaxed);
+        if idx < cells.data.len() {
+            let old_bits = cells.data[idx].swap(value.to_bits(), Ordering::Relaxed);
             self.note_cell_transition(note, old_bits, value.to_bits());
-            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+            cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+            cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
         }
     }
 
     pub fn set_with_id(&self, note: u8, param_idx: usize, value: f32, param_id: ParamNodeId) {
+        let cells = self.cells_or_alloc();
         let idx = self.index(note, param_idx);
-        if idx < self.data.len() {
-            let old_bits = self.data[idx].swap(value.to_bits(), Ordering::Relaxed);
+        if idx < cells.data.len() {
+            let old_bits = cells.data[idx].swap(value.to_bits(), Ordering::Relaxed);
             self.note_cell_transition(note, old_bits, value.to_bits());
-            self.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
-            self.id_node_param_indices[idx].store(param_id.node_param_idx, Ordering::Relaxed);
+            cells.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
+            cells.id_node_param_indices[idx].store(param_id.node_param_idx, Ordering::Relaxed);
         }
     }
 
     pub fn get_id(&self, note: u8, param_idx: usize) -> Option<ParamNodeId> {
+        let cells = self.cells()?;
         let idx = self.index(note, param_idx);
-        if idx >= self.data.len() {
+        if idx >= cells.data.len() {
             return None;
         }
-        let logical_id = self.id_logical_ids[idx].load(Ordering::Relaxed);
-        let node_param_idx = self.id_node_param_indices[idx].load(Ordering::Relaxed);
+        let logical_id = cells.id_logical_ids[idx].load(Ordering::Relaxed);
+        let node_param_idx = cells.id_node_param_indices[idx].load(Ordering::Relaxed);
         if logical_id == 0 || node_param_idx == u32::MAX {
             None
         } else {
@@ -6686,24 +7557,30 @@ impl SlotKeyLockData {
         if self.note_count(note) == 0 {
             return;
         }
+        let Some(cells) = self.cells() else {
+            return;
+        };
         for param_idx in 0..self.max_params {
             let idx = self.index(note, param_idx);
-            if idx < self.data.len() {
-                let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+            if idx < cells.data.len() {
+                let old_bits = cells.data[idx].swap(NAN_BITS, Ordering::Relaxed);
                 self.note_cell_transition(note, old_bits, NAN_BITS);
-                self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-                self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+                cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
             }
         }
     }
 
     pub fn clear_param(&self, note: u8, param_idx: usize) {
+        let Some(cells) = self.cells() else {
+            return;
+        };
         let idx = self.index(note, param_idx);
-        if idx < self.data.len() {
-            let old_bits = self.data[idx].swap(NAN_BITS, Ordering::Relaxed);
+        if idx < cells.data.len() {
+            let old_bits = cells.data[idx].swap(NAN_BITS, Ordering::Relaxed);
             self.note_cell_transition(note, old_bits, NAN_BITS);
-            self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-            self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+            cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+            cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
         }
     }
 
@@ -6726,6 +7603,9 @@ impl SlotKeyLockData {
         if !self.has_any_lock() {
             return (locks, lock_ids);
         }
+        let Some(cells) = self.cells() else {
+            return (locks, lock_ids);
+        };
         let read_np = num_params.min(self.max_params);
         for note in 0..MAX_MIDI_NOTES {
             let note = note as u8;
@@ -6737,13 +7617,13 @@ impl SlotKeyLockData {
             let mut id_row = vec![None; num_params];
             for param_idx in 0..read_np {
                 let idx = base + param_idx;
-                let value = f32::from_bits(self.data[idx].load(Ordering::Relaxed));
+                let value = f32::from_bits(cells.data[idx].load(Ordering::Relaxed));
                 if !value.is_nan() {
                     row[param_idx] = Some(value);
                 }
-                let logical_id = self.id_logical_ids[idx].load(Ordering::Relaxed);
+                let logical_id = cells.id_logical_ids[idx].load(Ordering::Relaxed);
                 if logical_id != 0 {
-                    let node_param_idx = self.id_node_param_indices[idx].load(Ordering::Relaxed);
+                    let node_param_idx = cells.id_node_param_indices[idx].load(Ordering::Relaxed);
                     if node_param_idx != u32::MAX {
                         id_row[param_idx] = Some(ParamNodeId {
                             logical_id,
@@ -6767,10 +7647,17 @@ impl SlotKeyLockData {
         num_params: usize,
     ) {
         self.clear_all();
+        let has_values = locks
+            .values()
+            .any(|row| row.iter().any(|value| value.is_some()));
+        if !has_values {
+            return;
+        }
+        let cells = self.cells_or_alloc();
         let np = num_params.min(self.max_params);
         for (&note, row) in locks {
             let base = note as usize * self.max_params;
-            if base >= self.data.len() {
+            if base >= cells.data.len() {
                 continue;
             }
             let id_row = lock_ids.get(&note);
@@ -6779,17 +7666,17 @@ impl SlotKeyLockData {
                     continue;
                 };
                 let idx = base + param_idx;
-                let old_bits = self.data[idx].swap(value.to_bits(), Ordering::Relaxed);
+                let old_bits = cells.data[idx].swap(value.to_bits(), Ordering::Relaxed);
                 self.note_cell_transition(note, old_bits, value.to_bits());
                 match id_row.and_then(|ids| ids.get(param_idx)).copied().flatten() {
                     Some(param_id) => {
-                        self.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
-                        self.id_node_param_indices[idx]
+                        cells.id_logical_ids[idx].store(param_id.logical_id, Ordering::Relaxed);
+                        cells.id_node_param_indices[idx]
                             .store(param_id.node_param_idx, Ordering::Relaxed);
                     }
                     None => {
-                        self.id_logical_ids[idx].store(0, Ordering::Relaxed);
-                        self.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
+                        cells.id_logical_ids[idx].store(0, Ordering::Relaxed);
+                        cells.id_node_param_indices[idx].store(u32::MAX, Ordering::Relaxed);
                     }
                 }
             }
@@ -6858,7 +7745,9 @@ pub struct SlotTensorParamData {
     flat_offsets: Vec<AtomicU32>,
     lengths: Vec<AtomicU32>,
     defaults: Vec<AtomicU32>,
-    plocks: Vec<AtomicU32>,
+    /// MAX_STEPS * MAX_SLOT_TENSOR_CELLS plock cells, allocated on the first
+    /// plock write; absent reads as all-NaN (no plocks).
+    plocks: OnceLock<Vec<AtomicU32>>,
     plock_count: AtomicU32,
     step_counts: Vec<AtomicU32>,
 }
@@ -6880,9 +7769,7 @@ impl SlotTensorParamData {
             defaults: (0..MAX_SLOT_TENSOR_CELLS)
                 .map(|_| AtomicU32::new(0.0_f32.to_bits()))
                 .collect(),
-            plocks: (0..MAX_STEPS * MAX_SLOT_TENSOR_CELLS)
-                .map(|_| AtomicU32::new(NAN_BITS))
-                .collect(),
+            plocks: OnceLock::new(),
             plock_count: AtomicU32::new(0),
             step_counts: (0..MAX_STEPS).map(|_| AtomicU32::new(0)).collect(),
         }
@@ -6902,13 +7789,27 @@ impl SlotTensorParamData {
         step * MAX_SLOT_TENSOR_CELLS + flat_offset + cell_idx
     }
 
+    fn plock_cells(&self) -> Option<&Vec<AtomicU32>> {
+        self.plocks.get()
+    }
+
+    fn plock_cells_or_alloc(&self) -> &Vec<AtomicU32> {
+        self.plocks.get_or_init(|| {
+            (0..MAX_STEPS * MAX_SLOT_TENSOR_CELLS)
+                .map(|_| AtomicU32::new(NAN_BITS))
+                .collect()
+        })
+    }
+
     fn has_plock_for_meta(&self, step: usize, meta: &SlotTensorParamMeta) -> bool {
         if step >= MAX_STEPS || meta.len == 0 {
             return false;
         }
+        let Some(plocks) = self.plock_cells() else {
+            return false;
+        };
         let idx = Self::plock_index(step, meta.flat_offset, 0);
-        idx < self.plocks.len()
-            && !f32::from_bits(self.plocks[idx].load(Ordering::Relaxed)).is_nan()
+        idx < plocks.len() && !f32::from_bits(plocks[idx].load(Ordering::Relaxed)).is_nan()
     }
 
     fn note_plock_transition(&self, step: usize, old_set: bool, new_set: bool) {
@@ -6933,8 +7834,10 @@ impl SlotTensorParamData {
         if !self.has_any_plock() {
             return;
         }
-        for value in &self.plocks {
-            value.store(NAN_BITS, Ordering::Relaxed);
+        if let Some(plocks) = self.plock_cells() {
+            for value in plocks {
+                value.store(NAN_BITS, Ordering::Relaxed);
+            }
         }
         self.plock_count.store(0, Ordering::Relaxed);
         for count in &self.step_counts {
@@ -7025,10 +7928,11 @@ impl SlotTensorParamData {
         if !self.has_plock_for_meta(step, &meta) {
             return None;
         }
+        let plocks = self.plock_cells()?;
         let mut values = Vec::with_capacity(meta.len);
         for cell_idx in 0..meta.len {
             let idx = Self::plock_index(step, meta.flat_offset, cell_idx);
-            values.push(f32::from_bits(self.plocks[idx].load(Ordering::Relaxed)));
+            values.push(f32::from_bits(plocks[idx].load(Ordering::Relaxed)));
         }
         Some(values)
     }
@@ -7077,9 +7981,10 @@ impl SlotTensorParamData {
             return false;
         }
         let had_plock = self.has_plock_for_meta(step, &meta);
+        let plocks = self.plock_cells_or_alloc();
         for (cell_idx, value) in values.iter().copied().enumerate() {
             let idx = Self::plock_index(step, meta.flat_offset, cell_idx);
-            self.plocks[idx].store(clamped_tensor_cell(value).to_bits(), Ordering::Relaxed);
+            plocks[idx].store(clamped_tensor_cell(value).to_bits(), Ordering::Relaxed);
         }
         self.note_plock_transition(step, had_plock, true);
         true
@@ -7113,9 +8018,12 @@ impl SlotTensorParamData {
         if !had_plock {
             return true;
         }
+        let Some(plocks) = self.plock_cells() else {
+            return true;
+        };
         for cell_idx in 0..meta.len {
             let idx = Self::plock_index(step, meta.flat_offset, cell_idx);
-            self.plocks[idx].store(NAN_BITS, Ordering::Relaxed);
+            plocks[idx].store(NAN_BITS, Ordering::Relaxed);
         }
         self.note_plock_transition(step, true, false);
         true

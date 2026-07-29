@@ -10,6 +10,7 @@ use eseqlisp::widget_render::compressor_display::{
 };
 use eseqlisp::widget_render::live_audio::{LiveAudioSourceSelector, TapPoint};
 use eseqlisp::widget_render::multiband_meter::{collect_band_meter_requests, BandMeterRequest};
+use eseqlisp::widget_render::gate_led::collect_gate_led_requests;
 use eseqlisp::widget_render::roar_shaper::collect_roar_meter_requests;
 use eseqlisp::widget_render::scope::{collect_scope_requests, ScopeRequest};
 use eseqlisp::widget_render::spectrogram::{collect_spectrogram_requests, SpectrogramRequest};
@@ -124,6 +125,16 @@ impl LiveAudioAnalyzerManager {
             // Roar shaper views read their effect node's state meters over
             // the same watchlist path, keyed `roar-meter:`.
             for request in collect_roar_meter_requests(layout.as_ref()) {
+                meter_requests
+                    .entry(request.data_key.clone())
+                    .or_insert(BandMeterRequest {
+                        data_key: request.data_key,
+                        source: request.source,
+                    });
+            }
+            // Filterbank gate LEDs read their effect node's state meter tail
+            // over the same watchlist path, keyed `filterbank-meter:`.
+            for request in collect_gate_led_requests(layout.as_ref()) {
                 meter_requests
                     .entry(request.data_key.clone())
                     .or_insert(BandMeterRequest {
@@ -383,8 +394,11 @@ impl LiveAudioAnalyzerManager {
                 continue;
             };
             let is_roar = data_key.starts_with("roar-meter:");
+            let is_filterbank = data_key.starts_with("filterbank-meter:");
             let state_len = if is_roar {
                 sequencer::effects::roar::ROAR_STATE_SIZE
+            } else if is_filterbank {
+                sequencer::effects::filterbank::FILTERBANK_STATE_SIZE
             } else {
                 sequencer::effects::ott::OTT_STATE_SIZE
             };
@@ -419,6 +433,12 @@ impl LiveAudioAnalyzerManager {
                     frame.gain_db[stage] =
                         state[sequencer::effects::roar::STATE_METER_POST_DB + stage];
                 }
+            } else if is_filterbank {
+                // Filterbank meter tail (§9 of docs/sherman-filterbank-spec.md):
+                // env in gain_db[0], the 0/1 gate flag in gain_db[1]. The
+                // gate-led widget decodes this layout.
+                frame.gain_db[0] = state[sequencer::effects::filterbank::FILTERBANK_METER_ENV];
+                frame.gain_db[1] = state[sequencer::effects::filterbank::FILTERBANK_METER_GATE];
             } else {
                 for band in 0..3 {
                     for ch in 0..2 {

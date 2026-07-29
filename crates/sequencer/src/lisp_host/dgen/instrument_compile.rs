@@ -243,7 +243,9 @@ pub fn compile_instrument_with_asset_base(
 ) -> Result<String, String> {
     let dir = output_dir();
     let seq = COMPILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dylib_name = format!("instrument_{}", seq);
+    // Include the pid: concurrent test processes share output_dir() and each
+    // starts COMPILE_COUNTER at 0, so a bare counter collides across them.
+    let dylib_name = format!("instrument_{}_{}", std::process::id(), seq);
     let effective_source = effective_dgen_source(DGenCompileKind::Instrument, source, sample_rate)?;
     compile_effective_dgen_source_to_dir(
         DGenCompileKind::Instrument,

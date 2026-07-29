@@ -514,6 +514,29 @@ impl Compiler {
         self.global_symbols.clone()
     }
 
+    /// Move the compiled program state out of the compiler. The REPL path
+    /// (`Vm::eval_str`) runs per keystroke on shortcut dispatch, so it must
+    /// not deep-clone thousands of chunks/names/macros in either direction.
+    pub fn take_chunks(&mut self) -> Vec<Chunk> {
+        std::mem::take(&mut self.chunks)
+    }
+
+    pub fn take_global_names(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.global_symbols)
+    }
+
+    pub fn take_derived_bindings(&mut self) -> HashMap<String, u32> {
+        std::mem::take(&mut self.derived_bindings)
+    }
+
+    pub fn take_state_bindings(&mut self) -> HashMap<String, u32> {
+        std::mem::take(&mut self.state_bindings)
+    }
+
+    pub fn take_macros(&mut self) -> HashMap<String, MacroDef> {
+        std::mem::take(&mut self.macros)
+    }
+
     pub fn into_derived_bindings(self) -> HashMap<String, u32> {
         self.derived_bindings
     }

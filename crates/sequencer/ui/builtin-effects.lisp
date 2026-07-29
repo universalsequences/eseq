@@ -18,4 +18,5 @@
 (load "@/ui/effects/builtin/tape.lisp")
 (load "@/ui/effects/builtin/dj-mixer.lisp")
 (load "@/ui/effects/builtin/convolution-reverb.lisp")
+(load "@/ui/effects/builtin/filterbank.lisp")
 (load "@/ui/effects/builtin/audio-fx.lisp")

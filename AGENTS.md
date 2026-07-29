@@ -2,20 +2,34 @@
 
 ## Test selection and runtime policy
 
+Prefer `cargo nextest run` over `cargo test` when nextest is installed (`brew
+install cargo-nextest`; check with `cargo nextest --version`). It runs each
+test in its own process, which isolates tests that touch shared global state
+(e.g. the shared `$TMPDIR/sequencer_dgenlisp` compile output dir), reports
+per-test wall times, and schedules the suite better. Fall back to `cargo test`
+if nextest is unavailable.
+
 Use the narrowest test target that validates the behavior changed. Do not run a
 full package or workspace test suite as a default validation or finishing step.
 
-For a unit test in a library, select both the library target and the exact test:
+For a unit test in a library, select the exact test:
 
 ```sh
-cargo test -p <package> --lib <fully-qualified-test-name> -- --exact
+cargo nextest run -p <package> -E 'test(=<fully-qualified-test-name>)'
+# or: cargo test -p <package> --lib <fully-qualified-test-name> -- --exact
 ```
 
 For an integration test, select the integration-test binary and the exact test:
 
 ```sh
-cargo test -p <package> --test <test-target> <test-name> -- --exact
+cargo nextest run -p <package> -E 'binary(<test-target>) and test(=<test-name>)'
+# or: cargo test -p <package> --test <test-target> <test-name> -- --exact
 ```
+
+nextest notes: use `--no-capture` where a `cargo test` command would use
+`-- --nocapture`; `-E 'test(/regex/)'` selects by regex; nextest does not run
+doctests (this repo's tests are all unit/integration tests, so that does not
+matter here).
 
 Do not run any of the following unless the user explicitly requests exhaustive
 testing, or the change is genuinely cross-cutting and no narrower validation
@@ -42,12 +56,12 @@ failing test's subject overlaps your diff at all; if it does not, verify the
 failure pre-exists by running that one test in a temporary `git worktree` of
 HEAD (see "Working tree safety"), then report it as pre-existing and move on.
 
-Known pre-existing failures (July 2026, do not re-investigate; unrelated to
-effects/DSP work):
-
-- `tui::effects::tests::bus_effect_wiring_resolves_graph_nodes_by_bus_id_after_reordering`
-- `tui::graph::tests::rack_rebuild_defers_old_sampler_nodes_until_forced_reap`
-- `tui::graph::tests::replacing_expanded_rack_instrument_preserves_slot_fx_and_defers_old_engine`
+Known pre-existing failures: none. As of 2026-07-28 the full suite
+(`cargo nextest run -p sequencer -p eseqlisp`) is green: 3310 passed,
+18 skipped (`#[ignore]`d benchmarks/captures). If a broader run fails, treat it
+as a real signal — verify against a clean-HEAD worktree as described above, and
+if a failure genuinely pre-exists your change, update this list with the test
+name and evidence rather than leaving it undocumented.
 
 ## Working tree safety
 

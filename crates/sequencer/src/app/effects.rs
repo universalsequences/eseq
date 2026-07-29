@@ -57,6 +57,26 @@ fn patch_sidechain_labels(desc: &mut EffectDescriptor, labels: &[String]) {
     }
 }
 
+/// Some builtin effects normal their sidechain input to an internal source
+/// and need a node-state flag flipped when the host actually routes a track
+/// into the port (buffer content alone can't distinguish "no selection" from
+/// silence). Returns the node param index to write 1.0/0.0 into on sidechain
+/// selection changes.
+fn sidechain_active_state_param(effect_name: &str, input_channel: usize) -> Option<u64> {
+    if effect_name != "Filterbank" {
+        return None;
+    }
+    match input_channel {
+        crate::effects::filterbank::FILTERBANK_FM_INPUT_CHANNEL => {
+            Some(crate::effects::filterbank::FILTERBANK_PARAM_FM_EXT_ACTIVE)
+        }
+        crate::effects::filterbank::FILTERBANK_AM_INPUT_CHANNEL => {
+            Some(crate::effects::filterbank::FILTERBANK_PARAM_AM_EXT_ACTIVE)
+        }
+        _ => None,
+    }
+}
+
 fn instrument_display_name(name: &str) -> String {
     std::path::Path::new(name)
         .file_name()
@@ -1330,6 +1350,10 @@ impl App {
                 crate::effects::tape::tape_vtable(),
                 crate::effects::tape::TAPE_STATE_SIZE * std::mem::size_of::<f32>(),
             ),
+            "Filterbank" => (
+                crate::effects::filterbank::filterbank_vtable(),
+                crate::effects::filterbank::FILTERBANK_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
             other => return Err(format!("Unknown built-in effect '{other}'")),
         };
         let name = CString::new(format!(
@@ -1498,6 +1522,7 @@ impl App {
                         "Roar" => crate::effects::roar::ROAR_PARAM_BPM,
                         "Filter" => crate::effects::filter::FILTER_PARAM_BPM,
                         "DJ Mixer" => crate::effects::dj_mixer::DJ_MIXER_PARAM_BPM,
+                        "Filterbank" => crate::effects::filterbank::FILTERBANK_PARAM_BPM,
                         _ => continue,
                     };
                     unsafe {
@@ -1541,6 +1566,7 @@ impl App {
                         "Roar" => crate::effects::roar::ROAR_PARAM_BPM,
                         "Filter" => crate::effects::filter::FILTER_PARAM_BPM,
                         "DJ Mixer" => crate::effects::dj_mixer::DJ_MIXER_PARAM_BPM,
+                        "Filterbank" => crate::effects::filterbank::FILTERBANK_PARAM_BPM,
                         _ => continue,
                     };
                     unsafe {
@@ -2111,6 +2137,7 @@ impl App {
             }
         }
 
+        let mut ext_connected = false;
         if let Some(new_track) = self.effect_sidechain_source_track(track, selection) {
             let source_port = (*input_channel).min(1) as i32;
             let connected = unsafe {
@@ -2126,6 +2153,26 @@ impl App {
                 eprintln!(
                     "sidechain: connect failed effect_node={} track={} slot={} new_track={} src_port={} dst_port={}",
                     node_id, track, slot_idx, new_track, source_port, *input_channel as i32,
+                );
+            }
+            ext_connected = connected;
+        }
+
+        // Tell effects with a normalled internal source (e.g. Filterbank
+        // FM/AM) whether an external sidechain is now routed in. Keyed to the
+        // actual connect result: on a failed connect the DSP must keep its
+        // normalled source rather than read a silent, never-connected port.
+        if let Some(active_idx) = sidechain_active_state_param(desc.name.as_str(), *input_channel)
+        {
+            let active = ext_connected;
+            unsafe {
+                crate::audiograph::params_push_wrapper(
+                    self.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        logical_id: node_id as u64,
+                        idx: active_idx,
+                        fvalue: if active { 1.0 } else { 0.0 },
+                    },
                 );
             }
         }
@@ -2181,18 +2228,38 @@ impl App {
             }
         }
 
+        let mut ext_connected = false;
         if let Some(new_track) = self.bus_effect_sidechain_source_track(selection) {
             if let Some(nodes) = self.graph.track_node_ids.get(new_track) {
                 let source_port = (*input_channel).min(1) as i32;
-                unsafe {
+                ext_connected = unsafe {
                     crate::audiograph::graph_connect(
                         self.graph.lg.0,
                         nodes.delay_id,
                         source_port,
                         node_id,
                         *input_channel as i32,
-                    );
-                }
+                    )
+                };
+            }
+        }
+
+        // Tell effects with a normalled internal source (e.g. Filterbank
+        // FM/AM) whether an external sidechain is now routed in. Keyed to the
+        // actual connect result so a failed connect keeps the normalled
+        // source instead of a silent, never-connected port.
+        if let Some(active_idx) = sidechain_active_state_param(desc.name.as_str(), *input_channel)
+        {
+            let active = ext_connected;
+            unsafe {
+                crate::audiograph::params_push_wrapper(
+                    self.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        logical_id: node_id as u64,
+                        idx: active_idx,
+                        fvalue: if active { 1.0 } else { 0.0 },
+                    },
+                );
             }
         }
     }
@@ -3406,8 +3473,9 @@ impl App {
             }
             return Ok(());
         }
-        let descriptor = EffectDescriptor::builtin_insert(name)
+        let mut descriptor = EffectDescriptor::builtin_insert(name)
             .ok_or_else(|| format!("Unknown built-in effect '{name}'"))?;
+        patch_sidechain_labels(&mut descriptor, &self.effect_sidechain_labels(track));
         let locator = Self::rack_slot_fx_locator(track, rack_slot);
         let (node_id, modulator_node_id) =
             self.install_builtin_fx_node(locator, effect_slot, &descriptor)?;

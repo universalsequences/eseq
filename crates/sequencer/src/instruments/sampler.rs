@@ -863,6 +863,11 @@ unsafe fn sampler_process_segment(
     } else {
         sample_len
     };
+    // Truncation can collapse the region to zero width even when
+    // end_point > start_point; downstream clamp(start, end - 1) requires a
+    // region of at least one frame.
+    let start_sample = start_sample.min(sample_len.saturating_sub(1));
+    let end_sample = end_sample.clamp(start_sample + 1, sample_len.max(1));
 
     if playing <= 0.0 || sample_data.is_null() || sample_len == 0 {
         for i in 0..nf {
