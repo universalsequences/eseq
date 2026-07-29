@@ -6245,10 +6245,31 @@ fn apply_recorded_track_params_command(
         .track_registry
         .id_at(track)
         .ok_or(EditError::TrackOutOfRange { track })?;
-    let pattern_id = app
-        .state
-        .effective_track_pattern_id(track)
-        .ok_or(EditError::MissingTrackPattern)?;
+    // Mixer/track-param edits follow the sound binding exactly like device
+    // values (takes spec 16.4): with a take or pinned clip bound, the fader
+    // IS the bound source's stored sound, and writing the effective scene
+    // pattern instead both loses the edit on the next row push and leaks a
+    // take-intended tweak into the scene cell. Structural step-machine
+    // fields (timebase/swing) stay live/pattern-owned — the borrow never
+    // loads them from the bound source.
+    let effective_id = app.state.effective_track_pattern_id(track);
+    let bound_pattern = if track_params_command_is_structural(cmd) {
+        None
+    } else {
+        match app.bound_read_pattern(track) {
+            Some(pattern)
+                if !app.track_sound_binding(track).is_scene()
+                    && Some(pattern) != effective_id =>
+            {
+                Some(pattern)
+            }
+            _ => None,
+        }
+    };
+    let pattern_id = match bound_pattern {
+        Some(pattern) => pattern,
+        None => effective_id.ok_or(EditError::MissingTrackPattern)?,
+    };
     let target = TrackPatternId { track: track_id, pattern: pattern_id };
     let merge_key = merge_key.map(|_| {
         MergeKey::new(format!(
@@ -6285,17 +6306,78 @@ fn apply_recorded_track_params_command(
         .unwrap_or_else(|| (current_before.clone(), current_base_before));
 
     super::command::execute_command(app, cmd.clone());
-    let after = match app.state.capture_pattern_track_params(track, pattern_id) {
-        Ok(after) => after,
-        Err(error) => return Err(rollback_track_params_edit(
+    // The command executed against the LIVE surface. For the effective
+    // pattern the live surface IS the pattern; for a bound pool target the
+    // live surface is the borrowed mirror of that source, so merge the live
+    // values onto the pool snapshot — preserving the structural fields the
+    // borrow never loads (a take chunk must keep its MAX_STEPS width).
+    let after = if bound_pattern.is_some() {
+        match app.state.capture_live_track_params(track) {
+            Ok(live) => {
+                let mut merged = live;
+                merged.num_steps = current_before.num_steps;
+                merged.timebase = current_before.timebase.clone();
+                merged.swing = current_before.swing;
+                merged.swing_resolution = current_before.swing_resolution;
+                merged
+            }
+            Err(error) => return Err(rollback_track_params_edit(
+                app,
+                track,
+                pattern_id,
+                &current_before,
+                current_base_before,
+                EditError::ReplayFailed(error),
+            )),
+        }
+    } else {
+        match app.state.capture_pattern_track_params(track, pattern_id) {
+            Ok(after) => after,
+            Err(error) => return Err(rollback_track_params_edit(
+                app,
+                track,
+                pattern_id,
+                &current_before,
+                current_base_before,
+                EditError::ReplayFailed(error),
+            )),
+        }
+    };
+    // Same live-surface rule for the base-note offset: a bound edit executed
+    // against the live atomic, not the pool value.
+    if bound_pattern.is_some() {
+        let live_base = app
+            .state
+            .pattern
+            .instrument_base_note_offsets
+            .get(track)
+            .map(|bits| bits.load(std::sync::atomic::Ordering::Relaxed));
+        let Some(live_base) = live_base else {
+            return Err(rollback_track_params_edit(
+                app,
+                track,
+                pattern_id,
+                &current_before,
+                current_base_before,
+                EditError::TrackOutOfRange { track },
+            ));
+        };
+        return finish_track_params_edit(
             app,
+            cmd,
+            merge_key,
             track,
             pattern_id,
-            &current_before,
+            target,
+            current_before,
             current_base_before,
-            EditError::ReplayFailed(error),
-        )),
-    };
+            entry_before,
+            entry_base_before,
+            after,
+            live_base,
+            true,
+        );
+    }
     let base_after = match app
         .state
         .capture_pattern_instrument_base_note_offset(track, pattern_id)
@@ -6310,6 +6392,43 @@ fn apply_recorded_track_params_command(
             EditError::ReplayFailed(error),
         )),
     };
+    finish_track_params_edit(
+        app,
+        cmd,
+        merge_key,
+        track,
+        pattern_id,
+        target,
+        current_before,
+        current_base_before,
+        entry_before,
+        entry_base_before,
+        after,
+        base_after,
+        false,
+    )
+}
+
+/// Shared tail of a track-params edit: persist `after` to the target pattern
+/// (pool for a bound source, live-and-pool for the effective one), fan a
+/// bound take's write out to every chunk (takes spec 16.4), and commit or
+/// stage exactly one history entry.
+#[allow(clippy::too_many_arguments)]
+fn finish_track_params_edit(
+    app: &mut App,
+    cmd: &AppCommand,
+    merge_key: Option<MergeKey>,
+    track: usize,
+    pattern_id: crate::sequencer::PatternId,
+    target: TrackPatternId,
+    current_before: TrackParamsSnapshot,
+    current_base_before: u32,
+    entry_before: TrackParamsSnapshot,
+    entry_base_before: u32,
+    after: TrackParamsSnapshot,
+    base_after: u32,
+    bound: bool,
+) -> Result<EditOutcome, EditError> {
     if track_params_bit_exact_eq(&current_before, &after) && current_base_before == base_after {
         return Ok(EditOutcome::NoOp);
     }
@@ -6341,6 +6460,30 @@ fn apply_recorded_track_params_command(
             current_base_before,
             EditError::ReplayFailed(error),
         ));
+    }
+    if bound {
+        // A bound take's chunks must never diverge (takes spec 16.4): mirror
+        // the write onto every sibling chunk, preserving each chunk's own
+        // structural fields.
+        if let Err(error) = fan_out_track_params_to_take_chunks(
+            app,
+            track,
+            pattern_id,
+            &after,
+            f32::from_bits(base_after),
+        ) {
+            return Err(rollback_track_params_edit(
+                app,
+                track,
+                pattern_id,
+                &current_before,
+                current_base_before,
+                EditError::ReplayFailed(error),
+            ));
+        }
+        // Edit-through (16.7): a playing song's prebuilt rows cloned this
+        // pattern at preflight and would keep the pre-edit sound.
+        invalidate_song_rows_for_edit(app, track, pattern_id);
     }
     if merge_key.is_none()
         && (scheduler_track_params_changed(&current_before, &after)
@@ -6382,6 +6525,48 @@ fn apply_recorded_track_params_command(
         retained_bytes,
     );
     Ok(EditOutcome::Applied(move_result))
+}
+
+/// Mirror a track-params write onto the rest of the bound take's chunks
+/// (takes spec 16.4), preserving each chunk's structural fields. A no-op for
+/// pattern-clip targets (no siblings).
+fn fan_out_track_params_to_take_chunks(
+    app: &mut App,
+    track: usize,
+    pattern: crate::sequencer::PatternId,
+    after: &TrackParamsSnapshot,
+    base_after: f32,
+) -> Result<(), String> {
+    for chunk in app.take_sibling_chunks(track, pattern) {
+        let sibling_before = app.state.capture_pattern_track_params(track, chunk)?;
+        let mut sibling_after = after.clone();
+        sibling_after.num_steps = sibling_before.num_steps;
+        sibling_after.timebase = sibling_before.timebase.clone();
+        sibling_after.swing = sibling_before.swing;
+        sibling_after.swing_resolution = sibling_before.swing_resolution;
+        app.state
+            .restore_pattern_track_params_no_publish(track, chunk, &sibling_after)?;
+        app.state
+            .restore_pattern_instrument_base_note_offset_no_publish(track, chunk, base_after)?;
+    }
+    Ok(())
+}
+
+/// Track-param commands whose fields the sound-binding borrow never loads
+/// (`restore_device_state_to` keeps live num_steps/timebase/swing): these
+/// stay routed to the live/effective pattern even with a source bound.
+fn track_params_command_is_structural(cmd: &AppCommand) -> bool {
+    matches!(
+        cmd,
+        AppCommand::SetTrackSwing { .. }
+            | AppCommand::AdjustTrackSwing { .. }
+            | AppCommand::SetTrackSwingResolution { .. }
+            | AppCommand::NextTrackSwingResolution { .. }
+            | AppCommand::PrevTrackSwingResolution { .. }
+            | AppCommand::SetTrackTimebase { .. }
+            | AppCommand::NextTrackTimebase { .. }
+            | AppCommand::PrevTrackTimebase { .. }
+    )
 }
 
 pub fn apply_recorded_track_params_batch(
@@ -7167,6 +7352,32 @@ fn replay_track_params_patch(
         // 5): a playing song whose rows cloned this pattern at preflight
         // must re-preflight, exactly like the do-path.
         invalidate_song_rows_for_edit(app, track, patch.target.pattern);
+        // A bound take's chunks must never diverge (takes spec 16.4): undo
+        // and redo mirror the restored params onto the sibling chunks too.
+        fan_out_track_params_to_take_chunks(
+            app,
+            track,
+            patch.target.pattern,
+            snapshot,
+            f32::from_bits(base_note_bits),
+        )
+        .map_err(EditError::ReplayFailed)?;
+        // The live mirror may be borrowing this pattern (a bound take or
+        // clip): drop the loan so the next binding sync re-borrows the
+        // restored values and re-pushes them where audible.
+        let borrowing = app
+            .loaded_sound_binding
+            .get(track)
+            .copied()
+            .flatten()
+            .is_some_and(|source| {
+                app.bound_source_patterns(source, track)
+                    .contains(&patch.target.pattern)
+            });
+        if borrowing {
+            app.loaded_sound_binding[track] = None;
+            app.state.release_bound_track_device_state(track);
+        }
     }
     Ok(MutationEffects { publish_scheduler })
 }

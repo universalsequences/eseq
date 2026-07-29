@@ -433,6 +433,208 @@ mod tests {
         assert_eq!(take.total_len_steps, 64);
     }
 
+    /// Mixer/track-param edits follow the sound binding (takes spec 16.4):
+    /// with a take clip bound, the fader writes the take's chunks — NOT the
+    /// hidden effective scene pattern, which both loses the edit at the next
+    /// row push and leaks a take-intended tweak into the scene cell.
+    #[test]
+    fn mixer_volume_with_a_bound_take_writes_the_take_not_the_scene_cell() {
+        use crate::app::sound_binding::{BoundSource, SongClipSelection};
+        use crate::app::AppCommand;
+
+        let mut app = app_with_song();
+        let take_id = app
+            .song_region_to_take(0, 4.0, 12.0)
+            .expect("conversion succeeds");
+        let chunk0 = app.state.track_take(0, take_id).expect("take").chunks[0];
+        app.state.with_scenes_mut(|scenes| {
+            scenes.track_pools[0]
+                .get_mut(chunk0)
+                .expect("chunk pattern")
+                .track_params
+                .volume = 0.9;
+        });
+        let scene_pattern = app
+            .state
+            .effective_track_pattern_id(0)
+            .expect("effective pattern");
+        let scene_volume_before = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(scene_pattern)
+                .expect("scene pattern")
+                .track_params
+                .volume
+        });
+
+        let clip_id = app
+            .state
+            .committed_arrangement()
+            .expect("arrangement")
+            .track_lanes[0]
+            .iter()
+            .find(|clip| clip.take_id == Some(take_id.0))
+            .expect("take clip painted")
+            .id;
+        app.set_arrangement_view_visible(true);
+        app.set_song_clip_selection(Some(SongClipSelection {
+            track: 0,
+            clip_id,
+            source: BoundSource::Take(take_id),
+        }));
+        app.sync_track_sound_bindings();
+        assert_eq!(app.state.pattern.track_params[0].get_volume(), 0.9);
+
+        crate::app::edit::try_apply_command(
+            &mut app,
+            AppCommand::SetTrackVolume { track: 0, value: 0.3 },
+        )
+        .expect("volume edit applies");
+        crate::app::edit::finish_active_gesture(&mut app);
+
+        let chunk_volume = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(chunk0)
+                .expect("chunk pattern")
+                .track_params
+                .volume
+        });
+        assert_eq!(chunk_volume, 0.3, "the bound take owns the fader value");
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume(),
+            0.3,
+            "the live mirror (what the user hears while bound) moved too"
+        );
+        let scene_volume_after = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(scene_pattern)
+                .expect("scene pattern")
+                .track_params
+                .volume
+        });
+        assert_eq!(
+            scene_volume_after, scene_volume_before,
+            "no dual-write: the scene cell must not absorb a take-bound edit"
+        );
+        // The chunk keeps its full step width — a fader move must never
+        // resize a take chunk.
+        let chunk_steps = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(chunk0)
+                .expect("chunk pattern")
+                .track_params
+                .num_steps
+        });
+        assert_eq!(chunk_steps, MAX_STEPS);
+
+        // Undo restores the chunk; the next binding sync re-borrows the
+        // restored value into the live mirror.
+        undo(&mut app);
+        let chunk_volume = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(chunk0)
+                .expect("chunk pattern")
+                .track_params
+                .volume
+        });
+        assert_eq!(chunk_volume, 0.9);
+        app.sync_track_sound_bindings();
+        assert_eq!(app.state.pattern.track_params[0].get_volume(), 0.9);
+    }
+
+    /// Playback of a take lane must SOUND the take's device state (takes
+    /// spec 16.2/16.7), not the scene cell's: after every row transition
+    /// stomps the live mirror with the scene pattern, the next tick's
+    /// binding sync must re-borrow the chunk's devices and re-push them.
+    #[test]
+    fn row_transitions_rebind_and_repush_the_audible_takes_device_state() {
+        use crate::app::sound_binding::{BoundSource, SongClipSelection};
+
+        let mut app = app_with_song();
+        let take_id = app
+            .song_region_to_take(0, 4.0, 12.0)
+            .expect("conversion succeeds");
+        let chunk0 = app.state.track_take(0, take_id).expect("take").chunks[0];
+        // The take's device snapshot diverges from the scene cells: a
+        // distinctive volume on the chunk (the scene patterns keep default).
+        app.state.with_scenes_mut(|scenes| {
+            scenes.track_pools[0]
+                .get_mut(chunk0)
+                .expect("chunk pattern")
+                .track_params
+                .volume = 0.25;
+        });
+        let scene_volume = app.state.pattern.track_params[0].get_volume();
+        assert!((scene_volume - 0.25).abs() > 1e-3, "fixture needs divergence");
+
+        // Select the take clip (rule 1) with the arrangement on screen.
+        let clip_id = app
+            .state
+            .committed_arrangement()
+            .expect("arrangement")
+            .track_lanes[0]
+            .iter()
+            .find(|clip| clip.take_id == Some(take_id.0))
+            .expect("take clip painted")
+            .id;
+        app.set_arrangement_view_visible(true);
+        app.set_song_clip_selection(Some(SongClipSelection {
+            track: 0,
+            clip_id,
+            source: BoundSource::Take(take_id),
+        }));
+        app.sync_track_sound_bindings();
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume(),
+            0.25,
+            "stopped, the bound take's devices are the live mirror (16.2)"
+        );
+
+        // Play the song from beat 0 (row 0 plays the scene's pattern clip;
+        // the take starts at beat 4).
+        app.set_use_arrangement(true).expect("arrangement mode");
+        app.song_transport_play(false).expect("song playback");
+        let song = app.active_runtime_song.clone().expect("active song");
+        app.sync_track_sound_bindings();
+
+        // Reach the row where the take is audible.
+        let take_row = song
+            .rows
+            .iter()
+            .position(|row| {
+                row.resolved_sources.first().copied()
+                    == Some(crate::sequencer::LaneSource::Take(take_id))
+            })
+            .expect("a row plays the take");
+        app.mirror_song_row_applied(&crate::sequencer::AudibleSongRowApplied {
+            row_id: song.rows[take_row].id,
+            row_ordinal: take_row,
+            effective_beat: song.rows[take_row].start_beat,
+            effective_sample: 0,
+            wrapped: false,
+        })
+        .expect("mirror succeeds");
+        // The row apply released the borrow and restored the scene pattern;
+        // the reactive tick's sync must now re-borrow AND re-push.
+        app.sync_track_sound_bindings();
+        assert_eq!(
+            app.loaded_sound_binding[0],
+            Some(BoundSource::Take(take_id)),
+            "the tick re-binds the audible take (rule 2/1)"
+        );
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume(),
+            0.25,
+            "the live mirror shows the take's devices again"
+        );
+        assert!(
+            app.sound_binding_monitored[0],
+            "the audible take's sound was re-pushed to the engine after the \
+             row apply stomped it (16.7: what is audible IS the mirror)"
+        );
+        assert!(!app.sound_binding_is_silent(0));
+        app.song_transport_stop().expect("stop");
+    }
+
     #[test]
     fn region_to_take_rejects_empty_regions() {
         let mut app = app_with_song();

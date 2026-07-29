@@ -502,6 +502,21 @@ impl SequencerState {
             .ok_or_else(|| "Track Pattern target no longer exists".to_string())
     }
 
+    /// The LIVE track-params surface, regardless of which pattern is
+    /// effective. Bound edits (takes spec 16.4) execute against the live
+    /// mirror and then persist to the bound pool pattern; this is the read
+    /// half of that write-through.
+    pub(crate) fn capture_live_track_params(
+        &self,
+        track: usize,
+    ) -> Result<TrackParamsSnapshot, String> {
+        self.pattern
+            .track_params
+            .get(track)
+            .map(capture_track_params_snapshot)
+            .ok_or_else(|| "live track target no longer exists".to_string())
+    }
+
     pub(crate) fn restore_pattern_track_params_no_publish(
         &self,
         track: usize,

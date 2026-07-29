@@ -302,6 +302,12 @@ impl App {
         self.song_mirrored_row = Some(row_ordinal);
         self.state.start_playback();
         self.set_song_transport_mode(SongTransportMode::SongPlayback);
+        // The row apply above pushed the row's launch state over the engine.
+        // Re-resolve the sound bindings NOW (takes spec 16.2/16.7) instead of
+        // waiting for the next reactive tick: an audible bound take must
+        // sound its own device snapshot from the first sample, not one frame
+        // late — and a non-audible selection stays display-only.
+        self.sync_track_sound_bindings();
         Ok(())
     }
 
@@ -450,6 +456,12 @@ impl App {
         self.apply_song_row_control(row.scene, &row.overrides, false)?;
         self.song_mirrored_row = Some(notice.row_ordinal);
         self.song_row_mirror_epoch += 1;
+        // The row apply released any bound device loan and pushed the row's
+        // launch state (a take lane's SCENE-CELL devices — the row snapshot
+        // plays the take's notes, but defaults are pushed control-side).
+        // Re-resolve the bindings synchronously so an audible take re-borrows
+        // its own device snapshot and re-pushes it in the same mirror step.
+        self.sync_track_sound_bindings();
         Ok(())
     }
 
