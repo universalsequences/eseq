@@ -13,8 +13,9 @@
 //! non-overlap stays an invariant the ops maintain.
 
 use crate::sequencer::{
-    insert_clip_sorted, lower_rows_to_arrangement, occlude_span, restamped_clip, stamp_scene_clips,
-    ArrClip, ClipId, LaneSource, ProjectArrangement, ProjectScenes, ProjectSongRow, SongRowId,
+    insert_clip_sorted, lower_rows_to_arrangement, occlude_span, pattern_play_step,
+    restamped_clip, stamp_scene_clips, ArrClip, ClipId, LaneSource, ProjectArrangement,
+    ProjectScenes, ProjectSongRow, SongCompileContext, SongRowId,
 };
 
 use super::edit::finish_active_gesture;
@@ -274,6 +275,40 @@ impl App {
             occlude_span(arrangement, scenes, track, new_start_beat, clamped_end)?;
             insert_clip_sorted(arrangement, track, resized);
             arrangement.end_beat = arrangement.end_beat.max(clamped_end);
+            Ok(())
+        })
+    }
+
+    /// Slide a pattern clip's loop window by `delta_steps` (clip-edit-target
+    /// spec 5): the window is the whole pattern today, so sliding it by k is
+    /// audibly identical to shifting phase by k — `offset_steps` advances by
+    /// `delta_steps`, wrapped through `pattern_play_step`. Take clips never
+    /// wrap; their band is read-only and this refuses them.
+    pub fn arr_clip_slide_offset(
+        &mut self,
+        clip_id: ClipId,
+        delta_steps: f64,
+    ) -> Result<(), String> {
+        if !delta_steps.is_finite() {
+            return Err("Loop-window slide delta must be finite".to_string());
+        }
+        self.edit_arrangement("Slide clip loop window", move |arrangement, scenes| {
+            let (track, clip) = Self::locate_clip(arrangement, clip_id)?;
+            let Some(pattern_id) = clip.pattern_id else {
+                return Err(
+                    "Only pattern clips have a loop window to slide; a take plays linearly"
+                        .to_string(),
+                );
+            };
+            let (_, num_steps) = scenes
+                .song_track_pattern_step_mapping(track, pattern_id)
+                .ok_or_else(|| "The clip's pattern no longer exists".to_string())?;
+            let next = pattern_play_step(clip.offset_steps, delta_steps, (0.0, num_steps));
+            let slid = arrangement.track_lanes[track]
+                .iter_mut()
+                .find(|candidate| candidate.id == clip_id)
+                .expect("located above");
+            slid.offset_steps = next;
             Ok(())
         })
     }

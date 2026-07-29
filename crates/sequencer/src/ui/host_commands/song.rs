@@ -68,6 +68,11 @@ pub(super) const COMMANDS: &[&str] = &[
     // Region move (region spec 6.2) needs no clipboard, so it runs with the
     // other arrangement primitives in `run`.
     "song-region-move",
+    // Edit-focus loop bar (clip-edit-target spec 5): pinned-pattern length,
+    // its gesture seal, and the band-body loop-window slide.
+    "focus-set-num-steps",
+    "focus-finish-num-steps",
+    "focus-slide-band",
     "sound-push-to-pattern",
     "sound-apply-to-all-takes",
 ];
@@ -355,6 +360,25 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             let map = payload_map(payload)?;
             let delta_beats = require_number(map, "delta-beats")?;
             app.song_region_move(delta_beats)
+        }
+        // --- edit-focus loop bar (clip-edit-target spec 5) -------------
+        "focus-set-num-steps" => {
+            let map = payload_map(payload)?;
+            let track = require_track(map)?;
+            let length = require_number(map, "length")?;
+            app.set_pinned_pattern_num_steps(track, length.round().max(1.0) as usize)?;
+            Ok(format!("Pattern loop: {} steps", length.round()))
+        }
+        "focus-finish-num-steps" => {
+            app.finish_focused_pattern_num_steps();
+            Ok("Pattern loop resize committed".to_string())
+        }
+        "focus-slide-band" => {
+            let map = payload_map(payload)?;
+            let track = require_track(map)?;
+            let delta_steps = require_number(map, "delta-steps")?;
+            app.slide_focused_clip_offset(track, delta_steps)?;
+            Ok(format!("Loop window slid by {delta_steps} step(s)"))
         }
         "arrangement-clip-resize" => {
             let map = payload_map(payload)?;
@@ -745,6 +769,18 @@ pub(super) fn handle(
             // A successful edit clears the latched rejection so the
             // arrangement banner disappears.
             app.song_edit_error = None;
+            // Focus loop-bar edits change what the piano roll reads
+            // (focus-num-steps, window overlay) without moving the focus
+            // itself, so they need an explicit resync.
+            if matches!(
+                name,
+                "focus-set-num-steps" | "focus-finish-num-steps" | "focus-slide-band"
+            ) {
+                ctx.shared.ui_invalidations.push(UiInvalidation::PianoRoll {
+                    track: ctx.shared.current_track.load(Ordering::Relaxed),
+                    change: PianoRollInvalidation::Items,
+                });
+            }
             editor.handle_host_event(HostEvent::Status(status));
         }
         Err(error) => {

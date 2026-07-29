@@ -15,6 +15,10 @@
 
 (def piano-roll-timeline-height 35)
 (def piano-roll-header-height 2)
+;; The focus header row above the timeline (clip-edit-target spec 4.4). Its
+;; height participates in every visible-lane computation below — the lane
+;; clamps and the vertical fit model the area the timeline ACTUALLY gets.
+(def piano-roll-focus-header-height 1)
 (def piano-roll-default-pane-height 11.5)
 (def piano-roll-view-padding 1)
 (def piano-roll-min-view-duration 4)
@@ -45,7 +49,10 @@
   (max 1 (len SEQ.piano-roll-lanes)))
 
 (def piano-roll-content-height ()
-  (max 1 (- piano-roll-default-pane-height piano-roll-header-height)))
+  (max 1
+    (- piano-roll-default-pane-height
+      piano-roll-focus-header-height
+      piano-roll-header-height)))
 
 (def piano-roll-visible-lane-count ()
   (/ (piano-roll-content-height) (piano-roll-lane-height-value)))
@@ -215,16 +222,34 @@
       (piano-roll-zoom-lanes event)
       :set-cursor
       (set! piano-roll-cursor-time event.time)
-      ;; The length write is live-track-shaped; in a pinned focus the band is
-      ;; read-only until the pattern-addressed write lands (clip-edit-target
-      ;; spec 5, slice C) — a write here would edit the LIVE pattern while
-      ;; the band displays the pinned one.
+      ;; The loop bar edits the FOCUSED source's length (clip-edit-target
+      ;; spec 5, locked decision 3): the live pattern through today's track
+      ;; path, a pinned pattern through the pattern-addressed write (the
+      ;; SHARED pattern — every clip referencing it). A take's length is
+      ;; owned by recording/splice, so its band is read-only.
       :resize-content-length
-      (if (= SEQ.focus-live false)
-        nil
+      (match SEQ.focus-kind
+        :live
         (do
           (cool-off-follow)
-          (seq-set-track-param :num-steps event.length)))
+          (seq-set-track-param :num-steps event.length))
+        :pattern
+        (host-command "focus-set-num-steps"
+          (dict :track SEQ.current-track :length event.length))
+        :take nil)
+      :finish-resize-content-length
+      (if (= SEQ.focus-kind :pattern)
+        (host-command "focus-finish-num-steps" (dict))
+        nil)
+      ;; Band-body slide (spec 5): live frames are preview-only; the release
+      ;; carries the TOTAL delta and lowers to one undoable phase edit.
+      :slide-band nil
+      :finish-slide-band
+      (let ((delta (round (piano-roll-event-num event :delta-time 0))))
+        (if (or (not (= SEQ.focus-kind :pattern)) (= delta 0))
+          nil
+          (host-command "focus-slide-band"
+            (dict :track SEQ.current-track :delta-steps delta))))
       :marquee-select
       (set! piano-roll-selection-rect event)
       :finish-marquee-select
@@ -250,7 +275,7 @@
 ;; (scene)" in the source's track color.
 (def piano-roll-focus-header ()
   (let ((color (piano-roll-current-track-color)))
-    (box :width :fill :height 1.2 :padding 0.1
+    (box :width :fill :height piano-roll-focus-header-height :padding 0.1
       :background-color (rgba 0.09 0.10 0.12 1.0)
       (label (str "  " SEQ.focus-label)
         :key "piano-roll-focus-label"
@@ -282,9 +307,15 @@
     :content-length (piano-roll-num-steps)
     :content-length-min 1
     :content-length-max 256
+    ;; Loop-window gestures + overlay (clip-edit-target spec 5): only a
+    ;; pinned clip has a window to slide or mark.
+    :band-slide (= SEQ.focus-kind :pattern)
+    :window-marker SEQ.focus-window-marker
+    :window-span SEQ.focus-window-span
+    :window-repeat SEQ.focus-window-repeat
     :lane-scroll piano-roll-lane-scroll
     :lane-height (piano-roll-lane-height-value)
-    :scroll-viewport-height piano-roll-default-pane-height
+    :scroll-viewport-height (- piano-roll-default-pane-height piano-roll-focus-header-height)
     :snap 1
     :min-duration 0.03125
     :create-duration piano-roll-create-duration

@@ -626,6 +626,43 @@ pub(crate) fn sync_piano_roll_state(
         "focus-live",
         Value::Bool(matches!(focus, PianoRollFocusSpec::Live)),
     );
+    rt.set_reactive(
+        "SEQ",
+        "focus-kind",
+        Value::Keyword(
+            match focus {
+                PianoRollFocusSpec::Live => "live",
+                PianoRollFocusSpec::Pool(_) => "pattern",
+                PianoRollFocusSpec::Take(_) => "take",
+            }
+            .to_string(),
+        ),
+    );
+    // Loop-window overlay (spec 5): start marker at the clip's offset, the
+    // played window when the span is under one source pass, repeat badge
+    // when it covers several. All sentinel-shaped for the float channels.
+    let overlay = app.focus_window_overlay(track);
+    rt.set_reactive(
+        "SEQ",
+        "focus-window-marker",
+        Value::Number(overlay.map(|(marker, _, _)| marker).unwrap_or(-1.0)),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "focus-window-span",
+        match overlay.and_then(|(_, span, _)| span) {
+            Some((start, end)) => list_value([
+                Value::Number(start),
+                Value::Number(end),
+            ]),
+            None => Value::Nil,
+        },
+    );
+    rt.set_reactive(
+        "SEQ",
+        "focus-window-repeat",
+        Value::Number(overlay.and_then(|(_, _, repeat)| repeat).unwrap_or(0.0)),
+    );
     sync_piano_roll_note_state(rt, &lanes, selected);
 }
 

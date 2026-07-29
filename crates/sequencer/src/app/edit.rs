@@ -6224,7 +6224,7 @@ fn app_bus_effect_gesture_before(
 
 static NEXT_HISTORY_GESTURE_ID: AtomicU64 = AtomicU64::new(1);
 
-fn ensure_coalescing_gesture(app: &mut App, merge_key: &MergeKey) {
+pub(crate) fn ensure_coalescing_gesture(app: &mut App, merge_key: &MergeKey) {
     if app.history.active_gesture().map(|gesture| &gesture.merge_key) == Some(merge_key) {
         return;
     }

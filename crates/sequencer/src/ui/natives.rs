@@ -2155,6 +2155,10 @@ pub(crate) fn init_runtime(
                 ("focus-num-steps", Value::Number(16.0)),
                 ("focus-label", Value::String(String::new())),
                 ("focus-live", Value::Bool(true)),
+                ("focus-kind", Value::Keyword("live".to_string())),
+                ("focus-window-marker", Value::Number(-1.0)),
+                ("focus-window-span", Value::Nil),
+                ("focus-window-repeat", Value::Number(0.0)),
                 ("piano-roll-playhead", Value::Number(-1.0)),
                 (
                     "velocities",
