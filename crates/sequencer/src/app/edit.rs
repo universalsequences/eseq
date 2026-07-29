@@ -5521,7 +5521,7 @@ fn rewind_fanned_out_chunks(
 /// audible row already heard a device value through the direct engine push —
 /// so while a gesture is open this defers to its end through
 /// `pending_song_row_invalidation` (flushed in `finish_active_gesture`).
-fn invalidate_song_rows_for_edit(
+pub(crate) fn invalidate_song_rows_for_edit(
     app: &mut App,
     track: usize,
     pattern: crate::sequencer::PatternId,

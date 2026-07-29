@@ -111,6 +111,61 @@ impl App {
         self.commit_arrangement_edit(label, Some(before), Some(after))
     }
 
+    /// `edit_arrangement`, but continuous (clip-edit-target spec 6): frames
+    /// sharing `merge_key` coalesce into ONE staged undo entry whose `before`
+    /// is the arrangement at the FIRST frame, sealed like any device-knob
+    /// gesture. A drag that returns to its start discards the entry.
+    fn edit_arrangement_coalesced(
+        &mut self,
+        label: &'static str,
+        merge_key: crate::app::history::MergeKey,
+        edit: impl FnOnce(&mut ProjectArrangement, &ProjectScenes) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.require_song_edit_unlocked()?;
+        if self
+            .history
+            .active_gesture()
+            .map(|gesture| &gesture.merge_key)
+            != Some(&merge_key)
+        {
+            finish_active_gesture(self);
+        }
+        let current = self.require_arrangement()?;
+        let mut after = current.clone();
+        self.state
+            .with_project_scenes(|scenes| edit(&mut after, scenes))?;
+        if after == current {
+            return Ok(());
+        }
+        let gesture_before = self
+            .history
+            .active_gesture_patch(&merge_key)
+            .and_then(|patch| match patch {
+                EditPatch::Arrangement(patch) => patch.before.clone(),
+                _ => None,
+            })
+            .unwrap_or(current);
+        self.state.set_committed_arrangement(Some(after.clone()))?;
+        if gesture_before == after {
+            self.history.discard_active_gesture_entry(&merge_key);
+        } else {
+            let patch = ArrangementStructurePatch {
+                before: Some(gesture_before),
+                after: Some(after),
+            };
+            let retained_bytes = patch.retained_bytes();
+            crate::app::edit::ensure_coalescing_gesture(self, &merge_key);
+            self.history.stage_active_gesture(
+                label,
+                &merge_key,
+                EditPatch::Arrangement(patch),
+                retained_bytes,
+            );
+        }
+        self.rebuild_active_song_after_arrangement_edit();
+        Ok(())
+    }
+
     // --- clip ops (spec 8) ----------------------------------------------
 
     /// Create a clip on `track` over `[start_beat, end_beat)`, truncating
@@ -231,6 +286,29 @@ impl App {
         new_start_beat: f64,
         new_end_beat: f64,
     ) -> Result<(), String> {
+        self.arr_clip_resize_impl(clip_id, new_start_beat, new_end_beat, None)
+    }
+
+    /// `arr_clip_resize` staged under a coalescing merge key (the clip
+    /// panel's per-frame picker drags, clip-edit-target spec 6): the whole
+    /// drag is one undo entry.
+    pub(crate) fn arr_clip_resize_coalesced(
+        &mut self,
+        clip_id: ClipId,
+        new_start_beat: f64,
+        new_end_beat: f64,
+        merge_key: crate::app::history::MergeKey,
+    ) -> Result<(), String> {
+        self.arr_clip_resize_impl(clip_id, new_start_beat, new_end_beat, Some(merge_key))
+    }
+
+    fn arr_clip_resize_impl(
+        &mut self,
+        clip_id: ClipId,
+        new_start_beat: f64,
+        new_end_beat: f64,
+        merge_key: Option<crate::app::history::MergeKey>,
+    ) -> Result<(), String> {
         let new_start_beat = finite_beat("Clip start beat", new_start_beat)?;
         let new_end_beat = finite_beat("Clip end beat", new_end_beat)?;
         if new_end_beat <= new_start_beat {
@@ -263,7 +341,9 @@ impl App {
                     .to_string(),
             );
         }
-        self.edit_arrangement("Resize clip", move |arrangement, scenes| {
+        let resize = move |arrangement: &mut ProjectArrangement,
+                           scenes: &ProjectScenes|
+              -> Result<(), String> {
             let (track, clip) = Self::locate_clip(arrangement, clip_id)?;
             if clip.start_beat == new_start_beat && clip.end_beat == clamped_end {
                 return Ok(());
@@ -276,7 +356,13 @@ impl App {
             insert_clip_sorted(arrangement, track, resized);
             arrangement.end_beat = arrangement.end_beat.max(clamped_end);
             Ok(())
-        })
+        };
+        match merge_key {
+            Some(merge_key) => {
+                self.edit_arrangement_coalesced("Resize clip", merge_key, resize)
+            }
+            None => self.edit_arrangement("Resize clip", resize),
+        }
     }
 
     /// Slide a pattern clip's loop window by `delta_steps` (clip-edit-target
@@ -323,6 +409,26 @@ impl App {
         clip_id: ClipId,
         offset_steps: f64,
     ) -> Result<(), String> {
+        self.arr_clip_set_offset_impl(clip_id, offset_steps, None)
+    }
+
+    /// `arr_clip_set_offset` staged under a coalescing merge key (the clip
+    /// panel's per-frame picker drags): the whole drag is one undo entry.
+    pub(crate) fn arr_clip_set_offset_coalesced(
+        &mut self,
+        clip_id: ClipId,
+        offset_steps: f64,
+        merge_key: crate::app::history::MergeKey,
+    ) -> Result<(), String> {
+        self.arr_clip_set_offset_impl(clip_id, offset_steps, Some(merge_key))
+    }
+
+    fn arr_clip_set_offset_impl(
+        &mut self,
+        clip_id: ClipId,
+        offset_steps: f64,
+        merge_key: Option<crate::app::history::MergeKey>,
+    ) -> Result<(), String> {
         if !offset_steps.is_finite() {
             return Err("Clip start offset must be finite".to_string());
         }
@@ -338,7 +444,9 @@ impl App {
                 None
             }
         };
-        self.edit_arrangement("Set clip start offset", move |arrangement, scenes| {
+        let set_offset = move |arrangement: &mut ProjectArrangement,
+                               scenes: &ProjectScenes|
+              -> Result<(), String> {
             let (track, clip) = Self::locate_clip(arrangement, clip_id)?;
             let next = if let Some(take_id) = clip.take_id {
                 let (_, total_len) = scenes
@@ -363,7 +471,13 @@ impl App {
             edited.offset_steps = next;
             edited.end_beat = edited.end_beat.min(end_limit);
             Ok(())
-        })
+        };
+        match merge_key {
+            Some(merge_key) => {
+                self.edit_arrangement_coalesced("Set clip start offset", merge_key, set_offset)
+            }
+            None => self.edit_arrangement("Set clip start offset", set_offset),
+        }
     }
 
     /// Split a clip at `beat` into two clips playing the same uninterrupted

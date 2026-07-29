@@ -284,7 +284,11 @@
         :bg :transparent))))
 
 (def piano-roll-timeline ()
+  ;; Flex child of the panel row (the arrangement-lane idiom): the timeline
+  ;; absorbs exactly the width left of the clip panel — without :width 0
+  ;; :flex 1 an h-stack child lays out against an INFINITE max width.
   (timeline
+    :width 0 :flex 1
     :height piano-roll-timeline-height
     :focusable true
     :sidebar-width 5
@@ -359,28 +363,40 @@
       (piano-roll-panel-row "Start"
         (number-picker :key "piano-roll-panel-start"
           :value SEQ.focus-clip-start
-          :min 0 :max 8192 :decimals 0
+          :min 0 :max 512 :decimals 0
           :on-change (lambda (v)
-            (host-command "focus-clip-resize"
-              (dict :track SEQ.current-track
-                :start-beat v :end-beat SEQ.focus-clip-end)))
+            (if (= v SEQ.focus-clip-start)
+              nil
+              (host-command "focus-clip-resize"
+                (dict :track SEQ.current-track
+                  :start-beat v :end-beat SEQ.focus-clip-end))))
           :width 8 :height 1.3 :font-size 10))
       (piano-roll-panel-row "End"
         (number-picker :key "piano-roll-panel-end"
           :value SEQ.focus-clip-end
-          :min 0 :max 8192 :decimals 0
+          :min 0 :max 512 :decimals 0
           :on-change (lambda (v)
-            (host-command "focus-clip-resize"
-              (dict :track SEQ.current-track
-                :start-beat SEQ.focus-clip-start :end-beat v)))
+            (if (= v SEQ.focus-clip-end)
+              nil
+              (host-command "focus-clip-resize"
+                (dict :track SEQ.current-track
+                  :start-beat SEQ.focus-clip-start :end-beat v))))
           :width 8 :height 1.3 :font-size 10))
       (piano-roll-panel-row "Offset"
         (number-picker :key "piano-roll-panel-offset"
-          :value (piano-roll-signed-offset SEQ.focus-clip-offset)
-          :min -256 :max 256 :decimals 0
+          ;; Signed pickup display is a PATTERN-wrap idea (spec 6); a take's
+          ;; offset clamps at 0 and never wraps, so it reads raw.
+          :value (if (= SEQ.focus-clip-kind :pattern)
+                   (piano-roll-signed-offset SEQ.focus-clip-offset)
+                   SEQ.focus-clip-offset)
+          :min (if (= SEQ.focus-clip-kind :pattern) -256 0) :max 256 :decimals 0
           :on-change (lambda (v)
-            (host-command "focus-set-offset"
-              (dict :track SEQ.current-track :offset-steps v)))
+            (if (= v (if (= SEQ.focus-clip-kind :pattern)
+                       (piano-roll-signed-offset SEQ.focus-clip-offset)
+                       SEQ.focus-clip-offset))
+              nil
+              (host-command "focus-set-offset"
+                (dict :track SEQ.current-track :offset-steps v))))
           :width 8 :height 1.3 :font-size 10)))))
 
 (def piano-roll-panel-length-row ()
@@ -396,10 +412,11 @@
         :min 1 :max 256 :decimals 0
         :on-change (lambda (v)
           (if (= SEQ.focus-kind :pattern)
-            (do
-              (host-command "focus-set-num-steps"
-                (dict :track SEQ.current-track :length v))
-              (host-command "focus-finish-num-steps" (dict :track SEQ.current-track)))
+            ;; Stage only: frames coalesce into one undo entry, sealed like a
+            ;; device-knob gesture (the seal drains the deferred song-row
+            ;; refresh). The loop bar's release event sends the seal itself.
+            (host-command "focus-set-num-steps"
+              (dict :track SEQ.current-track :length v))
             (do
               (cool-off-follow)
               (seq-set-track-param :num-steps v))))
@@ -422,6 +439,6 @@
 (effect-buffer "*piano-roll*"
   (v-stack :padding 0.0 :gap 0.0
     (piano-roll-focus-header)
-    (h-stack :gap 0.0
+    (h-stack :width :fill :gap 0.0
       (piano-roll-clip-panel)
       (piano-roll-timeline))))

@@ -266,6 +266,7 @@ impl App {
             // Dragged back to the start: the value moved this frame but the
             // gesture as a whole is a no-op.
             self.history.discard_active_gesture_entry(&merge_key);
+            crate::app::edit::invalidate_song_rows_for_edit(self, track, pattern);
             return Ok(true);
         }
         let patch = crate::app::history::TrackParamsPatch {
@@ -283,18 +284,16 @@ impl App {
             crate::app::history::EditPatch::TrackParams(patch),
             retained_bytes,
         );
+        // Deferred while the gesture is open, drained at the seal — so a
+        // playing song re-preflights ONCE per drag, not per pointer frame.
+        crate::app::edit::invalidate_song_rows_for_edit(self, track, pattern);
         Ok(true)
     }
 
-    /// Seal the loop-bar drag's coalescing gesture into one undo entry, and
-    /// re-preflight a playing song ONCE for the whole drag — per-frame
-    /// invalidation would re-preflight the entire song on every pointer
-    /// movement during playback.
-    pub fn finish_focused_pattern_num_steps(&mut self, track: usize) {
+    /// Seal the loop-bar drag's coalescing gesture into one undo entry; the
+    /// seal drains the deferred song-row refresh queued per frame above.
+    pub fn finish_focused_pattern_num_steps(&mut self, _track: usize) {
         crate::app::edit::finish_active_gesture(self);
-        if let EditFocus::Pattern { pattern, .. } = self.track_edit_focus(track) {
-            self.invalidate_song_rows_for_pattern(track, pattern);
-        }
     }
 
     /// The ACTIVE pinned clip: the timeline selection while it is live
@@ -360,7 +359,13 @@ impl App {
         let selection = self
             .active_clip_selection(track)
             .ok_or_else(|| "No pinned clip to resize".to_string())?;
-        self.arr_clip_resize(selection.clip_id, start_beat, end_beat)?;
+        // Number-picker drags fire per pointer frame: coalesce the whole
+        // drag into one arrangement undo entry.
+        let merge_key = crate::app::history::MergeKey::new(format!(
+            "focus-clip-resize:{}",
+            selection.clip_id.0
+        ));
+        self.arr_clip_resize_coalesced(selection.clip_id, start_beat, end_beat, merge_key)?;
         self.refresh_song_region_for_clip(selection.clip_id);
         Ok(())
     }
@@ -375,7 +380,15 @@ impl App {
         let selection = self
             .active_clip_selection(track)
             .ok_or_else(|| "No pinned clip to offset".to_string())?;
-        self.arr_clip_set_offset(selection.clip_id, offset_steps)
+        let merge_key = crate::app::history::MergeKey::new(format!(
+            "focus-clip-offset:{}",
+            selection.clip_id.0
+        ));
+        self.arr_clip_set_offset_coalesced(selection.clip_id, offset_steps, merge_key)?;
+        // A take offset raise re-clamps the clip's END (the playable tail
+        // shrank): keep the one-clip region in step, like a resize does.
+        self.refresh_song_region_for_clip(selection.clip_id);
+        Ok(())
     }
 
     /// The loop-window overlay for the focused clip (spec 5):
@@ -812,6 +825,38 @@ mod tests {
 
         app.set_song_clip_selection(None);
         assert_eq!(app.focus_clip_fields(0), None, "follow mode hides fields");
+    }
+
+    /// Review regression: the panel's number-picker fires per pointer frame,
+    /// so consecutive Start/End (and Offset) edits must coalesce into ONE
+    /// arrangement undo entry, and a round-trip discards it.
+    #[test]
+    fn clip_panel_picker_frames_coalesce_into_one_undo_entry() {
+        let (mut app, _take, scene_pattern, _chunks) = app_with_take();
+        let _other = install_pattern_clip(&mut app, scene_pattern, (0.0, 8.0));
+        let depth = app.history.undo_len();
+        app.resize_focused_clip(0, 0.0, 7.0).expect("frame applies");
+        app.resize_focused_clip(0, 0.0, 6.0).expect("frame applies");
+        crate::app::edit::finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), depth + 1, "one entry per drag");
+        assert_eq!(app.focus_clip_fields(0).map(|(_, end, _)| end), Some(6.0));
+
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.focus_clip_fields(0).map(|(_, end, _)| end),
+            Some(8.0),
+            "undo restores the pre-drag span in one step"
+        );
+
+        // Round trip: back to the starting span leaves no entry behind.
+        let depth = app.history.undo_len();
+        app.resize_focused_clip(0, 0.0, 7.0).expect("frame applies");
+        app.resize_focused_clip(0, 0.0, 8.0).expect("frame applies");
+        crate::app::edit::finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), depth, "round-trip drag is a no-op");
     }
 
     /// Spec 6 signed start offset: setting an absolute (possibly negative)
