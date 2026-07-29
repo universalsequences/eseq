@@ -1400,6 +1400,9 @@
     :scroll-passthrough :vertical
     :background-color arrangement-timeline-background-color
     :title-bar-height arrangement-clip-title-bar-height
+    ;; Title-bar double-click opens the clip editor (clip-edit-target spec
+    ;; 4); the scene lane deliberately does NOT opt in.
+    :double-click-items true
     :item-label-font-size arrangement-clip-label-font-size
     :item-label-color arrangement-clip-label-color
     :item-corner-radius arrangement-clip-corner-radius

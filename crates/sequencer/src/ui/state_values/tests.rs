@@ -43144,7 +43144,7 @@
                 .runtime_mut()
                 .eval_str("piano-roll-lane-scroll")
                 .expect("read empty piano roll lane scroll"),
-            Some(Value::Number(39.0)),
+            Some(Value::Number(40.0)),
             "empty piano roll should center C4 at the default lower-pane height"
         );
         assert_eq!(
@@ -43152,7 +43152,7 @@
                 .runtime_mut()
                 .eval_str("(piano-roll-max-lane-scroll)")
                 .expect("read default piano roll max lane scroll"),
-            Some(Value::Number(78.0)),
+            Some(Value::Number(80.0)),
             "default lower-pane height should allow scrolling below C4"
         );
         editor
@@ -43302,7 +43302,7 @@
                 .runtime_mut()
                 .eval_str("piano-roll-lane-scroll")
                 .expect("read fitted piano roll lane scroll"),
-            Some(Value::Number(31.0))
+            Some(Value::Number(32.0))
         );
     }
 
@@ -43369,7 +43369,7 @@
             runtime
                 .eval_str("piano-roll-lane-scroll")
                 .expect("read fitted lane scroll after sync"),
-            Some(Value::Number(39.0))
+            Some(Value::Number(40.0))
         );
     }
 
