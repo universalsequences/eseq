@@ -136,7 +136,7 @@ impl App {
     /// Rule 1 candidate: the selection's source, dropped when it no longer
     /// exists (16.6 cause 4 — deleting the selected clip falls back without
     /// any explicit unbinding).
-    fn selected_bound_source(&self, track: usize) -> Option<BoundSource> {
+    pub(crate) fn selected_bound_source(&self, track: usize) -> Option<BoundSource> {
         // Dormant while the timeline is off screen (16.6): in the Seq tab
         // nothing renders the bound clip, so a selection silently owning the
         // device panel reads as the panel showing the wrong sound.

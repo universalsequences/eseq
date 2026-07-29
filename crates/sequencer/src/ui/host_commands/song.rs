@@ -73,6 +73,9 @@ pub(super) const COMMANDS: &[&str] = &[
     "focus-set-num-steps",
     "focus-finish-num-steps",
     "focus-slide-band",
+    // Clip panel (clip-edit-target spec 6): Start/End + Start-offset fields.
+    "focus-clip-resize",
+    "focus-set-offset",
     "sound-push-to-pattern",
     "sound-apply-to-all-takes",
 ];
@@ -370,7 +373,9 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             Ok(format!("Pattern loop: {} steps", length.round()))
         }
         "focus-finish-num-steps" => {
-            app.finish_focused_pattern_num_steps();
+            let map = payload_map(payload)?;
+            let track = require_track(map)?;
+            app.finish_focused_pattern_num_steps(track);
             Ok("Pattern loop resize committed".to_string())
         }
         "focus-slide-band" => {
@@ -379,6 +384,21 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             let delta_steps = require_number(map, "delta-steps")?;
             app.slide_focused_clip_offset(track, delta_steps)?;
             Ok(format!("Loop window slid by {delta_steps} step(s)"))
+        }
+        "focus-clip-resize" => {
+            let map = payload_map(payload)?;
+            let track = require_track(map)?;
+            let start_beat = require_number(map, "start-beat")?;
+            let end_beat = require_number(map, "end-beat")?;
+            app.resize_focused_clip(track, start_beat, end_beat)?;
+            Ok(format!("Clip resized to beats {start_beat}-{end_beat}"))
+        }
+        "focus-set-offset" => {
+            let map = payload_map(payload)?;
+            let track = require_track(map)?;
+            let offset_steps = require_number(map, "offset-steps")?;
+            app.set_focused_clip_offset(track, offset_steps)?;
+            Ok(format!("Clip start offset set to {offset_steps}"))
         }
         "arrangement-clip-resize" => {
             let map = payload_map(payload)?;
@@ -769,18 +789,16 @@ pub(super) fn handle(
             // A successful edit clears the latched rejection so the
             // arrangement banner disappears.
             app.song_edit_error = None;
-            // Focus loop-bar edits change what the piano roll reads
-            // (focus-num-steps, window overlay) without moving the focus
-            // itself, so they need an explicit resync.
-            if matches!(
-                name,
-                "focus-set-num-steps" | "focus-finish-num-steps" | "focus-slide-band"
-            ) {
-                ctx.shared.ui_invalidations.push(UiInvalidation::PianoRoll {
-                    track: ctx.shared.current_track.load(Ordering::Relaxed),
-                    change: PianoRollInvalidation::Items,
-                });
-            }
+            // Every command here can move what the piano roll's clip-shaped
+            // surfaces read (focus-num-steps, the window overlay, the clip
+            // panel's Start/End/Offset) without moving the FOCUS itself —
+            // a clip resize/move/region edit changes the pinned clip's span
+            // and offset. These are one-shot edits, so an unconditional
+            // resync is cheap and keeps the overlay from going stale.
+            ctx.shared.ui_invalidations.push(UiInvalidation::PianoRoll {
+                track: ctx.shared.current_track.load(Ordering::Relaxed),
+                change: PianoRollInvalidation::Items,
+            });
             editor.handle_host_event(HostEvent::Status(status));
         }
         Err(error) => {

@@ -235,9 +235,6 @@ impl App {
             .state
             .capture_pattern_instrument_base_note_offset(track, pattern)?
             .to_bits();
-        if current_before.num_steps == num_steps {
-            return Ok(false);
-        }
         let original_before = self
             .history
             .active_gesture_patch(&merge_key)
@@ -249,15 +246,31 @@ impl App {
                 }
                 _ => None,
             });
+        let gesture_before = original_before.clone().unwrap_or(current_before.clone());
+        if current_before.num_steps == num_steps {
+            // The frame changes nothing; if the whole DRAG is back at its
+            // starting length, drop the staged entry so releasing commits no
+            // no-op undo step (which would also have cleared the redo stack).
+            if gesture_before.num_steps == num_steps {
+                self.history.discard_active_gesture_entry(&merge_key);
+            }
+            return Ok(false);
+        }
         self.state
             .with_pool_pattern_mut(track, pattern, |data| {
                 data.track_params.num_steps = num_steps;
             })
             .ok_or_else(|| "The pinned pattern no longer exists".to_string())?;
         let after = self.state.capture_pattern_track_params(track, pattern)?;
+        if gesture_before.num_steps == after.num_steps {
+            // Dragged back to the start: the value moved this frame but the
+            // gesture as a whole is a no-op.
+            self.history.discard_active_gesture_entry(&merge_key);
+            return Ok(true);
+        }
         let patch = crate::app::history::TrackParamsPatch {
             target,
-            before: original_before.unwrap_or(current_before),
+            before: gesture_before,
             after,
             instrument_base_note_offset_before: base_note_bits,
             instrument_base_note_offset_after: base_note_bits,
@@ -270,13 +283,44 @@ impl App {
             crate::app::history::EditPatch::TrackParams(patch),
             retained_bytes,
         );
-        self.invalidate_song_rows_for_pattern(track, pattern);
         Ok(true)
     }
 
-    /// Seal the loop-bar drag's coalescing gesture into one undo entry.
-    pub fn finish_focused_pattern_num_steps(&mut self) {
+    /// Seal the loop-bar drag's coalescing gesture into one undo entry, and
+    /// re-preflight a playing song ONCE for the whole drag — per-frame
+    /// invalidation would re-preflight the entire song on every pointer
+    /// movement during playback.
+    pub fn finish_focused_pattern_num_steps(&mut self, track: usize) {
         crate::app::edit::finish_active_gesture(self);
+        if let EditFocus::Pattern { pattern, .. } = self.track_edit_focus(track) {
+            self.invalidate_song_rows_for_pattern(track, pattern);
+        }
+    }
+
+    /// The ACTIVE pinned clip: the timeline selection while it is live
+    /// (arrangement view on screen, source alive — the same dormancy rule the
+    /// sound binding applies). This deliberately does NOT go through the
+    /// resolved focus: a pinned clip whose pattern happens to be the
+    /// effective one resolves `Live` for the WRITE path, but it is still a
+    /// pinned clip for the clip-shaped surfaces (window overlay, panel
+    /// fields, band slide).
+    pub(crate) fn active_clip_selection(
+        &self,
+        track: usize,
+    ) -> Option<crate::app::sound_binding::SongClipSelection> {
+        self.selected_bound_source(track)?;
+        self.song_clip_selection
+            .filter(|selection| selection.track == track)
+    }
+
+    /// The pinned clip's source kind for the UI (`"pattern"` / `"take"`);
+    /// `None` without an active clip selection. Gates the clip-shaped
+    /// gestures (band slide) independently of the resolved WRITE focus.
+    pub fn focus_clip_source_kind(&self, track: usize) -> Option<&'static str> {
+        Some(match self.active_clip_selection(track)?.source {
+            crate::app::sound_binding::BoundSource::Pattern(_) => "pattern",
+            crate::app::sound_binding::BoundSource::Take(_) => "take",
+        })
     }
 
     /// Band-body slide (spec 5): slide the pinned clip's loop window by
@@ -288,10 +332,50 @@ impl App {
         delta_steps: f64,
     ) -> Result<(), String> {
         let selection = self
-            .song_clip_selection
-            .filter(|selection| selection.track == track)
+            .active_clip_selection(track)
             .ok_or_else(|| "No pinned clip to slide".to_string())?;
         self.arr_clip_slide_offset(selection.clip_id, delta_steps)
+    }
+
+    /// The pinned clip's panel fields (spec 6): `(start_beat, end_beat,
+    /// offset_steps)`. `None` without an active clip selection — the panel
+    /// hides Start/End/Offset in follow mode. Keyed off the SELECTION, not
+    /// the resolved focus: a pinned clip stays a clip even when its pattern
+    /// happens to be the effective one.
+    pub fn focus_clip_fields(&self, track: usize) -> Option<(f64, f64, f64)> {
+        let selection = self.active_clip_selection(track)?;
+        let arrangement = self.state.committed_arrangement()?;
+        let (_, clip) = arrangement.find_clip(selection.clip_id)?;
+        Some((clip.start_beat, clip.end_beat, clip.offset_steps))
+    }
+
+    /// Clip-panel Start/End edit (spec 6): lowers to `arr_clip_resize` on the
+    /// selected clip, keeping the one-clip region in step.
+    pub fn resize_focused_clip(
+        &mut self,
+        track: usize,
+        start_beat: f64,
+        end_beat: f64,
+    ) -> Result<(), String> {
+        let selection = self
+            .active_clip_selection(track)
+            .ok_or_else(|| "No pinned clip to resize".to_string())?;
+        self.arr_clip_resize(selection.clip_id, start_beat, end_beat)?;
+        self.refresh_song_region_for_clip(selection.clip_id);
+        Ok(())
+    }
+
+    /// Clip-panel Start-offset edit (spec 6): absolute source step, signed
+    /// entry allowed (a pattern's negative pickup wraps into the top half).
+    pub fn set_focused_clip_offset(
+        &mut self,
+        track: usize,
+        offset_steps: f64,
+    ) -> Result<(), String> {
+        let selection = self
+            .active_clip_selection(track)
+            .ok_or_else(|| "No pinned clip to offset".to_string())?;
+        self.arr_clip_set_offset(selection.clip_id, offset_steps)
     }
 
     /// The loop-window overlay for the focused clip (spec 5):
@@ -304,34 +388,35 @@ impl App {
         &self,
         track: usize,
     ) -> Option<(f64, Option<(f64, f64)>, Option<f64>)> {
-        let focus = self.track_edit_focus(track);
-        if focus.is_live() {
-            return None;
-        }
-        let selection = self
-            .song_clip_selection
-            .filter(|selection| selection.track == track)?;
+        use crate::app::sound_binding::BoundSource;
+        // Keyed off the SELECTION (the pinned clip), not the resolved focus:
+        // a clip whose pattern is the effective one still shows its window.
+        let selection = self.active_clip_selection(track)?;
         let arrangement = self.state.committed_arrangement()?;
         let (_, clip) = arrangement.find_clip(selection.clip_id)?;
         let span_beats = clip.end_beat - clip.start_beat;
         self.state.with_project_scenes(|scenes| {
             use crate::sequencer::SongCompileContext;
-            let (steps_per_beat, source_len) = match focus {
-                EditFocus::Pattern { pattern, .. } => {
+            let is_pattern = matches!(selection.source, BoundSource::Pattern(_));
+            let (steps_per_beat, source_len) = match selection.source {
+                BoundSource::Pattern(pattern) => {
                     scenes.song_track_pattern_step_mapping(track, pattern.0)?
                 }
-                EditFocus::Take { take, .. } => {
+                BoundSource::Take(take) => {
                     scenes.song_track_take_step_mapping(track, take.0)?
                 }
-                EditFocus::Live { .. } => return None,
             };
             let span_steps = span_beats * steps_per_beat;
-            let marker = clip.offset_steps;
+            // Normalize into the source: a loop-bar shrink can leave a clip
+            // offset beyond the new length until playback re-stamps it.
+            let marker = if is_pattern {
+                crate::sequencer::pattern_play_step(clip.offset_steps, 0.0, (0.0, source_len))
+            } else {
+                clip.offset_steps.clamp(0.0, (source_len - 1.0).max(0.0))
+            };
             if span_steps + 1e-6 < source_len {
                 Some((marker, Some((marker, marker + span_steps)), None))
-            } else if span_steps > source_len + 1e-6
-                && matches!(focus, EditFocus::Pattern { .. })
-            {
+            } else if span_steps > source_len + 1e-6 && is_pattern {
                 Some((marker, None, Some((span_steps / source_len).round().max(2.0))))
             } else {
                 Some((marker, None, None))
@@ -613,7 +698,7 @@ mod tests {
         // Two drag frames, one gesture.
         assert!(app.set_pinned_pattern_num_steps(0, 24).expect("resize applies"));
         assert!(app.set_pinned_pattern_num_steps(0, 32).expect("resize applies"));
-        app.finish_focused_pattern_num_steps();
+        app.finish_focused_pattern_num_steps(0);
 
         let state = app.state.clone();
         let pool_steps = move |pattern| {
@@ -635,8 +720,16 @@ mod tests {
         ));
         assert_eq!(pool_steps(other), 16, "undo restores the pool length");
 
-        // A take focus keeps the band read-only.
-        app.select_song_clip(0, ClipId(0)).expect("reselect");
+        // A drag that returns to its starting length leaves NO undo entry
+        // (a staged no-op patch would eat an undo step and clear redo).
+        let depth = app.history.undo_len();
+        assert!(app.set_pinned_pattern_num_steps(0, 24).expect("frame applies"));
+        assert!(app.set_pinned_pattern_num_steps(0, 16).expect("frame applies"));
+        app.finish_focused_pattern_num_steps(0);
+        assert_eq!(pool_steps(other), 16);
+        assert_eq!(app.history.undo_len(), depth, "round-trip drag is a no-op");
+
+        // Follow mode keeps the band on the live track path.
         app.set_song_clip_selection(None);
         assert!(app.set_pinned_pattern_num_steps(0, 24).is_err());
     }
@@ -700,6 +793,45 @@ mod tests {
         // Follow mode has no overlay.
         app.set_song_clip_selection(None);
         assert!(app.focus_window_overlay(0).is_none());
+    }
+
+    /// Spec 6 clip panel: Start/End lower to arr_clip_resize on the pinned
+    /// clip; the fields read back the stored clip; follow mode hides them.
+    #[test]
+    fn clip_panel_fields_read_and_resize_the_pinned_clip() {
+        let (mut app, _take, scene_pattern, _chunks) = app_with_take();
+        let _other = install_pattern_clip(&mut app, scene_pattern, (0.0, 8.0));
+        assert_eq!(app.focus_clip_fields(0), Some((0.0, 8.0, 0.0)));
+
+        app.resize_focused_clip(0, 2.0, 6.0).expect("resize applies");
+        let (start, end, offset) = app.focus_clip_fields(0).expect("fields");
+        assert_eq!((start, end), (2.0, 6.0));
+        // Left trim re-stamps the phase (spec 8 of the region spec): 2 beats
+        // at 4 steps per beat = 8 steps into the 16-step pattern.
+        assert_eq!(offset, 8.0);
+
+        app.set_song_clip_selection(None);
+        assert_eq!(app.focus_clip_fields(0), None, "follow mode hides fields");
+    }
+
+    /// Spec 6 signed start offset: setting an absolute (possibly negative)
+    /// source step wraps for patterns — the Ableton pickup entry — and
+    /// clamps at 0 for takes.
+    #[test]
+    fn clip_panel_offset_wraps_patterns_and_clamps_takes() {
+        let (mut app, _take, scene_pattern, _chunks) = app_with_take();
+        let _other = install_pattern_clip(&mut app, scene_pattern, (0.0, 8.0));
+        // Pickup entry: −1 on a 16-step pattern lands on step 15.
+        app.set_focused_clip_offset(0, -1.0).expect("offset applies");
+        assert_eq!(app.focus_clip_fields(0).unwrap().2, 15.0);
+        app.set_focused_clip_offset(0, 20.0).expect("offset applies");
+        assert_eq!(app.focus_clip_fields(0).unwrap().2, 4.0);
+
+        // Take: clamps at 0, never wraps.
+        let (mut app, _take, _scene_pattern, _chunks) = app_with_take();
+        app.select_song_clip(0, ClipId(0)).expect("take selects");
+        app.set_focused_clip_offset(0, -5.0).expect("offset applies");
+        assert_eq!(app.focus_clip_fields(0).unwrap().2, 0.0);
     }
 
     /// Review regression: a Live-focus history edit must publish the

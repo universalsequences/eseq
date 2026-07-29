@@ -638,6 +638,18 @@ pub(crate) fn sync_piano_roll_state(
             .to_string(),
         ),
     );
+    // The pinned CLIP's source kind (:none/:pattern/:take), independent of
+    // the resolved write focus: a pinned clip whose pattern is the effective
+    // one still shows clip-shaped surfaces (overlay, band slide, panel).
+    rt.set_reactive(
+        "SEQ",
+        "focus-clip-kind",
+        Value::Keyword(
+            app.focus_clip_source_kind(track)
+                .unwrap_or("none")
+                .to_string(),
+        ),
+    );
     // Loop-window overlay (spec 5): start marker at the clip's offset, the
     // played window when the span is under one source pass, repeat badge
     // when it covers several. All sentinel-shaped for the float channels.
@@ -662,6 +674,30 @@ pub(crate) fn sync_piano_roll_state(
         "SEQ",
         "focus-window-repeat",
         Value::Number(overlay.and_then(|(_, _, repeat)| repeat).unwrap_or(0.0)),
+    );
+    // Clip-panel fields (spec 6): Start/End/Offset for the pinned clip,
+    // Nil-shaped when hidden (follow mode).
+    let clip_fields = app.focus_clip_fields(track);
+    rt.set_reactive(
+        "SEQ",
+        "focus-clip-start",
+        clip_fields
+            .map(|(start, _, _)| Value::Number(start))
+            .unwrap_or(Value::Nil),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "focus-clip-end",
+        clip_fields
+            .map(|(_, end, _)| Value::Number(end))
+            .unwrap_or(Value::Nil),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "focus-clip-offset",
+        clip_fields
+            .map(|(_, _, offset)| Value::Number(offset))
+            .unwrap_or(Value::Nil),
     );
     sync_piano_roll_note_state(rt, &lanes, selected);
 }

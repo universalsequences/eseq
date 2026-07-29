@@ -7162,6 +7162,11 @@ fn replay_track_params_patch(
         if needs_publish && publish {
             app.state.publish_scheduler_snapshot();
         }
+    } else {
+        // A pool target (the pinned loop-bar resize, clip-edit-target spec
+        // 5): a playing song whose rows cloned this pattern at preflight
+        // must re-preflight, exactly like the do-path.
+        invalidate_song_rows_for_edit(app, track, patch.target.pattern);
     }
     Ok(MutationEffects { publish_scheduler })
 }

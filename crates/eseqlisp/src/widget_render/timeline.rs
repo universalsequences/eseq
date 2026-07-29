@@ -2404,6 +2404,20 @@ impl TimelineView {
         Some((x, self.rect.row, width, self.rect.height))
     }
 
+    /// The loop band's vertical extent inside the header — the SAME geometry
+    /// the metal renderer draws (clip-edit-target spec 5.1: band-BODY drag =
+    /// slide window; the ruler rows above the band must keep scrubbing).
+    fn loop_band_rows(&self) -> Option<(f32, f32)> {
+        let chrome = (self.header_height - self.header_bottom_gutter).max(0.0);
+        if chrome <= 0.2 {
+            return None;
+        }
+        let y = self.rect.row + (chrome * 0.55).min(chrome - 0.18);
+        let bottom_inset = 0.08_f32.min(chrome * 0.12);
+        let height = (chrome - (y - self.rect.row) - bottom_inset).max(0.12);
+        Some((y, y + height))
+    }
+
     fn loop_band_rect(&self) -> Option<(f32, f32)> {
         let content_length = self.content_length?;
         if content_length <= 0.0 {
@@ -3093,7 +3107,10 @@ impl TimelineView {
                     let raw_time = self.time_at_col(local_col);
                     let in_band = self
                         .content_length
-                        .is_some_and(|length| raw_time >= 0.0 && raw_time < length);
+                        .is_some_and(|length| raw_time >= 0.0 && raw_time < length)
+                        && self
+                            .loop_band_rows()
+                            .is_some_and(|(top, bottom)| local_row >= top && local_row < bottom);
                     if self.band_slide && in_band {
                         Some(map_value(vec![
                             ("kind", keyword(":slide-band")),
@@ -6631,8 +6648,9 @@ mod tests {
             height: 8.0,
         };
         let view = TimelineView::from_props(&props, rect);
-        // Header row, time 4 (col 8): inside the 16-step band.
-        let gesture = view.begin_gesture(8.0, 0.5).expect("band gesture begins");
+        // With header-height 2 the band occupies rows [1.1, 1.92): press
+        // INSIDE the band body at time 4 (col 8).
+        let gesture = view.begin_gesture(8.0, 1.5).expect("band gesture begins");
         let Value::Map(map) = &gesture else {
             panic!("expected gesture map");
         };
@@ -6646,7 +6664,7 @@ mod tests {
         );
 
         let action = view
-            .handle_pointer_drag(14.0, 0.5, Some(&gesture))
+            .handle_pointer_drag(14.0, 1.5, Some(&gesture))
             .expect("drag reports delta");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -6661,7 +6679,7 @@ mod tests {
         );
 
         let action = view
-            .handle_pointer_up(14.0, 0.5, Some(&gesture))
+            .handle_pointer_up(14.0, 1.5, Some(&gesture))
             .expect("release reports total delta");
         let Value::Map(map) = action else {
             panic!("expected action map");
@@ -6675,11 +6693,22 @@ mod tests {
             Some(Value::Number(3.0))
         );
 
-        // Without the prop, the same press scrubs as before.
+        // The RULER rows above the band keep scrubbing even with the prop
+        // on (spec 5.1: band-BODY drag, not the whole header).
+        let gesture = view.begin_gesture(8.0, 0.5).expect("ruler press begins");
+        let Value::Map(map) = &gesture else {
+            panic!("expected gesture map");
+        };
+        assert_eq!(
+            map.get("kind").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("scrub".to_string()))
+        );
+
+        // Without the prop, a band-body press scrubs as before.
         let mut plain = props.clone();
         plain.remove("band-slide");
         let view = TimelineView::from_props(&plain, rect);
-        let gesture = view.begin_gesture(8.0, 0.5).expect("scrub begins");
+        let gesture = view.begin_gesture(8.0, 1.5).expect("scrub begins");
         let Value::Map(map) = &gesture else {
             panic!("expected gesture map");
         };

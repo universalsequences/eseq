@@ -239,14 +239,14 @@
         :take nil)
       :finish-resize-content-length
       (if (= SEQ.focus-kind :pattern)
-        (host-command "focus-finish-num-steps" (dict))
+        (host-command "focus-finish-num-steps" (dict :track SEQ.current-track))
         nil)
       ;; Band-body slide (spec 5): live frames are preview-only; the release
       ;; carries the TOTAL delta and lowers to one undoable phase edit.
       :slide-band nil
       :finish-slide-band
       (let ((delta (round (piano-roll-event-num event :delta-time 0))))
-        (if (or (not (= SEQ.focus-kind :pattern)) (= delta 0))
+        (if (or (not (= SEQ.focus-clip-kind :pattern)) (= delta 0))
           nil
           (host-command "focus-slide-band"
             (dict :track SEQ.current-track :delta-steps delta))))
@@ -309,7 +309,7 @@
     :content-length-max 256
     ;; Loop-window gestures + overlay (clip-edit-target spec 5): only a
     ;; pinned clip has a window to slide or mark.
-    :band-slide (= SEQ.focus-kind :pattern)
+    :band-slide (= SEQ.focus-clip-kind :pattern)
     :window-marker SEQ.focus-window-marker
     :window-span SEQ.focus-window-span
     :window-repeat SEQ.focus-window-repeat
@@ -326,7 +326,102 @@
     :scroll-mode :smooth
     :on-action |event| (piano-roll-action event)))
 
+;; ── Clip panel (clip-edit-target spec 6) ───────────────────────────────────
+;; Ableton-style numeric column left of the piano roll: source identity,
+;; Start/End (beats), signed start offset, length, loop duality. Start/End/
+;; Offset only exist for a pinned clip; in follow mode the column shows the
+;; session identity, the live length and the loop row.
+
+(def piano-roll-clip-panel-width 14)
+
+(def piano-roll-panel-row (name body)
+  (h-stack :gap 0.3 :align :center
+    (box :width 4.6 :height 1.3
+      (label name :font-size 10 :color :dim :bg :transparent))
+    body))
+
+(def piano-roll-panel-static (name text key)
+  (piano-roll-panel-row name
+    (box :width 8 :height 1.3
+      (label text :key key :font-size 10 :color :white :bg :transparent))))
+
+;; Signed display (spec 6): an offset in the top half of the pattern reads as
+;; a negative pickup — offset L−1 shows as −1, exactly Ableton's start = −1
+;; with the loop at 0.
+(def piano-roll-signed-offset (offset)
+  (let ((steps (piano-roll-num-steps)))
+    (if (> offset (/ steps 2)) (- offset steps) offset)))
+
+(def piano-roll-clip-panel-rows ()
+  (if (= SEQ.focus-clip-start nil)
+    (box :width 0 :height 0 :bg :transparent)
+    (v-stack :gap 0.2
+      (piano-roll-panel-row "Start"
+        (number-picker :key "piano-roll-panel-start"
+          :value SEQ.focus-clip-start
+          :min 0 :max 8192 :decimals 0
+          :on-change (lambda (v)
+            (host-command "focus-clip-resize"
+              (dict :track SEQ.current-track
+                :start-beat v :end-beat SEQ.focus-clip-end)))
+          :width 8 :height 1.3 :font-size 10))
+      (piano-roll-panel-row "End"
+        (number-picker :key "piano-roll-panel-end"
+          :value SEQ.focus-clip-end
+          :min 0 :max 8192 :decimals 0
+          :on-change (lambda (v)
+            (host-command "focus-clip-resize"
+              (dict :track SEQ.current-track
+                :start-beat SEQ.focus-clip-start :end-beat v)))
+          :width 8 :height 1.3 :font-size 10))
+      (piano-roll-panel-row "Offset"
+        (number-picker :key "piano-roll-panel-offset"
+          :value (piano-roll-signed-offset SEQ.focus-clip-offset)
+          :min -256 :max 256 :decimals 0
+          :on-change (lambda (v)
+            (host-command "focus-set-offset"
+              (dict :track SEQ.current-track :offset-steps v)))
+          :width 8 :height 1.3 :font-size 10)))))
+
+(def piano-roll-panel-length-row ()
+  (piano-roll-panel-row "Length"
+    (if (= SEQ.focus-kind :take)
+      ;; A take's length is owned by recording/splice (spec 6): read-only.
+      (box :width 8 :height 1.3
+        (label (fmt "{}" (piano-roll-num-steps))
+          :key "piano-roll-panel-length-static"
+          :font-size 10 :color :white :bg :transparent))
+      (number-picker :key "piano-roll-panel-length"
+        :value (piano-roll-num-steps)
+        :min 1 :max 256 :decimals 0
+        :on-change (lambda (v)
+          (if (= SEQ.focus-kind :pattern)
+            (do
+              (host-command "focus-set-num-steps"
+                (dict :track SEQ.current-track :length v))
+              (host-command "focus-finish-num-steps" (dict :track SEQ.current-track)))
+            (do
+              (cool-off-follow)
+              (seq-set-track-param :num-steps v))))
+        :width 8 :height 1.3 :font-size 10))))
+
+(def piano-roll-clip-panel ()
+  (v-stack :padding 0.3 :gap 0.25 :width piano-roll-clip-panel-width
+    (box :width :fill :height 1.3
+      (label SEQ.focus-label
+        :key "piano-roll-panel-source"
+        :font-size 10 :color :white :bg :transparent))
+    (piano-roll-clip-panel-rows)
+    (piano-roll-panel-length-row)
+    ;; Informational in v1 (spec 6): states the pattern/take duality; layout
+    ;; leaves room for Position/Length when sub-pattern windows land (5.1).
+    (piano-roll-panel-static "Loop"
+      (if (= SEQ.focus-kind :take) "off" "on")
+      "piano-roll-panel-loop")))
+
 (effect-buffer "*piano-roll*"
   (v-stack :padding 0.0 :gap 0.0
     (piano-roll-focus-header)
-    (piano-roll-timeline)))
+    (h-stack :gap 0.0
+      (piano-roll-clip-panel)
+      (piano-roll-timeline))))

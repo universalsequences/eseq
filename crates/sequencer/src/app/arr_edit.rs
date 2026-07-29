@@ -313,6 +313,59 @@ impl App {
         })
     }
 
+    /// Set a clip's phase anchor to an absolute source step (clip-edit-target
+    /// spec 6, the clip panel's Start offset field). Pattern offsets wrap
+    /// through `pattern_play_step` (a negative "pickup" entry lands in the
+    /// top half); take offsets clamp to `[0, total_len)` and the clip end
+    /// re-clamps to the playable end the new offset leaves.
+    pub fn arr_clip_set_offset(
+        &mut self,
+        clip_id: ClipId,
+        offset_steps: f64,
+    ) -> Result<(), String> {
+        if !offset_steps.is_finite() {
+            return Err("Clip start offset must be finite".to_string());
+        }
+        // Take end re-clamp needs App context; compute before the edit.
+        let take_end_limit = {
+            let arrangement = self.require_arrangement()?;
+            let (track, clip) = Self::locate_clip(&arrangement, clip_id)?;
+            if clip.take_id.is_some() {
+                let mut probed = clip;
+                probed.offset_steps = offset_steps.max(0.0);
+                self.take_clip_playable_end(track, &probed)
+            } else {
+                None
+            }
+        };
+        self.edit_arrangement("Set clip start offset", move |arrangement, scenes| {
+            let (track, clip) = Self::locate_clip(arrangement, clip_id)?;
+            let next = if let Some(take_id) = clip.take_id {
+                let (_, total_len) = scenes
+                    .song_track_take_step_mapping(track, take_id)
+                    .ok_or_else(|| "The clip's take no longer exists".to_string())?;
+                offset_steps.clamp(0.0, (total_len - 1.0).max(0.0))
+            } else if let Some(pattern_id) = clip.pattern_id {
+                let (_, num_steps) = scenes
+                    .song_track_pattern_step_mapping(track, pattern_id)
+                    .ok_or_else(|| "The clip's pattern no longer exists".to_string())?;
+                pattern_play_step(offset_steps, 0.0, (0.0, num_steps))
+            } else {
+                return Err("An empty clip has no start offset".to_string());
+            };
+            let end_limit = take_end_limit
+                .map(|limit| limit.max(clip.start_beat + 1.0))
+                .unwrap_or(f64::INFINITY);
+            let edited = arrangement.track_lanes[track]
+                .iter_mut()
+                .find(|candidate| candidate.id == clip_id)
+                .expect("located above");
+            edited.offset_steps = next;
+            edited.end_beat = edited.end_beat.min(end_limit);
+            Ok(())
+        })
+    }
+
     /// Split a clip at `beat` into two clips playing the same uninterrupted
     /// music: the left half keeps the id and anchor, the right half gets a
     /// fresh id and `offset += steps(beat - start)`.
