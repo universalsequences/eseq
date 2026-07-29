@@ -322,7 +322,10 @@ fn normalized_piano_roll_notes(notes: &[PianoRollNote]) -> Vec<PianoRollNote> {
     notes.dedup_by(|a, b| {
         (a.transpose - b.transpose).abs() < f32::EPSILON && (a.delay - b.delay).abs() < f32::EPSILON
     });
-    notes.truncate(PIANO_ROLL_ID_STRIDE);
+    // Both writers share the LIVE chord lane's capacity: `ChordData` refuses
+    // notes past MAX_VOICES, and a pool pattern holding more than that would
+    // truncate (and mis-index) when it becomes effective.
+    notes.truncate(sequencer::audio::MAX_VOICES.min(PIANO_ROLL_ID_STRIDE));
     notes
 }
 
@@ -612,6 +615,16 @@ pub(crate) fn sync_piano_roll_state(
         "SEQ",
         "focus-label",
         Value::String(app.focus_label(track).unwrap_or_default()),
+    );
+    // Whether the focus is the live mirror. The loop bar's length write is
+    // still live-track-shaped (`seq-set-track-param :num-steps`), so a
+    // pinned focus must keep it read-only until slice C lands the
+    // pattern-addressed write — otherwise the band would DISPLAY the pinned
+    // length while EDITING the live pattern.
+    rt.set_reactive(
+        "SEQ",
+        "focus-live",
+        Value::Bool(matches!(focus, PianoRollFocusSpec::Live)),
     );
     sync_piano_roll_note_state(rt, &lanes, selected);
 }

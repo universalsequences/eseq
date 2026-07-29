@@ -423,6 +423,62 @@ mod tests {
         .is_err());
     }
 
+    /// Review regression: a Live-focus history edit must publish the
+    /// scheduler snapshot exactly like the legacy recorded-step path did via
+    /// `replay_step_patch(Redo)` — without it the new note is silent until
+    /// an unrelated action publishes.
+    #[test]
+    fn a_live_focus_edit_publishes_the_scheduler_snapshot() {
+        let (mut app, _take, _scene_pattern, _chunks) = app_with_take();
+        let focus = app.track_edit_focus(0);
+        assert!(focus.is_live());
+        let before = app.state.latest_scheduler_snapshot();
+        crate::app::edit::apply_recorded_focus_step_mutation(
+            &mut app,
+            focus,
+            &[2],
+            "Test live note",
+            |app| {
+                app.state.pattern.patterns[0].set_step_active(2, true);
+                Ok(())
+            },
+        )
+        .expect("live edit applies");
+        let after = app.state.latest_scheduler_snapshot();
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &after),
+            "a live-target edit must publish the scheduler snapshot"
+        );
+    }
+
+    /// Review regression (spec 3.3.3): in follow mode the focus carries no
+    /// pattern id, so the bail must compare the effective pattern against
+    /// the pattern the gesture BEGAN on — a launch mid-drag aborts, never
+    /// silently retargets onto the launched scene's pattern.
+    #[test]
+    fn a_live_gesture_bails_when_the_effective_pattern_moves() {
+        let (mut app, _take, scene_pattern, _chunks) = app_with_take();
+        let focus = app.track_edit_focus(0);
+        assert!(focus.is_live());
+        let mut gesture =
+            crate::app::edit::FocusStepGesture::begin(&mut app, focus, &[2], "Test drag")
+                .expect("gesture begins");
+        // Simulate a launch: the scene cell now resolves a different pattern.
+        app.state.with_scenes_mut(|scenes| {
+            let data = scenes.track_pools[0]
+                .get(scene_pattern)
+                .expect("scene pattern")
+                .clone();
+            let id = scenes.track_pools[0].insert(data);
+            scenes.scenes[0].cells[0] = Some(id);
+        });
+        assert!(
+            gesture.capture_additional_steps(&mut app, &[3]).is_err(),
+            "a moved effective pattern must abort the follow-mode drag"
+        );
+        gesture.rollback(&mut app).expect("rollback succeeds");
+    }
+
     /// Spec 3.3.3: the gesture bails when the RESOLVED focus moves under it —
     /// here a deselection mid-drag.
     #[test]

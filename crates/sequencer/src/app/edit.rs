@@ -3331,27 +3331,43 @@ impl FocusStepGesture {
         if app.track_edit_focus(track) != self.focus {
             return Err(EditError::MissingTrackPattern);
         }
+        // Follow mode carries no pattern id in the focus itself, so the
+        // legacy bail must run HERE: a scene launch mid-drag re-resolves to
+        // a different effective pattern, and continuing (or growing a new
+        // part for it) would silently migrate the drag onto the launched
+        // scene's pattern (spec 3.3.3).
+        if let crate::app::focus::EditFocus::Live { .. } = self.focus {
+            let begun = self
+                .parts
+                .first()
+                .map(|part| part.target.pattern)
+                .ok_or(EditError::MissingTrackPattern)?;
+            if app.state.effective_track_pattern_id(track) != Some(begun) {
+                return Err(EditError::MissingTrackPattern);
+            }
+        }
         for (pattern, local_steps) in focus_step_targets(app, self.focus, steps)? {
             match self
                 .parts
                 .iter_mut()
                 .find(|part| part.target.pattern == pattern)
             {
-                Some(part) => match self.focus {
-                    // Follow mode keeps the legacy bail: the effective
-                    // pattern moving out from under the drag aborts it.
-                    crate::app::focus::EditFocus::Live { .. } => {
-                        part.capture_additional_steps(app, &local_steps)?
-                    }
-                    _ => part.capture_additional_steps_for_target(app, track, &local_steps)?,
-                },
-                None => self.parts.push(StepGestureTransaction::begin_for(
-                    app,
-                    track,
-                    pattern,
-                    &local_steps,
-                    self.label,
-                )?),
+                Some(part) => {
+                    part.capture_additional_steps_for_target(app, track, &local_steps)?
+                }
+                // Only a take gesture may legitimately grow new parts (the
+                // drag reached another chunk); pattern-focus gestures always
+                // resolve to the single part begun above.
+                None if matches!(self.focus, crate::app::focus::EditFocus::Take { .. }) => {
+                    self.parts.push(StepGestureTransaction::begin_for(
+                        app,
+                        track,
+                        pattern,
+                        &local_steps,
+                        self.label,
+                    )?)
+                }
+                None => return Err(EditError::MissingTrackPattern),
             }
         }
         Ok(())
@@ -3420,10 +3436,13 @@ impl FocusStepGesture {
         let history_move = app.history.commit(label, None, patch, retained_bytes);
         // A pinned pool/take target the playing song resolves needs the
         // prebuilt row snapshots refreshed (they cloned the pattern at
-        // preflight); the live path keeps its existing edit-through seam.
+        // preflight). The LIVE publish deliberately does not live here:
+        // gesture finishes must not republish (drag frames already did —
+        // the coalescing contract), so `apply_recorded_focus_step_mutation`
+        // owns the legacy replay tail for one-shot edits.
         if !focus.is_live() {
             for pattern in targets {
-                app.invalidate_song_rows_for_pattern(track, pattern);
+                invalidate_song_rows_for_edit(app, track, pattern);
             }
         }
         Ok(EditOutcome::Applied(history_move))
@@ -3452,7 +3471,19 @@ pub fn apply_recorded_focus_step_mutation(
             ))),
         };
     }
-    gesture.commit(app)
+    let outcome = gesture.commit(app)?;
+    // The legacy `replay_step_patch(Redo)` tail for a one-shot live edit:
+    // the audio thread reads the PUBLISHED snapshot, so the effective
+    // target must publish, and playing song rows that resolve it must
+    // re-preflight. (Gesture drags publish per frame instead.)
+    if matches!(outcome, EditOutcome::Applied(_)) && focus.is_live() {
+        let track = focus.track();
+        app.state.publish_scheduler_track(track);
+        if let Some(pattern) = app.state.effective_track_pattern_id(track) {
+            invalidate_song_rows_for_edit(app, track, pattern);
+        }
+    }
+    Ok(outcome)
 }
 
 #[derive(Clone)]
