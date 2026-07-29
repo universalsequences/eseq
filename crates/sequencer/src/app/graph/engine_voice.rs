@@ -311,6 +311,13 @@ impl GraphController<'_> {
             self.ensure_track_uses_dedicated_engine(track)?;
         }
 
+        let previous_mode = self
+            .app
+            .graph
+            .track_instrument_run_modes
+            .get(track)
+            .copied()
+            .unwrap_or(CustomInstrumentRunMode::Instrument);
         if let Some(mode) = self.app.graph.track_instrument_run_modes.get_mut(track) {
             *mode = normalized_mode;
         }
@@ -329,7 +336,9 @@ impl GraphController<'_> {
             )?;
         if normalized_mode == CustomInstrumentRunMode::FreePatch {
             self.apply_free_patch_idle_voice(track)?;
-        } else {
+        } else if previous_mode == CustomInstrumentRunMode::FreePatch {
+            // Only close the idle route when actually leaving free-patch mode;
+            // closing it unconditionally mutes voice 0 mid-note on live tracks.
             self.close_free_patch_idle_route(track);
         }
         self.app.state.publish_scheduler_snapshot();
@@ -356,12 +365,13 @@ impl GraphController<'_> {
             if mode == CustomInstrumentRunMode::FreePatch {
                 self.ensure_track_uses_dedicated_engine(track)?;
             }
+            let previous_mode = self.app.graph.track_instrument_run_modes[track];
             self.app.graph.track_instrument_run_modes[track] = mode;
             self.app.state.runtime.instrument_run_mode_flags[track]
                 .store(mode.runtime_flag(), Ordering::Release);
             if mode == CustomInstrumentRunMode::FreePatch {
                 self.apply_free_patch_idle_voice(track)?;
-            } else {
+            } else if previous_mode == CustomInstrumentRunMode::FreePatch {
                 self.close_free_patch_idle_route(track);
             }
         }
