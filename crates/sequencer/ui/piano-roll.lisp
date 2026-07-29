@@ -215,10 +215,16 @@
       (piano-roll-zoom-lanes event)
       :set-cursor
       (set! piano-roll-cursor-time event.time)
+      ;; The length write is live-track-shaped; in a pinned focus the band is
+      ;; read-only until the pattern-addressed write lands (clip-edit-target
+      ;; spec 5, slice C) — a write here would edit the LIVE pattern while
+      ;; the band displays the pinned one.
       :resize-content-length
-      (do
-        (cool-off-follow)
-        (seq-set-track-param :num-steps event.length))
+      (if (= SEQ.focus-live false)
+        nil
+        (do
+          (cool-off-follow)
+          (seq-set-track-param :num-steps event.length)))
       :marquee-select
       (set! piano-roll-selection-rect event)
       :finish-marquee-select
@@ -239,7 +245,20 @@
       (set! piano-roll-status (seq-piano-roll-action event))
       (set! piano-roll-status "piano roll"))))
 
-(effect-buffer "*piano-roll*"
+;; Focus header (clip-edit-target spec 4.4): the pinned state must be
+;; visible, not inferred — "Pattern 3 — 4 clips" / "Take 2" / "Pattern 5
+;; (scene)" in the source's track color.
+(def piano-roll-focus-header ()
+  (let ((color (piano-roll-current-track-color)))
+    (box :width :fill :height 1.2 :padding 0.1
+      :background-color (rgba 0.09 0.10 0.12 1.0)
+      (label (str "  " SEQ.focus-label)
+        :key "piano-roll-focus-label"
+        :font-size 10
+        :color (rgba (nth color 0) (nth color 1) (nth color 2) 1.0)
+        :bg :transparent))))
+
+(def piano-roll-timeline ()
   (timeline
     :height piano-roll-timeline-height
     :focusable true
@@ -275,3 +294,8 @@
     :resize-snap-mode :alignment-helper
     :scroll-mode :smooth
     :on-action |event| (piano-roll-action event)))
+
+(effect-buffer "*piano-roll*"
+  (v-stack :padding 0.0 :gap 0.0
+    (piano-roll-focus-header)
+    (piano-roll-timeline)))

@@ -43047,6 +43047,10 @@
                 ("song-bound-clip", Value::Nil),
                 ("track-colors", test_track_colors()),
                 ("tp-num-steps", Value::Number(16.0)),
+                ("focus-num-steps", Value::Number(16.0)),
+                ("focus-label", Value::String(String::new())),
+                ("focus-live", Value::Bool(true)),
+                ("piano-roll-playhead", Value::Number(-1.0)),
                 ("piano-roll-lanes", build_piano_roll_lanes_value()),
                 ("piano-roll-items", Value::List(vec![])),
                 ("piano-roll-selection", Value::List(vec![])),
@@ -43078,7 +43082,18 @@
         let layout = editor
             .widget_layout()
             .expect("piano roll should have a widget layout");
-        assert_eq!(layout.widget_type, "timeline");
+        // The buffer is a focus-header + timeline stack (clip-edit-target
+        // spec 4.4); the timeline itself keeps every prop below.
+        assert_eq!(layout.widget_type, "v-stack");
+        fn find_timeline(
+            node: &eseqlisp::layout::LayoutNode,
+        ) -> Option<&eseqlisp::layout::LayoutNode> {
+            if node.widget_type == "timeline" {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_timeline)
+        }
+        let layout = find_timeline(&layout).expect("timeline inside the piano-roll stack");
         let expected_track_color = test_number_list(&[0.96, 0.28, 0.52]);
         assert_eq!(
             layout.props.get("item-color"),
@@ -43161,6 +43176,7 @@
         let layout = editor
             .widget_layout()
             .expect("piano roll should still have a widget layout");
+        let layout = find_timeline(&layout).expect("timeline inside the piano-roll stack");
         assert_eq!(
             layout.props.get("create-duration"),
             Some(&Value::Number(2.5)),
@@ -43174,6 +43190,7 @@
         let layout = editor
             .widget_layout()
             .expect("piano roll should still have a widget layout");
+        let layout = find_timeline(&layout).expect("timeline inside the piano-roll stack");
         assert_eq!(
             layout.props.get("create-duration"),
             Some(&Value::Number(3.25)),
@@ -43187,6 +43204,7 @@
         let layout = editor
             .widget_layout()
             .expect("piano roll should still have a widget layout");
+        let layout = find_timeline(&layout).expect("timeline inside the piano-roll stack");
         assert_eq!(
             layout.props.get("cursor-time"),
             Some(&Value::Number(4.5)),

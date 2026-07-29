@@ -3088,6 +3088,17 @@ impl TimelineView {
                     ("end", Value::Number(start + default_duration)),
                 ]))
             }
+            // Title bar only (clip-edit-target spec 4, locked decision 5):
+            // "the top part of the clip" opens its editor. Body and edge hits
+            // keep returning None so a body double-click starts nothing.
+            HitRegion::ItemTitleBar { item } => Some(action_map(vec![
+                ("type", keyword(":double-click-item")),
+                ("ids", list_value(vec![item.id])),
+                (
+                    "time",
+                    Value::Number(self.cursor_snap_time(self.time_at_col(local_col))),
+                ),
+            ])),
             _ => None,
         }
     }
@@ -6439,6 +6450,70 @@ mod tests {
             map.get("end").map(|value| value.borrow().clone()),
             Some(Value::Number(6.5))
         );
+    }
+
+    /// Clip-edit-target spec 4 (locked decision 5): a double-click on an
+    /// item's TITLE BAR emits :double-click-item; the body stays inert so a
+    /// body double-click starts nothing surprising.
+    #[test]
+    fn double_click_on_item_title_bar_emits_double_click_item() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("snap".to_string(), number_value(1.0)),
+            ("title-bar-height".to_string(), number_value(0.9)),
+            ("header-height".to_string(), number_value(0.0)),
+            ("lane-height".to_string(), number_value(3.0)),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(7.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(12.0)),
+                ])]),
+            ),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        // The item spans cols 8..24; col 16 is well clear of both edge
+        // handles. Row 0.2 is inside the 0.9-row title bar.
+        let action = view
+            .handle_double_click(16.0, 0.2)
+            .expect("title-bar double-click emits an action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("double-click-item".to_string()))
+        );
+        let Some(ids) = map.get("ids").map(|value| value.borrow().clone()) else {
+            panic!("expected ids");
+        };
+        let Value::List(ids) = ids else {
+            panic!("expected id list");
+        };
+        assert_eq!(ids.len(), 1);
+        assert_eq!(*ids[0].borrow(), Value::Number(7.0));
+
+        // The BODY (below the title bar) still returns no action.
+        assert!(view.handle_double_click(16.0, 2.0).is_none());
     }
 
     #[test]
