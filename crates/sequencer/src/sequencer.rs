@@ -11,7 +11,8 @@ mod state;
 pub use clock::{SequencerClock, TrackClockState};
 #[allow(unused_imports)]
 pub use data::{
-    rack_slot_pool_index, sync_beats, BusId, ChordData, ChordSnapshot, CustomInstrumentRunMode,
+    ceil_to_grid, rack_slot_pool_index, sync_beats, BusId, ChordData, ChordSnapshot,
+    CustomInstrumentRunMode, PatternStepGeometry,
     InstrumentType, KeyboardTrigger, MidiFxPosition, ModConnection, ModDestination, RackRouting,
     StepData, StepParam, SwingResolution, Timebase, TimebasePLockData, TrackOutput, TrackParams,
     TrackParamsSnapshot, TrackPattern, TrackSendSnapshot, TrackSoundState, Trigger, DEFAULT_BPM,

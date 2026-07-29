@@ -30,9 +30,10 @@ enum LaneResolution {
     Pattern {
         id: PatternId,
         offset_steps: f64,
-        /// `(steps_per_beat, num_steps)` under the pattern's base timebase —
-        /// the `steps()` mapping offsets are stamped in (takes spec 7.2).
-        mapping: (f64, f64),
+        /// The pattern's real beat↔step geometry (per-step timebase and sync
+        /// plocks included) — the `steps()` mapping offsets are stamped and
+        /// advanced in (takes spec 7.1/7.2).
+        geometry: PatternStepGeometry,
     },
     Take {
         id: TakeId,
@@ -142,18 +143,10 @@ impl SequencerState {
                                         id.0
                                     )
                                 })?;
-                            let num_steps = data.track_params.num_steps.max(1) as usize;
-                            let step_beats =
-                                data.track_params.timebase.step_beats(num_steps);
-                            let mapping = if step_beats > 0.0 {
-                                (1.0 / step_beats, num_steps as f64)
-                            } else {
-                                (0.0, num_steps as f64)
-                            };
                             LaneResolution::Pattern {
                                 id,
                                 offset_steps,
-                                mapping,
+                                geometry: data.step_geometry(),
                             }
                         }
                         LaneSource::Take(take_id) => {
@@ -277,17 +270,18 @@ impl SequencerState {
                             LaneResolution::Pattern {
                                 id,
                                 offset_steps,
-                                mapping: (steps_per_beat, num_steps),
+                                geometry,
                             } => {
-                                let advanced = if delta_beats > 0.0 && *steps_per_beat > 0.0 {
-                                    // Snap before wrapping (boundary-coincident rows
-                                    // must land exactly on the step), then wrap
-                                    // through the one shared window helper
+                                let advanced = if delta_beats > 0.0 {
+                                    // Advance in the pattern's real geometry,
+                                    // snap before wrapping (boundary-coincident
+                                    // rows must land exactly on the step), then
+                                    // wrap through the one shared window helper
                                     // (clip-edit-target spec 5.1).
                                     pattern_play_step(
-                                        snap_steps(offset_steps + delta_beats * steps_per_beat),
+                                        snap_steps(geometry.advance(*offset_steps, delta_beats)),
                                         0.0,
-                                        (0.0, *num_steps),
+                                        (0.0, geometry.num_steps() as f64),
                                     )
                                 } else {
                                     *offset_steps

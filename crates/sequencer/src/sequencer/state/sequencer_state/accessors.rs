@@ -912,15 +912,14 @@ impl SequencerState {
         scene_idx: usize,
         pattern: PatternId,
     ) {
-        let mapping = self.with_project_scenes(|scenes| {
+        let geometry = self.with_project_scenes(|scenes| {
             let data = scenes.track_pools.get(track)?.get(pattern)?;
-            let num_steps = data.track_params.num_steps.max(1);
-            let step_beats = data.track_params.timebase.step_beats(num_steps);
-            (step_beats > 0.0).then(|| (1.0 / step_beats, num_steps as f64))
+            Some(data.step_geometry())
         });
-        let Some((steps_per_beat, num_steps)) = mapping else {
+        let Some(geometry) = geometry else {
             return;
         };
+        let num_steps = geometry.num_steps() as f64;
         self.with_committed_song_mut(|song| {
             let Some(song) = song.as_mut() else {
                 return;
@@ -931,7 +930,7 @@ impl SequencerState {
                 {
                     continue;
                 }
-                let offset = (row.start_beat * steps_per_beat).rem_euclid(num_steps);
+                let offset = geometry.steps_at_beats(row.start_beat);
                 if offset < 1e-9 || offset > num_steps - 1e-9 {
                     continue;
                 }

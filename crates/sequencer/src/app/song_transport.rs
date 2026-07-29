@@ -1946,6 +1946,191 @@ mod tests {
         app.state.set_scheduler_rendered_beats(0.0);
     }
 
+    /// End-to-end reproduction of the "sync/timebase p-locks out of time
+    /// after arrangement capture" bug: arrangement-record from session,
+    /// launch a scene with a p-locked pattern at an unquantized beat, and
+    /// follow the free-run phase stamp through EVERY layer the audio path
+    /// consumes — the captured clip, the compiled row override, and the
+    /// preflighted runtime row's `lane_offsets` (what the scheduler anchors
+    /// the clock with). Each must carry the REAL-geometry free-run phase.
+    #[test]
+    fn capture_of_plocked_pattern_stamps_real_geometry_phase_end_to_end() {
+        use crate::sequencer::{PatternId, PatternSnapshot, StepParam, Timebase};
+        let mut app = test_app_two_tracks();
+        // Scene 1's cell for track 0 is pool pattern 2. Give it the p-locked
+        // shape: step 0 is a half-beat step synced to the 1-beat grid
+        // (padding the cycle to 5.0 beats), step 5 synced to the same grid
+        // (a mid-pattern wait). A uniform 16th-note ruler would call this
+        // pattern 4.0 beats long; the real cycle is 5.0.
+        let mut snapshots = vec![
+            PatternSnapshot::new_default(2, &[]),
+            PatternSnapshot::new_default(2, &[]),
+            PatternSnapshot::new_default(2, &[]),
+        ];
+        snapshots[1].timebase_plock_snapshots[0][0] = Some(Timebase::Eighth as u32);
+        snapshots[1].step_data[0][0][StepParam::Sync.index()] = 3.0;
+        snapshots[1].step_data[0][5][StepParam::Sync.index()] = 3.0;
+        app.state.replace_pattern_repository(snapshots, 0);
+
+        // The performance: record from session, free-run to beat 5.3, launch
+        // scene 1 unquantized, stop at beat 12.
+        start_capture(&mut app);
+        app.state.set_scheduler_rendered_beats(5.3);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("scene launch");
+        app.state.set_scheduler_rendered_beats(12.0);
+        app.song_transport_stop().expect("stop commits");
+
+        // What session free-run audibly played at 5.3: 5.3 mod the real
+        // 5.0-beat cycle = 0.3 beats = 60% through the half-beat step 0.
+        let geometry = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(PatternId(2))
+                .expect("scene 1's cell pattern")
+                .step_geometry()
+        });
+        assert!(
+            (geometry.cycle_beats() - 5.0).abs() < 1e-9,
+            "fixture cycle: {}",
+            geometry.cycle_beats()
+        );
+        let expected = geometry.steps_at_beats(5.3);
+        assert!((expected - 0.6).abs() < 1e-9, "free-run phase: {expected}");
+
+        // Layer 1: the captured clip.
+        let arrangement = app
+            .state
+            .committed_arrangement()
+            .expect("capture commits an arrangement");
+        let clip = arrangement.track_lanes[0]
+            .iter()
+            .find(|clip| (clip.start_beat - 5.3).abs() < 1e-9)
+            .expect("the launch opens a clip at the punch-in");
+        assert_eq!(clip.pattern_id, Some(2), "scene 1's cell for track 0");
+        assert!(
+            (clip.offset_steps - expected).abs() < 1e-6,
+            "clip stamped {} but free-run played {}",
+            clip.offset_steps,
+            expected
+        );
+
+        // Layer 2: the compiled row override.
+        let song = committed(&app);
+        let row = song
+            .rows
+            .iter()
+            .find(|row| (row.start_beat - 5.3).abs() < 1e-9)
+            .expect("a row at the launch beat");
+        let over = row
+            .overrides
+            .iter()
+            .find(|over| over.track == 0)
+            .expect("launched lane override");
+        assert!(
+            (over.offset_steps - expected).abs() < 1e-6,
+            "row stamped {} but free-run played {}",
+            over.offset_steps,
+            expected
+        );
+
+        // Layer 3: the preflighted runtime row the scheduler anchors with.
+        let runtime = app
+            .state
+            .preflight_runtime_song()
+            .expect("preflight succeeds");
+        let runtime_row = runtime
+            .rows
+            .iter()
+            .find(|row| (row.start_beat - 5.3).abs() < 1e-9)
+            .expect("a runtime row at the launch beat");
+        assert!(
+            (runtime_row.lane_offsets[0] - expected).abs() < 1e-6,
+            "runtime lane offset {} but free-run played {}",
+            runtime_row.lane_offsets[0],
+            expected
+        );
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    /// The user-reported repro: a committed song, arrangement-record started
+    /// AT THE CURSOR (record-clock zero = cursor beat), and an unquantized
+    /// scene launch of a p-locked pattern. The launched lane audibly
+    /// free-runs against the RECORD clock, so the stamp must be
+    /// `steps(beat - cursor)`, not `steps(timeline_beat)` — on a pattern
+    /// whose real cycle (5.0 here) doesn't divide the cursor position, the
+    /// two differ and the timeline-domain stamp plays back rotated and off
+    /// the sync grid.
+    #[test]
+    fn capture_from_cursor_stamps_record_clock_phase_for_plocked_pattern() {
+        use crate::sequencer::{PatternId, PatternSnapshot, StepParam, Timebase};
+        let mut app = test_app_two_tracks();
+        let mut snapshots = vec![
+            PatternSnapshot::new_default(2, &[]),
+            PatternSnapshot::new_default(2, &[]),
+            PatternSnapshot::new_default(2, &[]),
+        ];
+        // Same p-locked shape as the end-to-end test: real cycle 5.0 beats.
+        snapshots[1].timebase_plock_snapshots[0][0] = Some(Timebase::Eighth as u32);
+        snapshots[1].step_data[0][0][StepParam::Sync.index()] = 3.0;
+        snapshots[1].step_data[0][5][StepParam::Sync.index()] = 3.0;
+        app.state.replace_pattern_repository(snapshots, 0);
+        app.arr_replace_rows(
+            vec![SongRowSpec {
+                start_beat: 0.0,
+                scene: 0,
+                overrides: Vec::new(),
+            }],
+            16.0,
+            false,
+        )
+        .expect("song committed");
+
+        // Record from bar 2: cursor at beat 4.0. The record clock's zero is
+        // the cursor, so a launch at raw beat 1.3 is timeline beat 5.3.
+        app.arrangement_cursor_beat = 4.0;
+        app.set_use_arrangement(true).expect("toggle while stopped");
+        app.state.set_scheduler_rendered_beats(0.0);
+        let mode = app.song_transport_play(true).expect("capture starts");
+        assert_eq!(mode, SongTransportMode::ArrangementCapture);
+        app.state.set_scheduler_rendered_beats(1.3);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("scene launch");
+        app.state.set_scheduler_rendered_beats(8.0);
+        app.song_transport_stop().expect("stop commits");
+
+        let geometry = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(PatternId(2))
+                .expect("scene 1's cell pattern")
+                .step_geometry()
+        });
+        // What the performer heard: free-run 1.3 beats into the record
+        // clock. What the timeline-domain stamp would wrongly claim: 5.3.
+        let heard = geometry.steps_at_beats(1.3);
+        let timeline_stamp = geometry.steps_at_beats(5.3);
+        assert!(
+            (heard - timeline_stamp).abs() > 0.5,
+            "fixture must discriminate the two domains: {heard} vs {timeline_stamp}"
+        );
+
+        let arrangement = app
+            .state
+            .committed_arrangement()
+            .expect("capture commits an arrangement");
+        let clip = arrangement.track_lanes[0]
+            .iter()
+            .find(|clip| (clip.start_beat - 5.3).abs() < 1e-9)
+            .expect("the launch opens a clip at the punch-in");
+        assert_eq!(clip.pattern_id, Some(2));
+        assert!(
+            (clip.offset_steps - heard).abs() < 1e-6,
+            "clip stamped {} but the performer heard record-clock phase {}",
+            clip.offset_steps,
+            heard
+        );
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
     #[test]
     fn capture_scene_launch_preserves_take_lanes() {
         // Takes spec 10 refined: a scene launch during arrangement capture

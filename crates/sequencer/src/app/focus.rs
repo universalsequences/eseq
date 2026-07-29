@@ -170,12 +170,14 @@ impl App {
             use crate::sequencer::SongCompileContext;
             match focus {
                 EditFocus::Pattern { pattern, .. } => {
-                    let (steps_per_beat, num_steps) =
-                        scenes.song_track_pattern_step_mapping(track, pattern.0)?;
+                    // Advance in the pattern's REAL geometry (timebase/sync
+                    // plocks included) so the resolved source step matches
+                    // what the runtime clock plays at `pos`.
+                    let geometry = scenes.song_track_pattern_geometry(track, pattern.0)?;
                     Some(crate::sequencer::pattern_play_step(
-                        clip.offset_steps,
-                        delta_beats * steps_per_beat,
-                        (0.0, num_steps),
+                        geometry.advance(clip.offset_steps, delta_beats),
+                        0.0,
+                        (0.0, geometry.num_steps() as f64),
                     ))
                 }
                 EditFocus::Take { take, .. } => {
@@ -434,7 +436,12 @@ impl App {
             let is_pattern = matches!(selection.source, BoundSource::Pattern(_));
             let (steps_per_beat, source_len) = match selection.source {
                 BoundSource::Pattern(pattern) => {
-                    scenes.song_track_pattern_step_mapping(track, pattern.0)?
+                    // Average steps-per-beat over the pattern's REAL cycle
+                    // (timebase/sync plocks included): the overlay's span and
+                    // repeat count then reflect the audible loop length.
+                    let geometry = scenes.song_track_pattern_geometry(track, pattern.0)?;
+                    let num_steps = geometry.num_steps() as f64;
+                    (num_steps / geometry.cycle_beats(), num_steps)
                 }
                 BoundSource::Take(take) => {
                     scenes.song_track_take_step_mapping(track, take.0)?

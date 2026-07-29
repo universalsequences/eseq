@@ -440,6 +440,7 @@ impl App {
                 &scene_launch_beats,
                 punch_in,
                 end_beat,
+                take.timeline_start_beat,
             )?,
             (None, _) => {
                 let base = ProjectArrangement {
@@ -452,7 +453,15 @@ impl App {
                     loop_enabled: false,
                     next_clip_id: 0,
                 };
-                self.spliced_arrangement(&base, &scenes, &captured, &scene_launch_beats, 0.0, end_beat)?
+                self.spliced_arrangement(
+                    &base,
+                    &scenes,
+                    &captured,
+                    &scene_launch_beats,
+                    0.0,
+                    end_beat,
+                    take.timeline_start_beat,
+                )?
             }
         };
 
@@ -514,6 +523,7 @@ impl App {
         scene_launch_beats: &[f64],
         punch_in: f64,
         stop_beat: f64,
+        record_clock_origin: f64,
     ) -> Result<ProjectArrangement, String> {
         let punch_out = stop_beat.max(punch_in);
         // The captured state governing `P`, re-based to start exactly there,
@@ -557,7 +567,14 @@ impl App {
             punch_out,
         );
         for track in 0..arrangement.track_lanes.len() {
-            self.splice_captured_lane(&mut arrangement, scenes, track, &states, punch_out)?;
+            self.splice_captured_lane(
+                &mut arrangement,
+                scenes,
+                track,
+                &states,
+                punch_out,
+                record_clock_origin,
+            )?;
         }
         Ok(arrangement)
     }
@@ -641,13 +658,19 @@ impl App {
     ///
     /// A touched lane's launches become clips: each state's resolved source
     /// (the explicit launch else the captured scene's cell — a scene launch
-    /// stamps every lane it claims) with the free-run offset `steps(beat) mod
-    /// L` stamped (takes spec 7.2), opened where it first differs and closed
-    /// where the lane changes again or at `Q`. A state resolving to nothing
-    /// (an empty scene cell) opens no clip: the lane is genuinely silent
-    /// there. At `Q` the pre-existing clips resume — `occlude_span`
-    /// left-trimmed and re-stamped whatever the region cut into, so nothing
-    /// has to be materialized to restore them.
+    /// stamps every lane it claims) with the free-run offset
+    /// `steps(beat - record_clock_origin) mod L` stamped (takes spec 7.2),
+    /// opened where it first differs and closed where the lane changes again
+    /// or at `Q`. The offset is measured in the RECORD CLOCK's domain — the
+    /// clock the launched lanes audibly free-ran against — not the
+    /// arrangement timeline: a capture that starts at the cursor (record
+    /// over a committed song) has record-clock zero at the cursor beat, and
+    /// stamping timeline beats there would rotate any pattern whose real
+    /// cycle doesn't divide the cursor position (timebase/sync p-locks). A
+    /// state resolving to nothing (an empty scene cell) opens no clip: the
+    /// lane is genuinely silent there. At `Q` the pre-existing clips resume
+    /// — `occlude_span` left-trimmed and re-stamped whatever the region cut
+    /// into, so nothing has to be materialized to restore them.
     fn splice_captured_lane(
         &self,
         arrangement: &mut ProjectArrangement,
@@ -655,6 +678,7 @@ impl App {
         track: usize,
         states: &[CapturedSongState],
         punch_out: f64,
+        record_clock_origin: f64,
     ) -> Result<bool, String> {
         let Some(first) = states
             .iter()
@@ -675,7 +699,8 @@ impl App {
             if beat >= punch_out {
                 break;
             }
-            let desired = self.captured_lane_resolution(scenes, track, state, beat);
+            let desired =
+                self.captured_lane_resolution(scenes, track, state, beat, record_clock_origin);
             if let Some(clip) = open.as_ref() {
                 if lane_resolution_matches(&stamped_clip_override(scenes, track, clip, beat), desired)
                 {
@@ -715,15 +740,18 @@ impl App {
 
     /// What `track` played at `beat` during the performance: the explicit
     /// launch if the performer made one, else the captured scene's cell, with
-    /// the free-run phase stamped (takes spec 7.2 — every audible pattern
-    /// free-runs against the global clock, so its position is
-    /// `steps(beat) mod L`). `None` when the lane resolved to nothing.
+    /// the free-run phase stamped (takes spec 7.2 — every audible launched
+    /// pattern free-runs against the RECORD CLOCK, whose zero is
+    /// `record_clock_origin` on the arrangement timeline, so its position is
+    /// `steps(beat - record_clock_origin) mod L`). `None` when the lane
+    /// resolved to nothing.
     fn captured_lane_resolution(
         &self,
         scenes: &ProjectScenes,
         track: usize,
         state: &CapturedSongState,
         beat: f64,
+        record_clock_origin: f64,
     ) -> Option<(u64, f64)> {
         let pattern_id = match state
             .overrides
@@ -737,7 +765,10 @@ impl App {
                 track,
             )?,
         };
-        Some((pattern_id, self.advanced_offset(track, pattern_id, 0.0, beat)))
+        Some((
+            pattern_id,
+            self.advanced_offset(track, pattern_id, 0.0, beat - record_clock_origin),
+        ))
     }
 
     /// Paint one take clip per recorded lane over its punch region (takes spec

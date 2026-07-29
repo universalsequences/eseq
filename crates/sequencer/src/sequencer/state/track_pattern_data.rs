@@ -26,6 +26,26 @@ pub struct TrackPatternData {
 }
 
 impl TrackPatternData {
+    /// The pattern's real beat↔step geometry (per-step timebase plocks and
+    /// sync-plock grid waits included) — the `steps()` mapping offsets are
+    /// stamped and resolved in (takes spec 7.1).
+    pub fn step_geometry(&self) -> crate::sequencer::PatternStepGeometry {
+        let num_steps = self.track_params.num_steps.max(1);
+        crate::sequencer::PatternStepGeometry::new(
+            num_steps,
+            self.track_params.timebase,
+            |step| {
+                (
+                    self.timebase_plock_snapshot[step].map(Timebase::from_index),
+                    self.step_data
+                        .get(step)
+                        .map(|params| params[StepParam::Sync.index()])
+                        .unwrap_or_else(|| StepParam::Sync.default_value()),
+                )
+            },
+        )
+    }
+
     /// Strip every per-step lane (notes, params, chords, timing plocks),
     /// keeping the track-level device/param state. Used to mint empty take
     /// chunks from a template pattern (takes spec 6.1).

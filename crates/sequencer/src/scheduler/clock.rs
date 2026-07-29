@@ -5,14 +5,7 @@ Deterministic snapshot clocking, swing timing, and step-delay calculations.
 #[allow(unused_imports)]
 use super::*;
 
-pub(super) fn ceil_to_grid(value: f64, grid: f64) -> f64 {
-    let rem = value % grid;
-    if rem > 1e-9 {
-        value + (grid - rem)
-    } else {
-        value
-    }
-}
+pub(super) use crate::sequencer::ceil_to_grid;
 
 pub(super) fn snap_near_grid_down(value: f64, grid: f64, tolerance: f64) -> f64 {
     let rem = value.rem_euclid(grid);
@@ -133,10 +126,21 @@ impl SnapshotSequencerClock {
             return 0.0;
         }
         // Pattern offsets resolve modulo the pattern length (takes spec 6.3).
+        // Fractional positions interpolate across the whole inter-boundary
+        // span (sync waits and the padded cycle tail included), so the
+        // mapping is the exact inverse of `PatternStepGeometry` stamping —
+        // an offset stamped mid-wait resolves to that beat, not to a point
+        // inside the step's sounding span. For gapless patterns the span
+        // equals the step duration and this is unchanged.
         let steps = tc.offset_steps.rem_euclid(num_steps as f64);
         let step = (steps.floor() as usize).min(num_steps - 1);
         let frac = steps - step as f64;
-        tc.boundaries[step] + frac * (tc.step_ends[step] - tc.boundaries[step])
+        let span_end = if step + 1 < num_steps {
+            tc.boundaries[step + 1]
+        } else {
+            tc.cycle_beats
+        };
+        tc.boundaries[step] + frac * (span_end - tc.boundaries[step])
     }
 
     pub(super) fn seek_to_rendered_position(

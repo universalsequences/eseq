@@ -43,17 +43,20 @@ impl App {
         Ok(())
     }
 
-    /// Steps-per-beat and step count of `pattern_id` in `track`'s pool under
-    /// the pattern's base timebase — the `steps()` mapping used for offset
-    /// stamping (takes spec 7.2/7.4). Per-step timebase plocks deliberately
-    /// do not participate in stamping (spec 15); the runtime resolves the
-    /// stamped step offset through the track's live boundaries.
-    fn pattern_step_mapping(&self, track: usize, pattern_id: u64) -> Option<(f64, f64)> {
+    /// The real beat↔step geometry of `pattern_id` in `track`'s pool — the
+    /// `steps()` mapping used for offset stamping (takes spec 7.1/7.2/7.4).
+    /// Per-step timebase and sync plocks participate: stamping must invert
+    /// the same boundaries the runtime resolves the stamped offset through,
+    /// or anchored playback of an unquantized capture drifts against the
+    /// transport (and sync plocks snap to the wrong grid).
+    fn pattern_geometry(
+        &self,
+        track: usize,
+        pattern_id: u64,
+    ) -> Option<crate::sequencer::PatternStepGeometry> {
         self.state.with_project_scenes(|scenes| {
             let data = scenes.track_pools.get(track)?.get(PatternId(pattern_id))?;
-            let num_steps = data.track_params.num_steps.max(1);
-            let step_beats = data.track_params.timebase.step_beats(num_steps);
-            (step_beats > 0.0).then(|| (1.0 / step_beats, num_steps as f64))
+            Some(data.step_geometry())
         })
     }
 
@@ -79,9 +82,9 @@ impl App {
     }
 
     /// Advance `offset_steps` by `delta_beats` of playback in the given
-    /// pattern's step domain, normalized into `[0, num_steps)`. Offsets
-    /// within stamping epsilon of a pattern boundary collapse to 0 so
-    /// scene-resolved lanes stay implicit whenever they can.
+    /// pattern's real step geometry, normalized into `[0, num_steps)`.
+    /// Offsets within stamping epsilon of a pattern boundary collapse to 0
+    /// so scene-resolved lanes stay implicit whenever they can.
     pub(crate) fn advanced_offset(
         &self,
         track: usize,
@@ -89,15 +92,10 @@ impl App {
         offset_steps: f64,
         delta_beats: f64,
     ) -> f64 {
-        let Some((steps_per_beat, num_steps)) = self.pattern_step_mapping(track, pattern_id) else {
+        let Some(geometry) = self.pattern_geometry(track, pattern_id) else {
             return offset_steps;
         };
-        let advanced = (offset_steps + delta_beats * steps_per_beat).rem_euclid(num_steps);
-        if advanced < 1e-9 || advanced > num_steps - 1e-9 {
-            0.0
-        } else {
-            advanced
-        }
+        geometry.advanced_offset(offset_steps, delta_beats)
     }
 
 }

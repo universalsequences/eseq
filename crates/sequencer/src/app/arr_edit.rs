@@ -497,9 +497,10 @@ impl App {
                         .to_string(),
                 );
             };
-            let (_, num_steps) = scenes
-                .song_track_pattern_step_mapping(track, pattern_id)
-                .ok_or_else(|| "The clip's pattern no longer exists".to_string())?;
+            let num_steps = scenes
+                .song_track_pattern_geometry(track, pattern_id)
+                .ok_or_else(|| "The clip's pattern no longer exists".to_string())?
+                .num_steps() as f64;
             let next = pattern_play_step(clip.offset_steps, delta_steps, (0.0, num_steps));
             let slid = arrangement.track_lanes[track]
                 .iter_mut()
@@ -565,9 +566,10 @@ impl App {
                     .ok_or_else(|| "The clip's take no longer exists".to_string())?;
                 offset_steps.clamp(0.0, (total_len - 1.0).max(0.0))
             } else if let Some(pattern_id) = clip.pattern_id {
-                let (_, num_steps) = scenes
-                    .song_track_pattern_step_mapping(track, pattern_id)
-                    .ok_or_else(|| "The clip's pattern no longer exists".to_string())?;
+                let num_steps = scenes
+                    .song_track_pattern_geometry(track, pattern_id)
+                    .ok_or_else(|| "The clip's pattern no longer exists".to_string())?
+                    .num_steps() as f64;
                 pattern_play_step(offset_steps, 0.0, (0.0, num_steps))
             } else {
                 return Err("An empty clip has no start offset".to_string());
