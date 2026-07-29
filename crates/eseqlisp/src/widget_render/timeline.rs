@@ -2294,14 +2294,22 @@ impl TimelineView {
     /// edge clamps to [0, end-1] and re-anchors the content phase by the
     /// split rule (patterns wrap, takes clamp at zero).
     fn apply_bound_channels(&mut self, props: &HashMap<String, Value>) {
-        let selected_id = get_num(props, "selected-id", -1.0);
-        if selected_id >= 0.0 {
-            self.selection.push(Value::Number(selected_id));
-        }
-        let bound_id = get_num(props, "bound-id", -1.0);
-        if bound_id >= 0.0 {
-            self.selection.push(Value::Number(bound_id));
-        }
+        // A clicked clip is usually BOTH channels (a click selects and binds
+        // the sound), so pushing without the dedup would hold the same id
+        // twice — and Backspace would emit two :delete-items for one clip,
+        // deleting it and then erroring on the second, already-gone id.
+        let mut select = |id: f64| {
+            if id >= 0.0
+                && !self
+                    .selection
+                    .iter()
+                    .any(|existing| matches!(existing, Value::Number(n) if *n == id))
+            {
+                self.selection.push(Value::Number(id));
+            }
+        };
+        select(get_num(props, "selected-id", -1.0));
+        select(get_num(props, "bound-id", -1.0));
         let ghost_region_a = get_num(props, "ghost-region-a", f64::NAN);
         let ghost_region_b = get_num(props, "ghost-region-b", f64::NAN);
         let ghost_kind = get_num(props, "ghost-kind", 0.0);
