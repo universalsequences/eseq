@@ -19,7 +19,7 @@ use crate::sequencer::{
 };
 
 use super::edit::finish_active_gesture;
-use super::history::{ArrangementStructurePatch, EditPatch};
+use super::history::{ArrangementStructurePatch, EditPatch, SceneStructurePatch};
 use super::song_edit::SongRowSpec;
 use super::App;
 
@@ -327,7 +327,27 @@ impl App {
                 .with_project_scenes(|scenes| restamped_clip(scenes, track, &clip, new_start_beat));
             match restamped {
                 Some(restamped) => match self.take_clip_playable_end(track, &restamped) {
-                    Some(limit) => new_end_beat.min(limit).max(new_start_beat),
+                    Some(limit) => {
+                        // Dragging a take clip's right edge past its playable
+                        // end GROWS the take (takes never wrap; the drag asks
+                        // for more length, so the linear axis extends with
+                        // silence). One-shot commits only — the coalesced
+                        // panel pickers stay clamped and route length changes
+                        // through the Length field instead.
+                        if merge_key.is_none()
+                            && new_end_beat > limit + 1e-9
+                            && limit > new_start_beat
+                        {
+                            return self.arr_take_clip_resize_growing(
+                                clip_id,
+                                track,
+                                restamped,
+                                new_start_beat,
+                                new_end_beat,
+                            );
+                        }
+                        new_end_beat.min(limit).max(new_start_beat)
+                    }
                     None => new_end_beat,
                 },
                 // The re-anchored clip would have nothing left to play.
@@ -363,6 +383,97 @@ impl App {
             }
             None => self.edit_arrangement("Resize clip", resize),
         }
+    }
+
+    /// Grow a take so a right-edge resize past its playable end means what
+    /// the drag asked for: more length. Mints silence-filled chunks through
+    /// `resize_track_take` and resizes the clip in the same commit — ONE
+    /// composite undo entry (scenes first, so redo restores the longer take
+    /// before the arrangement that needs it).
+    fn arr_take_clip_resize_growing(
+        &mut self,
+        clip_id: ClipId,
+        track: usize,
+        restamped: ArrClip,
+        new_start_beat: f64,
+        new_end_beat: f64,
+    ) -> Result<(), String> {
+        use crate::app::take_edit::TAKE_MAX_LEN_STEPS;
+        use crate::sequencer::{SongCompileContext, TakeId};
+
+        self.require_song_edit_unlocked()?;
+        let take_id = restamped
+            .take_id
+            .expect("caller resolved a take playable end");
+        let (steps_per_beat, current_len) = self
+            .state
+            .with_project_scenes(|scenes| {
+                SongCompileContext::song_track_take_step_mapping(scenes, track, take_id)
+            })
+            .ok_or_else(|| "The clip's take no longer exists".to_string())?;
+        if !(steps_per_beat > 0.0) {
+            return Err("The take's timebase is degenerate".to_string());
+        }
+        let needed =
+            restamped.offset_steps + (new_end_beat - new_start_beat) * steps_per_beat;
+        let len = ((needed - 1e-6).ceil().max(1.0) as u32)
+            .clamp(current_len.ceil() as u32, TAKE_MAX_LEN_STEPS);
+        // If the length cap bites, the clip end clamps to the capped
+        // playable end instead of overhanging silence-past-the-take.
+        let end_beat = new_end_beat.min(
+            new_start_beat + (len as f64 - restamped.offset_steps).max(0.0) / steps_per_beat,
+        );
+        if end_beat <= new_start_beat {
+            return Err(
+                "Resizing this take clip to a positive span is impossible: its source has no \
+                 audio left at that start beat"
+                    .to_string(),
+            );
+        }
+        let scenes_before = self.capture_synchronized_scene_structure_state()?;
+        let arrangement_before = self.require_arrangement()?;
+        self.state.resize_track_take(track, TakeId(take_id), len)?;
+        let scenes = self.state.capture_project_scenes();
+        let mut after = arrangement_before.clone();
+        Self::take_clip(&mut after, track, clip_id);
+        let mut resized = restamped;
+        resized.end_beat = end_beat;
+        if let Err(error) = occlude_span(&mut after, &scenes, track, new_start_beat, end_beat) {
+            self.restore_scene_structure_state(&scenes_before)?;
+            return Err(error);
+        }
+        insert_clip_sorted(&mut after, track, resized);
+        after.end_beat = after.end_beat.max(end_beat);
+        if let Err(error) = self
+            .state
+            .set_committed_arrangement(Some(after.clone()))
+        {
+            self.restore_scene_structure_state(&scenes_before)?;
+            return Err(format!(
+                "growing the take left an invalid song and was rolled back: {error}"
+            ));
+        }
+        finish_active_gesture(self);
+        let scene_patch = SceneStructurePatch {
+            before: scenes_before,
+            after: self.state.capture_project_scenes(),
+        };
+        let arrangement_patch = ArrangementStructurePatch {
+            before: Some(arrangement_before),
+            after: Some(after),
+        };
+        let retained_bytes = scene_patch.retained_bytes() + arrangement_patch.retained_bytes();
+        self.history.commit(
+            "Resize clip",
+            None,
+            EditPatch::Composite(vec![
+                EditPatch::SceneStructure(scene_patch),
+                EditPatch::Arrangement(arrangement_patch),
+            ]),
+            retained_bytes,
+        );
+        self.rebuild_active_song_after_arrangement_edit();
+        Ok(())
     }
 
     /// Slide a pattern clip's loop window by `delta_steps` (clip-edit-target
@@ -1777,10 +1888,12 @@ mod tests {
         );
     }
 
-    /// A take has a finite length, so the right edge clamps to what is left
-    /// of it rather than trailing silence (spec 8).
+    /// The right edge of a take clip is a LENGTH ask: a one-shot resize past
+    /// the playable end grows the take's linear axis with silence instead of
+    /// clamping (the coalesced panel pickers still clamp — covered in
+    /// `take_edit`).
     #[test]
-    fn clip_resize_clamps_a_take_to_its_playable_length() {
+    fn clip_resize_grows_a_take_past_its_playable_length() {
         let mut app = test_app();
         let chunk = app
             .state
@@ -1799,8 +1912,13 @@ mod tests {
         app.arr_clip_resize(id, 0.0, 32.0).expect("clip grows");
         assert_eq!(
             app.state.committed_arrangement().unwrap().track_lanes[0][0].end_beat,
-            10.0,
-            "a take clip cannot be longer than the take"
+            32.0,
+            "the drag asked for length, so the take grew to cover it"
+        );
+        assert_eq!(
+            app.state.track_take(0, take).expect("take").total_len_steps,
+            128,
+            "32 beats at four steps per beat"
         );
     }
 

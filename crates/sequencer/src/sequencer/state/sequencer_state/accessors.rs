@@ -451,6 +451,85 @@ impl SequencerState {
         Ok(scenes.take_pools[track].insert(name, chunk_ids, total_len_steps))
     }
 
+    /// Resize a take's playable length (takes spec 6.1 invariants preserved).
+    /// Growing past the current chunk coverage mints fresh chunks cloned from
+    /// an existing one with the step content cleared — cloning keeps the
+    /// per-chunk device snapshot in agreement (spec 16.4). Shrinking keeps
+    /// chunks that still hold notes (re-growing restores them) but drops
+    /// trailing chunks with no active steps, so a grow-then-shrink round trip
+    /// leaves the scenes exactly as they were.
+    pub(crate) fn resize_track_take(
+        &self,
+        track: usize,
+        take_id: TakeId,
+        new_len_steps: u32,
+    ) -> Result<(), String> {
+        if new_len_steps == 0 {
+            return Err("a take must keep a positive length".to_string());
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let take = scenes
+            .take_pools
+            .get(track)
+            .and_then(|takes| takes.get(take_id))
+            .ok_or_else(|| {
+                format!("take {} does not exist on track {}", take_id.0, track + 1)
+            })?;
+        let needed_chunks = (new_len_steps as usize).div_ceil(MAX_STEPS).max(1);
+        let template_id = *take.chunks.first().expect("takes always have a chunk");
+        let existing = take.chunks.len();
+        let mut minted = Vec::new();
+        if needed_chunks > existing {
+            let mut blank = scenes.track_pools[track]
+                .get(template_id)
+                .cloned()
+                .ok_or_else(|| {
+                    format!("take {}'s template chunk is missing from the pool", take_id.0)
+                })?;
+            blank.clear_step_content();
+            blank.track_params.num_steps = MAX_STEPS;
+            for _ in existing..needed_chunks {
+                minted.push(scenes.track_pools[track].insert(blank.clone()));
+            }
+        }
+        let doomed: Vec<PatternId> = {
+            let take = scenes.take_pools[track].get_mut(take_id).expect("located above");
+            take.chunks.extend(minted);
+            take.total_len_steps = new_len_steps;
+            let mut doomed = Vec::new();
+            while take.chunks.len() > needed_chunks {
+                doomed.push(*take.chunks.last().expect("longer than needed_chunks >= 1"));
+                take.chunks.pop();
+            }
+            doomed
+        };
+        // Only content-free chunks may leave, and only from the tail down:
+        // chunk order is positional (index i covers steps [i·256, (i+1)·256)),
+        // so a surviving chunk pins every chunk below it in place. Chunks that
+        // still hold notes stay claimed so re-growing the take restores them.
+        let mut kept = Vec::new();
+        for chunk in doomed {
+            // `doomed` is in pop order: highest chunk index first.
+            let empty = scenes.track_pools[track]
+                .get(chunk)
+                .is_some_and(|data| data.track_bits.iter().all(|word| *word == 0));
+            if empty && kept.is_empty() {
+                scenes.track_pools[track].remove(chunk);
+            } else {
+                kept.push(chunk);
+            }
+        }
+        if !kept.is_empty() {
+            kept.reverse();
+            scenes.take_pools[track]
+                .get_mut(take_id)
+                .expect("located above")
+                .chunks
+                .extend(kept);
+        }
+        Ok(())
+    }
+
     /// Remove a take and delete its chunk patterns from the pattern pool
     /// (takes spec 6.4). The caller owns removing song overrides that
     /// reference the take and committing the combined undo entry.

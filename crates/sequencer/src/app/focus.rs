@@ -296,6 +296,27 @@ impl App {
         crate::app::edit::finish_active_gesture(self);
     }
 
+    /// Clip-panel Length edit for a TAKE focus (the pattern arm uses
+    /// `set_pinned_pattern_num_steps` / the live path): resize the take's
+    /// playable length. Picker drag frames coalesce into one undo entry.
+    pub fn set_focused_take_length(
+        &mut self,
+        track: usize,
+        len_steps: f64,
+    ) -> Result<(), String> {
+        let EditFocus::Take { take, .. } = self.track_edit_focus(track) else {
+            return Err(
+                "The Length field only resizes a take here; patterns use the loop path"
+                    .to_string(),
+            );
+        };
+        let merge_key = crate::app::history::MergeKey::new(format!(
+            "focus-take-length:{}:{}",
+            track, take.0
+        ));
+        self.song_take_set_length_coalesced(track, take, len_steps, merge_key)
+    }
+
     /// The ACTIVE pinned clip: the timeline selection while it is live
     /// (arrangement view on screen, source alive — the same dormancy rule the
     /// sound binding applies). This deliberately does NOT go through the

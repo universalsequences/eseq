@@ -408,26 +408,29 @@
 
 (def piano-roll-panel-length-row ()
   (piano-roll-panel-row "Length"
-    (if (= SEQ.focus-kind :take)
-      ;; A take's length is owned by recording/splice (spec 6): read-only.
-      (box :width 8 :height 1.0
-        (label (fmt "{}" (piano-roll-num-steps))
-          :key "piano-roll-panel-length-static"
-          :font-size 10 :color :white :bg :transparent))
-      (number-picker :key "piano-roll-panel-length"
-        :value (piano-roll-num-steps)
-        :min 1 :max 256 :decimals 0
-        :on-change (lambda (v)
-          (if (= SEQ.focus-kind :pattern)
-            ;; Stage only: frames coalesce into one undo entry, sealed like a
-            ;; device-knob gesture (the seal drains the deferred song-row
-            ;; refresh). The loop bar's release event sends the seal itself.
-            (host-command "focus-set-num-steps"
+    (number-picker :key "piano-roll-panel-length"
+      :value (piano-roll-num-steps)
+      ;; A take's linear axis can outgrow one pattern (chunks); patterns and
+      ;; the live path stay capped at MAX_STEPS.
+      :min 1 :max (if (= SEQ.focus-kind :take) 4096 256) :decimals 0
+      :on-change (lambda (v)
+        (if (= v (piano-roll-num-steps))
+          nil
+          (if (= SEQ.focus-kind :take)
+            ;; Coalesced take resize: grows mint silent chunks, shrinks keep
+            ;; noted ones; one undo entry per drag.
+            (host-command "focus-take-set-length"
               (dict :track SEQ.current-track :length v))
-            (do
-              (cool-off-follow)
-              (seq-set-track-param :num-steps v))))
-        :width 5 :height 1.0 :font-size 8))))
+            (if (= SEQ.focus-kind :pattern)
+              ;; Stage only: frames coalesce into one undo entry, sealed like a
+              ;; device-knob gesture (the seal drains the deferred song-row
+              ;; refresh). The loop bar's release event sends the seal itself.
+              (host-command "focus-set-num-steps"
+                (dict :track SEQ.current-track :length v))
+              (do
+                (cool-off-follow)
+                (seq-set-track-param :num-steps v))))))
+      :width 5 :height 1.0 :font-size 8)))
 
 (def piano-roll-clip-panel ()
   (let ((color (piano-roll-current-track-color)))

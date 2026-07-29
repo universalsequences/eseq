@@ -43082,9 +43082,9 @@
         let layout = editor
             .widget_layout()
             .expect("piano roll should have a widget layout");
-        // The buffer is a focus-header + timeline stack (clip-edit-target
-        // spec 4.4); the timeline itself keeps every prop below.
-        assert_eq!(layout.widget_type, "v-stack");
+        // The buffer wraps a clip-panel + timeline row (clip-edit-target
+        // spec 4.4/6); the timeline itself keeps every prop below.
+        assert_eq!(layout.widget_type, "box");
         fn find_timeline(
             node: &eseqlisp::layout::LayoutNode,
         ) -> Option<&eseqlisp::layout::LayoutNode> {

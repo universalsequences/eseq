@@ -73,9 +73,11 @@ pub(super) const COMMANDS: &[&str] = &[
     "focus-set-num-steps",
     "focus-finish-num-steps",
     "focus-slide-band",
-    // Clip panel (clip-edit-target spec 6): Start/End + Start-offset fields.
+    // Clip panel (clip-edit-target spec 6): Start/End + Start-offset fields,
+    // and the take-focus Length field.
     "focus-clip-resize",
     "focus-set-offset",
+    "focus-take-set-length",
     "sound-push-to-pattern",
     "sound-apply-to-all-takes",
 ];
@@ -392,6 +394,13 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             let end_beat = require_number(map, "end-beat")?;
             app.resize_focused_clip(track, start_beat, end_beat)?;
             Ok(format!("Clip resized to beats {start_beat}-{end_beat}"))
+        }
+        "focus-take-set-length" => {
+            let map = payload_map(payload)?;
+            let track = require_track(map)?;
+            let length = require_number(map, "length")?;
+            app.set_focused_take_length(track, length)?;
+            Ok(format!("Take length: {} steps", length.round()))
         }
         "focus-set-offset" => {
             let map = payload_map(payload)?;
