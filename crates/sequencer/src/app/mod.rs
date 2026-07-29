@@ -35,6 +35,7 @@ pub mod arr_edit;
 mod browser;
 pub mod command;
 pub mod edit;
+pub mod focus;
 pub mod history;
 mod effect_params;
 mod effects;

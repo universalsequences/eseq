@@ -280,8 +280,15 @@ impl SequencerState {
                                 mapping: (steps_per_beat, num_steps),
                             } => {
                                 let advanced = if delta_beats > 0.0 && *steps_per_beat > 0.0 {
-                                    snap_steps(offset_steps + delta_beats * steps_per_beat)
-                                        .rem_euclid(*num_steps)
+                                    // Snap before wrapping (boundary-coincident rows
+                                    // must land exactly on the step), then wrap
+                                    // through the one shared window helper
+                                    // (clip-edit-target spec 5.1).
+                                    pattern_play_step(
+                                        snap_steps(offset_steps + delta_beats * steps_per_beat),
+                                        0.0,
+                                        (0.0, *num_steps),
+                                    )
                                 } else {
                                     *offset_steps
                                 };

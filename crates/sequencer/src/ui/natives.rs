@@ -1954,6 +1954,7 @@ pub(crate) fn init_runtime(
     selected_steps: Arc<Mutex<HashSet<usize>>>,
     piano_roll_selection: Arc<Mutex<HashSet<u64>>>,
     piano_roll_move_state: Arc<Mutex<Option<PianoRollMoveState>>>,
+    piano_roll_focus: SharedPianoRollFocus,
     recording: Arc<AtomicBool>,
     master_recording: Arc<AtomicBool>,
     master_recorder: Arc<sequencer::recorder::MasterRecorder>,
@@ -2141,13 +2142,19 @@ pub(crate) fn init_runtime(
                     if track_count == 0 {
                         Value::List(vec![])
                     } else {
-                        build_piano_roll_items_value(&state, 0, &piano_roll_selection)
+                        build_piano_roll_items_value(
+                            &PianoRollLanes::live(&state, 0),
+                            &piano_roll_selection,
+                        )
                     },
                 ),
                 (
                     "piano-roll-selection",
                     build_piano_roll_selection_value(&piano_roll_selection),
                 ),
+                ("focus-num-steps", Value::Number(16.0)),
+                ("focus-label", Value::String(String::new())),
+                ("piano-roll-playhead", Value::Number(-1.0)),
                 (
                     "velocities",
                     if track_count == 0 {
@@ -3684,6 +3691,7 @@ pub(crate) fn init_runtime(
     let piano_move = piano_roll_move_state.clone();
     let piano_clipboard = new_piano_roll_clipboard();
     let native_piano_clipboard = piano_clipboard.clone();
+    let piano_focus = piano_roll_focus.clone();
     let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-piano-roll-action", move |args, ctx| {
         let Some(action) = args.first() else {
@@ -3715,7 +3723,12 @@ pub(crate) fn init_runtime(
             ctx.set_status(status);
             return Ok(Value::String(status.to_string()));
         }
-        if piano_roll_history_plan(&st, track, action, &native_piano_clipboard)?.is_some() {
+        // The shared focus cell is the reactive tick's projection of the
+        // App-resolved edit target (clip-edit-target spec 3); the host
+        // command layer re-resolves authoritatively before mutating.
+        let focus = *piano_focus.lock().unwrap();
+        let lanes = PianoRollLanes::new(&st, track, focus);
+        if piano_roll_history_plan(&lanes, action, &native_piano_clipboard)?.is_some() {
             let mut payload = HashMap::new();
             payload.insert(
                 "track".to_string(),
@@ -3740,8 +3753,7 @@ pub(crate) fn init_runtime(
             );
         }
         let status = apply_piano_roll_action_with_clipboard(
-            &st,
-            track,
+            &lanes,
             &piano_sel,
             &piano_move,
             &native_piano_clipboard,

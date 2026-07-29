@@ -696,6 +696,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&selected_steps),
         Arc::clone(&piano_roll_selection),
         piano_roll_move_state,
+        new_shared_piano_roll_focus(),
         recording,
         master_recording,
         master_recorder,

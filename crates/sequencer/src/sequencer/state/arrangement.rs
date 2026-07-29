@@ -477,6 +477,25 @@ pub trait ArrangementContext: SongProjectContext + SongCompileContext {}
 
 impl<T: SongProjectContext + SongCompileContext> ArrangementContext for T {}
 
+/// The one place pattern playback position wraps (clip-edit-target spec 5.1).
+///
+/// `offset_steps` is the phase *within the clip's loop window* and
+/// `delta_steps` an advance along it; the result is the absolute source step
+/// `window_start + (offset + delta) mod window_len`. Today every window is
+/// `(0, num_steps)`, hardcoded at the call sites — when sub-pattern loop
+/// windows land, they land here, not in a three-site semantics hunt. The
+/// three historical `rem_euclid` sites all funnel through this helper:
+/// `advanced_pattern_offset` below, the runtime advance in
+/// `song_playback.rs`, and `restamped_clip` (via `stamped_clip_override` →
+/// `advanced_pattern_offset`).
+pub fn pattern_play_step(offset_steps: f64, delta_steps: f64, window: (f64, f64)) -> f64 {
+    let (window_start, window_len) = window;
+    if window_len <= 0.0 {
+        return window_start;
+    }
+    window_start + (offset_steps + delta_steps).rem_euclid(window_len)
+}
+
 /// Advance a pattern lane's `offset_steps` by `delta_beats` of playback,
 /// normalized into `[0, num_steps)`. Byte-for-byte the rule in
 /// `SongApp::advanced_offset`, including the boundary-epsilon collapse to 0 so
@@ -492,7 +511,11 @@ fn advanced_pattern_offset(
     else {
         return offset_steps;
     };
-    let advanced = (offset_steps + delta_beats * steps_per_beat).rem_euclid(num_steps);
+    let advanced = pattern_play_step(
+        offset_steps,
+        delta_beats * steps_per_beat,
+        (0.0, num_steps),
+    );
     if advanced < 1e-9 || advanced > num_steps - 1e-9 {
         0.0
     } else {
@@ -1241,6 +1264,24 @@ pub fn arrangement_for_serialization(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shared window helper (clip-edit-target spec 5.1): today's windows
+    /// are always `(0, num_steps)`, so it must be byte-for-byte the old
+    /// `rem_euclid` rule — including backwards wrap — and window-relative
+    /// when a real window start arrives.
+    #[test]
+    fn pattern_play_step_matches_the_rem_euclid_rule_and_honours_windows() {
+        assert_eq!(pattern_play_step(0.0, 4.0, (0.0, 16.0)), 4.0);
+        assert_eq!(pattern_play_step(12.0, 8.0, (0.0, 16.0)), 4.0);
+        // Backwards wrap (a left-edge grow re-stamps through the same rule).
+        assert_eq!(pattern_play_step(4.0, -12.0, (0.0, 16.0)), 8.0);
+        // Exact boundary lands on 0, not num_steps.
+        assert_eq!(pattern_play_step(0.0, 16.0, (0.0, 16.0)), 0.0);
+        // A degenerate window collapses to its start instead of NaN.
+        assert_eq!(pattern_play_step(3.0, 5.0, (0.0, 0.0)), 0.0);
+        // Window-relative: the phase wraps INSIDE the window.
+        assert_eq!(pattern_play_step(2.0, 5.0, (8.0, 4.0)), 8.0 + 3.0);
+    }
 
     // --- fixtures (song.rs test vocabulary) -----------------------------
 

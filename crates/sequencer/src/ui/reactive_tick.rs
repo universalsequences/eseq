@@ -174,7 +174,7 @@ pub(crate) fn reactive_tick_and_render(
                 );
             }
             rt.set_reactive("SEQ", "steps", build_steps_value(&ctx.shared.state, ct));
-            sync_piano_roll_state(rt, &ctx.shared.state, ct, &ctx.shared.piano_roll_selection);
+            sync_piano_roll_state(rt, &app, &ctx.shared.state, ct, &ctx.shared.piano_roll_selection);
             sync_step_param_lists(rt, &ctx.shared.state, ct);
             sync_track_mixer_state(rt, &app, &ctx.shared.state);
             sync_bus_mixer_state(rt, &app);
@@ -594,6 +594,37 @@ pub(crate) fn reactive_tick_and_render(
         ) {
             needs_reactive_cycle = true;
         }
+        // Edit-focus refresh (clip-edit-target spec 3): project the
+        // App-resolved target into the cell the `seq-piano-roll-action`
+        // native reads, and re-sync the piano roll whenever the focus itself
+        // moved — a clip bind/unbind, a scene launch changing the effective
+        // pattern under a pinned id, or a source dying (spec 3.3.1).
+        {
+            let focus = PianoRollFocusSpec::from_focus(app.track_edit_focus(ct));
+            let focus_changed = {
+                let mut cell = ctx.shared.piano_roll_focus.lock().unwrap();
+                std::mem::replace(&mut *cell, focus) != focus
+            };
+            if focus_changed {
+                let rt = editor.runtime_mut();
+                sync_piano_roll_state(
+                    rt,
+                    &app,
+                    &ctx.shared.state,
+                    ct,
+                    &ctx.shared.piano_roll_selection,
+                );
+                needs_reactive_cycle = true;
+            }
+            if current_track_playhead_visible {
+                needs_reactive_cycle |= sync_piano_roll_playhead(
+                    editor.runtime_mut(),
+                    &app,
+                    ct,
+                    playhead as usize,
+                );
+            }
+        }
         let mirror_epoch = app.song_row_mirror_epoch;
         if (epoch != ctx.frame.prev_pattern_epoch
             || mirror_epoch != ctx.frame.prev_song_row_mirror_epoch)
@@ -649,7 +680,7 @@ pub(crate) fn reactive_tick_and_render(
             }
             sync_expanded_elapsed = started.elapsed();
             let started = Instant::now();
-            sync_piano_roll_state(rt, &ctx.shared.state, ct, &ctx.shared.piano_roll_selection);
+            sync_piano_roll_state(rt, &app, &ctx.shared.state, ct, &ctx.shared.piano_roll_selection);
             sync_piano_elapsed = started.elapsed();
             let started = Instant::now();
             sync_step_param_lists(rt, &ctx.shared.state, ct);
@@ -833,7 +864,7 @@ pub(crate) fn reactive_tick_and_render(
                     "selected-steps",
                     build_selection_value(&ctx.shared.selected_steps),
                 );
-                sync_piano_roll_state(rt, &ctx.shared.state, ct, &ctx.shared.piano_roll_selection);
+                sync_piano_roll_state(rt, &app, &ctx.shared.state, ct, &ctx.shared.piano_roll_selection);
                 rt.set_reactive(
                     "SEQ",
                     "step-has-plocks",

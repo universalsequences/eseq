@@ -2034,7 +2034,7 @@ pub(super) fn apply_ui_invalidations(
             },
             UiInvalidation::PianoRoll { track, change } => {
                 if track == current_track_idx {
-                    sync_piano_roll_state(rt, state, track, piano_roll_selection);
+                    sync_piano_roll_state(rt, app, state, track, piano_roll_selection);
                     needs_reactive_cycle = true;
                 }
                 if matches!(change, PianoRollInvalidation::Items) {

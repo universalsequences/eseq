@@ -29,7 +29,7 @@ pub use snapshot::{
 pub use state::{
     arrangement_for_serialization, arrangement_scene_spans,
     compile_arrangement, insert_clip_sorted, legacy_backdrop_spans, migrate_legacy_backdrops,
-    lower_rows_to_arrangement, occlude_span, restamped_clip, stamp_scene_clips,
+    lower_rows_to_arrangement, occlude_span, pattern_play_step, restamped_clip, stamp_scene_clips,
     stamped_clip_override, ArrClip, LegacyBackdropSpan, SceneSpan,
     ArrangementContext, ClipId, ProjectArrangement, SceneEvent, SongCompileContext,
     default_empty_effect_chain, default_rack_macros, format_song_row_positions, project_lanes,

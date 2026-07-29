@@ -76,8 +76,16 @@
     (nth SEQ.track-colors SEQ.current-track)
     (list 0.34 0.48 0.98)))
 
+;; The piano roll's axis is the FOCUS length (clip-edit-target spec 3.5):
+;; a pinned pattern's num-steps, a pinned take's playable length, or the
+;; live pattern's num-steps in follow mode. SEQ.tp-num-steps stays the live
+;; value for the step grid.
+(def piano-roll-num-steps ()
+  (let ((focus (or SEQ.focus-num-steps 0)))
+    (if (> focus 0) focus SEQ.tp-num-steps)))
+
 (def piano-roll-max-view-start (duration)
-  (max 0 (- (+ SEQ.tp-num-steps 4) duration)))
+  (max 0 (- (+ (piano-roll-num-steps) 4) duration)))
 
 (def set-piano-roll-view-start (start duration)
   (set! piano-roll-view-start
@@ -143,7 +151,7 @@
   (do
     (set! piano-roll-view-duration
       (max piano-roll-min-view-duration
-        (min piano-roll-max-view-duration SEQ.tp-num-steps)))
+        (min piano-roll-max-view-duration (piano-roll-num-steps))))
     (set-piano-roll-view-start 0 piano-roll-view-duration)
     (piano-roll-fit-vertical
       (floor (/ (- (piano-roll-lane-count) 1) 2))
@@ -242,7 +250,7 @@
     :item-color (piano-roll-current-track-color)
     :loop-color (piano-roll-current-track-color)
     :tool piano-roll-tool
-    :playhead-time (bind-seq "playhead")
+    :playhead-time (bind-seq "piano-roll-playhead")
     :cursor-time piano-roll-cursor-time
     :lanes SEQ.piano-roll-lanes
     :items SEQ.piano-roll-items
@@ -252,7 +260,7 @@
     :view-duration piano-roll-view-duration
     :zoom-min-duration piano-roll-min-view-duration
     :zoom-max-duration piano-roll-max-view-duration
-    :content-length SEQ.tp-num-steps
+    :content-length (piano-roll-num-steps)
     :content-length-min 1
     :content-length-max 256
     :lane-scroll piano-roll-lane-scroll

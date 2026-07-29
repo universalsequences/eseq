@@ -692,6 +692,47 @@ impl SequencerState {
         f(&self.pattern.scenes.lock().unwrap())
     }
 
+    /// Read one pool pattern's stored data. `None` when the pattern is gone.
+    pub fn with_pool_pattern<R>(
+        &self,
+        track: usize,
+        pattern: PatternId,
+        f: impl FnOnce(&TrackPatternData) -> R,
+    ) -> Option<R> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.get(pattern))
+            .map(f)
+    }
+
+    /// Targeted pool write seam (clip-edit-target spec 3.4): mutate one pool
+    /// pattern's stored data in place. Callers must only address patterns
+    /// that are NOT currently effective for `track` — the effective pattern's
+    /// truth is the live mirror, and writing its pool copy underneath it
+    /// would desync the two (the `capture_pattern_step_cells` rule). The
+    /// focus resolution guarantees this; gestures bail when it moves.
+    pub fn with_pool_pattern_mut<R>(
+        &self,
+        track: usize,
+        pattern: PatternId,
+        f: impl FnOnce(&mut TrackPatternData) -> R,
+    ) -> Option<R> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        debug_assert!(
+            scenes.effective_pattern_id(track) != Some(pattern),
+            "pool write addressed track {track}'s EFFECTIVE pattern {}; the live \
+             mirror owns it (clip-edit-target spec 3.4)",
+            pattern.0
+        );
+        scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(pattern))
+            .map(f)
+    }
+
     /// Edit the committed song in place (topology remaps, future editing
     /// primitives). Callers are responsible for keeping the song valid.
     pub(crate) fn with_committed_song_mut<R>(

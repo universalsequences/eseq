@@ -2,7 +2,7 @@ use crate::macro_engine::{Macro, MacroMapping};
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot, BUILTIN_SLOT_COUNT};
 use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
-    BusId, StepCellSnapshot, TrackId, TrackParamsSnapshot, TrackPatternId, MAX_STEPS,
+    BusId, PatternId, StepCellSnapshot, TrackId, TrackParamsSnapshot, TrackPatternId, MAX_STEPS,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -2988,14 +2988,27 @@ impl StepGestureTransaction {
         steps: &[usize],
         label: &'static str,
     ) -> Result<Self, EditError> {
-        let track_id = app
-            .track_registry
-            .id_at(track)
-            .ok_or(EditError::TrackOutOfRange { track })?;
         let pattern_id = app
             .state
             .effective_track_pattern_id(track)
             .ok_or(EditError::MissingTrackPattern)?;
+        Self::begin_for(app, track, pattern_id, steps, label)
+    }
+
+    /// Begin against an explicit Track Pattern target (clip-edit-target spec
+    /// 3.4): `capture_pattern_step_cells` reads the live lanes when the target
+    /// is effective, else the pool, so one constructor covers both routes.
+    pub fn begin_for(
+        app: &App,
+        track: usize,
+        pattern_id: PatternId,
+        steps: &[usize],
+        label: &'static str,
+    ) -> Result<Self, EditError> {
+        let track_id = app
+            .track_registry
+            .id_at(track)
+            .ok_or(EditError::TrackOutOfRange { track })?;
         let steps = normalized_steps(steps);
         if steps.is_empty() {
             return Err(EditError::InvalidStepRange);
@@ -3029,6 +3042,18 @@ impl StepGestureTransaction {
         if app.state.effective_track_pattern_id(track) != Some(self.target.pattern) {
             return Err(EditError::MissingTrackPattern);
         }
+        self.capture_additional_steps_for_target(app, track, steps)
+    }
+
+    /// `capture_additional_steps` without the effective-pattern requirement:
+    /// pinned pool/take targets (clip-edit-target spec 3.4) stay valid while
+    /// not effective. Callers (`FocusStepGesture`) own the focus bail-out.
+    fn capture_additional_steps_for_target(
+        &mut self,
+        app: &App,
+        track: usize,
+        steps: &[usize],
+    ) -> Result<(), EditError> {
         let missing = normalized_steps(steps)
             .into_iter()
             .filter(|step| !self.before.contains_key(step))
@@ -3068,6 +3093,27 @@ impl StepGestureTransaction {
     }
 
     pub fn commit(self, app: &mut App) -> Result<EditOutcome, EditError> {
+        let label = self.label;
+        match self.build_patch(app)? {
+            None => Ok(EditOutcome::NoOp),
+            Some(patch) => {
+                let retained_bytes = patch.retained_bytes();
+                finish_active_gesture(app);
+                let history_move = app.history.commit(
+                    label,
+                    None,
+                    EditPatch::StepCells(patch),
+                    retained_bytes,
+                );
+                Ok(EditOutcome::Applied(history_move))
+            }
+        }
+    }
+
+    /// The capture-after/delta/normalize half of `commit`, without the
+    /// history entry: `FocusStepGesture` composes several per-pattern patches
+    /// into ONE undo entry (clip-edit-target spec 3.4, take chunks).
+    fn build_patch(self, app: &mut App) -> Result<Option<StepCellsPatch>, EditError> {
         let track = app
             .track_registry
             .index_of(self.target.track)
@@ -3102,7 +3148,7 @@ impl StepGestureTransaction {
             })
             .collect::<Vec<_>>();
         if cells.is_empty() {
-            return Ok(EditOutcome::NoOp);
+            return Ok(None);
         }
         app.state.reconcile_plock_variant_registry_for_track(track);
         let (_, variant_registry_after) = match app
@@ -3172,16 +3218,241 @@ impl StepGestureTransaction {
                 ))),
             };
         }
-        let retained_bytes = patch.retained_bytes();
+        Ok(Some(patch))
+    }
+}
+
+/// One editor gesture against the resolved focus (clip-edit-target spec 3.4):
+/// a set of per-pattern [`StepGestureTransaction`]s — one for a pattern
+/// target, one per touched chunk for a take — committed as a single history
+/// entry. Steps are addressed on the FOCUS axis (pattern steps, or the take's
+/// continuous step axis) and mapped onto chunk-local steps here.
+pub struct FocusStepGesture {
+    label: &'static str,
+    focus: crate::app::focus::EditFocus,
+    parts: Vec<StepGestureTransaction>,
+}
+
+/// Map focus-axis steps onto per-pattern (target, local steps) groups.
+///
+/// Take steps map through the same arithmetic as `TrackTake::chunk_step_at`
+/// (takes spec 6.1): at/past `total_len_steps` is the silent tail and is
+/// rejected — the editor must not write notes the take can never play.
+fn focus_step_targets(
+    app: &App,
+    focus: crate::app::focus::EditFocus,
+    steps: &[usize],
+) -> Result<Vec<(PatternId, Vec<usize>)>, EditError> {
+    use crate::app::focus::EditFocus;
+    match focus {
+        EditFocus::Live { track } => {
+            let pattern = app
+                .state
+                .effective_track_pattern_id(track)
+                .ok_or(EditError::MissingTrackPattern)?;
+            Ok(vec![(pattern, normalized_steps(steps))])
+        }
+        EditFocus::Pattern { pattern, .. } => Ok(vec![(pattern, normalized_steps(steps))]),
+        EditFocus::Take { track, take } => {
+            let take = app
+                .state
+                .with_project_scenes(|scenes| {
+                    scenes
+                        .take_pools
+                        .get(track)
+                        .and_then(|takes| takes.get(take))
+                        .cloned()
+                })
+                .ok_or(EditError::MissingTrackPattern)?;
+            // Take-axis steps legitimately exceed MAX_STEPS (the axis spans
+            // every chunk), so `normalized_steps`'s MAX_STEPS filter must not
+            // run here — `chunk_step_at` enforces the real bound.
+            let mut axis_steps = steps.to_vec();
+            axis_steps.sort_unstable();
+            axis_steps.dedup();
+            let mut groups: Vec<(PatternId, Vec<usize>)> = Vec::new();
+            for step in axis_steps {
+                let (chunk_idx, local) = take
+                    .chunk_step_at(step as f64)
+                    .ok_or(EditError::InvalidStepRange)?;
+                let chunk = *take
+                    .chunks
+                    .get(chunk_idx)
+                    .ok_or(EditError::InvalidStepRange)?;
+                let local = local as usize;
+                match groups.iter_mut().find(|(id, _)| *id == chunk) {
+                    Some((_, locals)) => locals.push(local),
+                    None => groups.push((chunk, vec![local])),
+                }
+            }
+            Ok(groups)
+        }
+    }
+}
+
+impl FocusStepGesture {
+    pub fn begin(
+        app: &mut App,
+        focus: crate::app::focus::EditFocus,
+        steps: &[usize],
+        label: &'static str,
+    ) -> Result<Self, EditError> {
+        let track = focus.track();
+        if focus.is_live() {
+            // A bare scene cell materializes its pattern on first edit
+            // (takes spec 11.1), exactly like the legacy live path.
+            ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?;
+        }
+        let parts = focus_step_targets(app, focus, steps)?
+            .into_iter()
+            .map(|(pattern, local_steps)| {
+                StepGestureTransaction::begin_for(app, track, pattern, &local_steps, label)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if parts.is_empty() {
+            return Err(EditError::InvalidStepRange);
+        }
+        Ok(Self { label, focus, parts })
+    }
+
+    pub fn focus(&self) -> crate::app::focus::EditFocus {
+        self.focus
+    }
+
+    /// Extend the gesture to more focus-axis steps, bailing out when the
+    /// RESOLVED focus moved under the drag (clip-edit-target spec 3.3.3) —
+    /// a scene launch in follow mode, or a re-bind/invalidation in song mode.
+    pub fn capture_additional_steps(
+        &mut self,
+        app: &mut App,
+        steps: &[usize],
+    ) -> Result<(), EditError> {
+        let track = self.focus.track();
+        if app.track_edit_focus(track) != self.focus {
+            return Err(EditError::MissingTrackPattern);
+        }
+        for (pattern, local_steps) in focus_step_targets(app, self.focus, steps)? {
+            match self
+                .parts
+                .iter_mut()
+                .find(|part| part.target.pattern == pattern)
+            {
+                Some(part) => match self.focus {
+                    // Follow mode keeps the legacy bail: the effective
+                    // pattern moving out from under the drag aborts it.
+                    crate::app::focus::EditFocus::Live { .. } => {
+                        part.capture_additional_steps(app, &local_steps)?
+                    }
+                    _ => part.capture_additional_steps_for_target(app, track, &local_steps)?,
+                },
+                None => self.parts.push(StepGestureTransaction::begin_for(
+                    app,
+                    track,
+                    pattern,
+                    &local_steps,
+                    self.label,
+                )?),
+            }
+        }
+        Ok(())
+    }
+
+    pub fn rollback(self, app: &mut App) -> Result<(), EditError> {
+        let mut first_error = None;
+        for part in self.parts {
+            if let Err(error) = part.rollback(app) {
+                first_error.get_or_insert(error);
+            }
+        }
+        match first_error {
+            None => Ok(()),
+            Some(error) => Err(error),
+        }
+    }
+
+    /// Commit every touched pattern as ONE history entry: a plain step-cells
+    /// patch for a single target, a composite for a multi-chunk take gesture.
+    pub fn commit(self, app: &mut App) -> Result<EditOutcome, EditError> {
+        let label = self.label;
+        let focus = self.focus;
+        let track = focus.track();
+        let mut patches = Vec::new();
+        let mut parts = self.parts.into_iter();
+        while let Some(part) = parts.next() {
+            match part.build_patch(app) {
+                Ok(Some(patch)) => patches.push(patch),
+                Ok(None) => {}
+                Err(error) => {
+                    // Best effort: unwind what this gesture already changed so
+                    // no history-less edits survive a failed commit.
+                    for patch in &patches {
+                        let before_cells = patch
+                            .cells
+                            .iter()
+                            .map(|cell| (cell.step, cell.before.clone()))
+                            .collect::<Vec<_>>();
+                        let _ = app.state.restore_pattern_step_cells_no_publish(
+                            track,
+                            patch.target.pattern,
+                            &before_cells,
+                            &patch.variant_registry_before,
+                        );
+                    }
+                    for part in parts {
+                        let _ = part.rollback(app);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        if patches.is_empty() {
+            return Ok(EditOutcome::NoOp);
+        }
+        let targets: Vec<PatternId> =
+            patches.iter().map(|patch| patch.target.pattern).collect();
+        let patch = if patches.len() == 1 {
+            EditPatch::StepCells(patches.pop().expect("one patch"))
+        } else {
+            EditPatch::Composite(patches.into_iter().map(EditPatch::StepCells).collect())
+        };
+        let retained_bytes = edit_patch_retained_bytes(&patch);
         finish_active_gesture(app);
-        let history_move = app.history.commit(
-            self.label,
-            None,
-            EditPatch::StepCells(patch),
-            retained_bytes,
-        );
+        let history_move = app.history.commit(label, None, patch, retained_bytes);
+        // A pinned pool/take target the playing song resolves needs the
+        // prebuilt row snapshots refreshed (they cloned the pattern at
+        // preflight); the live path keeps its existing edit-through seam.
+        if !focus.is_live() {
+            for pattern in targets {
+                app.invalidate_song_rows_for_pattern(track, pattern);
+            }
+        }
         Ok(EditOutcome::Applied(history_move))
     }
+}
+
+/// [`apply_recorded_step_mutation`] against a resolved focus: pool-first
+/// writes with the effective-pattern mirror rule (clip-edit-target spec 3.4),
+/// steps on the focus axis, one undo entry.
+pub fn apply_recorded_focus_step_mutation(
+    app: &mut App,
+    focus: crate::app::focus::EditFocus,
+    steps: &[usize],
+    label: &'static str,
+    mutate: impl FnOnce(&mut App) -> Result<(), EditError>,
+) -> Result<EditOutcome, EditError> {
+    if steps.is_empty() {
+        return Ok(EditOutcome::NoOp);
+    }
+    let gesture = FocusStepGesture::begin(app, focus, steps, label)?;
+    if let Err(error) = mutate(app) {
+        return match gesture.rollback(app) {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(EditError::ReplayFailed(format!(
+                "{error:?}; rollback also failed: {rollback_error:?}"
+            ))),
+        };
+    }
+    gesture.commit(app)
 }
 
 #[derive(Clone)]

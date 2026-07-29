@@ -43327,7 +43327,7 @@
         state.pattern.patterns[track].set_step_active(step, true);
         runtime.set_reactive("SEQ", "current-track", Value::Number(track as f64));
 
-        sync_piano_roll_state(&mut runtime, &state, track, &selection);
+        sync_piano_roll_note_state(&mut runtime, &PianoRollLanes::live(&state, track), &selection);
 
         assert_eq!(
             runtime
@@ -43397,7 +43397,7 @@
             ("end", Value::Number(5.5)),
         ]);
         assert!(piano_roll_action_mutates_pattern(&action));
-        apply_piano_roll_action(&state, 0, &piano_roll_selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, 0), &piano_roll_selection, &move_state, &action)
             .expect("create piano roll note");
 
         sync_single_track_sequencer_state(
@@ -43479,7 +43479,7 @@
             ("time", Value::Number(4.0)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("resize action");
 
         assert_eq!(state.pattern.chord_data[track].get_duration(step, 0), 2.0);
@@ -43511,7 +43511,7 @@
             ("duration-delta", Value::Number(1.0)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("resize action");
 
         assert_eq!(
@@ -43538,7 +43538,7 @@
             ("end", Value::Number(3.5)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("create action");
 
         assert!(state.pattern.patterns[track].is_active(2));
@@ -43551,7 +43551,7 @@
         assert_eq!(state.pattern.chord_data[track].get_delay(2, 0), 0.5);
         assert_eq!(state.pattern.step_data[track].get(2, StepParam::Delay), 0.0);
 
-        let items = build_piano_roll_items_value(&state, track, &selection);
+        let items = build_piano_roll_items_value(&PianoRollLanes::live(&state, track), &selection);
         let Value::List(items) = items else {
             panic!("expected item list");
         };
@@ -43586,7 +43586,7 @@
             ("lane", Value::Number(48.0)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("move action");
 
         assert!(!state.pattern.patterns[track].is_active(2));
@@ -43614,7 +43614,7 @@
                 ("start", Value::Number(start)),
                 ("end", Value::Number(start + 1.0)),
             ]);
-            apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+            apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
                 .expect("create action");
         }
 
@@ -43649,8 +43649,7 @@
             ),
         ]);
         apply_piano_roll_action_with_clipboard(
-            &state,
-            track,
+            &PianoRollLanes::live(&state, track),
             &selection,
             &move_state,
             &clipboard,
@@ -43663,8 +43662,7 @@
             ("time", Value::Number(4.5)),
         ]);
         apply_piano_roll_action_with_clipboard(
-            &state,
-            track,
+            &PianoRollLanes::live(&state, track),
             &selection,
             &move_state,
             &clipboard,
@@ -43713,7 +43711,7 @@
             ("delta-lane", Value::Number(0.0)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("nudge action");
 
         assert!(!state.pattern.patterns[track].is_active(step));
@@ -43752,7 +43750,7 @@
             ("delta-lane", Value::Number(0.0)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("nudge action");
 
         assert_eq!(state.pattern.chord_data[track].count(step), 1);
@@ -43792,7 +43790,7 @@
             ("duration-delta", Value::Number(1.0)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("resize action");
 
         let mut durations_by_transpose = (0..state.pattern.chord_data[track].count(step))
@@ -43846,9 +43844,9 @@
             ("duration-delta", Value::Number(-1.0)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &first)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &first)
             .expect("first resize action");
-        apply_piano_roll_action(&state, track, &selection, &move_state, &second)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &second)
             .expect("second resize action");
 
         let mut durations_by_transpose = (0..state.pattern.chord_data[track].count(step))
@@ -43890,7 +43888,7 @@
             ),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("delete action");
 
         assert_eq!(state.pattern.chord_data[track].count(step), 1);
@@ -43918,7 +43916,7 @@
             ),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("delete action");
 
         assert_eq!(state.pattern.chord_data[track].count(step), 2);
@@ -43936,7 +43934,7 @@
         state.pattern.patterns[track].set_step_active(step, true);
         state.pattern.step_data[track].set(step, StepParam::Duration, 0.5);
 
-        let items = build_piano_roll_items_value(&state, track, &selection);
+        let items = build_piano_roll_items_value(&PianoRollLanes::live(&state, track), &selection);
         let Value::List(items) = items else {
             panic!("expected item list");
         };
@@ -43954,7 +43952,7 @@
             ("time", Value::Number(2.125)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("resize action");
 
         assert_eq!(
@@ -43979,7 +43977,7 @@
             ("lane-b", Value::Number(1.0)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("marquee action");
 
         assert!(selection.lock().unwrap().is_empty());
@@ -44002,7 +44000,7 @@
             ("time", Value::Number(2.125)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("resize action");
 
         assert_eq!(

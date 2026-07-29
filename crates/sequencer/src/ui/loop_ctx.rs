@@ -110,6 +110,7 @@ pub(crate) struct SharedHandles {
     pub(crate) selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons,
     pub(crate) piano_roll_selection: Arc<Mutex<HashSet<u64>>>,
     pub(crate) piano_roll_move_state: Arc<Mutex<Option<PianoRollMoveState>>>,
+    pub(crate) piano_roll_focus: SharedPianoRollFocus,
     pub(crate) step_clipboard:
         Arc<Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>>,
     pub(crate) ui_epoch: Arc<AtomicUsize>,
