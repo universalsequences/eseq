@@ -441,6 +441,59 @@ mod tests {
     }
 
     #[test]
+    fn sync_descriptor_restamps_lock_identity_under_the_new_node_id() {
+        let desc = EffectDescriptor {
+            name: "synth".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![ParamDescriptor {
+                name: "pitch".to_string(),
+                min: -10.0,
+                max: 10.0,
+                default: 0.0,
+                kind: ParamKind::Continuous { unit: None },
+                scaling: ParamScaling::Linear,
+                node_param_idx: 5,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }],
+        };
+        let slot = EffectSlotState::new(&desc, 100);
+        slot.set_plock(3, 0, -4.25);
+        slot.set_key_lock(60, 0, 2.5);
+        assert_eq!(
+            slot.plocks.get_id(3, 0),
+            Some(ParamNodeId {
+                logical_id: 100,
+                node_param_idx: 5
+            })
+        );
+
+        // An engine rebind hands the slot the same descriptor under a new
+        // node id. The locks must be re-stamped under that identity —
+        // carrying the old ids leaves every lock failing the identity check
+        // at trigger resolution, silently playing base defaults.
+        slot.sync_descriptor(&desc, 200);
+
+        let expected = Some(ParamNodeId {
+            logical_id: 200,
+            node_param_idx: 5,
+        });
+        assert_eq!(slot.plocks.get(3, 0), Some(-4.25));
+        assert_eq!(slot.plocks.get_id(3, 0), expected, "p-lock id re-stamped");
+        assert_eq!(slot.key_locks.get(60, 0), Some(2.5));
+        assert_eq!(
+            slot.key_locks.get_id(60, 0),
+            expected,
+            "key-lock id re-stamped"
+        );
+    }
+
+    #[test]
     fn tensor_param_descriptors_expose_small_named_mutable_tensors() {
         let tensors = vec![
             tensor_meta("strike_mask", 64, vec![2, 2], true),
@@ -8383,18 +8436,14 @@ impl EffectSlotState {
         }
 
         let mut saved_plocks = Vec::with_capacity(MAX_STEPS);
-        let mut saved_plock_ids = Vec::with_capacity(MAX_STEPS);
         let saved_tensor_params = self.tensor_params.capture();
-        let (saved_key_locks, saved_key_lock_ids) = self.key_locks.capture_rows(preserve);
+        let (saved_key_locks, _saved_key_lock_ids) = self.key_locks.capture_rows(preserve);
         for step in 0..MAX_STEPS {
             let mut step_plocks = Vec::with_capacity(preserve);
-            let mut step_ids = Vec::with_capacity(preserve);
             for param_idx in 0..preserve {
                 step_plocks.push(self.plocks.get(step, param_idx));
-                step_ids.push(self.plocks.get_id(step, param_idx));
             }
             saved_plocks.push(step_plocks);
-            saved_plock_ids.push(step_ids);
         }
 
         self.apply_descriptor_with_modulator(desc, node_id, modulator_node_id);
@@ -8404,22 +8453,26 @@ impl EffectSlotState {
         for param_idx in 0..preserve {
             self.defaults.set(param_idx, saved_defaults[param_idx]);
         }
+        // Re-stamp preserved locks under the NEW slot identity (matching the
+        // snapshot-side sync). Carrying the old ParamNodeIds across a rebind
+        // leaves every lock failing the identity check at trigger resolution,
+        // which silently plays base defaults.
         for step in 0..MAX_STEPS {
             for param_idx in 0..preserve {
                 match saved_plocks[step][param_idx] {
-                    Some(value) => {
-                        if let Some(param_id) = saved_plock_ids[step][param_idx] {
-                            self.plocks.set_with_id(step, param_idx, value, param_id);
-                        } else {
-                            self.plocks.set(step, param_idx, value);
-                        }
-                    }
+                    Some(value) => self.set_plock(step, param_idx, value),
                     None => self.plocks.clear_param(step, param_idx),
                 }
             }
         }
-        self.key_locks
-            .restore_rows(&saved_key_locks, &saved_key_lock_ids, preserve);
+        self.key_locks.clear_all();
+        for (&note, row) in &saved_key_locks {
+            for (param_idx, value) in row.iter().enumerate().take(preserve) {
+                if let Some(value) = value {
+                    self.set_key_lock(note, param_idx, *value);
+                }
+            }
+        }
         self.recompute_modulation_active_params(desc);
     }
 

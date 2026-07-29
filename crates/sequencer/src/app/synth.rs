@@ -1599,13 +1599,27 @@ impl App {
         true
     }
 
+    /// Custom-instrument voices in Instrument mode are fully stamped per
+    /// note-on (defaults + p-locks, fingerprint-gated in the audio thread).
+    /// An out-of-band defaults push can only stomp p-locked values sitting
+    /// on the voice nodes — and because a looping pattern keeps producing
+    /// the same fingerprints, the audio thread then skips re-dispatch
+    /// forever, so every later note plays base params. Same bug class the
+    /// sampler exemption covers. Free-patch tracks keep the push: the idle
+    /// drone has no note-ons to stamp it.
+    pub(super) fn instrument_defaults_push_would_stomp(&self, track: usize) -> bool {
+        self.graph.track_instrument_types.get(track) == Some(&InstrumentType::Custom)
+            && self.graph.track_instrument_run_modes.get(track)
+                != Some(&crate::sequencer::CustomInstrumentRunMode::FreePatch)
+    }
+
     pub(super) fn push_all_restored_instrument_defaults(&self) {
         for track in 0..self.tracks.len() {
             if self.graph.track_instrument_types.get(track) == Some(&InstrumentType::Rack) {
                 self.push_rack_slot_instrument_defaults_for_track(track);
                 continue;
             }
-            if self.is_sampler_track(track) {
+            if self.is_sampler_track(track) || self.instrument_defaults_push_would_stomp(track) {
                 continue;
             }
             self.push_instrument_defaults_for_track(track);

@@ -666,7 +666,8 @@ impl App {
             == Some(&crate::sequencer::InstrumentType::Rack)
         {
             self.push_rack_slot_instrument_defaults_for_track(track);
-        } else if !self.is_sampler_track(track) {
+        } else if !self.is_sampler_track(track) && !self.instrument_defaults_push_would_stomp(track)
+        {
             self.push_instrument_defaults_for_track(track);
         }
     }
