@@ -1028,7 +1028,7 @@ impl SequencerState {
             .scenes
             .lock()
             .unwrap()
-            .save_scene_snapshot(current_pattern, snapshot)
+            .save_scene_snapshot_masked(current_pattern, snapshot, self.stale_live_lane_mask())
     }
 
     pub fn save_current_track_midi_fx_snapshot(&self, track: usize) -> bool {

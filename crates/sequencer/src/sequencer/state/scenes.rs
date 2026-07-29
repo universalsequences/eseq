@@ -250,6 +250,23 @@ impl ProjectScenes {
     }
 
     pub fn save_scene_snapshot(&mut self, scene_idx: usize, snapshot: PatternSnapshot) -> bool {
+        self.save_scene_snapshot_masked(scene_idx, snapshot, 0)
+    }
+
+    /// Save a live-grid snapshot into a scene, skipping lanes whose live
+    /// content does not belong to that scene. A set bit in `stale_mask`
+    /// marks such a lane (song-latched or row-silenced): its live grid holds
+    /// performer/leftover content, and writing it through the scene cell
+    /// would overwrite an unrelated pool pattern with a clone of whatever
+    /// happens to be live. A stale lane is still saved when a track override
+    /// pins its own pattern id — that write is a self-write into the pattern
+    /// the lane is actually playing.
+    pub fn save_scene_snapshot_masked(
+        &mut self,
+        scene_idx: usize,
+        snapshot: PatternSnapshot,
+        stale_mask: u64,
+    ) -> bool {
         while self.track_pools.len() < snapshot.track_bits.len() {
             self.track_pools.push(TrackPatternPool::default());
             self.take_pools.push(TrackTakePool::default());
@@ -280,6 +297,12 @@ impl ProjectScenes {
             let Some(data) = snapshot.track_pattern_data(track) else {
                 continue;
             };
+            if track < 64
+                && stale_mask >> track & 1 == 1
+                && self.track_overrides.get(track).copied().flatten().is_none()
+            {
+                continue;
+            }
             let Some(id) = self
                 .track_overrides
                 .get(track)

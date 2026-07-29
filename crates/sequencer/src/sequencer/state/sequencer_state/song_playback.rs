@@ -424,6 +424,23 @@ impl SequencerState {
         self.song_manual_latch.load(Ordering::Acquire)
     }
 
+    /// Bitmask of lanes whose live-grid content does not belong to the
+    /// current scene: song-latched lanes (the performer's launch is live
+    /// there) and scene-silenced lanes (an explicit-empty row override left
+    /// stale content in the live grid on purpose — see the mirror comment in
+    /// `apply_song_row_latched`). Pass this to `save_scene_snapshot_masked`
+    /// so a live-grid save-back never clones foreign content over a scene
+    /// cell's real pattern.
+    pub fn stale_live_lane_mask(&self) -> u64 {
+        let mut mask = self.song_manual_latch_mask();
+        for track in 0..self.pattern.scene_silenced.len().min(64) {
+            if self.is_scene_silenced(track) {
+                mask |= 1 << track;
+            }
+        }
+        mask
+    }
+
     /// Latch specific tracks (a manual track launch during song playback).
     pub fn latch_song_manual_override(&self, tracks: impl IntoIterator<Item = usize>) {
         let mut bits = 0u64;

@@ -554,7 +554,7 @@ impl SequencerState {
         );
         {
             let mut scenes = self.pattern.scenes.lock().unwrap();
-            scenes.save_scene_snapshot(current_pattern, current_snapshot.clone());
+            scenes.save_scene_snapshot_masked(current_pattern, current_snapshot.clone(), self.stale_live_lane_mask());
             for owner_track in 0..old_count {
                 if owner_track == track_idx {
                     continue;

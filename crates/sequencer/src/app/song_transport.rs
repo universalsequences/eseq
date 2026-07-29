@@ -371,12 +371,17 @@ impl App {
                 } else {
                     None
                 };
-                self.state.clear_song_manual_latch();
                 self.state.stop_playback();
                 // Unlock the song editing primitives before committing: the
                 // commit itself goes through `song_replace`.
                 self.set_song_transport_mode(SongTransportMode::Stopped);
                 let result = self.finish_song_capture_take(end_raw_beats).map(Some);
+                // The latch clears only AFTER the commit: the commit's
+                // scene-sync snapshot must still see latched lanes as stale
+                // (their live grid holds the performer's launch, not the
+                // current scene's pattern) or it writes that content over
+                // the scene cell's real pattern.
+                self.state.clear_song_manual_latch();
                 // Capture ran on top of song playback, so the same row-owned
                 // lane state has to be handed back to the scene.
                 if playback_teardown.is_some() {
@@ -909,6 +914,133 @@ mod tests {
         assert!(app.manual_launch_rejection().is_none());
         app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
             .expect("manual launch works after stop");
+    }
+
+    /// Clobber regression (variant: latched scene launch): a manual scene
+    /// launch during song playback wipes the lane's override pointer, so the
+    /// live grid holds the performer's pattern while `current_scene` keeps
+    /// advancing with the row mirror. The mirror's save-back must skip that
+    /// lane — an unmasked save writes the performer's pattern data over
+    /// whatever scene cell the previous row left current.
+    #[test]
+    fn latched_scene_launch_never_clobbers_other_scene_patterns() {
+        use crate::sequencer::{PatternId, PatternSnapshot};
+        let mut app = app_with_song();
+        let mut snapshots = vec![
+            PatternSnapshot::new_default(1, &[]),
+            PatternSnapshot::new_default(1, &[]),
+            PatternSnapshot::new_default(1, &[]),
+        ];
+        snapshots[0].track_bits[0][0] = 0b1;
+        snapshots[1].track_bits[0][0] = 0b11;
+        snapshots[2].track_bits[0][0] = 0b111;
+        app.state.replace_pattern_repository(snapshots, 0);
+        app.state.resync_live_grid_to_current_scene();
+        app.set_use_arrangement(true).unwrap();
+        app.song_transport_play(false).expect("song playback");
+        let song = app.active_runtime_song.clone().expect("active song");
+
+        // Performer launches scene 3 (pattern 3) — the lane latches and its
+        // live grid now holds pattern 3's content with no override pinned.
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 2 })
+            .expect("scene launch latches");
+        assert_eq!(app.state.song_manual_latch_mask(), 1);
+
+        // Two row transitions: the first save-back targets the launched
+        // scene (self-write), the second targets row 1's scene — the one an
+        // unmasked save clobbers with pattern 3's data.
+        for (ordinal, beat) in [(1usize, 4.0f64), (2, 8.0)] {
+            app.mirror_song_row_applied(&AudibleSongRowApplied {
+                row_id: song.rows[ordinal].id,
+                row_ordinal: ordinal,
+                effective_beat: beat,
+                effective_sample: (beat * 44_100.0) as u64,
+                wrapped: false,
+            })
+            .expect("row mirror");
+        }
+
+        app.state.with_project_scenes(|scenes| {
+            assert_eq!(
+                scenes.track_pools[0].get(PatternId(1)).unwrap().track_bits[0],
+                0b1,
+                "pattern 1 must keep its own steps"
+            );
+            assert_eq!(
+                scenes.track_pools[0].get(PatternId(2)).unwrap().track_bits[0],
+                0b11,
+                "pattern 2 must keep its own steps"
+            );
+        });
+        app.song_transport_stop().unwrap();
+    }
+
+    /// Clobber regression (variant: gap lanes, no performer gesture): an
+    /// explicit-empty row override silences the lane but deliberately keeps
+    /// the previous content in the live grid. Two rows later that stale
+    /// content sits under a different `current_scene`; the mirror's
+    /// save-back must skip silenced lanes or it writes the stale pattern
+    /// over that scene's real cell.
+    #[test]
+    fn gap_silenced_lane_never_saves_stale_content_over_other_scenes() {
+        use crate::sequencer::{PatternId, PatternSnapshot, ProjectSongTrackOverride};
+        let mut app = test_app();
+        let mut snapshots = vec![
+            PatternSnapshot::new_default(1, &[]),
+            PatternSnapshot::new_default(1, &[]),
+            PatternSnapshot::new_default(1, &[]),
+        ];
+        snapshots[0].track_bits[0][0] = 0b1;
+        snapshots[1].track_bits[0][0] = 0b11;
+        snapshots[2].track_bits[0][0] = 0b111;
+        app.state.replace_pattern_repository(snapshots, 0);
+        app.state.resync_live_grid_to_current_scene();
+        let gap = |start_beat: f64, scene: usize| SongRowSpec {
+            start_beat,
+            scene,
+            overrides: vec![ProjectSongTrackOverride::new(0, None)],
+        };
+        app.arr_replace_rows(
+            vec![
+                gap(0.0, 0),
+                gap(4.0, 1),
+                SongRowSpec {
+                    start_beat: 8.0,
+                    scene: 2,
+                    overrides: Vec::new(),
+                },
+            ],
+            16.0,
+            false,
+        )
+        .expect("song committed");
+        app.set_use_arrangement(true).unwrap();
+        app.song_transport_play(false).expect("song playback");
+        let song = app.active_runtime_song.clone().expect("active song");
+
+        // Row 0 (gap over scene 1's cell) applied at start; the lane is
+        // silenced with pattern 1's content left live. Rows 1 and 2 then
+        // advance current_scene under that stale content.
+        assert!(app.state.is_scene_silenced(0), "gap row silences the lane");
+        for (ordinal, beat) in [(1usize, 4.0f64), (2, 8.0)] {
+            app.mirror_song_row_applied(&AudibleSongRowApplied {
+                row_id: song.rows[ordinal].id,
+                row_ordinal: ordinal,
+                effective_beat: beat,
+                effective_sample: (beat * 44_100.0) as u64,
+                wrapped: false,
+            })
+            .expect("row mirror");
+        }
+
+        app.state.with_project_scenes(|scenes| {
+            assert_eq!(
+                scenes.track_pools[0].get(PatternId(2)).unwrap().track_bits[0],
+                0b11,
+                "scene 2's pattern must keep its own steps"
+            );
+        });
+        app.song_transport_stop().unwrap();
     }
 
     #[test]

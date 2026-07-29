@@ -174,7 +174,7 @@ impl SequencerState {
             }
 
             let started = Instant::now();
-            scenes.save_scene_snapshot(current_scene, current_snapshot);
+            scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask());
             profile.save_current_snapshot = started.elapsed();
 
             let started = Instant::now();
@@ -284,7 +284,7 @@ impl SequencerState {
         let launched = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
-            if !scenes.save_scene_snapshot(current_scene, current_snapshot) {
+            if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask()) {
                 return false;
             }
             scenes.launch_track_pattern(track, pattern_id)
@@ -389,7 +389,7 @@ impl SequencerState {
                 return false;
             }
             let current_scene = self.current_scene_index();
-            if !scenes.save_scene_snapshot(current_scene, current_snapshot) {
+            if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask()) {
                 return false;
             }
             scenes.launch_scene_tracks(scene, tracks)
@@ -643,7 +643,7 @@ impl SequencerState {
                 resolved.push((track, override_id, data, take_lane));
             }
             let current_scene = self.current_scene_index();
-            if !scenes.save_scene_snapshot(current_scene, current_snapshot) {
+            if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask()) {
                 return Err("Could not save the outgoing session state".to_string());
             }
             scenes.current_scene = scene;
@@ -757,7 +757,7 @@ impl SequencerState {
         let id = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
-            scenes.save_scene_snapshot(current_scene, current_snapshot);
+            scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask());
             scenes.fork_track_pattern(track)?
         };
         self.set_scene_silenced(track, false);
@@ -788,7 +788,7 @@ impl SequencerState {
         let (id, data) = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
-            scenes.save_scene_snapshot(current_scene, current_snapshot);
+            scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask());
             let id = scenes.clone_track_pattern_into_current_scene(track)?;
             let data = scenes.effective_track_pattern(track)?.clone();
             (id, data)
@@ -823,7 +823,7 @@ impl SequencerState {
         let (id, data) = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
-            scenes.save_scene_snapshot(current_scene, current_snapshot);
+            scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask());
             let id = scenes.clone_track_pattern_id_into_current_scene(track, source_id)?;
             let data = scenes.effective_track_pattern(track)?.clone();
             (id, data)
@@ -872,7 +872,7 @@ impl SequencerState {
         let (was_effective, replacement) = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
-            scenes.save_scene_snapshot(current_scene, current_snapshot);
+            scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask());
             let was_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
             if !scenes.delete_track_pattern(track, pattern_id) {
                 return Err(format!(
@@ -926,7 +926,7 @@ impl SequencerState {
         let restore_current_track = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
-            if !scenes.save_scene_snapshot(current_scene, current_snapshot) {
+            if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask()) {
                 return false;
             }
             if !scenes.set_cell(scene, track, pattern_id) {
@@ -978,7 +978,7 @@ impl SequencerState {
         let (cleared, should_silence) = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
-            if !scenes.save_scene_snapshot(current_scene, current_snapshot) {
+            if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask()) {
                 return None;
             }
             let cleared = scenes.clear_cell(scene, track)?;
@@ -1061,7 +1061,7 @@ impl SequencerState {
                 current_metadata.1,
                 current_metadata.2,
             );
-            scenes.save_scene_snapshot(cur, current_snapshot);
+            scenes.save_scene_snapshot_masked(cur, current_snapshot, self.stale_live_lane_mask());
             let new_idx = scenes.new_scene();
             self.pattern
                 .current_pattern
@@ -1149,7 +1149,7 @@ impl SequencerState {
                 current_metadata.1,
                 current_metadata.2,
             );
-            scenes.save_scene_snapshot(cur, current_snapshot);
+            scenes.save_scene_snapshot_masked(cur, current_snapshot, self.stale_live_lane_mask());
             let new_idx = scenes
                 .delete_scene(cur)
                 .ok_or_else(|| "The last scene cannot be deleted".to_string())?;
@@ -1220,7 +1220,7 @@ impl SequencerState {
             current_metadata.1,
             current_metadata.2,
         );
-        scenes.save_scene_snapshot(cur, current_snapshot);
+        scenes.save_scene_snapshot_masked(cur, current_snapshot, self.stale_live_lane_mask());
         let Some(source) = scenes.scene_snapshot(cur) else {
             return false;
         };
