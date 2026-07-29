@@ -1882,9 +1882,18 @@ fn item_cycle_separator_xs(
     item: &TimelineItem,
     viewport: super::WidgetViewport,
 ) -> Vec<f32> {
-    let Some(TimelineItemContent::Dots { cycle, phase, .. }) = &item.content else {
+    let Some(TimelineItemContent::Dots {
+        cycle, phase, wrap, ..
+    }) = &item.content
+    else {
         return Vec::new();
     };
+    // Non-wrapping content (takes) plays its source exactly once: there are
+    // no repeat play-throughs, so there is no loop boundary to cue — an item
+    // stretched past the source end is silence, not another pass.
+    if !wrap {
+        return Vec::new();
+    }
     let span = item.end - item.start;
     if span <= 0.0 {
         return Vec::new();
@@ -1995,7 +2004,10 @@ fn push_item_content_primitives(
     }
     match &item.content {
         Some(TimelineItemContent::Dots {
-            dots, cycle, phase, ..
+            dots,
+            cycle,
+            phase,
+            wrap,
         }) => {
             let span = item.end - item.start;
             if span <= 0.0 {
@@ -2052,7 +2064,14 @@ fn push_item_content_primitives(
             };
             // One partial source cycle can straddle the left edge, hence the
             // extra iteration beyond the number of complete visible cycles.
-            let repetitions = (1.0 / cycle).ceil().min(512.0) as usize + 1;
+            // Non-wrapping content (takes) never repeats: one pass only, so
+            // the stretch past the source end stays visibly empty — extending
+            // a take must read as growth, not looping.
+            let repetitions = if *wrap {
+                (1.0 / cycle).ceil().min(512.0) as usize + 1
+            } else {
+                1
+            };
             for index in 0..repetitions {
                 for dot in dots {
                     let offset = (dot.offset - phase + index as f64) * cycle;
@@ -5381,6 +5400,107 @@ mod tests {
             top_color_at(&marquee, x_at(6.0), body_y),
             Some(CLIP),
             "the marquee style never repaints a clip body"
+        );
+    }
+
+    /// A take stretched past its source end (`:wrap false`, cycle < 1 —
+    /// e.g. the grow-resize ghost) must read as GROWTH: one pass of dots,
+    /// no tiled repeats, no loop-boundary segmentation.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn non_wrapping_take_content_never_tiles_dots_or_loop_segments() {
+        let props = HashMap::from([
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(1.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(12.0)),
+                    (
+                        "content",
+                        map_value_raw(vec![
+                            (
+                                "dots",
+                                list_value_raw(vec![map_value_raw(vec![
+                                    ("offset", number_value(0.25)),
+                                    ("value", number_value(0.5)),
+                                ])]),
+                            ),
+                            ("cycle", number_value(0.5)),
+                            ("wrap", Value::Bool(false)),
+                        ]),
+                    ),
+                ])]),
+            ),
+            ("title-bar-height".to_string(), number_value(1.0)),
+            ("item-corner-radius".to_string(), number_value(0.4)),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(0.0)),
+        ]);
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 160.0,
+            height: 4.0,
+        };
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1920.0,
+            vp_h: 1080.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 12.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let node = LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "timeline".to_string(),
+            rect,
+            props: props.clone(),
+            children: Vec::new(),
+            focusable: false,
+        };
+
+        let view = TimelineView::from_props(&node.props, rect);
+        assert!(
+            item_cycle_separator_xs(&view, &view.items[0], viewport).is_empty(),
+            "a non-wrapping item has no repeat play-throughs to cue"
+        );
+
+        let primitives = build_metal_primitives(&node, viewport);
+        let dot_quads: Vec<_> = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                MetalPrimitive::Quad(quad)
+                    if (quad.color.a - 0.78).abs() < f32::EPSILON
+                        && (quad.color.r - 0.02).abs() < f32::EPSILON =>
+                {
+                    Some(quad)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dot_quads.len(),
+            1,
+            "one source pass only — a second tiled copy would read as looping"
+        );
+        // The single pass lands at source offset 0.25 of the first (and
+        // only) cycle: item offset 0.125 → beat 5 → x 50.
+        assert!(
+            (dot_quads[0].x - 50.0).abs() < 1.0,
+            "the dot stays at its absolute source position, got x {}",
+            dot_quads[0].x
         );
     }
 
