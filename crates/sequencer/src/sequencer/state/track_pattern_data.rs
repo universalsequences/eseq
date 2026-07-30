@@ -566,6 +566,35 @@ impl TrackPatternData {
         self.sample_id = source.sample_id.clone();
     }
 
+    /// Restore a slot snapshot into a live slot, keeping the LIVE slot's
+    /// graph identity when it has one (§18.2 item 6). The live slot's node
+    /// ids are graph-authoritative — rebuild sweeps re-stamp live slots —
+    /// while a stored Patch may predate a sweep; adopting a stale identity
+    /// would make every restored p-lock and key lock fail the staleness
+    /// guards at trigger resolution and silently play base defaults. Slots
+    /// with no live identity yet (node id 0, initial build-out) adopt the
+    /// snapshot's identity as before.
+    fn restore_slot_with_live_identity(snap: &EffectSlotSnapshot, slot: &EffectSlotState) {
+        let live_node = slot.node_id.load(Ordering::Relaxed);
+        let live_modulator = slot.modulator_node_id.load(Ordering::Relaxed);
+        snap.restore(slot);
+        if live_node != 0 {
+            slot.adopt_identity_and_restamp(live_node, live_modulator);
+        }
+    }
+
+    fn restore_slot(
+        snap: &EffectSlotSnapshot,
+        slot: &EffectSlotState,
+        preserve_live_identity: bool,
+    ) {
+        if preserve_live_identity {
+            Self::restore_slot_with_live_identity(snap, slot);
+        } else {
+            snap.restore(slot);
+        }
+    }
+
     /// Restore only the device/sound half of this snapshot into the live
     /// mirror — instruments, effects, MIDI FX, rack and the mixer-side track
     /// params — leaving every per-step lane and the step grid itself alone.
@@ -598,17 +627,25 @@ impl TrackPatternData {
 
         for (slot_idx, slot_snap) in self.effect_slots.iter().enumerate() {
             if slot_idx < state.pattern.effect_chains[track].len() {
-                slot_snap.restore(&state.pattern.effect_chains[track][slot_idx]);
+                Self::restore_slot_with_live_identity(
+                    slot_snap,
+                    &state.pattern.effect_chains[track][slot_idx],
+                );
             }
         }
         for (slot_idx, slot_snap) in self.midi_fx_slots.iter().enumerate() {
             if slot_idx < state.pattern.midi_fx_slots[track].len() {
-                slot_snap.restore(&state.pattern.midi_fx_slots[track][slot_idx]);
+                Self::restore_slot_with_live_identity(
+                    slot_snap,
+                    &state.pattern.midi_fx_slots[track][slot_idx],
+                );
             }
         }
 
-        self.instrument_slot
-            .restore(&state.pattern.instrument_slots[track]);
+        Self::restore_slot_with_live_identity(
+            &self.instrument_slot,
+            &state.pattern.instrument_slots[track],
+        );
         state.pattern.instrument_base_note_offsets[track].store(
             self.instrument_base_note_offset.to_bits(),
             Ordering::Relaxed,
@@ -651,6 +688,27 @@ impl TrackPatternData {
     }
 
     pub(super) fn restore_to(&self, state: &SequencerState, track: usize) -> bool {
+        self.restore_to_impl(state, track, true)
+    }
+
+    /// `restore_to` for lane-RELOCATING restores (track delete/reorder): the
+    /// snapshot carries a DIFFERENT track's graph identity, which the shifted
+    /// lane must adopt — the live slot's old identity belongs to the lane
+    /// that used to live at this index, not to this sound.
+    pub(super) fn restore_to_adopting_snapshot_identity(
+        &self,
+        state: &SequencerState,
+        track: usize,
+    ) -> bool {
+        self.restore_to_impl(state, track, false)
+    }
+
+    fn restore_to_impl(
+        &self,
+        state: &SequencerState,
+        track: usize,
+        preserve_live_identity: bool,
+    ) -> bool {
         if track >= state.pattern.patterns.len()
             || track >= state.pattern.neural_reset_patterns.len()
             || track >= state.pattern.step_data.len()
@@ -689,17 +747,28 @@ impl TrackPatternData {
 
         for (slot_idx, slot_snap) in self.effect_slots.iter().enumerate() {
             if slot_idx < state.pattern.effect_chains[track].len() {
-                slot_snap.restore(&state.pattern.effect_chains[track][slot_idx]);
+                Self::restore_slot(
+                    slot_snap,
+                    &state.pattern.effect_chains[track][slot_idx],
+                    preserve_live_identity,
+                );
             }
         }
         for (slot_idx, slot_snap) in self.midi_fx_slots.iter().enumerate() {
             if slot_idx < state.pattern.midi_fx_slots[track].len() {
-                slot_snap.restore(&state.pattern.midi_fx_slots[track][slot_idx]);
+                Self::restore_slot(
+                    slot_snap,
+                    &state.pattern.midi_fx_slots[track][slot_idx],
+                    preserve_live_identity,
+                );
             }
         }
 
-        self.instrument_slot
-            .restore(&state.pattern.instrument_slots[track]);
+        Self::restore_slot(
+            &self.instrument_slot,
+            &state.pattern.instrument_slots[track],
+            preserve_live_identity,
+        );
         state.pattern.instrument_base_note_offsets[track].store(
             self.instrument_base_note_offset.to_bits(),
             Ordering::Relaxed,

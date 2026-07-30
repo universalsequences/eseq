@@ -492,12 +492,72 @@ mod tests {
         assert_eq!(take.total_len_steps, 64);
     }
 
-    /// Mixer/track-param edits follow the sound binding (takes spec 16.4):
-    /// with a take clip bound, the fader writes the take's chunks — NOT the
-    /// hidden effective scene pattern, which both loses the edit at the next
-    /// row push and leaks a take-intended tweak into the scene cell.
+    /// §18.2 item 4 must-pass: two takes on one track share the scene's Mix
+    /// by default, so a fader edit made while take 2 is selected is heard on
+    /// take 1 (and the cell) — one fader for the track's sound.
     #[test]
-    fn mixer_volume_with_a_bound_take_writes_the_take_not_the_scene_cell() {
+    fn fader_edit_with_take_2_selected_is_heard_on_take_1() {
+        use crate::app::sound_binding::{BoundSource, SongClipSelection};
+        use crate::app::AppCommand;
+
+        let mut app = app_with_song();
+        let take_1 = app
+            .song_region_to_take(0, 0.0, 4.0)
+            .expect("take 1 converts");
+        let take_2 = app
+            .song_region_to_take(0, 8.0, 12.0)
+            .expect("take 2 converts");
+        let (chunk_1, sound_1, sound_2) = app.state.with_project_scenes(|scenes| {
+            let t1 = scenes.take_pools[0].get(take_1).expect("take 1");
+            let t2 = scenes.take_pools[0].get(take_2).expect("take 2");
+            (t1.chunks[0], t1.sound, t2.sound)
+        });
+        assert_eq!(sound_1, sound_2, "both takes share the cell's sound (§17.3)");
+
+        let clip_2 = app
+            .state
+            .committed_arrangement()
+            .expect("arrangement")
+            .track_lanes[0]
+            .iter()
+            .find(|clip| clip.take_id == Some(take_2.0))
+            .expect("take 2 clip painted")
+            .id;
+        app.set_arrangement_view_visible(true);
+        app.set_song_clip_selection(Some(SongClipSelection {
+            track: 0,
+            clip_id: clip_2,
+            source: BoundSource::Take(take_2),
+        }));
+        app.sync_track_sound_bindings();
+
+        crate::app::edit::try_apply_command(
+            &mut app,
+            AppCommand::SetTrackVolume { track: 0, value: 0.35 },
+        )
+        .expect("volume edit applies");
+        crate::app::edit::finish_active_gesture(&mut app);
+
+        let heard_on_take_1 = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(chunk_1)
+                .expect("take 1 chunk")
+                .track_params
+                .volume
+        });
+        assert_eq!(
+            heard_on_take_1, 0.35,
+            "the shared Mix carries the fader to the unselected take"
+        );
+    }
+
+    /// Mixer/track-param edits follow the sound binding and land on the
+    /// bound source's Mix ENTITY (takes spec 17.3): the take shares the
+    /// scene cell's sound by construction, so a take-bound fader move is
+    /// heard by every referent of that Mix — cell included. One write, one
+    /// entity, no fan-out and no divergence.
+    #[test]
+    fn mixer_volume_with_a_bound_take_writes_the_shared_mix() {
         use crate::app::sound_binding::{BoundSource, SongClipSelection};
         use crate::app::AppCommand;
 
@@ -515,12 +575,24 @@ mod tests {
             .state
             .effective_track_pattern_id(0)
             .expect("effective pattern");
-        let scene_volume_before = app.state.with_project_scenes(|scenes| {
-            scenes.track_pools[0]
-                .get(scene_pattern)
-                .expect("scene pattern")
-                .track_params
-                .volume
+        // Ref identity (§17.3): the conversion shared the bound cell's
+        // Patch/Mix pair, so the 0.9 written through the chunk above already
+        // reached the scene cell — they are one Mix.
+        app.state.with_project_scenes(|scenes| {
+            assert_eq!(
+                scenes.track_pools[0].refs(chunk0),
+                scenes.track_pools[0].refs(scene_pattern),
+                "take chunks and the scene cell name the same entities"
+            );
+            assert_eq!(
+                scenes.track_pools[0]
+                    .get(scene_pattern)
+                    .expect("scene pattern")
+                    .track_params
+                    .volume,
+                0.9,
+                "an entity write through the chunk is heard by the cell"
+            );
         });
 
         let clip_id = app
@@ -569,8 +641,8 @@ mod tests {
                 .volume
         });
         assert_eq!(
-            scene_volume_after, scene_volume_before,
-            "no dual-write: the scene cell must not absorb a take-bound edit"
+            scene_volume_after, 0.3,
+            "shared Mix (§17.3): the fader edit applies to every referent"
         );
         // The chunk keeps its full step width — a fader move must never
         // resize a take chunk.
@@ -954,6 +1026,9 @@ impl App {
         }
 
         let bound = self.bound_read_pattern(track);
+        // An empty take clip performs the current sound (§17.3): it shares
+        // the bound cell's refs exactly like a recorded take.
+        let bound_sound = self.bound_sound_refs(track);
         let scenes_before = self.capture_synchronized_scene_structure_state()?;
         let mut template = scenes_before
             .track_pools
@@ -975,7 +1050,7 @@ impl App {
 
         let take_id = self
             .state
-            .register_track_take(track, None, chunks, total_len_steps)?;
+            .register_track_take(track, None, chunks, total_len_steps, bound_sound)?;
         let mut arrangement_after = arrangement_before.clone();
         arrangement_after.end_beat = arrangement_after.end_beat.max(end_beat);
         let scenes = self.state.capture_project_scenes();
@@ -1089,9 +1164,13 @@ impl App {
 
         let scenes_before = self.capture_synchronized_scene_structure_state()?;
         let arrangement_before = Some(arrangement.clone());
+        // A consolidated region plays as the track currently sounds: share
+        // the bound cell's refs (§17.3) rather than freezing the rendered
+        // chunks' device state into a private pair.
+        let bound_sound = self.bound_sound_refs(track);
         let take_id = self
             .state
-            .register_track_take(track, None, chunks, total_len_steps)?;
+            .register_track_take(track, None, chunks, total_len_steps, bound_sound)?;
 
         let mut arrangement_after = arrangement;
         let scenes = self.state.capture_project_scenes();

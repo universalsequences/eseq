@@ -407,6 +407,7 @@ mod tests {
                 None,
                 vec![chunk_template(0.7, 3.0), chunk_template(0.7, 3.0)],
                 MAX_STEPS as u32 + 12,
+                None,
             )
             .expect("take registers");
         state.with_scenes_mut(|scenes| {
@@ -471,6 +472,7 @@ mod tests {
                 Some("Riff".into()),
                 vec![chunk_template(0.42, 12.0), chunk_template(0.42, 12.0)],
                 MAX_STEPS as u32 + 30,
+                None,
             )
             .expect("take registers");
 
@@ -676,6 +678,182 @@ mod tests {
                 Some(scenes.scenes[0].cell_sounds[0])
             );
         });
+    }
+
+    /// §18.2 item 4 must-pass: scene create forks the Mix, so per-scene
+    /// volume divergence (scene 1 at 0.5, scene 2 at 0.7) survives — while a
+    /// take registered against the cell's refs SHARES its Mix.
+    #[test]
+    fn per_scene_mix_divergence_survives_while_takes_share() {
+        let state = state_with_scenes(1, 1);
+        state.with_scenes_mut(|scenes| {
+            let s0 = scenes.scenes[0].cells[0].expect("scene 0 cell");
+            assert!(scenes.track_pools[0].edit(s0, |data| {
+                data.track_params.volume = 0.5;
+            }));
+            let new_scene = scenes.new_scene();
+            let s1 = scenes.scenes[new_scene].cells[0].expect("new scene cell");
+            assert_ne!(
+                scenes.track_pools[0].refs(s0).expect("refs").mix,
+                scenes.track_pools[0].refs(s1).expect("refs").mix,
+                "scene create forks the Mix (§17.3)"
+            );
+            assert!(scenes.track_pools[0].edit(s1, |data| {
+                data.track_params.volume = 0.7;
+            }));
+            let v0 = scenes.track_pools[0].get(s0).expect("s0").track_params.volume;
+            let v1 = scenes.track_pools[0].get(s1).expect("s1").track_params.volume;
+            assert_eq!(v0.to_bits(), 0.5f32.to_bits());
+            assert_eq!(v1.to_bits(), 0.7f32.to_bits());
+        });
+        // A take that shares scene 0's refs hears scene 0's fader, and a
+        // fader write through the take is heard by the cell (one Mix).
+        let refs = state.with_project_scenes(|scenes| scenes.scenes[0].cell_sounds[0]);
+        let take = state
+            .register_track_take(
+                0,
+                None,
+                vec![chunk_template(0.9, 0.0)],
+                16,
+                Some(refs),
+            )
+            .expect("take registers");
+        state.with_scenes_mut(|scenes| {
+            let take = scenes.take_pools[0].get(take).expect("take").clone();
+            assert_eq!(take.sound, refs, "take shares the cell sound (§17.3)");
+            let chunk = take.chunks[0];
+            assert_eq!(
+                scenes.track_pools[0]
+                    .get(chunk)
+                    .expect("chunk")
+                    .track_params
+                    .volume
+                    .to_bits(),
+                0.5f32.to_bits(),
+                "the chunk's own 0.9 device half was dropped; the shared Mix wins"
+            );
+            assert!(scenes.track_pools[0].edit(chunk, |data| {
+                data.track_params.volume = 0.25;
+            }));
+            let s0 = scenes.scenes[0].cells[0].expect("scene 0 cell");
+            assert_eq!(
+                scenes.track_pools[0].get(s0).expect("s0").track_params.volume.to_bits(),
+                0.25f32.to_bits(),
+                "a take-side fader write reaches the cell through the shared Mix"
+            );
+        });
+    }
+
+    /// §18.1 step 3 (S2): a capture with a borrowed lane is TRUTHFUL — the
+    /// snapshot carries the scene-effective device state, not the borrowed
+    /// bound sound, and the borrow itself survives the capture (no more
+    /// release/re-bind dance around save-backs).
+    #[test]
+    fn capture_with_borrowed_lane_is_truthful_and_keeps_the_borrow() {
+        let state = state_with_scenes(1, 1);
+        let other = state.with_scenes_mut(|scenes| {
+            let cell = scenes.scenes[0].cells[0].expect("cell");
+            let mut data = scenes.track_pools[0].get(cell).expect("cell data");
+            data.instrument_base_note_offset = 9.0;
+            scenes.track_pools[0].insert(data)
+        });
+        let data = state
+            .with_project_scenes(|scenes| scenes.track_pools[0].get(other))
+            .expect("other pattern");
+        assert!(state.borrow_track_device_state(0, other, &data));
+        let snapshot = state.capture_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        );
+        assert_eq!(
+            snapshot.instrument_base_note_offsets[0].to_bits(),
+            0.0f32.to_bits(),
+            "the captured lane carries the scene sound, not the borrow"
+        );
+        assert_eq!(
+            state.sound_binding_borrowed_mask() & 1,
+            1,
+            "the borrow survives the capture"
+        );
+        // The live mirror still holds the bound sound.
+        assert_eq!(
+            f32::from_bits(
+                state.pattern.instrument_base_note_offsets[0]
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            )
+            .to_bits(),
+            9.0f32.to_bits()
+        );
+    }
+
+    /// §18.2 item 4 must-pass pair: launching a pool pattern brings its own
+    /// Mix level (the cell repoints to the pattern's refs), and a
+    /// post-launch fader tweak lands in that Mix via save-back, surviving a
+    /// relaunch.
+    #[test]
+    fn pattern_launch_brings_its_mix_and_relaunch_preserves_tweaks() {
+        let state = state_with_scenes(1, 1);
+        let names = ["Track 1".to_string()];
+        let types = [InstrumentType::Sampler];
+        let pattern = state.with_scenes_mut(|scenes| {
+            let cell = scenes.scenes[0].cells[0].expect("cell");
+            let mut data = scenes.track_pools[0].get(cell).expect("cell data");
+            data.track_params.volume = 0.8;
+            scenes.track_pools[0].insert(data)
+        });
+        assert!(state.launch_track_pattern(0, pattern, 1, &[-1], &[44_100], &names, &types));
+        assert_eq!(
+            state.pattern.track_params[0].get_volume().to_bits(),
+            0.8f32.to_bits(),
+            "launch brings the pattern's own mix level"
+        );
+        state.with_project_scenes(|scenes| {
+            assert_eq!(
+                scenes.effective_sound_refs(0),
+                scenes.track_pools[0].refs(pattern),
+                "the launch repoints the track's effective refs to the \
+                 pattern's (§17.3, via the launch override)"
+            );
+        });
+
+        // Post-launch tweak: live fader move, saved back through the
+        // pattern's entities.
+        state.pattern.track_params[0].set_volume(0.66);
+        assert!(state.save_current_pattern_snapshot(1, &[-1], &[44_100], &names, &types));
+        state.with_project_scenes(|scenes| {
+            assert_eq!(
+                scenes.track_pools[0]
+                    .get(pattern)
+                    .expect("pattern")
+                    .track_params
+                    .volume
+                    .to_bits(),
+                0.66f32.to_bits(),
+                "the tweak landed in the launched pattern's Mix"
+            );
+        });
+
+        // Switch back to the scene's own pattern (override cleared, its own
+        // forked Mix takes the fader)…
+        assert!(state
+            .launch_scene(0, 1, &[-1], &[44_100], &names, &types)
+            .is_some());
+        assert_ne!(
+            state.pattern.track_params[0].get_volume().to_bits(),
+            0.66f32.to_bits(),
+            "the scene's own Mix is not the launched pattern's"
+        );
+        // …then relaunch the pattern: the post-launch tweak survives in its
+        // Mix.
+        assert!(state.launch_track_pattern(0, pattern, 1, &[-1], &[44_100], &names, &types));
+        assert_eq!(
+            state.pattern.track_params[0].get_volume().to_bits(),
+            0.66f32.to_bits(),
+            "relaunch restores the post-launch tweak"
+        );
     }
 
     /// Deleting a track shifts every scene's `cell_sounds` together with

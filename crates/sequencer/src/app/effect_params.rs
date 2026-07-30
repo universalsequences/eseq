@@ -590,6 +590,10 @@ impl App {
         slot_idx: usize,
         param_idx: usize,
     ) {
+        // A base edit under an engaged override is legal (release pops back
+        // to the new base): keep the leak shadow tracking the fresh base.
+        #[cfg(debug_assertions)]
+        self.refresh_macro_base_shadow_for_slot(track, slot_idx, param_idx);
         if self.sound_binding_is_silent(track) {
             return;
         }
@@ -827,10 +831,156 @@ impl App {
         self.scene_macro_mappings(config).len()
     }
 
+    /// The base value the capture seams are allowed to persist for a macro
+    /// key: the live slot's default. `None` for keys whose base lives outside
+    /// the per-track slot surface (bus/rack/MIDI-FX targets — buses never
+    /// reach a Patch/Mix save-back).
+    #[cfg(debug_assertions)]
+    fn macro_param_base_value(&self, key: &crate::macro_engine::MacroParamKey) -> Option<f32> {
+        use crate::macro_engine::MacroParamKey as Key;
+        match key {
+            Key::Effect { track, slot, param } => self
+                .state
+                .pattern
+                .effect_chains
+                .get(*track)?
+                .get(*slot)
+                .map(|slot| slot.defaults.get(*param)),
+            Key::Instrument { track, param } => self
+                .state
+                .pattern
+                .instrument_slots
+                .get(*track)
+                .map(|slot| slot.defaults.get(*param)),
+            Key::Node { track, param_id } => {
+                let instrument = self.state.pattern.instrument_slots.get(*track);
+                let chain = self.state.pattern.effect_chains.get(*track)?;
+                for slot in instrument.into_iter().chain(chain.iter()) {
+                    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+                    for param_idx in 0..num_params {
+                        if slot.param_node_id(param_idx) == Some(*param_id) {
+                            return Some(slot.defaults.get(param_idx));
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Effective-send-path shadow refresh for one slot param: base edits are
+    /// the only legal writers of `defaults` and they always re-send through
+    /// the effective layer, so this keeps the shadow current without letting
+    /// a send-less capture path masquerade as a base edit.
+    #[cfg(debug_assertions)]
+    pub(crate) fn refresh_macro_base_shadow_for_slot(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        param_idx: usize,
+    ) {
+        let Some(slot) = self
+            .state
+            .pattern
+            .effect_chains
+            .get(track)
+            .and_then(|chain| chain.get(slot_idx))
+        else {
+            return;
+        };
+        let raw_idx = slot.resolve_node_idx(param_idx) as u32;
+        let param_id = crate::neural::ParamNodeId::from_slot_param(
+            slot.node_id.load(Ordering::Relaxed),
+            slot.modulator_node_id.load(Ordering::Relaxed),
+            raw_idx,
+        );
+        let key =
+            crate::macro_engine::MacroParamKey::for_effect(track, slot_idx, param_idx, param_id);
+        if self.macro_engine.override_value(&key).is_some() {
+            self.macro_base_shadow
+                .lock()
+                .unwrap()
+                .insert(key, slot.defaults.get(param_idx));
+        }
+    }
+
+    /// Instrument twin of `refresh_macro_base_shadow_for_slot`.
+    #[cfg(debug_assertions)]
+    pub(crate) fn refresh_macro_base_shadow_for_instrument(&self, track: usize, param_idx: usize) {
+        let Some(slot) = self.state.pattern.instrument_slots.get(track) else {
+            return;
+        };
+        let raw_idx = slot.resolve_node_idx(param_idx) as u32;
+        let param_id = crate::neural::ParamNodeId::from_slot_param(
+            slot.node_id.load(Ordering::Relaxed),
+            slot.modulator_node_id.load(Ordering::Relaxed),
+            raw_idx,
+        );
+        let key = crate::macro_engine::MacroParamKey::for_instrument(track, param_idx, param_id);
+        if self.macro_engine.override_value(&key).is_some() {
+            self.macro_base_shadow
+                .lock()
+                .unwrap()
+                .insert(key, slot.defaults.get(param_idx));
+        }
+    }
+
+    /// Keep the override-leak shadow (takes spec §17.10) tracking the base
+    /// beneath every engaged override. Newly engaged keys record the current
+    /// default; released keys drop out.
+    #[cfg(debug_assertions)]
+    pub(crate) fn refresh_macro_base_shadow(&self) {
+        let overrides = self.macro_engine.override_snapshot();
+        let mut shadow = self.macro_base_shadow.lock().unwrap();
+        shadow.retain(|key, _| overrides.contains_key(key));
+        for key in overrides.keys() {
+            if !shadow.contains_key(key) {
+                if let Some(base) = self.macro_param_base_value(key) {
+                    shadow.insert(key.clone(), base);
+                }
+            }
+        }
+    }
+
+    /// Override-leak tripwire (takes spec §17.10 / macro spec §8.7), run at
+    /// every save-back/capture seam: an engaged override's value must never
+    /// have replaced the base the capture is about to persist — under the
+    /// sounds model that write would corrupt every referent of a shared
+    /// Patch/Mix silently. Fires only when the base now equals the override
+    /// while the recorded base did not (a legal base edit refreshes the
+    /// shadow through the effective-send path).
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_assert_no_macro_override_leak(&self) {
+        let shadow = self.macro_base_shadow.lock().unwrap();
+        for (key, override_value) in self.macro_engine.override_snapshot() {
+            let Some(recorded_base) = shadow.get(&key) else {
+                continue;
+            };
+            let Some(current_base) = self.macro_param_base_value(&key) else {
+                continue;
+            };
+            debug_assert!(
+                current_base.to_bits() != override_value.to_bits()
+                    || recorded_base.to_bits() == override_value.to_bits(),
+                "macro override leaked into the base value about to be captured \
+                 (key {key:?}: base was {recorded_base}, now equals the engaged \
+                 override {override_value}) — a save-back would persist it into \
+                 a shared Patch/Mix (takes spec 17.10)"
+            );
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[inline]
+    pub(crate) fn debug_assert_no_macro_override_leak(&self) {}
+
     pub(super) fn send_macro_targets(
         &mut self,
         touched: Vec<crate::macro_engine::ScopedParamTarget>,
     ) {
+        #[cfg(debug_assertions)]
+        self.refresh_macro_base_shadow();
         self.state
             .publish_macro_overrides(self.macro_engine.override_snapshot());
         let mut bus_touched = false;

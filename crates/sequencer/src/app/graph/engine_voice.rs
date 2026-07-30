@@ -379,6 +379,10 @@ impl GraphController<'_> {
     }
 
     pub(super) fn rebind_live_track_runtime_after_delete(&mut self) {
+        // Topology changed (delete/reorder): index-keyed device loans are
+        // meaningless across the shift — drop them; the reactive tick's
+        // binding sync re-borrows against the new lane order.
+        self.app.state.release_bound_device_state();
         let mut track_sound_state = self.app.state.pattern.track_sound_state.lock().unwrap();
 
         for track_idx in 0..self.app.tracks.len() {

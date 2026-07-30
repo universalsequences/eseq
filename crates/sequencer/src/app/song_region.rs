@@ -853,13 +853,21 @@ impl App {
                 .iter()
                 .map(|chunk| scenes.track_pools.get(track)?.get(*chunk))
                 .collect();
-            Some((take.name.clone(), chunks?, take.total_len_steps))
+            Some((take.name.clone(), chunks?, take.total_len_steps, take.sound))
         });
-        let Some((name, chunks, total_len_steps)) = source else {
+        let Some((name, chunks, total_len_steps, sound)) = source else {
             return Ok(None);
         };
+        // The copy shares the source take's sound (§17.3 sharing default):
+        // pasting duplicates the performance, not the Patch/Mix identity.
         self.state
-            .register_track_take(track, Some(format!("{name} copy")), chunks, total_len_steps)
+            .register_track_take(
+                track,
+                Some(format!("{name} copy")),
+                chunks,
+                total_len_steps,
+                Some(sound),
+            )
             .map(Some)
     }
 

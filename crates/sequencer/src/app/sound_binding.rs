@@ -1,10 +1,10 @@
 //! Sound binding — device-parameter ownership per track
 //! (docs/takes-and-additive-arrangement-recording-spec.md 16).
 //!
-//! Every pool pattern owns a full device snapshot, and a take's chunks are
-//! frozen copies of one. Without a binding the device UI would keep reading
-//! and writing the scene-effective pattern while song playback sounds a
-//! take's frozen snapshot — the panel lies and edits are inaudible.
+//! Every pool pattern and take references pooled Patch/Mix entities (takes
+//! spec 17.2). Without a binding the device UI would keep reading and
+//! writing the scene-effective sound while song playback sounds a take's or
+//! clip's — the panel lies and edits are inaudible.
 //!
 //! The invariant (16.2): per track there is exactly ONE bound source, and
 //! the panel display, the live monitor sound, and the take punch-in clone
@@ -12,7 +12,7 @@
 //! selection lifecycle (16.6); routing edits through it lives in `edit.rs`
 //! and the panel read surfaces.
 
-use crate::sequencer::{ClipId, LaneSource, PatternId, TakeId};
+use crate::sequencer::{ClipId, LaneSource, PatternId, SoundRefs, TakeId};
 
 use super::App;
 
@@ -24,8 +24,8 @@ const BEATS_PER_BAR: f64 = 4.0;
 /// edit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundSource {
-    /// A take: the snapshot lives on every one of its chunks, which must
-    /// never diverge (16.4) — writes fan out to all of them.
+    /// A take: one Patch/Mix pair for the whole take (§17.2); its chunks all
+    /// reference that pair, so a single entity write reaches every referent.
     Take(TakeId),
     /// An ordinary pool pattern (a track clip, or the effective scene
     /// pattern under rule 3).
@@ -147,17 +147,8 @@ impl App {
         if selection.track != track {
             return None;
         }
-        let alive = self.state.with_project_scenes(|scenes| match selection.source {
-            BoundSource::Take(id) => scenes
-                .take_pools
-                .get(track)
-                .is_some_and(|takes| takes.contains(id)),
-            BoundSource::Pattern(id) => scenes
-                .track_pools
-                .get(track)
-                .is_some_and(|pool| pool.contains(id)),
-        });
-        alive.then_some(selection.source)
+        self.bound_source_alive(track, selection.source)
+            .then_some(selection.source)
     }
 
     /// Rule 2 candidate: what the track is actually sounding under song
@@ -189,18 +180,53 @@ impl App {
         row.resolved_sources.get(track).copied()
     }
 
+    /// True while `source` still exists in the track's pools.
+    fn bound_source_alive(&self, track: usize, source: BoundSource) -> bool {
+        self.state.with_project_scenes(|scenes| match source {
+            BoundSource::Take(id) => scenes
+                .take_pools
+                .get(track)
+                .is_some_and(|takes| takes.contains(id)),
+            BoundSource::Pattern(id) => scenes
+                .track_pools
+                .get(track)
+                .is_some_and(|pool| pool.contains(id)),
+        })
+    }
+
+    /// Gaps hold refs (§17.3): the last non-empty rule-2 source, still alive.
+    /// An empty span between clips keeps binding (and sounding) this instead
+    /// of resetting to the scene pattern.
+    fn held_lane_source(&self, track: usize) -> Option<BoundSource> {
+        let held = self.song_held_sources.get(track).copied().flatten()?;
+        self.bound_source_alive(track, held).then_some(held)
+    }
+
+    /// Rule 2's lane source with the §17.3 gap hold applied: an `Empty` span
+    /// resolves to the held source when one exists.
+    fn audible_or_held_lane_source(&self, track: usize) -> Option<LaneSource> {
+        match self.audible_lane_source(track)? {
+            LaneSource::Empty => Some(match self.held_lane_source(track) {
+                Some(BoundSource::Take(id)) => LaneSource::Take(id),
+                Some(BoundSource::Pattern(id)) => LaneSource::Pattern(id),
+                None => LaneSource::Empty,
+            }),
+            source => Some(source),
+        }
+    }
+
     /// The track's bound source (16.3). Cheap enough for per-frame reads:
     /// one scenes lock, no pattern clones.
     pub fn track_sound_binding(&self, track: usize) -> TrackBinding {
         resolve_binding(
             self.selected_bound_source(track),
-            self.audible_lane_source(track),
+            self.audible_or_held_lane_source(track),
             self.state.effective_track_pattern_id(track),
         )
     }
 
-    /// Every pool pattern carrying the bound source's device snapshot: one
-    /// id for a pattern, every chunk for a take (16.4/16.8).
+    /// Every pool pattern referencing the bound source's sound: one id for
+    /// a pattern, every chunk for a take (they share one pair, §17.2).
     pub fn bound_source_patterns(&self, source: BoundSource, track: usize) -> Vec<PatternId> {
         match source {
             BoundSource::Pattern(id) => vec![id],
@@ -216,7 +242,8 @@ impl App {
     }
 
     /// The pool pattern the panel reads and a single-target edit writes: the
-    /// take's FIRST chunk stands for the take (chunks never diverge, 16.4).
+    /// take's FIRST chunk stands for the take (every chunk references the
+    /// take's one Patch/Mix pair, §17.2, so any chunk names the sound).
     pub fn bound_read_pattern(&self, track: usize) -> Option<PatternId> {
         match self.track_sound_binding(track).source? {
             BoundSource::Pattern(id) => Some(id),
@@ -228,6 +255,29 @@ impl App {
                     .and_then(|take| take.chunks.first().copied())
             }),
         }
+    }
+
+    /// The bound source's sound (§17.2): the `(patch_ref, mix_ref)` pair the
+    /// binding resolves to. Falls back to the track's effective refs, which
+    /// always resolve ("no steps" never means "no sound") — so this is `None`
+    /// only for an out-of-range track.
+    pub(crate) fn bound_sound_refs(&self, track: usize) -> Option<SoundRefs> {
+        let source = self.track_sound_binding(track).source;
+        self.state.with_project_scenes(|scenes| {
+            let from_source = match source {
+                Some(BoundSource::Take(id)) => scenes
+                    .take_pools
+                    .get(track)
+                    .and_then(|takes| takes.get(id))
+                    .map(|take| take.sound),
+                Some(BoundSource::Pattern(id)) => scenes
+                    .track_pools
+                    .get(track)
+                    .and_then(|pool| pool.refs(id)),
+                None => None,
+            };
+            from_source.or_else(|| scenes.effective_sound_refs(track))
+        })
     }
 
     /// Human-readable binding label for the panel header (16.6):
@@ -319,6 +369,25 @@ impl App {
             // the engine already reflects the mirror.
             self.sound_binding_monitored.resize(self.tracks.len(), true);
         }
+        if self.song_held_sources.len() != self.tracks.len() {
+            self.song_held_sources.resize(self.tracks.len(), None);
+        }
+        // Gaps hold refs (§17.3): remember each lane's last non-empty rule-2
+        // source. `Empty` keeps the hold (that is the point); losing song
+        // authority for the lane (stop, manual latch, no song) clears it.
+        let song_authoritative = self.song_playback_authority_active();
+        for track in 0..self.tracks.len() {
+            match (song_authoritative, self.audible_lane_source(track)) {
+                (true, Some(LaneSource::Take(id))) => {
+                    self.song_held_sources[track] = Some(BoundSource::Take(id));
+                }
+                (true, Some(LaneSource::Pattern(id))) => {
+                    self.song_held_sources[track] = Some(BoundSource::Pattern(id));
+                }
+                (true, Some(LaneSource::Empty)) => {}
+                (false, _) | (true, None) => self.song_held_sources[track] = None,
+            }
+        }
         // While the song is sounding, a binding that is NOT what the playhead
         // is currently playing is display + edit only (16.7): the performer
         // must keep hearing the arrangement while tuning a past or future
@@ -338,7 +407,12 @@ impl App {
                 BindingOrigin::Scene => None,
                 _ => binding.source,
             };
-            let audible = self.audible_lane_source(track).and_then(BoundSource::from_lane);
+            // The gap hold counts as audible (§17.3): in an empty span the
+            // engine keeps the held sound, so edits to it stay live and the
+            // monitor never resets.
+            let audible = self
+                .audible_or_held_lane_source(track)
+                .and_then(BoundSource::from_lane);
             let monitors = !song_sounding || desired.is_none() || desired == audible;
             if desired != self.loaded_sound_binding[track] {
                 match desired {
@@ -401,12 +475,16 @@ impl App {
             return false;
         }
         let loaded = self.loaded_sound_binding.get(track).copied().flatten();
-        let audible = self.audible_lane_source(track).and_then(BoundSource::from_lane);
+        // Gap hold (§17.3): a held source in an empty span is audible-class —
+        // the engine is carrying its params, so edits to it must stay live.
+        let audible = self
+            .audible_or_held_lane_source(track)
+            .and_then(BoundSource::from_lane);
         loaded != audible
     }
 
-    /// The pool pattern holding `source`'s device snapshot: a take is
-    /// represented by its first chunk (chunks never diverge, 16.4).
+    /// The pool pattern naming `source`'s sound: a take is represented by
+    /// its first chunk (all chunks share the take's pair, §17.2).
     fn source_read_pattern(&self, track: usize, source: BoundSource) -> Option<PatternId> {
         match source {
             BoundSource::Pattern(id) => Some(id),
@@ -428,11 +506,11 @@ impl App {
     ///
     /// A no-op outside song playback, and when no row uses the pattern.
     ///
-    /// A take's write fans out to every chunk (16.4) but names the take by its
-    /// FIRST chunk, while preflight stores the per-row CHUNK id — so the guard
-    /// matches the whole chunk set, not just the id it was handed. Otherwise a
-    /// take whose rows all resolve a later chunk (a clip offset past chunk 0)
-    /// would skip the re-preflight and keep the pre-edit sound.
+    /// A take edit names the take by its FIRST chunk, while preflight stores
+    /// the per-row CHUNK id — so the guard matches the whole chunk set, not
+    /// just the id it was handed. Otherwise a take whose rows all resolve a
+    /// later chunk (a clip offset past chunk 0) would skip the re-preflight
+    /// and keep the pre-edit sound.
     pub fn invalidate_song_rows_for_pattern(&mut self, track: usize, pattern: PatternId) {
         if !self.song_playback_authority_active() {
             return;
@@ -485,60 +563,63 @@ impl App {
         })
     }
 
-    /// **Push to pattern** (16.5): promote the bound source's sound to the
-    /// track's working sound by copying it into the effective pattern of the
-    /// CURRENT SCENE only. Other scenes' patterns are what per-scene sound
-    /// design protects, so the blast radius stops here — the track-wide
-    /// broadcast is the deferred "Apply sound to entire track" gesture, not
-    /// a variant of this one.
+    /// **Push to pattern** (16.5, S2 semantics per §17.5): re-link the
+    /// current scene's effective pattern (and its cell) to the bound
+    /// source's `(patch_ref, mix_ref)`. Reference semantics: the scene now
+    /// shares the take's sound, and future edits to it follow. Kept as a
+    /// thin alias of the palette re-link until S3 gives it a real home.
     pub fn push_bound_sound_to_pattern(&mut self, track: usize) -> Result<String, String> {
         let binding = self.track_sound_binding(track);
         if binding.is_scene() {
             return Err("The track is already bound to its scene pattern".to_string());
         }
-        let source = self
-            .bound_read_pattern(track)
-            .ok_or_else(|| "The bound source has no device snapshot".to_string())?;
+        let refs = self
+            .bound_sound_refs(track)
+            .ok_or_else(|| "The bound source has no sound".to_string())?;
         let target = self
             .state
             .effective_track_pattern_id(track)
             .ok_or_else(|| "The current scene has no pattern on this track".to_string())?;
-        self.commit_sound_propagation(track, source, &[target], "Push sound to pattern")
+        self.commit_sound_relink(track, &[target], &[], refs, "Push sound to pattern")
     }
 
-    /// **Apply to all takes on track** (16.5): the bound source's sound onto
-    /// every take on the track, every chunk.
+    /// **Apply to all takes on track** (16.5, S2 semantics): re-link every
+    /// take on the track (take + chunks) to the bound source's refs. With
+    /// takes sharing by default this is a repair/convergence tool for
+    /// deliberately forked or legacy-imported takes.
     pub fn apply_bound_sound_to_all_takes(&mut self, track: usize) -> Result<String, String> {
-        let source = self
-            .bound_read_pattern(track)
+        let refs = self
+            .bound_sound_refs(track)
             .ok_or_else(|| "The track has no bound sound".to_string())?;
-        let targets: Vec<PatternId> = self.state.with_project_scenes(|scenes| {
+        let takes: Vec<TakeId> = self.state.with_project_scenes(|scenes| {
             scenes
                 .take_pools
                 .get(track)
-                .map(|takes| takes.claimed().collect())
+                .map(|takes| takes.takes.iter().map(|take| take.id).collect())
                 .unwrap_or_default()
         });
-        if targets.is_empty() {
+        if takes.is_empty() {
             return Err(format!("Track {} has no takes", track + 1));
         }
-        self.commit_sound_propagation(track, source, &targets, "Apply sound to all takes")
+        self.commit_sound_relink(track, &[], &takes, refs, "Apply sound to all takes")
     }
 
-    /// One propagation gesture = one undo entry (16.5).
-    fn commit_sound_propagation(
+    /// One re-link gesture = one undo entry (§17.4: an entity edit — and a
+    /// repoint — affects all referents through one history entry).
+    fn commit_sound_relink(
         &mut self,
         track: usize,
-        source: PatternId,
-        targets: &[PatternId],
+        patterns: &[PatternId],
+        takes: &[TakeId],
+        refs: SoundRefs,
         label: &'static str,
     ) -> Result<String, String> {
         let before = self.capture_synchronized_scene_structure_state()?;
-        let copied = self
+        let changed = self
             .state
-            .copy_track_pattern_device_state(track, source, targets)?;
-        if copied == 0 {
-            return Ok(format!("{label}: nothing to copy"));
+            .relink_track_sound_refs(track, patterns, takes, refs)?;
+        if changed == 0 {
+            return Ok(format!("{label}: already linked"));
         }
         let after = self.state.capture_project_scenes();
         crate::app::edit::finish_active_gesture(self);
@@ -550,11 +631,78 @@ impl App {
             crate::app::history::EditPatch::SceneStructure(patch),
             retained_bytes,
         );
-        self.invalidate_song_rows_for_pattern(track, source);
-        for target in targets {
-            self.invalidate_song_rows_for_pattern(track, *target);
+        // A re-link is a repoint (§17.10): rebind the engine through the one
+        // restore seam, then re-preflight the rows that resolve the targets.
+        self.after_sound_repoint(track);
+        for pattern in patterns {
+            self.invalidate_song_rows_for_pattern(track, *pattern);
         }
-        Ok(format!("{label}: {copied} pattern(s) updated"))
+        let take_chunks: Vec<PatternId> = self.state.with_project_scenes(|scenes| {
+            scenes
+                .take_pools
+                .get(track)
+                .map(|pool| {
+                    takes
+                        .iter()
+                        .filter_map(|id| pool.get(*id))
+                        .flat_map(|take| take.chunks.iter().copied())
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        for chunk in take_chunks {
+            self.invalidate_song_rows_for_pattern(track, chunk);
+        }
+        Ok(format!("{label}: {changed} referent(s) re-linked"))
+    }
+
+    /// The one seam every sound repoint routes through (§17.10 / macro spec
+    /// §3.6): drop the lane's device loan so the next binding sync
+    /// re-borrows the repointed sound, re-push restored defaults through the
+    /// effective (macro-aware) layer, and re-stamp lock identity so p-locks
+    /// and key locks survive the rebind (§18.2 item 6).
+    pub(crate) fn after_sound_repoint(&mut self, track: usize) {
+        if track < self.loaded_sound_binding.len() {
+            self.loaded_sound_binding[track] = None;
+        }
+        self.state.release_bound_track_device_state(track);
+        self.sync_track_sound_bindings();
+        // §3.6: re-route every restored default through the effective layer —
+        // this also revalidates macro mappings and re-asserts engaged
+        // overrides instead of letting the repoint clobber them.
+        self.push_all_restored_defaults();
+        self.re_stamp_track_lock_identity(track);
+    }
+
+    /// The `param_node_id` re-stamping pass for one track (§18.2 item 6):
+    /// re-sync every live slot against the graph's current descriptor so
+    /// restored p-locks and key locks carry ids the staleness guards accept
+    /// (`plock_variants.rs` / `audio/params.rs`). Mirrors the per-track body
+    /// of `rebind_live_track_runtime_after_delete`.
+    pub(crate) fn re_stamp_track_lock_identity(&mut self, track: usize) {
+        use std::sync::atomic::Ordering;
+        if let (Some(descs), Some(chain)) = (
+            self.graph.effect_descriptors.get(track),
+            self.state.pattern.effect_chains.get(track),
+        ) {
+            for (slot_idx, slot) in chain.iter().enumerate() {
+                let Some(desc) = descs.get(slot_idx) else {
+                    continue;
+                };
+                let node_id = slot.node_id.load(Ordering::Relaxed);
+                slot.sync_descriptor(desc, node_id);
+            }
+        }
+        if self.graph.track_instrument_types.get(track)
+            == Some(&crate::sequencer::InstrumentType::Custom)
+        {
+            if let Some(desc) = self.graph.instrument_descriptors.get(track) {
+                if let Some(slot) = self.state.pattern.instrument_slots.get(track) {
+                    let node_id = slot.node_id.load(Ordering::Relaxed);
+                    slot.sync_descriptor(desc, node_id);
+                }
+            }
+        }
     }
 
     /// Select the clip a timeline gesture picked (16.6 causes 1–2). The
@@ -763,7 +911,7 @@ pub(crate) mod tests {
             data
         };
         let take = state
-            .register_track_take(0, None, vec![chunk(), chunk()], 300)
+            .register_track_take(0, None, vec![chunk(), chunk()], 300, None)
             .expect("take registers");
         let chunks = state
             .with_project_scenes(|scenes| scenes.take_pools[0].get(take).unwrap().chunks.clone());
@@ -859,6 +1007,20 @@ pub(crate) mod tests {
             scene_before,
             "the scene pattern is never dual-written"
         );
+        // The mechanism is ref identity, not mirrored writes (§17.2): every
+        // chunk references the take's one Patch/Mix pair, and the scene
+        // pattern references a different one.
+        app.state.with_project_scenes(|scenes| {
+            let take_refs = scenes.track_pools[0].refs(chunks[0]).expect("chunk refs");
+            for chunk in &chunks {
+                assert_eq!(scenes.track_pools[0].refs(*chunk), Some(take_refs));
+            }
+            assert_ne!(
+                scenes.track_pools[0].refs(scene_pattern),
+                Some(take_refs),
+                "this take was registered with a private pair"
+            );
+        });
     }
 
     /// 16.6 cause 1: deselecting returns the binding — and the edit target —
@@ -1027,6 +1189,93 @@ pub(crate) mod tests {
         assert_eq!(instrument_default(&app, scene_pattern), target);
         assert_eq!(instrument_default(&app, chunks[0]), target);
         assert_eq!(app.history.undo_len(), depth + 1, "one undo entry");
+        // S2: push-to-pattern is a RE-LINK (§17.5) — the scene pattern and
+        // its cell now reference the take's entities, so future edits to the
+        // take's sound follow automatically.
+        app.state.with_project_scenes(|scenes| {
+            let take_refs = scenes.track_pools[0].refs(chunks[0]).expect("chunk refs");
+            assert_eq!(
+                scenes.track_pools[0].refs(scene_pattern),
+                Some(take_refs),
+                "the scene pattern re-linked to the take's refs"
+            );
+            assert_eq!(
+                scenes.scenes[scenes.current_scene].cell_sounds[0], take_refs,
+                "the cell followed its pattern"
+            );
+        });
+    }
+
+    /// Gaps hold refs (§17.3 / §18.2 item 3): when the playhead leaves the
+    /// take clip for an empty span, the binding — and the monitor — retain
+    /// the take's sound instead of resetting to the scene pattern. An empty
+    /// span is *no events*, not *no sound*.
+    #[test]
+    fn empty_spans_hold_the_last_resolved_binding() {
+        let (mut app, take, _scene_pattern, _chunks) = app_with_take();
+        // Re-shape the arrangement: the take covers [0, 8) and [8, 16) is an
+        // empty span, so the compiled song has a row whose lane resolves
+        // Empty.
+        let mut arrangement = crate::sequencer::ProjectArrangement::new(1, 16.0);
+        arrangement.track_lanes[0].push(crate::sequencer::ArrClip::new_take(
+            ClipId(0),
+            0.0,
+            8.0,
+            take.0,
+            0.0,
+        ));
+        arrangement.next_clip_id = 1;
+        app.state
+            .set_committed_arrangement(Some(arrangement))
+            .expect("arrangement installs");
+
+        app.set_use_arrangement(true).expect("song mode on");
+        app.song_transport_play(false).expect("song playback starts");
+        app.sync_track_sound_bindings();
+        assert_eq!(
+            app.track_sound_binding(0).source,
+            Some(BoundSource::Take(take)),
+            "row 0 plays the take"
+        );
+        assert!(!app.sound_binding_is_silent(0));
+
+        // The playhead reaches the empty span (the row after the clip).
+        let song = app.active_runtime_song.as_ref().expect("runtime song");
+        let empty_row = song
+            .rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row.resolved_sources.first(),
+                    Some(crate::sequencer::LaneSource::Empty)
+                )
+            })
+            .expect("the arrangement compiles an empty span row");
+        app.song_mirrored_row = Some(empty_row);
+        app.sync_track_sound_bindings();
+
+        let binding = app.track_sound_binding(0);
+        assert_eq!(
+            binding.source,
+            Some(BoundSource::Take(take)),
+            "the gap holds the last resolved source (§17.3)"
+        );
+        assert_eq!(binding.origin, BindingOrigin::Playback);
+        assert_eq!(
+            app.loaded_sound_binding[0],
+            Some(BoundSource::Take(take)),
+            "the mirror keeps the held sound loaded — no reset to scene params"
+        );
+        assert!(
+            !app.sound_binding_is_silent(0),
+            "the held sound stays the monitor: no silence in the gap"
+        );
+        app.song_transport_stop().expect("stop succeeds");
+        app.sync_track_sound_bindings();
+        assert!(
+            app.track_sound_binding(0).is_scene(),
+            "stopping clears the hold and falls back to the scene"
+        );
     }
 
     /// The common case: a plain pattern clip, not a take. Selecting one binds

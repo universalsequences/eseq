@@ -444,6 +444,10 @@ impl App {
         if !self.song_playback_authority_active() {
             return Ok(());
         }
+        // Row-transition save-back seam (takes spec 17.10): the row apply
+        // saves the outgoing scene; an engaged macro override must never be
+        // what gets persisted into the pool entities.
+        self.debug_assert_no_macro_override_leak();
         // Song-loop wrap while recording (takes spec 12): recording across
         // the wrap is disallowed — punch-out is forced at `end_beat` and
         // the pass commits what exists.
@@ -2293,7 +2297,7 @@ mod tests {
         // still audible at the scene-launch beat.
         let take_id = app
             .state
-            .register_track_take(0, None, vec![chunk], 64)
+            .register_track_take(0, None, vec![chunk], 64, None)
             .expect("take registers");
         app.arr_replace_rows(
             vec![SongRowSpec {
@@ -2489,7 +2493,7 @@ mod tests {
             // 64 steps = 16 beats at the default sixteenth timebase.
             take_ids.push(
                 app.state
-                    .register_track_take(track, None, vec![chunk], 64)
+                    .register_track_take(track, None, vec![chunk], 64, None)
                     .expect("take registers"),
             );
         }

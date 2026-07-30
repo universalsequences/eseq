@@ -148,6 +148,9 @@ impl App {
     pub(super) fn capture_synchronized_scene_structure_state(
         &mut self,
     ) -> Result<crate::sequencer::ProjectScenes, String> {
+        // Save-back seam: nothing captured here may carry an engaged macro
+        // override (takes spec 17.10) — it would persist into pool entities.
+        self.debug_assert_no_macro_override_leak();
         finish_active_gesture(self);
         self.save_current_bus_pattern();
         if !self.state.save_current_pattern_snapshot(
@@ -5168,6 +5171,9 @@ fn ensure_effective_track_pattern(
     if let Some(id) = app.state.effective_track_pattern_id(track) {
         return Some(id);
     }
+    // Capture seam (takes spec 17.10): the materialized pattern must carry
+    // base values, never an engaged macro override.
+    app.debug_assert_no_macro_override_leak();
     let snapshot = app.state.capture_current_pattern_snapshot(
         app.tracks.len(),
         &app.graph.track_buffer_ids,
@@ -5453,63 +5459,6 @@ fn restore_device_value_snapshot(
     }
 }
 
-/// Mirror a device write onto the rest of the bound take's chunks (takes
-/// spec 16.4). Every write path funnels through `restore_device_value_snapshot`,
-/// so calling this right after it keeps undo and redo fanned out too without
-/// widening the stored patch (16.8 keeps the snapshot per-chunk).
-fn fan_out_device_values_to_take_chunks(
-    app: &mut App,
-    target: ResolvedDeviceTarget,
-    snapshot: &DeviceValueSnapshot,
-) -> Result<(), EditError> {
-    // A partial fan-out would leave the chunks diverging permanently (16.4)
-    // with nothing in history recording it, so each sibling's pre-edit value
-    // is kept until the whole set has been written and the first failure
-    // rewinds the ones already touched.
-    let mut written: Vec<(ResolvedDeviceTarget, DeviceValueSnapshot)> = Vec::new();
-    for chunk in app.take_sibling_chunks(target.track, target.pattern) {
-        let sibling = ResolvedDeviceTarget {
-            pattern: chunk,
-            ..target
-        };
-        let before = match capture_device_value_snapshot(app, sibling) {
-            Ok(before) => before,
-            Err(error) => return Err(rewind_fanned_out_chunks(app, written, error)),
-        };
-        if let Err(error) = restore_device_value_snapshot(app, sibling, snapshot) {
-            return Err(rewind_fanned_out_chunks(app, written, error));
-        }
-        written.push((sibling, before));
-    }
-    // Edit-through (16.7): the playing song's prebuilt rows cloned this
-    // pattern at preflight and would otherwise keep the pre-edit sound.
-    invalidate_song_rows_for_edit(app, target.track, target.pattern);
-    Ok(())
-}
-
-/// Undo the sibling chunks a failed fan-out already wrote. The callers roll
-/// back `target` themselves; without this the take's chunks would keep two
-/// different device states.
-fn rewind_fanned_out_chunks(
-    app: &mut App,
-    written: Vec<(ResolvedDeviceTarget, DeviceValueSnapshot)>,
-    error: EditError,
-) -> EditError {
-    let mut failures = Vec::new();
-    for (sibling, before) in written.iter().rev() {
-        if let Err(rewind_error) = restore_device_value_snapshot(app, *sibling, before) {
-            failures.push(format!("chunk {}: {rewind_error:?}", sibling.pattern.0));
-        }
-    }
-    if failures.is_empty() {
-        return error;
-    }
-    EditError::ReplayFailed(format!(
-        "{error:?}; rewinding the take's other chunks also failed: {}",
-        failures.join(", ")
-    ))
-}
-
 /// Edit-through for a pool pattern the playing song may resolve: re-preflight
 /// the rows so everything the playhead has not reached becomes correct
 /// (takes spec 16.7 for device edits,
@@ -5627,9 +5576,7 @@ fn apply_recorded_device_value_commands(
     if current_before.bit_exact_eq(&after) {
         return Ok(EditOutcome::NoOp);
     }
-    if let Err(error) = restore_device_value_snapshot(app, target, &after)
-        .and_then(|_| fan_out_device_values_to_take_chunks(app, target, &after))
-    {
+    if let Err(error) = restore_device_value_snapshot(app, target, &after) {
         return Err(rollback_device_value_edit(
             app,
             target,
@@ -5637,6 +5584,9 @@ fn apply_recorded_device_value_commands(
             error,
         ));
     }
+    // One entity write reaches every referent (§17.3); edit-through (16.7)
+    // still re-preflights the playing song's prebuilt rows.
+    invalidate_song_rows_for_edit(app, target.track, target.pattern);
 
     let patch = DeviceValuesPatch {
         target: target.id,
@@ -5757,13 +5707,14 @@ pub fn apply_recorded_instrument_values_mutation(
     if before.bit_exact_eq(&after) {
         return Ok(EditOutcome::NoOp);
     }
-    if let Err(error) = restore_device_value_snapshot(app, target, &after)
-        .and_then(|_| fan_out_device_values_to_take_chunks(app, target, &after))
-    {
+    if let Err(error) = restore_device_value_snapshot(app, target, &after) {
         let _ = restore_device_value_snapshot(app, target, &before);
         let _ = push_live_device_values(app, target, Some(&before));
         return Err(error);
     }
+    // One entity write reaches every referent (§17.3); edit-through (16.7)
+    // still re-preflights the playing song's prebuilt rows.
+    invalidate_song_rows_for_edit(app, target.track, target.pattern);
     app.state.publish_scheduler_snapshot();
     let patch = DeviceValuesPatch {
         target: target.id,
@@ -6511,25 +6462,8 @@ fn finish_track_params_edit(
         ));
     }
     if bound {
-        // A bound take's chunks must never diverge (takes spec 16.4): mirror
-        // the write onto every sibling chunk, preserving each chunk's own
-        // structural fields.
-        if let Err(error) = fan_out_track_params_to_take_chunks(
-            app,
-            track,
-            pattern_id,
-            &after,
-            f32::from_bits(base_after),
-        ) {
-            return Err(rollback_track_params_edit(
-                app,
-                track,
-                pattern_id,
-                &current_before,
-                current_base_before,
-                EditError::ReplayFailed(error),
-            ));
-        }
+        // The write landed on the bound source's entities (§17.3); its take
+        // siblings share them structurally, so there is nothing to mirror.
         // Edit-through (16.7): a playing song's prebuilt rows cloned this
         // pattern at preflight and would keep the pre-edit sound.
         invalidate_song_rows_for_edit(app, track, pattern_id);
@@ -6574,31 +6508,6 @@ fn finish_track_params_edit(
         retained_bytes,
     );
     Ok(EditOutcome::Applied(move_result))
-}
-
-/// Mirror a track-params write onto the rest of the bound take's chunks
-/// (takes spec 16.4), preserving each chunk's structural fields. A no-op for
-/// pattern-clip targets (no siblings).
-fn fan_out_track_params_to_take_chunks(
-    app: &mut App,
-    track: usize,
-    pattern: crate::sequencer::PatternId,
-    after: &TrackParamsSnapshot,
-    base_after: f32,
-) -> Result<(), String> {
-    for chunk in app.take_sibling_chunks(track, pattern) {
-        let sibling_before = app.state.capture_pattern_track_params(track, chunk)?;
-        let mut sibling_after = after.clone();
-        sibling_after.num_steps = sibling_before.num_steps;
-        sibling_after.timebase = sibling_before.timebase.clone();
-        sibling_after.swing = sibling_before.swing;
-        sibling_after.swing_resolution = sibling_before.swing_resolution;
-        app.state
-            .restore_pattern_track_params_no_publish(track, chunk, &sibling_after)?;
-        app.state
-            .restore_pattern_instrument_base_note_offset_no_publish(track, chunk, base_after)?;
-    }
-    Ok(())
 }
 
 /// Track-param commands whose fields the sound-binding borrow never loads
@@ -7401,16 +7310,8 @@ fn replay_track_params_patch(
         // 5): a playing song whose rows cloned this pattern at preflight
         // must re-preflight, exactly like the do-path.
         invalidate_song_rows_for_edit(app, track, patch.target.pattern);
-        // A bound take's chunks must never diverge (takes spec 16.4): undo
-        // and redo mirror the restored params onto the sibling chunks too.
-        fan_out_track_params_to_take_chunks(
-            app,
-            track,
-            patch.target.pattern,
-            snapshot,
-            f32::from_bits(base_note_bits),
-        )
-        .map_err(EditError::ReplayFailed)?;
+        // The restore wrote the pattern's entities (§17.3), which its take
+        // siblings share structurally — no mirroring needed.
         // The live mirror may be borrowing this pattern (a bound take or
         // clip): drop the loan so the next binding sync re-borrows the
         // restored values and re-pushes them where audible.
@@ -7739,7 +7640,9 @@ fn replay_device_values_patch(
     };
     let current = capture_device_value_snapshot(app, target)?;
     let is_effective = restore_device_value_snapshot(app, target, snapshot)?;
-    fan_out_device_values_to_take_chunks(app, target, snapshot)?;
+    // One entity write reaches every referent (§17.3); the playing song's
+    // prebuilt rows still need a re-preflight (16.7).
+    invalidate_song_rows_for_edit(app, target.track, target.pattern);
     if is_effective {
         if let Err(error) = push_live_device_values(app, target, Some(snapshot)) {
             let _ = restore_device_value_snapshot(app, target, &current);

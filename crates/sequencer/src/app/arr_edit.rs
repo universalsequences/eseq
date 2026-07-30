@@ -1935,7 +1935,7 @@ mod tests {
         // 40 steps at four per beat == 10 beats of content.
         let take = app
             .state
-            .register_track_take(0, Some("Take".to_string()), vec![chunk], 40)
+            .register_track_take(0, Some("Take".to_string()), vec![chunk], 40, None)
             .expect("take registers");
         let mut arrangement = ProjectArrangement::new(2, 64.0);
         let id = arrangement.allocate_clip_id().expect("clip id");
