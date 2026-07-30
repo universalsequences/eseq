@@ -664,6 +664,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                     .load(Ordering::Relaxed),
             ),
         ),
+        trigger.velocity,
         &active_voices[..active_voice_count],
     );
     true

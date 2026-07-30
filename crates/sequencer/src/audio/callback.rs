@@ -236,6 +236,7 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     kt.track,
                     kt.transpose,
                     midi_note_from_transpose(resolved_transpose, base_note_offset),
+                    kt.velocity,
                     &[ActiveKeyboardVoice {
                         logical_id: voice_lid,
                         gatepitch_id: 0,
@@ -367,12 +368,16 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     kt.track,
                     kt.transpose,
                     midi_note_from_transpose(resolved_transpose, base_note_offset),
+                    kt.velocity,
                     &[ActiveKeyboardVoice {
                         logical_id: voice_lid,
                         gatepitch_id: voice.gatepitch_id,
                         target: ActiveKeyboardVoiceTarget::Sampler { pool_id: kt.track },
                     }],
                 );
+            }
+            if let Some(note) = midi_note_from_transpose(resolved_transpose, base_note_offset) {
+                data.state.mark_live_note_trigger(kt.track, note);
             }
             data.state.transport.trigger_flash[kt.track].store(255, Ordering::Relaxed);
         }
@@ -382,7 +387,11 @@ pub(super) fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             track,
             data.active_keyboard_notes[track]
                 .iter()
-                .filter_map(|note| note.and_then(|note| note.midi_note)),
+                .filter_map(|note| {
+                    note.and_then(|note| {
+                        note.midi_note.map(|midi_note| (midi_note, note.velocity))
+                    })
+                }),
         );
     }
     if processed_keyboard_trigger {

@@ -25,16 +25,33 @@
     fn active_notes_merge_scheduled_expirations_with_live_note_state() {
         let state = SequencerState::new(1, vec![vec![]]);
         state.set_audio_rendered_sample(100);
-        state.mark_scheduled_note_active_until(0, 60, 200);
-        state.replace_live_notes(0, [64]);
+        state.mark_scheduled_note_active_until(0, 60, 200, 0.4);
+        state.mark_live_note_trigger(0, 64);
+        state.replace_live_notes(0, [(64, 0.7)]);
         assert_eq!(state.active_notes(0), vec![60, 64]);
+        assert_eq!(
+            state.active_note_activity(0),
+            vec![
+                ActiveNoteActivity {
+                    note: 60,
+                    velocity: 0.4,
+                    trigger_id: 1,
+                },
+                ActiveNoteActivity {
+                    note: 64,
+                    velocity: 0.7,
+                    trigger_id: 2,
+                },
+            ]
+        );
 
         state.set_audio_rendered_sample(200);
         assert_eq!(state.active_notes(0), vec![64]);
 
-        state.mark_scheduled_note_active_until(0, 64, 300);
+        state.mark_scheduled_note_active_until(0, 64, 300, 0.5);
         state.replace_live_notes(0, []);
         assert_eq!(state.active_notes(0), vec![64]);
+        assert_eq!(state.active_note_activity(0)[0].trigger_id, 3);
 
         state.set_audio_rendered_sample(300);
         assert!(state.active_notes(0).is_empty());

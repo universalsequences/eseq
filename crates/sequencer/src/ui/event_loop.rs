@@ -93,6 +93,7 @@ pub(crate) fn run_event_loop(
         prev_sound_binding_epoch: 0,
         prev_focus_clip_surface: (None, None, u64::MAX),
         prev_instrument_active_notes: Vec::new(),
+        prev_track_active_notes: Vec::new(),
         prev_active_buffer_name: editor.active_buffer().name.clone(),
         prev_selected_neural_neurons: shared.selected_neural_neurons.lock().unwrap().clone(),
         prev_agent_generation_watermark: agent_generation_watermark(&app),

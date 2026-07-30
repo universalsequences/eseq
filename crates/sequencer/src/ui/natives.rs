@@ -2346,6 +2346,10 @@ pub(crate) fn init_runtime(
                     },
                 ),
                 ("instrument-active-notes", Value::List(vec![])),
+                (
+                    "track-active-notes",
+                    build_track_active_notes_value(&state, track_count),
+                ),
                 ("track-params", build_track_params(&state, 0)),
                 (
                     "tp-attack",

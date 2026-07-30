@@ -114,6 +114,7 @@
     (list 1 0 0 0 0 0 0 0)))
 
 (defstate g8-weights (list))
+(defstate g8-piano-press-depth 1.0)
 
 (def g8-read-weights ()
   (map
@@ -252,7 +253,7 @@
     (label "res"    :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
     (label "quant"  :width g8-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)))
 
-(def g8-panel (current-pattern graph-visualizations track-events track-event-current-beat track-colors)
+(def g8-panel (current-pattern graph-visualizations track-events track-event-current-beat track-colors track-active-notes)
   (do
     ;; Re-derive the matrix snapshot from the resolved current-pattern graph. The
     ;; per-node knobs need no sync — `bind-graph` re-seeds their slots as the rows
@@ -283,6 +284,11 @@
                     (g8-num "graph-8x8-max-poly"
                       (bind-graph-config g8-name :max-poly) 0 16 1 0
                       (lambda (v) (g8-edit-config :max-poly v))))
+                  (v-stack :gap 0.1 :align :center
+                    (label "key press" :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
+                    (g8-num "graph-8x8-piano-press-depth"
+                      g8-piano-press-depth 0 2 0.05 2
+                      (lambda (v) (set! g8-piano-press-depth v))))
                   ))
               (matrix
                 :key "graph-8x8-dampening-matrix"
@@ -397,8 +403,23 @@
                   (do
                     (set! g8-weights (g8-set-cell g8-weights r c v))
                     (graph-edge g8-name :from r :to c :weight v))))))
-          (v-stack :gap 0.5
-            ))))))
+          (box
+            :debug-name "graph-8x8-piano-panel"
+            :padding 0.55
+            :background-color :mixer-strip-bg
+            :border-color :mixer-strip-border
+            :corner-radius 12
+            (piano-keyboard
+              :key "graph-8x8-piano"
+              :notes-by-track track-active-notes
+              :track-colors track-colors
+              :tracks (range 0 g8-node-count)
+              :overlap-mode :loudest
+              :press-depth g8-piano-press-depth
+              :start-note 24
+              :key-count 80
+              :width 84
+              :height 4.5)))))))
 
-(effect-buffer "*8x8*" (g8-panel SEQ.current-pattern SEQ.graph-visualizations SEQ.track-events SEQ.track-event-current-beat SEQ.track-colors))
+(effect-buffer "*8x8*" (g8-panel SEQ.current-pattern SEQ.graph-visualizations SEQ.track-events SEQ.track-event-current-beat SEQ.track-colors SEQ.track-active-notes))
 (seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

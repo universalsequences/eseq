@@ -17,6 +17,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "vslider",
     "toggle",
     "event-view",
+    "piano-keyboard",
     "matrix",
     "knob",
     "knob-number",

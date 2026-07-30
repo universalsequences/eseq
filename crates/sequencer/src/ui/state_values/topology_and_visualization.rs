@@ -304,6 +304,40 @@ pub(crate) fn build_active_notes_value(notes: &[u8]) -> Value {
     )
 }
 
+pub(crate) fn build_track_active_notes_value(
+    state: &Arc<SequencerState>,
+    track_count: usize,
+) -> Value {
+    let notes_by_track: Vec<Vec<sequencer::sequencer::ActiveNoteActivity>> = (0..track_count)
+        .map(|track| state.active_note_activity(track))
+        .collect();
+    build_track_active_notes_snapshot_value(&notes_by_track)
+}
+
+pub(crate) fn build_track_active_notes_snapshot_value(
+    notes_by_track: &[Vec<sequencer::sequencer::ActiveNoteActivity>],
+) -> Value {
+    Value::List(
+        notes_by_track
+            .iter()
+            .map(|notes| {
+                Rc::new(RefCell::new(Value::List(
+                    notes
+                        .iter()
+                        .map(|activity| {
+                            Rc::new(RefCell::new(map_value([
+                                ("note", Value::Number(activity.note as f64)),
+                                ("velocity", Value::Number(activity.velocity as f64)),
+                                ("trigger-id", Value::Number(activity.trigger_id as f64)),
+                            ])))
+                        })
+                        .collect(),
+                )))
+            })
+            .collect(),
+    )
+}
+
 pub(super) fn track_output_event_value(event: sequencer::sequencer::TrackOutputEvent) -> Value {
     map_value([
         ("node", Value::Nil),

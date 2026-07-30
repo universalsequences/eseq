@@ -82,6 +82,7 @@ pub(crate) struct FrameDiffState {
     /// spec alone is not enough to decide whether they need republishing.
     pub(crate) prev_focus_clip_surface: (Option<(usize, u64)>, Option<&'static str>, u64),
     pub(crate) prev_instrument_active_notes: Vec<u8>,
+    pub(crate) prev_track_active_notes: Vec<Vec<sequencer::sequencer::ActiveNoteActivity>>,
     pub(crate) prev_active_buffer_name: String,
     pub(crate) prev_selected_neural_neurons:
         BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,

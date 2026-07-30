@@ -242,9 +242,16 @@ impl SequencerState {
             active_note_until_samples: (0..MAX_TRACKS)
                 .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
                 .collect(),
-            live_note_masks: (0..MAX_TRACKS)
+            active_note_velocity_bits: (0..MAX_TRACKS)
+                .map(|_| std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())))
+                .collect(),
+            live_note_velocity_bits: (0..MAX_TRACKS)
+                .map(|_| std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())))
+                .collect(),
+            active_note_trigger_ids: (0..MAX_TRACKS)
                 .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
                 .collect(),
+            active_note_trigger_sequence: AtomicU64::new(0),
             audio_rendered_sample: AtomicU64::new(0),
             scheduler_rendered_beats_bits: AtomicU64::new(0.0_f64.to_bits()),
             scratch_source: Mutex::new(String::new()),

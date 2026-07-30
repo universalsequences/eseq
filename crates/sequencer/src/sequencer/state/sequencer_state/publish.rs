@@ -78,41 +78,103 @@ impl SequencerState {
 
     /// Keep a scheduled MIDI note active through its gate end. `fetch_max`
     /// preserves overlapping/retriggered instances of the same pitch.
-    pub fn mark_scheduled_note_active_until(&self, track: usize, note: u8, sample: u64) {
-        if let Some(notes) = self.active_note_until_samples.get(track) {
-            notes[note as usize].fetch_max(sample, Ordering::Relaxed);
-        }
-    }
-
-    /// Live notes have explicit note-off events, so replace their compact mask
-    /// independently from scheduled expirations. The two sources can overlap.
-    pub fn replace_live_notes(&self, track: usize, notes: impl IntoIterator<Item = u8>) {
-        let Some(words) = self.live_note_masks.get(track) else {
+    pub fn mark_scheduled_note_active_until(
+        &self,
+        track: usize,
+        note: u8,
+        sample: u64,
+        velocity: f32,
+    ) {
+        let (Some(notes), Some(velocities)) = (
+            self.active_note_until_samples.get(track),
+            self.active_note_velocity_bits.get(track),
+        ) else {
             return;
         };
-        let mut next = [0_u64; 2];
-        for note in notes {
-            next[note as usize / 64] |= 1_u64 << (note as usize % 64);
+        velocities[note as usize].store(velocity.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        self.mark_note_trigger(track, note);
+        notes[note as usize].fetch_max(sample, Ordering::Release);
+    }
+
+    /// Publish a live note-on independently from the live active-note snapshot.
+    /// This preserves retrigger edges when a pitch remains active continuously.
+    pub fn mark_live_note_trigger(&self, track: usize, note: u8) {
+        self.mark_note_trigger(track, note);
+    }
+
+    fn mark_note_trigger(&self, track: usize, note: u8) {
+        let Some(trigger_ids) = self.active_note_trigger_ids.get(track) else {
+            return;
+        };
+        let trigger_id = self
+            .active_note_trigger_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        trigger_ids[note as usize].store(trigger_id, Ordering::Release);
+    }
+
+    /// Live notes have explicit note-off events, so replace their velocity
+    /// table independently from scheduled expirations. Zero means inactive;
+    /// the two sources can overlap.
+    pub fn replace_live_notes(
+        &self,
+        track: usize,
+        notes: impl IntoIterator<Item = (u8, f32)>,
+    ) {
+        let Some(velocities) = self.live_note_velocity_bits.get(track) else {
+            return;
+        };
+        let mut next_velocities = [0.0_f32; 128];
+        for (note, velocity) in notes {
+            next_velocities[note as usize] =
+                next_velocities[note as usize].max(velocity.clamp(0.0, 1.0));
         }
-        for (word, value) in words.iter().zip(next) {
-            word.store(value, Ordering::Release);
+        for (slot, velocity) in velocities.iter().zip(next_velocities) {
+            slot.store(velocity.to_bits(), Ordering::Release);
         }
     }
 
     pub fn active_notes(&self, track: usize) -> Vec<u8> {
-        let (Some(until), Some(live)) = (
+        self.active_note_activity(track)
+            .into_iter()
+            .map(|activity| activity.note)
+            .collect()
+    }
+
+    pub fn active_note_activity(&self, track: usize) -> Vec<ActiveNoteActivity> {
+        let (
+            Some(until),
+            Some(scheduled_velocities),
+            Some(live_velocities),
+            Some(trigger_ids),
+        ) = (
             self.active_note_until_samples.get(track),
-            self.live_note_masks.get(track),
+            self.active_note_velocity_bits.get(track),
+            self.live_note_velocity_bits.get(track),
+            self.active_note_trigger_ids.get(track),
         ) else {
             return Vec::new();
         };
         let rendered = self.audio_rendered_sample.load(Ordering::Acquire);
         (0_u8..=127)
-            .filter(|note| {
-                let idx = *note as usize;
-                let bit = 1_u64 << (idx % 64);
-                live[idx / 64].load(Ordering::Relaxed) & bit != 0
-                    || until[idx].load(Ordering::Relaxed) > rendered
+            .filter_map(|note| {
+                let idx = note as usize;
+                let scheduled_active = until[idx].load(Ordering::Acquire) > rendered;
+                let live_velocity =
+                    f32::from_bits(live_velocities[idx].load(Ordering::Acquire)).clamp(0.0, 1.0);
+                if live_velocity <= 0.0 && !scheduled_active {
+                    return None;
+                }
+                let scheduled_velocity = if scheduled_active {
+                    f32::from_bits(scheduled_velocities[idx].load(Ordering::Relaxed))
+                } else {
+                    0.0
+                };
+                Some(ActiveNoteActivity {
+                    note,
+                    velocity: scheduled_velocity.max(live_velocity).clamp(0.0, 1.0),
+                    trigger_id: trigger_ids[idx].load(Ordering::Acquire),
+                })
             })
             .collect()
     }

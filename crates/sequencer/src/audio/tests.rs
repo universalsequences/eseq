@@ -590,11 +590,12 @@ fn active_keyboard_note_stores_all_rack_slot_voices_for_one_key() {
         },
     ];
 
-    store_active_keyboard_note(&mut notes, 0, 3.0, Some(63), &voices);
+    store_active_keyboard_note(&mut notes, 0, 3.0, Some(63), 0.7, &voices);
     let note = take_active_keyboard_note(&mut notes, 0, 3.0).unwrap();
 
     assert_eq!(note.source_transpose, 3.0);
     assert_eq!(note.midi_note, Some(63));
+    assert_eq!(note.velocity, 0.7);
     assert_eq!(note.voices(), &voices);
 }
 
@@ -622,7 +623,7 @@ fn active_keyboard_note_clear_by_lid_preserves_other_slot_voices() {
         },
     ];
 
-    store_active_keyboard_note(&mut notes, 0, 3.0, Some(63), &voices);
+    store_active_keyboard_note(&mut notes, 0, 3.0, Some(63), 0.7, &voices);
     clear_active_keyboard_note_by_lid(&mut notes, 12);
     let note = take_active_keyboard_note(&mut notes, 0, 3.0).unwrap();
 

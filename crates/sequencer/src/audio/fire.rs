@@ -53,6 +53,7 @@ pub(super) fn mark_resolved_note_activity(
             track_idx,
             note,
             start_sample.saturating_add(gate_samples),
+            resolved.velocity,
         );
     };
 

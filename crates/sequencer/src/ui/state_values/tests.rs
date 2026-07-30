@@ -5296,6 +5296,53 @@
         names
     }
 
+    #[test]
+    fn track_active_notes_value_preserves_source_track_boundaries() {
+        let value = build_track_active_notes_snapshot_value(&[
+            vec![
+                sequencer::sequencer::ActiveNoteActivity {
+                    note: 36,
+                    velocity: 0.25,
+                    trigger_id: 101,
+                },
+                sequencer::sequencer::ActiveNoteActivity {
+                    note: 60,
+                    velocity: 0.75,
+                    trigger_id: 102,
+                },
+            ],
+            vec![],
+            vec![sequencer::sequencer::ActiveNoteActivity {
+                note: 64,
+                velocity: 1.0,
+                trigger_id: 103,
+            }],
+        ]);
+        assert_eq!(
+            value,
+            test_list(vec![
+                test_list(vec![
+                    map_value([
+                        ("note", Value::Number(36.0)),
+                        ("velocity", Value::Number(0.25)),
+                        ("trigger-id", Value::Number(101.0)),
+                    ]),
+                    map_value([
+                        ("note", Value::Number(60.0)),
+                        ("velocity", Value::Number(0.75)),
+                        ("trigger-id", Value::Number(102.0)),
+                    ]),
+                ]),
+                test_list(vec![]),
+                test_list(vec![map_value([
+                    ("note", Value::Number(64.0)),
+                    ("velocity", Value::Number(1.0)),
+                    ("trigger-id", Value::Number(103.0)),
+                ])]),
+            ])
+        );
+    }
+
     fn tile_tabs_for_buffer(editor: &eseqlisp::Editor, buffer_name: &str) -> Vec<(String, String)> {
         let buffer_idx = editor
             .buffers

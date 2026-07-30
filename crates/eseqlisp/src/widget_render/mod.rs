@@ -25,6 +25,7 @@ pub mod multiband_meter;
 pub mod number_label;
 pub mod number_picker;
 pub mod patcher;
+pub mod piano_keyboard;
 pub mod phaser_notch;
 pub mod response_curve_editor;
 pub mod roar_filter;
@@ -931,6 +932,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &button::BUTTON_WIDGET,
     &toggle::TOGGLE_WIDGET,
     &event_view::EVENT_VIEW_WIDGET,
+    &piano_keyboard::PIANO_KEYBOARD_WIDGET,
     &matrix::MATRIX_WIDGET,
     &knob::KNOB_WIDGET,
     &knob_number::KNOB_NUMBER_WIDGET,

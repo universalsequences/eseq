@@ -97,8 +97,28 @@ pub(crate) fn reactive_tick_and_render(
         let mut needs_reactive_cycle = false;
         let mut refresh_visible_step_after_cycle = false;
         let selected_neural_snapshot = ctx.shared.selected_neural_neurons.lock().unwrap().clone();
+        let track_active_notes: Vec<Vec<sequencer::sequencer::ActiveNoteActivity>> =
+            (0..app.tracks.len())
+            .map(|track| ctx.shared.state.active_note_activity(track))
+            .collect();
+        if track_active_notes != ctx.frame.prev_track_active_notes {
+            needs_reactive_cycle |= editor
+                .runtime_mut()
+                .set_reactive(
+                    "SEQ",
+                    "track-active-notes",
+                    build_track_active_notes_snapshot_value(&track_active_notes),
+                )
+                .effects_dirty;
+            ctx.frame.prev_track_active_notes = track_active_notes.clone();
+        }
         if fx_visible {
-            let active_notes = ctx.shared.state.active_notes(ct);
+            let active_notes: Vec<u8> = track_active_notes
+                .get(ct)
+                .into_iter()
+                .flatten()
+                .map(|activity| activity.note)
+                .collect();
             if active_notes != ctx.frame.prev_instrument_active_notes {
                 needs_reactive_cycle |= editor
                     .runtime_mut()

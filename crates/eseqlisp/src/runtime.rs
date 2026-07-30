@@ -1645,6 +1645,7 @@ impl Runtime {
             "hslider",
             "vslider",
             "toggle",
+            "piano-keyboard",
             "matrix",
             "knob",
             "knob-number",

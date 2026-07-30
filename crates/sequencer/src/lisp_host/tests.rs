@@ -1290,6 +1290,17 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             vec![
                 ("current-pattern", Value::Number(0.0)),
                 ("graph-visualizations", Value::List(Vec::new())),
+                ("track-events", Value::List(Vec::new())),
+                ("track-event-current-beat", Value::Number(0.0)),
+                ("track-colors", Value::List(Vec::new())),
+                (
+                    "track-active-notes",
+                    Value::List(
+                        (0..8)
+                            .map(|_| Rc::new(RefCell::new(Value::List(Vec::new()))))
+                            .collect(),
+                    ),
+                ),
             ],
             true,
         );
@@ -1358,6 +1369,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "graph-8x8-dampening-matrix",
             "graph-8x8-event-view",
             "graph-8x8-track-event-view",
+            "graph-8x8-piano",
         ] {
             let widget =
                 find_by_stable_key(&layout, key).unwrap_or_else(|| panic!("missing widget {key}"));
@@ -1366,16 +1378,91 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let mut event_views = Vec::new();
         collect_widgets(&layout, "event-view", &mut event_views);
         assert_eq!(event_views.len(), 2, "expected two event-view widgets");
+        let mut piano_keyboards = Vec::new();
+        collect_widgets(&layout, "piano-keyboard", &mut piano_keyboards);
+        assert_eq!(
+            piano_keyboards.len(),
+            1,
+            "expected one aggregate track piano keyboard"
+        );
+        assert_eq!(
+            piano_keyboards[0].props.get("key-count"),
+            Some(&Value::Number(80.0))
+        );
+        assert_eq!(
+            piano_keyboards[0].props.get("tracks"),
+            Some(&Value::List(
+                (0..8)
+                    .map(|track| Rc::new(RefCell::new(Value::Number(track as f64))))
+                .collect(),
+            ))
+        );
+        assert_eq!(
+            piano_keyboards[0].props.get("overlap-mode"),
+            Some(&Value::Keyword("loudest".to_string()))
+        );
+        let activity = |note: f64, velocity: f64| {
+            Rc::new(RefCell::new(Value::Map(std::collections::HashMap::from([
+                (
+                    "note".to_string(),
+                    Rc::new(RefCell::new(Value::Number(note))),
+                ),
+                (
+                    "velocity".to_string(),
+                    Rc::new(RefCell::new(Value::Number(velocity))),
+                ),
+                (
+                    "trigger-id".to_string(),
+                    Rc::new(RefCell::new(Value::Number(note))),
+                ),
+            ]))))
+        };
+        let active_notes = Value::List(
+            (0..8)
+                .map(|track| {
+                    Rc::new(RefCell::new(Value::List(
+                        if track == 0 {
+                            vec![activity(60.0, 0.4)]
+                        } else if track == 7 {
+                            vec![activity(60.0, 0.9), activity(67.0, 0.7)]
+                        } else {
+                            Vec::new()
+                        },
+                    )))
+                })
+                .collect(),
+        );
+        runtime.set_reactive("SEQ", "track-active-notes", active_notes.clone());
+        runtime.run_reactive_cycle();
+        let updated_tree = runtime
+            .take_pending_buffer_widget_trees()
+            .into_iter()
+            .rev()
+            .find_map(|pending| match pending {
+                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
+            })
+            .expect("active-note update should republish the graph keyboard");
+        let updated_layout = runtime
+            .layout_snapshot_for_tree_with_viewport(&updated_tree, Some((40.0, 48.0)))
+            .expect("updated graph keyboard should lay out");
+        let updated_piano = find_by_stable_key(&updated_layout, "graph-8x8-piano")
+            .expect("updated piano stable key");
+        assert_eq!(
+            updated_piano.props.get("notes-by-track"),
+            Some(&active_notes),
+            "aggregate note activity must reach the piano widget reactively"
+        );
 
         // Five number-pickers per node (delay + transpose + vel-decay + dampening +
-        // recovery) plus the two top-of-panel config pickers (reset-bars + max-poly);
-        // three dropdowns per node (route + resolution + quantize).
+        // recovery) plus the three top-of-panel pickers (reset-bars + max-poly +
+        // piano press depth); three dropdowns per node (route + resolution + quantize).
         let mut pickers = Vec::new();
         collect_widgets(&layout, "number-picker", &mut pickers);
         assert_eq!(
             pickers.len(),
-            8 * 5 + 2,
-            "expected delay/transpose/vel/dampening/recovery per node + reset-bars + max-poly"
+            8 * 5 + 3,
+            "expected per-node controls + reset-bars + max-poly + piano press depth"
         );
         let mut dropdowns = Vec::new();
         collect_widgets(&layout, "dropdown", &mut dropdowns);
@@ -1384,7 +1471,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             24,
             "expected route + resolution + quantize per node"
         );
-        for key in ["graph-8x8-reset-bars", "graph-8x8-max-poly"] {
+        for key in [
+            "graph-8x8-reset-bars",
+            "graph-8x8-max-poly",
+            "graph-8x8-piano-press-depth",
+        ] {
             let widget = find_by_stable_key(&layout, key)
                 .unwrap_or_else(|| panic!("missing config control {key}"));
             assert_measured(widget);

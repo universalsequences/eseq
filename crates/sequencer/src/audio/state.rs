@@ -35,6 +35,7 @@ pub(super) struct ActiveKeyboardVoice {
 pub(super) struct ActiveKeyboardNote {
     pub(super) source_transpose: f32,
     pub(super) midi_note: Option<u8>,
+    pub(super) velocity: f32,
     pub(super) voice_count: u8,
     pub(super) voices: [ActiveKeyboardVoice; MAX_RACK_SLOTS],
 }
@@ -43,6 +44,7 @@ impl ActiveKeyboardNote {
     pub(super) fn new(
         source_transpose: f32,
         midi_note: Option<u8>,
+        velocity: f32,
         voices: &[ActiveKeyboardVoice],
     ) -> Option<Self> {
         if voices.is_empty() {
@@ -51,6 +53,7 @@ impl ActiveKeyboardNote {
         let mut note = Self {
             source_transpose,
             midi_note,
+            velocity: velocity.clamp(0.0, 1.0),
             voice_count: 0,
             voices: [ActiveKeyboardVoice::default(); MAX_RACK_SLOTS],
         };
@@ -213,9 +216,10 @@ pub(super) fn store_active_keyboard_note(
     track_idx: usize,
     source_transpose: f32,
     midi_note: Option<u8>,
+    velocity: f32,
     voices: &[ActiveKeyboardVoice],
 ) {
-    let Some(note) = ActiveKeyboardNote::new(source_transpose, midi_note, voices) else {
+    let Some(note) = ActiveKeyboardNote::new(source_transpose, midi_note, velocity, voices) else {
         return;
     };
     for voice in voices {

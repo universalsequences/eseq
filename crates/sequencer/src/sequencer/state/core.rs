@@ -248,7 +248,10 @@ pub struct SequencerState {
     pub(super) track_output_events: Mutex<Vec<TrackOutputEvent>>,
     pub(super) track_output_current_beat_bits: AtomicU64,
     pub(super) active_note_until_samples: Vec<[AtomicU64; 128]>,
-    pub(super) live_note_masks: Vec<[AtomicU64; 2]>,
+    pub(super) active_note_velocity_bits: Vec<[AtomicU32; 128]>,
+    pub(super) live_note_velocity_bits: Vec<[AtomicU32; 128]>,
+    pub(super) active_note_trigger_ids: Vec<[AtomicU64; 128]>,
+    pub(super) active_note_trigger_sequence: AtomicU64,
     pub(super) audio_rendered_sample: AtomicU64,
     /// The scheduler's rendered-beat clock (`rendered_total_beats` in
     /// scheduler/worker.rs), published every scheduler loop. This is the same
@@ -316,6 +319,15 @@ pub struct TrackOutputEvent {
     pub beat: f64,
     pub transpose: f32,
     pub velocity: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ActiveNoteActivity {
+    pub note: u8,
+    pub velocity: f32,
+    /// Monotonic identity of the most recent note-on for this track and pitch.
+    /// A changed ID is an onset even when the note never left the active set.
+    pub trigger_id: u64,
 }
 
 pub(super) const TRACK_OUTPUT_EVENT_HISTORY_CAP: usize = 1024;
