@@ -64,25 +64,22 @@ impl SequencerState {
 
     /// Grow the scene/pool bookkeeping to cover a newly added track.
     ///
-    /// Bare tracks (takes spec 11.1, scoped): a new track materializes
-    /// exactly ONE pattern — into the CURRENT scene's cell — and gets a
-    /// `None` cell in every other scene, instead of the historical
-    /// one-pattern-per-scene seeding. The timeline therefore shows the new
-    /// lane empty everywhere the current scene doesn't play, and other
-    /// scenes stay bare until the user puts content there.
+    /// EVERY scene eagerly materializes its own pattern for the new track,
+    /// mirroring `new_scene`'s fork-per-track seeding: a scene must always
+    /// resolve a pattern + sound for every track, or the track's device
+    /// simply vanishes whenever that scene is current (a `None` cell blanks
+    /// the live mirror on launch, so instrument slots report zero params
+    /// and every knob edit is rejected). Scenes the user doesn't want the
+    /// track to play in stay silent naturally — the seeded patterns have no
+    /// steps — and arrangement-level silence is expressed by deleting the
+    /// stamped clips (explicit-empty overrides), never by bare cells.
+    /// Deliberate cell clearing (`clear_scene_cell`) remains the only
+    /// producer of `None` cells.
     ///
     /// If an arrangement is committed, this operation also appends its
-    /// first-class track lane and stamps that one materialized scene cell
-    /// across every matching scene span. The arrangement and its compiled
-    /// song are installed together before the new track count is published.
-    ///
-    /// The single current-scene pattern is deliberate, not an oversight:
-    /// device-value edits, track-creation history capture
-    /// (`capture_track_instrument_pattern_state`), and the rack rebuild
-    /// machinery all key on the track's effective pattern, so a track with
-    /// an empty pool cannot be edited or even committed to history. Fully
-    /// bare tracks (empty pool) need that machinery decoupled from pattern
-    /// data first — deferred alongside the take-pool work (spec Phase C).
+    /// first-class track lane and stamps every scene span with that scene's
+    /// materialized cell. The arrangement and its compiled song are
+    /// installed together before the new track count is published.
     pub fn extend_all_pattern_snapshots_to_track(
         &self,
         track_count: usize,
@@ -120,21 +117,29 @@ impl SequencerState {
                 scenes.scenes[scene_idx].cell_sounds.push(refs);
             }
         }
-        let current_scene = scenes.current_scene;
-        let mut materialized = None;
-        if let Some(scene) = scenes.scenes.get(current_scene) {
-            if scene.cells.get(track).copied().flatten().is_none() {
-                let id = scenes.track_pools[track].insert(default_data);
-                let refs = scenes.track_pools[track].refs(id);
-                scenes.scenes[current_scene].cells[track] = Some(id);
-                if let (Some(refs), Some(cell_sound)) = (
-                    refs,
-                    scenes.scenes[current_scene].cell_sounds.get_mut(track),
-                ) {
-                    *cell_sound = refs;
-                }
-                materialized = Some(id);
+        // One private pattern per scene (each insert mints its own
+        // Patch + Mix), so per-scene device/mixer divergence works for the
+        // new track exactly as it does for tracks that predate a scene.
+        let mut materialized = Vec::new();
+        for scene_idx in 0..scenes.scenes.len() {
+            let has_cell = scenes.scenes[scene_idx]
+                .cells
+                .get(track)
+                .copied()
+                .flatten()
+                .is_some();
+            if has_cell {
+                continue;
             }
+            let id = scenes.track_pools[track].insert(default_data.clone());
+            let refs = scenes.track_pools[track].refs(id);
+            scenes.scenes[scene_idx].cells[track] = Some(id);
+            if let (Some(refs), Some(cell_sound)) =
+                (refs, scenes.scenes[scene_idx].cell_sounds.get_mut(track))
+            {
+                *cell_sound = refs;
+            }
+            materialized.push((scene_idx, id));
         }
         drop(scenes);
         if let Some(committed) = arrangement.as_mut() {
@@ -144,10 +149,12 @@ impl SequencerState {
                 })?;
                 self.set_committed_arrangement(arrangement)?;
             }
-        } else if let Some(id) = materialized {
+        } else {
             // Legacy/direct row-model callers have no authored arrangement
             // to extend. Preserve their free-run stamps.
-            self.stamp_free_run_song_offsets_for_new_lane(track, current_scene, id);
+            for (scene_idx, id) in materialized {
+                self.stamp_free_run_song_offsets_for_new_lane(track, scene_idx, id);
+            }
         }
         Ok(())
     }

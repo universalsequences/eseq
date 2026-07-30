@@ -5725,8 +5725,8 @@
             loop_enabled: false,
             next_row_id: 4,
         }));
-        // Adding a track while on scene 0 materializes its current-scene
-        // pattern and stamps the song rows referencing scene 0.
+        // Adding a track materializes a pattern in EVERY scene and stamps
+        // the off-grid song rows of each scene with that scene's pattern.
         state.extend_all_pattern_snapshots_to_track(
             3,
             &[],
@@ -5735,6 +5735,12 @@
             None,
         )
         .unwrap();
+        let (scene0_pattern, scene1_pattern) = state.with_project_scenes(|scenes| {
+            (
+                scenes.scenes[0].cells[2].expect("scene 0 cell"),
+                scenes.scenes[1].cells[2].expect("scene 1 cell"),
+            )
+        });
         let song = state.committed_song().expect("song");
         let lane = |idx: usize| {
             song.rows[idx]
@@ -5744,8 +5750,11 @@
                 .copied()
         };
         assert_eq!(lane(0), None, "beat 0 is grid-aligned: no override");
-        assert_eq!(lane(1), None, "scene 1 rows are untouched");
+        let stamped_scene1 = lane(1).expect("off-grid scene 1 row is stamped");
+        assert_eq!(stamped_scene1.pattern_id, Some(scene1_pattern.0));
+        assert!((stamped_scene1.offset_steps - (4.7 * 4.0) % 16.0).abs() < 1e-9);
         let stamped = lane(2).expect("off-grid scene 0 row is stamped");
+        assert_eq!(stamped.pattern_id, Some(scene0_pattern.0));
         assert!((stamped.offset_steps - (9.3 * 4.0) % 16.0).abs() < 1e-9);
         assert_eq!(lane(3), None, "beat 12 is grid-aligned: no override");
     }
@@ -5796,13 +5805,25 @@
             "the arrangement topology follows the project topology"
         );
         let lane = &arrangement.track_lanes[2];
-        assert_eq!(lane.len(), 2, "only the current scene's spans are stamped");
+        assert_eq!(lane.len(), 3, "every scene span is stamped");
         assert_eq!((lane[0].start_beat, lane[0].end_beat), (0.0, 4.7));
-        assert_eq!((lane[1].start_beat, lane[1].end_beat), (9.3, 16.0));
-        assert_eq!(lane[0].pattern_id, lane[1].pattern_id);
+        assert_eq!((lane[1].start_beat, lane[1].end_beat), (4.7, 9.3));
+        assert_eq!((lane[2].start_beat, lane[2].end_beat), (9.3, 16.0));
+        assert_eq!(
+            lane[0].pattern_id, lane[2].pattern_id,
+            "spans of the same scene share that scene's pattern"
+        );
+        assert_ne!(
+            lane[0].pattern_id, lane[1].pattern_id,
+            "each scene materializes its own pattern for the new track"
+        );
         assert_eq!(lane[0].offset_steps, 0.0);
         assert!(
-            (lane[1].offset_steps - (9.3 * 4.0) % 16.0).abs() < 1e-9,
+            (lane[1].offset_steps - (4.7 * 4.0) % 16.0).abs() < 1e-9,
+            "the scene 1 span keeps global free-run phase"
+        );
+        assert!(
+            (lane[2].offset_steps - (9.3 * 4.0) % 16.0).abs() < 1e-9,
             "the later scene span keeps global free-run phase"
         );
         state.with_project_scenes(|scenes| {
@@ -5817,11 +5838,12 @@
     }
 
     #[test]
-    fn added_track_is_bare_outside_the_current_scene() {
-        // Bare tracks (takes spec 11.1, scoped): growing to a new track
-        // materializes exactly one pattern in the CURRENT scene (the
-        // effective-pattern anchor device edits and history need) and a
-        // None cell in every other scene.
+    fn added_track_materializes_a_pattern_in_every_scene() {
+        // A scene must always resolve a pattern + sound for every track: a
+        // None cell blanks the track's live mirror on launch, so its device
+        // disappears (zero-param instrument slot rejects every knob edit).
+        // Growing to a new track therefore seeds one private pattern per
+        // scene, mirroring new_scene's fork-per-track seeding.
         let state = SequencerState::new(2, vec![vec![], vec![]]);
         state.with_scenes_mut(|scenes| {
             let snapshots = vec![
@@ -5841,15 +5863,23 @@
         state.with_project_scenes(|scenes| {
             assert_eq!(
                 scenes.track_pools[2].patterns.len(),
-                1,
-                "one pattern for the current scene only"
+                2,
+                "one private pattern per scene"
             );
-            assert!(scenes.scenes[0].cells[2].is_some(), "current scene cell");
-            assert_eq!(scenes.scenes[1].cells[2], None, "other scenes stay bare");
+            let scene0 = scenes.scenes[0].cells[2].expect("scene 0 cell");
+            let scene1 = scenes.scenes[1].cells[2].expect("scene 1 cell");
+            assert_ne!(scene0, scene1, "each scene owns its own pattern");
+            for (scene, id) in [(0, scene0), (1, scene1)] {
+                assert_eq!(
+                    scenes.scenes[scene].cell_sounds[2],
+                    scenes.track_pools[2].refs(id).expect("pattern refs"),
+                    "the cell's sound refs follow its pattern"
+                );
+            }
+            scenes.validate_sound_refs().expect("sound refs resolve");
         });
 
-        // The timeline lane projection resolves the bare scenes to nothing:
-        // an empty span, never a synthesized placeholder clip.
+        // Every scene span of the timeline projection resolves.
         let song = ProjectSong {
             rows: vec![song_row(0, 0.0, 0, &[]), song_row(1, 8.0, 1, &[])],
             end_beat: 16.0,
@@ -5858,19 +5888,8 @@
         };
         state.with_project_scenes(|scenes| {
             let lanes = project_lanes(&song, scenes);
-            assert!(lanes[2][0].pattern.is_some(), "current scene's span resolves");
-            assert!(lanes[2][1].pattern.is_none(), "bare scene's span is empty");
-        });
-
-        // Saving an all-empty snapshot into a bare scene keeps it bare. This
-        // track's pool already holds the current scene's pattern, so it is
-        // the non-empty-pool half of the guard that blocks materialization
-        // here; the empty-pool halves are covered by
-        // `lazy_materialization_covers_fully_bare_tracks_only`.
-        state.with_scenes_mut(|scenes| {
-            assert!(scenes.save_scene_snapshot(1, PatternSnapshot::new_default(3, &[])));
-            assert_eq!(scenes.scenes[1].cells[2], None);
-            assert_eq!(scenes.track_pools[2].patterns.len(), 1);
+            assert!(lanes[2][0].pattern.is_some(), "scene 0's span resolves");
+            assert!(lanes[2][1].pattern.is_some(), "scene 1's span resolves");
         });
     }
 
