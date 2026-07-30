@@ -473,6 +473,11 @@ impl SequencerState {
             scene.cells[track] = *cell;
             scene.cell_sounds[track] = *cell_sound;
         }
+        debug_assert!(
+            scenes.validate_sound_refs().is_ok(),
+            "sound refs invalid after track lane restore: {:?}",
+            scenes.validate_sound_refs().err()
+        );
         let current = scenes.current_scene;
         let live = scenes.scene_snapshot(current)
             .ok_or_else(|| "Current scene is missing during track restore".to_string())?;
@@ -531,6 +536,11 @@ impl SequencerState {
                 *target_slot = state.clone();
             }
         }
+        debug_assert!(
+            scenes.validate_sound_refs().is_ok(),
+            "sound refs invalid after track move: {:?}",
+            scenes.validate_sound_refs().err()
+        );
         let current = scenes.current_scene;
         let live = scenes.scene_snapshot(current)
             .ok_or_else(|| "Current scene is missing during track insertion".to_string())?;
@@ -599,6 +609,11 @@ impl SequencerState {
                 }
             }
             scenes.remove_track(track_idx);
+            debug_assert!(
+                scenes.validate_sound_refs().is_ok(),
+                "sound refs invalid after track delete: {:?}",
+                scenes.validate_sound_refs().err()
+            );
         }
         self.with_committed_song_mut(|song| {
             if let Some(song) = song {
@@ -619,6 +634,14 @@ impl SequencerState {
         );
         current_snapshot.remove_track(track_idx);
         current_snapshot.restore(self);
+        // Solo is live-only (§17.8) and absent from the snapshot, so the
+        // restore above cannot shift it; move each bit down with its track.
+        // The deleted track's own bit simply disappears, and the trailing
+        // lane is cleared by `clear_live_track_lane` below.
+        for idx in track_idx..old_count - 1 {
+            let next = self.pattern.track_params[idx + 1].is_solo();
+            self.pattern.track_params[idx].set_solo(next);
+        }
         self.shift_runtime_track_bindings_left(track_idx, old_count);
         self.clear_live_track_lane(old_count - 1);
         self.transport

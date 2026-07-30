@@ -1444,9 +1444,12 @@ impl SequencerState {
         let mut live = None;
         for (id, chain) in saved {
             let refs = pool.refs(*id).expect("pattern set was validated");
-            if let Some(patch) = pool.sounds.patches.get_mut(&refs.patch) {
-                patch.process_chain = chain.clone();
-            }
+            let patch = pool
+                .sounds
+                .patches
+                .get_mut(&refs.patch)
+                .ok_or_else(|| "stored process patch is missing".to_string())?;
+            patch.process_chain = chain.clone();
             if *id == effective {
                 live = Some(chain.clone());
             }

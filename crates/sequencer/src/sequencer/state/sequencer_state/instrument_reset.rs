@@ -317,9 +317,15 @@ impl SequencerState {
             ));
         }
         for (id, state) in &snapshot.patterns {
-            pool.edit(*id, |data| {
+            if !pool.edit(*id, |data| {
                 data.restore_instrument_state(state, descriptor, node_id, modulator_node_id);
-            });
+            }) {
+                return Err(format!(
+                    "Track {} pattern {} sound is missing during instrument history replay",
+                    track + 1,
+                    id.0
+                ));
+            }
         }
         for scene in &mut scenes.scenes {
             for network in &mut scene.neural_networks {

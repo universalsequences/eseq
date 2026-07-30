@@ -107,6 +107,11 @@ impl SequencerState {
         if track >= scenes.track_pools.len() {
             return Ok(());
         }
+        // Placeholder pairs minted for the new track's lane are provisional:
+        // the materialize loop below repoints those cells at their pattern's
+        // freshly minted entities, and the placeholders are removed so a
+        // track add creates exactly one pair per scene.
+        let mut placeholder_refs: Vec<(usize, SoundRefs)> = Vec::new();
         for scene_idx in 0..scenes.scenes.len() {
             while scenes.scenes[scene_idx].cells.len() < track_count {
                 let lane = scenes.scenes[scene_idx].cells.len();
@@ -115,6 +120,9 @@ impl SequencerState {
                     .insert(Patch::new_default(), Mix::default());
                 scenes.scenes[scene_idx].cells.push(None);
                 scenes.scenes[scene_idx].cell_sounds.push(refs);
+                if lane == track {
+                    placeholder_refs.push((scene_idx, refs));
+                }
             }
         }
         // One private pattern per scene (each insert mints its own
@@ -141,6 +149,23 @@ impl SequencerState {
             }
             materialized.push((scene_idx, id));
         }
+        // Drop the placeholders whose cells repointed; each was minted in
+        // this call and only its own cell ever saw it.
+        for (scene_idx, refs) in placeholder_refs {
+            let still_used = scenes.scenes[scene_idx]
+                .cell_sounds
+                .get(track)
+                .is_some_and(|cell_sound| *cell_sound == refs);
+            if !still_used {
+                scenes.track_pools[track].sounds.patches.remove(&refs.patch);
+                scenes.track_pools[track].sounds.mixes.remove(&refs.mix);
+            }
+        }
+        debug_assert!(
+            scenes.validate_sound_refs().is_ok(),
+            "sound refs invalid after track add: {:?}",
+            scenes.validate_sound_refs().err()
+        );
         drop(scenes);
         if let Some(committed) = arrangement.as_mut() {
             if committed.track_lanes.len() == track {

@@ -6032,3 +6032,150 @@
         assert_eq!(song.rows[0].scene, 0);
         assert_eq!(song.rows[1].scene, 1);
     }
+
+    #[test]
+    fn remove_track_shifts_live_solo_with_its_track() {
+        let state = make_state_with_tracks(3);
+        let names = vec!["kick".to_string(), "snare".to_string(), "hat".to_string()];
+        let buffer_ids = vec![10, 20, 30];
+        let instrument_types = vec![InstrumentType::Sampler; 3];
+        let effect_descriptors = vec![EffectDescriptor::default_full_chain(); 3];
+
+        // Solo the last track, delete the middle one: solo is live-only
+        // (takes spec 17.8), outside the snapshot restore, so the bit must
+        // be shifted explicitly with its track.
+        state.pattern.track_params[2].set_solo(true);
+        assert!(state.remove_track(
+            1,
+            &buffer_ids,
+            &[44_100; 3],
+            &names,
+            &instrument_types,
+            &effect_descriptors
+        ));
+        assert!(!state.pattern.track_params[0].is_solo());
+        assert!(
+            state.pattern.track_params[1].is_solo(),
+            "solo follows its track down"
+        );
+        assert!(
+            !state.pattern.track_params[2].is_solo(),
+            "trailing lane is cleared"
+        );
+
+        // Deleting the soloed track itself clears the bit — it must not
+        // transfer to the successor.
+        let names = vec!["kick".to_string(), "hat".to_string()];
+        let instrument_types = vec![InstrumentType::Sampler; 2];
+        let effect_descriptors = vec![EffectDescriptor::default_full_chain(); 2];
+        assert!(state.remove_track(
+            1,
+            &[10, 30],
+            &[44_100; 2],
+            &names,
+            &instrument_types,
+            &effect_descriptors
+        ));
+        assert!(!state.pattern.track_params[0].is_solo());
+        assert!(!state.pattern.track_params[1].is_solo());
+    }
+
+    #[test]
+    fn orphaned_entities_do_not_veto_midi_fx_replacement() {
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        // Every referenced patch (and the live mirror) carries one MIDI-FX
+        // device.
+        state.pattern.track_params[0].set_midi_fx_chain(vec!["arp".to_string()]);
+        state.with_scenes_mut(|scenes| {
+            let pool = &mut scenes.track_pools[0];
+            let ids: Vec<PatternId> = pool.patterns.keys().copied().collect();
+            for id in ids {
+                assert!(pool.edit(id, |data| {
+                    data.track_params.midi_fx_chain = vec!["arp".to_string()];
+                }));
+            }
+            // A stale orphan predating the device (chain len 0): reachable
+            // by nothing, it must not veto or receive the replacement.
+            pool.sounds.insert_patch(Patch::new_default());
+        });
+        let descriptor = EffectDescriptor {
+            name: "arp2".to_string(),
+            params: Vec::new(),
+            input_channels: 0,
+            output_channels: 0,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+        };
+        state
+            .replace_midi_fx_slot_in_all_track_patterns(0, 0, "arp2".to_string(), &descriptor)
+            .expect("an unreferenced orphan entity must not veto the replacement");
+        state.with_scenes_mut(|scenes| {
+            for refs in scenes.referenced_track_sounds(0) {
+                let patch = &scenes.track_pools[0].sounds.patches[&refs.patch];
+                assert_eq!(patch.params.midi_fx_chain, vec!["arp2".to_string()]);
+            }
+        });
+    }
+
+    #[test]
+    fn bare_cell_sounds_receive_structural_chain_edits_and_do_not_veto_replacement() {
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        // Scene 1 goes bare BEFORE the device exists: its cell keeps a sound
+        // (§17.2) whose chain is empty, and no pattern represents it.
+        let bare_refs = state.with_scenes_mut(|scenes| {
+            let id = scenes.scenes[1].cells[0].expect("scene 1 cell");
+            assert!(scenes.delete_track_pattern(0, id));
+            scenes.scenes[1].cell_sounds[0]
+        });
+        // Add the device the way the app does: live mirror + the structural
+        // sweep over the other patterns — which must include the bare cell.
+        state.pattern.track_params[0].set_midi_fx_chain(vec!["arp".to_string()]);
+        state.with_scenes_mut(|scenes| {
+            let id = scenes.scenes[0].cells[0].expect("scene 0 cell");
+            assert!(scenes.track_pools[0].edit(id, |data| {
+                data.track_params.midi_fx_chain = vec!["arp".to_string()];
+            }));
+            assert!(scenes.edit_other_track_patterns(0, |data| {
+                data.track_params.midi_fx_chain.insert(0, "arp".to_string());
+            }));
+            let patch = &scenes.track_pools[0].sounds.patches[&bare_refs.patch];
+            assert_eq!(
+                patch.params.midi_fx_chain,
+                vec!["arp".to_string()],
+                "the structural edit reaches the bare cell's entity"
+            );
+        });
+        // Replacement validates every referenced entity — a bare cell whose
+        // chain drifted would veto it forever.
+        let descriptor = EffectDescriptor {
+            name: "arp2".to_string(),
+            params: Vec::new(),
+            input_channels: 0,
+            output_channels: 0,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+        };
+        state
+            .replace_midi_fx_slot_in_all_track_patterns(0, 0, "arp2".to_string(), &descriptor)
+            .expect("a bare cell's sound must not veto the replacement");
+        state.with_scenes_mut(|scenes| {
+            let patch = &scenes.track_pools[0].sounds.patches[&bare_refs.patch];
+            assert_eq!(patch.params.midi_fx_chain, vec!["arp2".to_string()]);
+        });
+    }

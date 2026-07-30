@@ -6134,8 +6134,11 @@
                 chunk_b.step_data[step][StepParam::Transpose.index()] = 6.0;
             }
             let chunk_a = scenes.track_pools[0].insert(chunk);
-            let chunk_b = scenes.track_pools[0].insert(chunk_b);
             let sound = scenes.track_pools[0].refs(chunk_a).expect("chunk refs");
+            // Chunks share the take's one Patch/Mix pair (§16.4) — keep the
+            // fixture on-model so entity-sweep double-application bugs are
+            // observable here.
+            let chunk_b = scenes.track_pools[0].insert_with_refs(chunk_b, sound);
             scenes.take_pools[0].insert(None, vec![chunk_a, chunk_b], 296, sound)
         })
     }

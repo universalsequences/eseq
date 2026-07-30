@@ -280,6 +280,23 @@ impl<'de> Deserialize<'de> for ProjectFile {
             track_sounds: wire.track_sounds,
         };
         project.normalize_device_instances().map_err(D::Error::custom)?;
+        // A take with no chunks is structurally impossible (registration
+        // rejects empty chunk lists), and the loader would skip it silently
+        // — desyncing the positional `track_sounds.takes` alignment so
+        // later takes adopt the wrong sound. Reject it with a name instead.
+        for (track, pool) in project.take_pools.iter().enumerate() {
+            for take in &pool.takes {
+                if take.chunks.is_empty() {
+                    return Err(D::Error::custom(format!(
+                        "invalid project take pools: track {} take '{}' (id {}) \
+                         has no chunk patterns",
+                        track + 1,
+                        take.name,
+                        take.id
+                    )));
+                }
+            }
+        }
         // Reject malformed arrangement data with an actionable error rather
         // than clamping, reordering, or dropping invalid references (spec
         // 6.1). Pattern pools are rebuilt from scene cells on load, so track
@@ -3381,6 +3398,29 @@ mod tests {
         let json = serde_json::to_string(&bare).expect("serialize project");
         assert!(!json.contains("take_pools"), "empty take pools are skipped");
         assert!(!json.contains("scene_cell_presence"), "full presence is skipped");
+    }
+
+    #[test]
+    fn takes_with_no_chunks_are_rejected_on_load() {
+        let mut project = sample_project();
+        project.take_pools = vec![ProjectTrackTakePool {
+            takes: vec![ProjectTake {
+                id: 1,
+                name: "Ghost".to_string(),
+                total_len_steps: 16,
+                chunks: Vec::new(),
+            }],
+            next_take_id: 2,
+        }];
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let error = match serde_json::from_str::<ProjectFile>(&json) {
+            Ok(_) => panic!("a take with no chunk patterns must be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("has no chunk patterns"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

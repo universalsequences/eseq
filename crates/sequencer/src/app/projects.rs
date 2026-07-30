@@ -1842,6 +1842,12 @@ impl App {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
+        // §17.4 prune-on-save: drop orphaned entities from the LIVE pools
+        // before capturing. This is the one seam the spec sanctions, and it
+        // is safe here because nothing holds Patch/Mix ids into the live
+        // pools from outside `ProjectScenes` — undo lane snapshots clone
+        // pools wholesale, so history entries stay self-consistent.
+        self.state.prune_unreferenced_sounds();
         // Takes spec 6.1/11.1: record per-scene cell presence (the dense
         // `patterns` bank cannot encode a bare lane) and serialize each
         // track's take pool with its chunk patterns inline — chunks are in
@@ -3232,6 +3238,10 @@ impl App {
             ));
         }
         self.state.apply_project_sound_model(&sound_model);
+        // Relinking abandons the privately minted entities of every referent
+        // that adopted a canonical one; drop those orphans now instead of
+        // carrying them until the first save prunes them.
+        self.state.prune_unreferenced_sounds();
         // Per-track record-arm flags (takes spec 8.1), persisted like
         // mute/solo. The UI-shared arm vector syncs FROM `graph.record_armed`
         // on the next tick via `record_arm_sync_pending`.

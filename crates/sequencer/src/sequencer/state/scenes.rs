@@ -90,6 +90,11 @@ impl TrackPatternPool {
         let (seq, patch, mix) = data.split();
         self.sounds.patches.entry(sound.patch).or_insert(patch);
         self.sounds.mixes.entry(sound.mix).or_insert(mix);
+        // If the defensive seed above actually fired, keep the mint cursors
+        // ahead of the seeded ids — a later mint colliding with one would
+        // silently replace the entity under every referent sharing it.
+        self.sounds.next_patch_id = self.sounds.next_patch_id.max(sound.patch.0.saturating_add(1));
+        self.sounds.next_mix_id = self.sounds.next_mix_id.max(sound.mix.0.saturating_add(1));
         self.insert_stored(StoredPattern { seq, sound })
     }
 
@@ -995,6 +1000,45 @@ impl ProjectScenes {
         removed
     }
 
+    /// Every sound entity pair still reachable on `track` — pattern refs
+    /// (take chunks are pool patterns, so they're included), scene cell
+    /// refs, and take sounds. Anything outside this set is an orphan:
+    /// invisible to the model, awaiting pruning (§17.4).
+    pub fn referenced_track_sounds(&self, track: usize) -> HashSet<SoundRefs> {
+        let mut keep = self
+            .track_pools
+            .get(track)
+            .map(|pool| pool.referenced_sounds())
+            .unwrap_or_default();
+        for scene in &self.scenes {
+            if let Some(refs) = scene.cell_sounds.get(track) {
+                keep.insert(*refs);
+            }
+        }
+        if let Some(takes) = self.take_pools.get(track) {
+            for take in &takes.takes {
+                keep.insert(take.sound);
+            }
+        }
+        keep
+    }
+
+    /// Drop every orphaned entity from every track's pool (§17.4 pruning).
+    /// Safe wherever no one holds `PatchId`/`MixId` into the pools from
+    /// outside `ProjectScenes` — undo lane snapshots clone pools wholesale,
+    /// so they stay self-consistent regardless.
+    pub fn prune_unreferenced_sounds(&mut self) -> usize {
+        let mut removed = 0;
+        for track in 0..self.track_pools.len() {
+            let keep = self.referenced_track_sounds(track);
+            let pool = &mut self.track_pools[track].sounds;
+            let before = pool.patches.len() + pool.mixes.len();
+            pool.retain_refs(&keep);
+            removed += before - (pool.patches.len() + pool.mixes.len());
+        }
+        removed
+    }
+
     /// The §17.2 always-resolves invariant: every scene cell, pool pattern,
     /// and take holds `(patch_ref, mix_ref)` that resolve in its track's
     /// entity pool — unconditionally. (§18.1 exit criterion.)
@@ -1084,6 +1128,31 @@ impl ProjectScenes {
         }
         for id in representatives {
             pool.edit(id, |data| edit(data));
+        }
+        // Bare-cell sounds (§17.2 "no steps ≠ no sound"): an entity
+        // referenced only by a scene cell has no pattern representative,
+        // but it is still a live sound — the same structural edit must
+        // reach it, or its device chain drifts from the track's and later
+        // slot edits fail validation against it.
+        let mut cell_only: Vec<SoundRefs> = Vec::new();
+        for scene in &self.scenes {
+            if let Some(refs) = scene.cell_sounds.get(track) {
+                if !seen.contains(&refs.patch)
+                    && Some(refs.patch) != effective_sound.map(|refs| refs.patch)
+                    && seen.insert(refs.patch)
+                {
+                    cell_only.push(*refs);
+                }
+            }
+        }
+        for refs in cell_only {
+            let Some(mut data) = pool.compose_bare_sound(refs) else {
+                continue;
+            };
+            edit(&mut data);
+            let (_seq, patch, mix) = data.split();
+            pool.sounds.patches.insert(refs.patch, patch);
+            pool.sounds.mixes.insert(refs.mix, mix);
         }
         true
     }

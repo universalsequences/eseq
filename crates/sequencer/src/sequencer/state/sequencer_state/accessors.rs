@@ -663,19 +663,15 @@ impl SequencerState {
                             &first, &data,
                         )
                     });
+                    // Report only — this fires on FILE data (a legacy save
+                    // that violated §16.4), so it must never abort a load,
+                    // debug builds included. Collapsing to chunk 0's sound
+                    // is the documented §17.7 resolution.
                     if !agrees {
                         eprintln!(
                             "[takes-migration] track {} take {}: chunk {} device state \
                              diverges from chunk 0 (takes spec 16.4 violation in the \
                              saved project); collapsing to chunk 0's sound",
-                            track + 1,
-                            id,
-                            idx + 1
-                        );
-                        debug_assert!(
-                            false,
-                            "take chunk device state diverged during migration \
-                             (track {}, take {}, chunk {})",
                             track + 1,
                             id,
                             idx + 1
@@ -1098,6 +1094,16 @@ impl SequencerState {
     #[cfg(test)]
     pub(crate) fn with_scenes_mut<R>(&self, f: impl FnOnce(&mut ProjectScenes) -> R) -> R {
         f(&mut self.pattern.scenes.lock().unwrap())
+    }
+
+    /// §17.4 pruning: drop orphaned Patch/Mix entities from every track's
+    /// pool. Returns how many entities were removed.
+    pub fn prune_unreferenced_sounds(&self) -> usize {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .prune_unreferenced_sounds()
     }
 
     /// Bare-scene lazy materialization (takes spec 11.1): insert `data` into
