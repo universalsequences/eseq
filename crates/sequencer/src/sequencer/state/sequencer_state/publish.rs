@@ -21,6 +21,14 @@ impl SequencerState {
         self.graph_visualizations.lock().unwrap().clone()
     }
 
+    pub fn push_graph_control_command(&self, command: crate::graph::GraphControlCommand) {
+        self.graph_control_commands.lock().unwrap().push(command);
+    }
+
+    pub fn drain_graph_control_commands(&self) -> Vec<crate::graph::GraphControlCommand> {
+        std::mem::take(&mut *self.graph_control_commands.lock().unwrap())
+    }
+
     pub fn append_track_output_events(&self, events: impl IntoIterator<Item = TrackOutputEvent>) {
         let mut history = self.track_output_events.lock().unwrap();
         history.extend(events);

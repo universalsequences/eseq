@@ -214,6 +214,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     ];
     if scheduler.resolved_read_pattern_epoch != Some(pattern_epoch) {
         process_runtime.reset_resolved_track_history(&resolved_read_bases);
+        for graph in graph_runtimes.iter_mut() {
+            graph.clear_deltas();
+        }
         scheduler.resolved_read_pattern_epoch = Some(pattern_epoch);
     } else {
         process_runtime.ensure_resolved_track_bases(&resolved_read_bases);
@@ -256,6 +259,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     // Scene launches restart accumulator evolution on every
                     // track, matching the control-side launch path.
                     *pending_accum_reset = [true; MAX_TRACKS];
+                    for graph in graph_runtimes.iter_mut() {
+                        graph.clear_deltas();
+                    }
                 }
                 crate::quantized_launch::SessionLaunchInstall::Tracks(tracks) => {
                     for track in tracks {
@@ -292,6 +298,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     chunk_frames = frames;
                     song_row_snapshot = Some(song.row_snapshot(row));
                     if row_changed {
+                        for graph in graph_runtimes.iter_mut() {
+                            graph.clear_deltas();
+                        }
                         if wrapped {
                             // A loop wrap rewinds the clock and every
                             // self-clocked runtime below; accumulators restart
@@ -323,7 +332,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         generator_runtime.reset(0.0);
                         process_runtime.reset_transport(0.0);
                         for graph in graph_runtimes.iter_mut() {
-                            graph.reset(0.0);
+                            graph.reset_transport(0.0);
                         }
                     }
                     // Anchored per-lane phase (takes spec 7.3): every chunk
@@ -396,6 +405,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             if !invoke_conductor_invocations(
                 scratch_runtime,
                 process_runtime,
+                graph_runtimes,
                 conductor_invocations,
                 debug_accum,
             ) || !enqueue_due_process_emissions(
@@ -599,7 +609,8 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                 commands,
                                 Some(&mut inlet_context),
                                 debug_accum,
-                            )
+                            );
+                            apply_graph_process_commands(graph_runtimes, commands);
                         },
                     ) {
                         chunk_enqueued = false;
@@ -666,7 +677,8 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             commands,
                             None,
                             debug_accum,
-                        )
+                        );
+                        apply_graph_process_commands(graph_runtimes, commands);
                     },
                 ) {
                     chunk_enqueued = false;
@@ -1211,6 +1223,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             chunk_enqueued = invoke_conductor_invocations(
                 scratch_runtime,
                 process_runtime,
+                graph_runtimes,
                 conductor_invocations,
                 debug_accum,
             ) && enqueue_due_process_emissions(
@@ -1410,6 +1423,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         };
                         match scratch.invoke_process_run(invocation) {
                             Ok(result) => {
+                                apply_graph_process_commands(graph_runtimes, &result.commands);
                                 let mut followups = process_runtime.apply_run_result(result);
                                 followups.reverse();
                                 pending_invocations.extend(followups);

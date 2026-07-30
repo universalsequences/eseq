@@ -519,7 +519,7 @@
         (v-stack :gap 0.5
           ;; ── sequencer-level config (on top) ──
           (box 
-            :width 81.5
+            :width 105.5
             :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 1 :corner-radius 16
             
             (h-stack
@@ -577,7 +577,13 @@
                   (label "res/q x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
                   (gvr-pick "graph-variable-reset-timebase-factor"
                     gvr-timebase-factor-index gvr-factor-options
-                    (lambda (v) (gvr-apply-timebase-factor v))))
+                    (lambda (v) (gvr-apply-timebase-factor v)))
+                  (button "commit" :key "graph-variable-reset-delta-commit"
+                    :width 4.8 :height 1.2 :font-size 8
+                    :on-click (lambda (event) (graph-commit-deltas! gvr-name)))
+                  (button "clear" :key "graph-variable-reset-delta-clear"
+                    :width 4.8 :height 1.2 :font-size 8
+                    :on-click (lambda (event) (graph-clear-deltas! gvr-name))))
                 )
               (matrix
                 :key "graph-variable-reset-dampening-matrix"
@@ -593,6 +599,21 @@
                 :max 1
                 :value (gvr-viz-matrix viz :dampening-matrix (gvr-zero-matrix) active-count active-count)
                 )
+              (matrix
+                :key "graph-variable-reset-delta-matrix"
+                :rows active-count
+                :cols active-count
+                :width (max 11 (* active-count 0.75))
+                :height (max 5 (* active-count 0.35))
+                :control :grid
+                :diverging true
+                :zero 0
+                :background (rgba 0.1 0.1 0.1 0.6)
+                :fill :primary
+                :negative-fill "#ff9f43"
+                :min -1
+                :max 1
+                :value (gvr-viz-matrix viz :delta-matrix (gvr-zero-matrix) active-count active-count))
               
               (event-view
                 :key "graph-variable-reset-event-view"
@@ -668,6 +689,17 @@
                 :min 0
                 :max 4
                 :value (gvr-viz-matrix viz :energy-matrix (gvr-zero-column-matrix) active-count 1)))            
+            (v-stack :gap gvr-matrix-column-gap
+              (label "" :width 0.1 :height (gvr-matrix-header-spacer-height) :font-size 1 :bg :transparent)
+              (matrix
+                :key "graph-variable-reset-node-delta-column"
+                :rows active-count
+                :cols 1
+                :width 2
+                :height (gvr-matrix-data-height active-count)
+                :min 0
+                :max 4
+                :value (gvr-viz-matrix viz :node-delta-column (gvr-zero-column-matrix) active-count 1)))
             (v-stack :gap gvr-matrix-column-gap
               (label "" :width 0.1 :height (gvr-matrix-header-spacer-height) :font-size 1 :bg :transparent)
               (matrix

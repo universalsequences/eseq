@@ -375,6 +375,51 @@ pub(super) fn graph_visualization_value(snapshot: &sequencer::graph::GraphVisual
             edge.delay_steps as f64
         })),
     );
+    let mut delta_matrix = vec![vec![0.0; snapshot.num_nodes]; snapshot.num_nodes];
+    let mut node_delta_magnitudes = vec![0.0; snapshot.num_nodes];
+    for entry in &snapshot.deltas {
+        match &entry.key {
+            sequencer::graph::GraphDeltaKey::NodeDelay { node }
+            | sequencer::graph::GraphDeltaKey::NodeParam { node, .. } => {
+                if let Some(total) = node_delta_magnitudes.get_mut(*node) {
+                    *total += entry.delta.abs() as f64;
+                }
+            }
+            sequencer::graph::GraphDeltaKey::EdgeParam { from, to, param }
+                if param == "weight" =>
+            {
+                if *from < snapshot.num_nodes && *to < snapshot.num_nodes {
+                    delta_matrix[*from][*to] = entry.delta as f64;
+                }
+            }
+            sequencer::graph::GraphDeltaKey::EdgeParam { .. } => {}
+        }
+    }
+    map.insert(
+        "delta-matrix".to_string(),
+        value_cell(Value::List(
+            delta_matrix
+                .into_iter()
+                .map(|row| {
+                    Rc::new(RefCell::new(Value::List(
+                        row.into_iter()
+                            .map(|cell| Rc::new(RefCell::new(Value::Number(cell))))
+                            .collect(),
+                    )))
+                })
+                .collect(),
+        )),
+    );
+    map.insert(
+        "node-delta-column".to_string(),
+        value_cell(neural_column_matrix_value(
+            node_delta_magnitudes.into_iter(),
+        )),
+    );
+    map.insert(
+        "delta-leak-per-beat".to_string(),
+        value_cell(Value::Number(snapshot.delta_leak_per_beat as f64)),
+    );
     map.insert(
         "edges".to_string(),
         value_cell(Value::List(

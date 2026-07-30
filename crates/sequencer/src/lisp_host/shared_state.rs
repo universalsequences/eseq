@@ -975,28 +975,39 @@ impl ScratchControlRuntime {
             });
         }
         let _ = self.runtime.take_status_message();
-        if self.process_run_cache_enabled() {
-            let callback =
-                if let Some(callback) = self.process_run_callbacks.get(&invocation.source) {
-                    callback.clone()
-                } else {
-                    let callback_source = format!("(lambda () {})", invocation.source);
-                    let callback = self
-                        .runtime
-                        .eval_str(&callback_source)
-                        .map_err(|error| format!("{error:?}"))?
-                        .ok_or_else(|| "process body did not compile to a callback".to_string())?;
-                    self.process_run_callbacks
-                        .insert(invocation.source.clone(), callback.clone());
-                    callback
-                };
-            self.runtime
-                .invoke(callback, Vec::new())
-                .map_err(|error| format!("{error:?}"))?;
-        } else {
-            self.runtime
-                .eval_str(&invocation.source)
-                .map_err(|error| format!("{error:?}"))?;
+        let execution_result = (|| -> Result<(), String> {
+            if self.process_run_cache_enabled() {
+                let callback =
+                    if let Some(callback) = self.process_run_callbacks.get(&invocation.source) {
+                        callback.clone()
+                    } else {
+                        let callback_source = format!("(lambda () {})", invocation.source);
+                        let callback = self
+                            .runtime
+                            .eval_str(&callback_source)
+                            .map_err(|error| format!("{error:?}"))?
+                            .ok_or_else(|| {
+                                "process body did not compile to a callback".to_string()
+                            })?;
+                        self.process_run_callbacks
+                            .insert(invocation.source.clone(), callback.clone());
+                        callback
+                    };
+                self.runtime
+                    .invoke(callback, Vec::new())
+                    .map_err(|error| format!("{error:?}"))?;
+            } else {
+                self.runtime
+                    .eval_str(&invocation.source)
+                    .map_err(|error| format!("{error:?}"))?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = execution_result {
+            if let Ok(mut ctx) = self.process_eval.lock() {
+                ctx.take();
+            }
+            return Err(error);
         }
         let process_status = self.runtime.take_status_message();
         let ctx = self

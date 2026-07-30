@@ -48,6 +48,74 @@ const DEFAULT_DECAY_STEP_BEATS: f64 = 0.25;
 /// native neural visualization hold so both layers read similarly in the UI.
 const TRIGGER_VISUAL_HOLD_BEATS: f64 = 0.25;
 
+/// Default per-beat decay of process-authored graph deltas. This is a half-life
+/// of approximately 128 beats.
+pub const DEFAULT_GRAPH_DELTA_LEAK_PER_BEAT: f32 = 0.9946;
+pub const GRAPH_DELTA_EPSILON: f32 = 1e-4;
+pub const GRAPH_NODE_DELAY_MIN: f64 = 0.0;
+pub const GRAPH_NODE_DELAY_MAX: f64 = 16.0;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum GraphDeltaKey {
+    NodeDelay { node: usize },
+    NodeParam { node: usize, param: String },
+    EdgeParam {
+        from: usize,
+        to: usize,
+        param: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphDeltaEntry {
+    pub key: GraphDeltaKey,
+    pub delta: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphNudge {
+    pub graph_id: u64,
+    pub graph_name: String,
+    pub key: GraphDeltaKey,
+    pub amount: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum GraphControlCommand {
+    Nudge(GraphNudge),
+    Clear {
+        graph_id: u64,
+        graph_name: String,
+    },
+    SetLeak {
+        graph_id: u64,
+        graph_name: String,
+        factor: f32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GraphDeltaRange {
+    pub min: f64,
+    pub max: f64,
+    pub is_int: bool,
+}
+
+impl GraphDeltaRange {
+    fn normalized(self) -> Self {
+        Self {
+            min: self.min.min(self.max),
+            max: self.min.max(self.max),
+            is_int: self.is_int,
+        }
+    }
+
+    fn width(self) -> f32 {
+        let range = self.normalized();
+        (range.max - range.min).max(0.0).min(f32::MAX as f64) as f32
+    }
+}
+
 /// How a node folds the several edge currents arriving in one boundary into the
 /// single `node-input` scalar its `:update` reads. `gather` lives on the edge;
 /// `reduce` lives on the node (spec §1.3).
@@ -190,6 +258,8 @@ pub struct GraphVisualizationSnapshot {
     pub node_events: Vec<Option<GraphVisualizationEvent>>,
     pub event_history: Vec<GraphVisualizationEvent>,
     pub edges: Vec<GraphVisualizationEdge>,
+    pub deltas: Vec<GraphDeltaEntry>,
+    pub delta_leak_per_beat: f32,
 }
 
 const GRAPH_EVENT_HISTORY_CAP: usize = 1024;
@@ -730,6 +800,8 @@ pub struct GraphRuntimeConfig {
     pub default_duration: GraphDurationSpec,
     pub default_swing: GraphSwingSpec,
     pub node_params: Vec<HashMap<String, f64>>,
+    pub node_param_ranges: HashMap<String, GraphDeltaRange>,
+    pub edge_param_ranges: HashMap<String, GraphDeltaRange>,
 }
 
 impl GraphRuntimeConfig {
@@ -773,6 +845,8 @@ impl GraphRuntimeConfig {
             default_duration,
             default_swing,
             node_params: normalized_node_params(num_nodes, node_params),
+            node_param_ranges: HashMap::new(),
+            edge_param_ranges: HashMap::new(),
         }
     }
 
@@ -808,6 +882,15 @@ pub struct GraphRuntime {
     default_duration: GraphDurationSpec,
     default_swing: GraphSwingSpec,
     random_state: u64,
+
+    // ── ephemeral process regulation ──
+    authored_nodes: Vec<GraphNode>,
+    authored_edges: Vec<GraphEdge>,
+    authored_node_params: Vec<HashMap<String, f64>>,
+    node_param_ranges: HashMap<String, GraphDeltaRange>,
+    edge_param_ranges: HashMap<String, GraphDeltaRange>,
+    deltas: HashMap<GraphDeltaKey, f32>,
+    delta_leak_per_beat: f32,
 
     // ── per-node runtime state ──
     node_params: Vec<HashMap<String, f64>>,
@@ -907,6 +990,9 @@ impl GraphRuntime {
 
     pub fn new_from_config(config: GraphRuntimeConfig) -> Self {
         let num_nodes = config.num_nodes();
+        let authored_nodes = config.nodes.clone();
+        let authored_edges = config.edges.clone();
+        let authored_node_params = config.node_params.clone();
         let mut runtime = Self {
             id: config.id,
             name: config.name,
@@ -924,6 +1010,13 @@ impl GraphRuntime {
             default_duration: config.default_duration,
             default_swing: config.default_swing,
             random_state: config.id,
+            authored_nodes,
+            authored_edges,
+            authored_node_params,
+            node_param_ranges: config.node_param_ranges,
+            edge_param_ranges: config.edge_param_ranges,
+            deltas: HashMap::new(),
+            delta_leak_per_beat: DEFAULT_GRAPH_DELTA_LEAK_PER_BEAT,
             node_params: config.node_params,
             energy: vec![0.0; num_nodes],
             trigger_activity: vec![0.0; num_nodes],
@@ -987,6 +1080,8 @@ impl GraphRuntime {
                     distribution: edge.distribution,
                 })
                 .collect(),
+            deltas: self.delta_entries(),
+            delta_leak_per_beat: self.delta_leak_per_beat,
         }
     }
 
@@ -1019,7 +1114,12 @@ impl GraphRuntime {
         self.id = config.id;
         self.name = config.name;
         self.num_nodes = num_nodes;
-        self.nodes = config.nodes;
+        self.authored_nodes = config.nodes;
+        self.authored_edges = config.edges.clone();
+        self.authored_node_params = config.node_params;
+        self.node_param_ranges = config.node_param_ranges;
+        self.edge_param_ranges = config.edge_param_ranges;
+        self.nodes = self.authored_nodes.clone();
         // Re-seat each node's live resolution/quantize at its held cycle position (the new
         // cycle may be a different length — `sync_cycle_slot` wraps), so the grid-change
         // detection below compares against the correct current spacing.
@@ -1034,7 +1134,7 @@ impl GraphRuntime {
         self.max_poly_selection = config.max_poly_selection;
         self.default_duration = config.default_duration;
         self.default_swing = config.default_swing;
-        self.node_params = config.node_params;
+        self.node_params = self.authored_node_params.clone();
 
         for (idx, next_edge) in config.edges.into_iter().enumerate() {
             let old_default = self.edge_default_dampening[idx];
@@ -1046,6 +1146,8 @@ impl GraphRuntime {
             self.edges[idx] = updated_edge;
             self.edge_default_dampening[idx] = new_default;
         }
+        self.prune_invalid_deltas();
+        self.reapply_all_deltas();
 
         let mut eval_grid_changed = false;
         for (idx, previous_step_beats) in previous_step_beats.into_iter().enumerate() {
@@ -1083,6 +1185,78 @@ impl GraphRuntime {
 
     pub fn edge_dampening(&self, edge_index: usize) -> Option<f64> {
         self.edges.get(edge_index).map(|edge| edge.dampening)
+    }
+
+    pub fn matches_reference(&self, graph_id: u64, graph_name: &str) -> bool {
+        self.id == graph_id || self.name == graph_name
+    }
+
+    pub fn delta_entries(&self) -> Vec<GraphDeltaEntry> {
+        let mut entries = self
+            .deltas
+            .iter()
+            .map(|(key, delta)| GraphDeltaEntry {
+                key: key.clone(),
+                delta: *delta,
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            graph_delta_key_order(&left.key).cmp(&graph_delta_key_order(&right.key))
+        });
+        entries
+    }
+
+    pub fn delta(&self, key: &GraphDeltaKey) -> f32 {
+        self.deltas.get(key).copied().unwrap_or(0.0)
+    }
+
+    pub fn delta_leak_per_beat(&self) -> f32 {
+        self.delta_leak_per_beat
+    }
+
+    pub fn set_delta_leak_per_beat(&mut self, factor: f32) -> Result<(), String> {
+        if !factor.is_finite() || !(0.0..=1.0).contains(&factor) {
+            return Err("graph delta leak factor must be finite and between 0 and 1".to_string());
+        }
+        self.delta_leak_per_beat = factor;
+        Ok(())
+    }
+
+    pub fn clear_deltas(&mut self) {
+        if self.deltas.is_empty() {
+            return;
+        }
+        self.deltas.clear();
+        self.reapply_all_deltas();
+    }
+
+    pub fn nudge(&mut self, key: GraphDeltaKey, amount: f32) -> Result<f32, String> {
+        if !amount.is_finite() {
+            return Err("graph nudge amount must be finite".to_string());
+        }
+        let width = self.delta_range(&key)?.width();
+        let next = (self.delta(&key) + amount).clamp(-width, width);
+        if next.abs() < GRAPH_DELTA_EPSILON {
+            self.deltas.remove(&key);
+        } else {
+            self.deltas.insert(key.clone(), next);
+        }
+        self.apply_delta_key(&key);
+        Ok(self.delta(&key))
+    }
+
+    /// Clear the ephemeral overlay as part of a transport lifecycle reset.
+    /// Periodic graph resets intentionally call `reset` directly and retain it.
+    pub fn reset_transport(&mut self, total_beats: f64) {
+        self.clear_deltas();
+        self.reset(total_beats);
+    }
+
+    pub fn inherit_delta_state_from(&mut self, previous: &GraphRuntime) {
+        self.delta_leak_per_beat = previous.delta_leak_per_beat;
+        self.deltas = previous.deltas.clone();
+        self.prune_invalid_deltas();
+        self.reapply_all_deltas();
     }
 
     /// Read a node's resolved seed mask (telemetry / tests).
@@ -1505,7 +1679,164 @@ impl GraphRuntime {
             for idx in 0..self.num_nodes {
                 self.energy[idx] *= self.energy_decay;
             }
+            self.leak_deltas(self.finest_step_beats());
             self.last_decay_index += 1;
+        }
+    }
+
+    fn finest_step_beats(&self) -> f64 {
+        (0..self.num_nodes)
+            .map(|idx| self.node_step_beats(idx))
+            .filter(|beats| *beats > 0.0)
+            .fold(DEFAULT_DECAY_STEP_BEATS, f64::min)
+    }
+
+    fn leak_deltas(&mut self, step_beats: f64) {
+        if self.deltas.is_empty() || self.delta_leak_per_beat == 1.0 {
+            return;
+        }
+        let factor = self.delta_leak_per_beat.powf(step_beats as f32);
+        let keys = self.deltas.keys().cloned().collect::<Vec<_>>();
+        self.deltas.retain(|_, delta| {
+            *delta *= factor;
+            delta.abs() >= GRAPH_DELTA_EPSILON
+        });
+        for key in keys {
+            self.apply_delta_key(&key);
+        }
+    }
+
+    fn delta_range(&self, key: &GraphDeltaKey) -> Result<GraphDeltaRange, String> {
+        match key {
+            GraphDeltaKey::NodeDelay { node } => {
+                if *node >= self.num_nodes {
+                    return Err("graph nudge node index out of range".to_string());
+                }
+                Ok(GraphDeltaRange {
+                    min: GRAPH_NODE_DELAY_MIN,
+                    max: GRAPH_NODE_DELAY_MAX,
+                    is_int: true,
+                })
+            }
+            GraphDeltaKey::NodeParam { node, param } => {
+                if *node >= self.num_nodes {
+                    return Err("graph nudge node index out of range".to_string());
+                }
+                self.node_param_ranges
+                    .get(param)
+                    .copied()
+                    .ok_or_else(|| format!("graph node param :{param} has no declared range"))
+            }
+            GraphDeltaKey::EdgeParam { from, to, param } => {
+                if *from >= self.num_nodes || *to >= self.num_nodes {
+                    return Err("graph nudge edge index out of range".to_string());
+                }
+                if param != "weight" && param != "dampening" {
+                    return Err(format!("graph edge param :{param} is not delta-able"));
+                }
+                if !self
+                    .authored_edges
+                    .iter()
+                    .any(|edge| edge.from == *from && edge.to == *to)
+                {
+                    return Err("graph nudge edge does not exist".to_string());
+                }
+                self.edge_param_ranges
+                    .get(param)
+                    .copied()
+                    .ok_or_else(|| format!("graph edge param :{param} has no declared range"))
+            }
+        }
+    }
+
+    fn prune_invalid_deltas(&mut self) {
+        let keys = self.deltas.keys().cloned().collect::<Vec<_>>();
+        for key in keys {
+            if self.delta_range(&key).is_err() {
+                self.deltas.remove(&key);
+            }
+        }
+    }
+
+    fn reapply_all_deltas(&mut self) {
+        let dampening_state = self
+            .edges
+            .iter()
+            .zip(&self.edge_default_dampening)
+            .map(|(edge, default)| edge.dampening - default)
+            .collect::<Vec<_>>();
+        self.nodes = self.authored_nodes.clone();
+        for idx in 0..self.num_nodes {
+            self.sync_cycle_slot(idx);
+        }
+        self.node_params = self.authored_node_params.clone();
+        self.edges = self.authored_edges.clone();
+        self.edge_default_dampening = self
+            .authored_edges
+            .iter()
+            .map(|edge| edge.dampening)
+            .collect();
+        for (idx, dynamic_delta) in dampening_state.into_iter().enumerate() {
+            if let Some(edge) = self.edges.get_mut(idx) {
+                edge.dampening = (edge.dampening + dynamic_delta).clamp(0.0, 1.0);
+            }
+        }
+        let keys = self.deltas.keys().cloned().collect::<Vec<_>>();
+        for key in keys {
+            self.apply_delta_key(&key);
+        }
+    }
+
+    fn apply_delta_key(&mut self, key: &GraphDeltaKey) {
+        let Ok(range) = self.delta_range(key) else {
+            return;
+        };
+        let delta = self.delta(key) as f64;
+        match key {
+            GraphDeltaKey::NodeDelay { node } => {
+                let authored = self.authored_nodes[*node].delay_steps as f64;
+                self.nodes[*node].delay_steps =
+                    effective_delta_value(authored, delta, range).max(0.0) as u32;
+            }
+            GraphDeltaKey::NodeParam { node, param } => {
+                let authored = self.authored_node_params[*node]
+                    .get(param)
+                    .copied()
+                    .unwrap_or(0.0);
+                let effective = effective_delta_value(authored, delta, range);
+                self.node_params[*node].insert(param.clone(), effective);
+                match param.as_str() {
+                    "transpose" => self.nodes[*node].transpose = effective as f32,
+                    "threshold" => self.nodes[*node].threshold = effective,
+                    _ => {}
+                }
+            }
+            GraphDeltaKey::EdgeParam { from, to, param } => {
+                let Some(edge_idx) = self
+                    .authored_edges
+                    .iter()
+                    .position(|edge| edge.from == *from && edge.to == *to)
+                else {
+                    return;
+                };
+                let authored = match param.as_str() {
+                    "weight" => self.authored_edges[edge_idx].weight,
+                    "dampening" => self.authored_edges[edge_idx].dampening,
+                    _ => return,
+                };
+                let effective = effective_delta_value(authored, delta, range);
+                match param.as_str() {
+                    "weight" => self.edges[edge_idx].weight = effective,
+                    "dampening" => {
+                        let dynamic_delta =
+                            self.edges[edge_idx].dampening - self.edge_default_dampening[edge_idx];
+                        self.edge_default_dampening[edge_idx] = effective;
+                        self.edges[edge_idx].dampening =
+                            (effective + dynamic_delta).clamp(range.min, range.max);
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -2118,6 +2449,29 @@ fn normalized_node_params(
     node_params
 }
 
+fn graph_delta_key_order(key: &GraphDeltaKey) -> (u8, usize, usize, &str) {
+    match key {
+        GraphDeltaKey::NodeDelay { node } => (0, *node, 0, "delay"),
+        GraphDeltaKey::NodeParam { node, param } => (1, *node, 0, param.as_str()),
+        GraphDeltaKey::EdgeParam { from, to, param } => {
+            (2, *from, *to, param.as_str())
+        }
+    }
+}
+
+pub fn effective_delta_value(authored: f64, delta: f64, range: GraphDeltaRange) -> f64 {
+    let range = range.normalized();
+    let effective = (authored + delta).clamp(range.min, range.max);
+    if !range.is_int {
+        return effective;
+    }
+    if effective >= authored {
+        effective.floor()
+    } else {
+        effective.ceil()
+    }
+}
+
 fn grid_index_at(total_beats: f64, step_beats: f64) -> u64 {
     (total_beats / step_beats.max(1e-9)).floor().max(0.0) as u64
 }
@@ -2542,7 +2896,7 @@ impl GraphManifest {
             .and_then(|o| o.max_poly_selection)
             .unwrap_or(self.max_poly_selection);
 
-        GraphRuntimeConfig::new(
+        let mut config = GraphRuntimeConfig::new(
             self.id,
             self.name.clone(),
             nodes,
@@ -2554,7 +2908,35 @@ impl GraphManifest {
             self.duration.clone(),
             self.swing,
             node_params,
-        )
+        );
+        config.node_param_ranges = self
+            .node
+            .params
+            .iter()
+            .map(|param| {
+                (
+                    param.name.clone(),
+                    GraphDeltaRange {
+                        min: param.min,
+                        max: param.max,
+                        is_int: param.is_int,
+                    },
+                )
+            })
+            .collect();
+        for edge_set in &self.edge_sets {
+            for param in &edge_set.params {
+                config
+                    .edge_param_ranges
+                    .entry(param.name.clone())
+                    .or_insert(GraphDeltaRange {
+                        min: param.min,
+                        max: param.max,
+                        is_int: param.is_int,
+                    });
+            }
+        }
+        config
     }
 
     pub fn materialize_with_overrides(
@@ -2632,6 +3014,101 @@ mod tests {
             GraphSwingSpec::default(),
             Vec::new(),
         )
+    }
+
+    fn delta_runtime() -> GraphRuntime {
+        let mut graph_node = node(Timebase::Sixteenth);
+        graph_node.delay_steps = 4;
+        graph_node.transpose = 0.0;
+        graph_node.threshold = 1.0;
+        let mut config = runtime_config(
+            77,
+            vec![graph_node],
+            vec![GraphEdge::new(0, 0, 0.2)],
+        );
+        config.node_params = vec![HashMap::from([
+            ("transpose".to_string(), 0.0),
+            ("threshold".to_string(), 1.0),
+        ])];
+        config.node_param_ranges = HashMap::from([
+            (
+                "transpose".to_string(),
+                GraphDeltaRange {
+                    min: -48.0,
+                    max: 48.0,
+                    is_int: true,
+                },
+            ),
+            (
+                "threshold".to_string(),
+                GraphDeltaRange {
+                    min: 0.0,
+                    max: 4.0,
+                    is_int: false,
+                },
+            ),
+        ]);
+        config.edge_param_ranges = HashMap::from([(
+            "weight".to_string(),
+            GraphDeltaRange {
+                min: -1.0,
+                max: 1.0,
+                is_int: false,
+            },
+        )]);
+        GraphRuntime::new_from_config(config)
+    }
+
+    #[test]
+    fn graph_deltas_compose_quantize_clamp_leak_and_clear_without_touching_authored_values() {
+        let mut runtime = delta_runtime();
+        let transpose = GraphDeltaKey::NodeParam {
+            node: 0,
+            param: "transpose".to_string(),
+        };
+        runtime.nudge(transpose.clone(), 0.75).unwrap();
+        runtime.nudge(transpose.clone(), 0.75).unwrap();
+        assert_eq!(runtime.delta(&transpose), 1.5);
+        assert_eq!(runtime.nodes[0].transpose, 1.0);
+
+        runtime.nudge(transpose.clone(), 1_000.0).unwrap();
+        assert_eq!(runtime.delta(&transpose), 96.0);
+        assert_eq!(runtime.nodes[0].transpose, 48.0);
+
+        let edge = GraphDeltaKey::EdgeParam {
+            from: 0,
+            to: 0,
+            param: "weight".to_string(),
+        };
+        runtime.nudge(edge.clone(), 0.3).unwrap();
+        assert!((runtime.edges[0].weight - 0.5).abs() < 1e-6);
+
+        runtime.clear_deltas();
+        assert_eq!(runtime.delta(&transpose), 0.0);
+        assert_eq!(runtime.nodes[0].transpose, 0.0);
+        assert!((runtime.edges[0].weight - 0.2).abs() < 1e-6);
+
+        runtime.nudge(transpose.clone(), 2.0).unwrap();
+        runtime.set_delta_leak_per_beat(0.5).unwrap();
+        let mut out = Vec::new();
+        runtime.process_block(0.0, 1.0, 0, 48_000.0, 0, |_| NodeFire::default(), &mut out);
+        assert!((runtime.delta(&transpose) - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn periodic_reset_keeps_graph_deltas_but_transport_reset_clears_them() {
+        let mut runtime = delta_runtime();
+        runtime.reset_interval_beats = 0.5;
+        let delay = GraphDeltaKey::NodeDelay { node: 0 };
+        runtime.nudge(delay.clone(), -1.5).unwrap();
+        let mut out = Vec::new();
+        runtime.process_block(0.0, 0.75, 0, 48_000.0, 0, |_| NodeFire::default(), &mut out);
+        assert!(runtime.delta(&delay).abs() > 1.0);
+        assert_eq!(runtime.nodes[0].delay_steps, 3);
+
+        runtime.reset_transport(0.0);
+        assert_eq!(runtime.delta(&delay), 0.0);
+        assert_eq!(runtime.nodes[0].delay_steps, 4);
     }
 
     #[test]

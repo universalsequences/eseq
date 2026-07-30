@@ -602,6 +602,58 @@
     }
 
     #[test]
+    fn graph_node_count_reconcile_keeps_surviving_deltas_and_drops_out_of_range_keys() {
+        let mut manifests = Vec::new();
+        let mut runtimes = Vec::new();
+        let manifest = graph_manifest(
+            1,
+            "g",
+            ShapeSpec::VariableLine {
+                default: 8,
+                min: 1,
+                max: 16,
+            },
+        );
+        reconcile_graph_runtimes(
+            vec![manifest.clone()],
+            &[],
+            &mut runtimes,
+            &mut manifests,
+            0.0,
+        );
+        let surviving = crate::graph::GraphDeltaKey::EdgeParam {
+            from: 1,
+            to: 1,
+            param: "weight".to_string(),
+        };
+        let removed = crate::graph::GraphDeltaKey::EdgeParam {
+            from: 7,
+            to: 7,
+            param: "weight".to_string(),
+        };
+        runtimes[0].nudge(surviving.clone(), 0.25).unwrap();
+        runtimes[0].nudge(removed.clone(), 0.5).unwrap();
+
+        let overrides = ProjectGraphOverrides {
+            sequencer_id: 1,
+            sequencer_name: "g".into(),
+            node_count: Some(4),
+            ..ProjectGraphOverrides::default()
+        };
+        reconcile_graph_runtimes(
+            vec![manifest],
+            &[overrides],
+            &mut runtimes,
+            &mut manifests,
+            0.0,
+        );
+
+        assert_eq!(runtimes[0].num_nodes(), 4);
+        assert_eq!(runtimes[0].delta(&surviving), 0.25);
+        assert_eq!(runtimes[0].delta(&removed), 0.0);
+    }
+
+    #[test]
     fn graph_reconcile_tracks_multiple_graphs_by_id() {
         let mut manifests = Vec::new();
         let mut runtimes = Vec::new();

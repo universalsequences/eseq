@@ -194,6 +194,65 @@ pub(super) fn graph_overrides_for_manifest<'a>(
     })
 }
 
+pub(super) fn apply_graph_control_commands(
+    runtimes: &mut [crate::graph::GraphRuntime],
+    commands: &[crate::graph::GraphControlCommand],
+) {
+    for command in commands {
+        apply_graph_control_command(runtimes, command);
+    }
+}
+
+fn apply_graph_control_command(
+    runtimes: &mut [crate::graph::GraphRuntime],
+    command: &crate::graph::GraphControlCommand,
+) {
+    match command {
+        crate::graph::GraphControlCommand::Nudge(nudge) => {
+            if let Some(runtime) = runtimes
+                .iter_mut()
+                .find(|runtime| runtime.matches_reference(nudge.graph_id, &nudge.graph_name))
+            {
+                let _ = runtime.nudge(nudge.key.clone(), nudge.amount);
+            }
+        }
+        crate::graph::GraphControlCommand::Clear {
+            graph_id,
+            graph_name,
+        } => {
+            if let Some(runtime) = runtimes
+                .iter_mut()
+                .find(|runtime| runtime.matches_reference(*graph_id, graph_name))
+            {
+                runtime.clear_deltas();
+            }
+        }
+        crate::graph::GraphControlCommand::SetLeak {
+            graph_id,
+            graph_name,
+            factor,
+        } => {
+            if let Some(runtime) = runtimes
+                .iter_mut()
+                .find(|runtime| runtime.matches_reference(*graph_id, graph_name))
+            {
+                let _ = runtime.set_delta_leak_per_beat(*factor);
+            }
+        }
+    }
+}
+
+pub(super) fn apply_graph_process_commands(
+    runtimes: &mut [crate::graph::GraphRuntime],
+    commands: &[crate::process::ProcessRunCommand],
+) {
+    for command in commands {
+        if let crate::process::ProcessRunCommand::Graph(command) = command {
+            apply_graph_control_command(runtimes, command);
+        }
+    }
+}
+
 pub(super) fn reconcile_graph_runtimes(
     manifests: Vec<crate::graph::GraphManifest>,
     overrides: &[crate::graph::ProjectGraphOverrides],
@@ -215,9 +274,10 @@ pub(super) fn reconcile_graph_runtimes(
                 runtime.apply_config_preserving_state(config, total_beats);
                 runtime
             } else {
-                let mut runtime = crate::graph::GraphRuntime::new_from_config(config);
-                runtime.realign(total_beats);
-                runtime
+                let mut replacement = crate::graph::GraphRuntime::new_from_config(config);
+                replacement.inherit_delta_state_from(&runtime);
+                replacement.realign(total_beats);
+                replacement
             }
         } else {
             let mut runtime = crate::graph::GraphRuntime::new_from_config(config);

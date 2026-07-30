@@ -244,6 +244,7 @@ pub struct SequencerState {
     pub(super) rack_macro_runtime_values: Arc<RackMacroRuntimeValues>,
     pub(super) neural_visualization: Mutex<NeuralVisualizationSnapshot>,
     pub(super) graph_visualizations: Mutex<Vec<GraphVisualizationSnapshot>>,
+    pub(super) graph_control_commands: Mutex<Vec<crate::graph::GraphControlCommand>>,
     pub(super) track_output_events: Mutex<Vec<TrackOutputEvent>>,
     pub(super) track_output_current_beat_bits: AtomicU64,
     pub(super) active_note_until_samples: Vec<[AtomicU64; 128]>,

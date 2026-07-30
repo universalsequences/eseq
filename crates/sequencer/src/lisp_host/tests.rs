@@ -2127,6 +2127,10 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 "graph-variable-reset-energy-matrix",
                 "graph-variable-reset-weight-matrix",
                 "graph-variable-reset-dampening-matrix",
+                "graph-variable-reset-delta-matrix",
+                "graph-variable-reset-node-delta-column",
+                "graph-variable-reset-delta-commit",
+                "graph-variable-reset-delta-clear",
             ] {
                 let widget =
                     find_by_stable_key(layout, key).unwrap_or_else(|| panic!("missing {key}"));
@@ -2140,8 +2144,10 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             assert_number_prop(trigger, "rows", count as f64);
             assert_number_prop(trigger, "cols", 1.0);
             let energy = find_by_stable_key(layout, "graph-variable-reset-energy-matrix").unwrap();
+            let node_delta =
+                find_by_stable_key(layout, "graph-variable-reset-node-delta-column").unwrap();
             let expected_matrix_height = count as f64 + (count.saturating_sub(1) as f64 * 0.2);
-            for matrix in [trigger, energy, weight] {
+            for matrix in [trigger, energy, node_delta, weight] {
                 assert_number_prop_close(matrix, "height", expected_matrix_height);
             }
             let first_row = find_by_stable_key(layout, "graph-variable-reset-transpose-0")
@@ -2166,7 +2172,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             );
             let row_top = first_row.rect.row;
             let row_bottom = final_row.rect.row + final_row.rect.height;
-            for matrix in [trigger, energy, weight] {
+            for matrix in [trigger, energy, node_delta, weight] {
                 assert_close(
                     matrix.rect.row,
                     row_top,
@@ -8770,6 +8776,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                          (+ (read (track 0 :transpose))
                             (read (track 0 :transpose :steps-ago 1))
                             (read (track 0 :transpose :trigs-ago 0))
+                            (read (track 0 :fire-count :window (bars 1)))
                             (read (process :brain :value))
                             (read :channel :density))))
                 "#,
@@ -8793,7 +8800,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             tracks: Arc::new(vec![crate::process::ProcessTrackReadSnapshot {
                 current,
                 steps: vec![step_zero, step_one],
-                trigs: vec![trig],
+                trigs: vec![trig, trig, trig],
+                trig_beats: vec![0.9, 0.5, -3.1],
             }]),
             process_values: HashMap::from([(
                 "brain".to_string(),
@@ -8819,7 +8827,226 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 seed: 1,
             })
             .expect("invoke read-family probe");
-        assert_eq!(result.target_writes[0].value, 24.0);
+        assert_eq!(result.target_writes[0].value, 26.0);
+    }
+
+    #[test]
+    fn graph_homeostat_nudges_use_process_commands_and_immediate_host_queue() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut publisher = Runtime::new();
+        register_graph_def_sequencer_test_native(&mut publisher, Arc::clone(&state));
+        publisher
+            .eval_str(
+                r#"
+                (def-sequencer "homeostat-test"
+                  :shape (line 2)
+                  :energy-decay 1
+                  :reset-every 0
+                  :seed-on-reset 0
+                  :max-poly 2
+                  (def-node nrn
+                    :resolution :16
+                    :delay 2
+                    :route 0
+                    :seed-from ()
+                    :params ((threshold :float 0 4 :default 1)
+                             (transpose :int -48 48 :default 0))
+                    :state ((energy :leak (per-step :energy-decay)))
+                    :update nil)
+                  (edges
+                    :from nrn :to nrn :topology (all-to-all)
+                    :gather (edge :weight)
+                    :params ((weight :float -1 1 :default 0)
+                             (dampening :float 0 1 :default 0))))
+                "#,
+            )
+            .expect("publish graph");
+
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process homeostat-command-probe
+                  :run (do
+                         (graph-clear-deltas! "homeostat-test")
+                         (graph-nudge-param! "homeostat-test" 0 :transpose 1.5)
+                         (graph-nudge-node! "homeostat-test" 0 :delay -0.5)
+                         (graph-nudge-edge! "homeostat-test"
+                           :from 0 :to 1 :weight 0.2)))
+                "#,
+            )
+            .expect("define graph homeostat command probe");
+        let def = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "homeostat-command-probe")
+            .expect("homeostat command definition");
+        let result = scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 1,
+                source: def.run_source.expect("run source"),
+                beat: 1.0,
+                sample_time: 0,
+                inlets: HashMap::new(),
+                state: HashMap::new(),
+                event: None,
+                step_context: None,
+                ports: def.ports,
+                reads: crate::process::ProcessReadSnapshot::default(),
+                seed: 1,
+            })
+            .expect("invoke homeostat command probe");
+        assert_eq!(result.commands.len(), 4);
+        assert!(matches!(
+            result.commands.first(),
+            Some(crate::process::ProcessRunCommand::Graph(
+                crate::graph::GraphControlCommand::Clear { .. }
+            ))
+        ));
+        assert!(result.commands.iter().skip(1).all(|command| matches!(
+            command,
+            crate::process::ProcessRunCommand::Graph(
+                crate::graph::GraphControlCommand::Nudge(_)
+            )
+        )));
+        assert!(state.current_graph_overrides().is_empty());
+
+        scratch
+            .eval("(graph-clear-deltas! \"homeostat-test\")")
+            .expect("queue immediate clear");
+        assert!(matches!(
+            state.drain_graph_control_commands().as_slice(),
+            [crate::graph::GraphControlCommand::Clear { .. }]
+        ));
+
+        let demo = std::fs::read_to_string(format!(
+            "{}/scripts/processes/graph-homeostat-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("read graph homeostat demo");
+        scratch.eval(&demo).expect("evaluate graph homeostat demo");
+        let names = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        assert!(names.iter().any(|name| name == "graph-homeostat"));
+        assert!(names.iter().any(|name| name == "graph-restructurer"));
+
+        scratch
+            .eval(
+                r#"
+                (def-process invalid-homeostat-commit
+                  :run (graph-commit-deltas! "homeostat-test"))
+                "#,
+            )
+            .expect("define invalid commit probe");
+        let invalid = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "invalid-homeostat-commit")
+            .expect("invalid commit definition");
+        assert!(scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 2,
+                source: invalid.run_source.expect("run source"),
+                beat: 1.0,
+                sample_time: 0,
+                inlets: HashMap::new(),
+                state: HashMap::new(),
+                event: None,
+                step_context: None,
+                ports: invalid.ports,
+                reads: crate::process::ProcessReadSnapshot::default(),
+                seed: 1,
+            })
+            .is_err());
+        scratch
+            .eval("(graph-clear-deltas! \"homeostat-test\")")
+            .expect("process error must not poison later host actions");
+        assert!(matches!(
+            state.drain_graph_control_commands().as_slice(),
+            [crate::graph::GraphControlCommand::Clear { .. }]
+        ));
+    }
+
+    #[test]
+    fn graph_commit_deltas_promotes_one_authored_edit_then_queues_clear() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut publisher = Runtime::new();
+        register_graph_def_sequencer_test_native(&mut publisher, Arc::clone(&state));
+        publisher
+            .eval_str(
+                r#"
+                (def-sequencer "commit-test"
+                  :shape (line 1)
+                  :energy-decay 1
+                  :reset-every 0
+                  :seed-on-reset 0
+                  :max-poly 1
+                  (def-node nrn
+                    :resolution :16 :delay 4 :route 0 :seed-from ()
+                    :params ((transpose :int -48 48 :default 0))
+                    :state ((energy :leak (per-step :energy-decay)))
+                    :update nil)
+                  (edges
+                    :from nrn :to nrn :topology (all-to-all)
+                    :gather (edge :weight)
+                    :params ((weight :float -1 1 :default 0))))
+                "#,
+            )
+            .expect("publish graph");
+        let manifest = state
+            .published_sequencers()
+            .into_iter()
+            .find_map(|published| published.graph)
+            .expect("published graph manifest");
+        state.set_graph_visualizations(vec![crate::graph::GraphVisualizationSnapshot {
+            id: manifest.id,
+            name: manifest.name.clone(),
+            deltas: vec![
+                crate::graph::GraphDeltaEntry {
+                    key: crate::graph::GraphDeltaKey::NodeDelay { node: 0 },
+                    delta: -1.5,
+                },
+                crate::graph::GraphDeltaEntry {
+                    key: crate::graph::GraphDeltaKey::NodeParam {
+                        node: 0,
+                        param: "transpose".to_string(),
+                    },
+                    delta: 2.75,
+                },
+            ],
+            ..crate::graph::GraphVisualizationSnapshot::default()
+        }]);
+
+        let mut runtime = Runtime::new();
+        register_published_process_authoring_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        runtime
+            .eval_str("(graph-commit-deltas! \"commit-test\")")
+            .expect("commit graph deltas");
+
+        let overrides = state.current_graph_overrides();
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].node_intrinsics[0].delay_steps, Some(3));
+        assert_eq!(overrides[0].node_params[0].value, 2.0);
+        assert!(matches!(
+            state.drain_graph_control_commands().as_slice(),
+            [crate::graph::GraphControlCommand::Clear { .. }]
+        ));
     }
 
     #[test]

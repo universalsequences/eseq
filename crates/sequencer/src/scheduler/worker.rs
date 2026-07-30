@@ -93,7 +93,7 @@ pub fn spawn_scheduler_thread(
                                     lookahead_state.generator_runtime.reset(0.0);
                                     lookahead_state.process_runtime.reset_transport(0.0);
                                     for graph in &mut lookahead_state.graph_runtimes {
-                                        graph.reset(0.0);
+                                        graph.reset_transport(0.0);
                                     }
                                 }
                                 Err(error) => {
@@ -258,6 +258,19 @@ pub fn spawn_scheduler_thread(
                     loaded_graph_overrides = Some(snapshot.graph_overrides.clone());
                 }
 
+                let graph_control_commands = state.drain_graph_control_commands();
+                if !graph_control_commands.is_empty() {
+                    apply_graph_control_commands(
+                        &mut lookahead_state.graph_runtimes,
+                        &graph_control_commands,
+                    );
+                    publish_graph_visualizations(
+                        &state,
+                        &lookahead_state.graph_runtimes,
+                        lookahead_state.clock.total_beats,
+                    );
+                }
+
                 if !playing
                     && (last_playing
                         || last_pattern != pattern
@@ -326,6 +339,10 @@ pub fn spawn_scheduler_thread(
                     song_playback_active,
                 );
                 if !playing {
+                    let clear_graph_deltas = last_playing
+                        || last_pattern != pattern
+                        || last_pattern_epoch != pattern_epoch
+                        || last_topology_epoch != topology_epoch;
                     let live_active = schedule_live_midi_fx(
                         scratch_runtime.as_mut(),
                         &state,
@@ -357,7 +374,11 @@ pub fn spawn_scheduler_thread(
                     lookahead_state.generator_runtime.reset(0.0);
                     lookahead_state.process_runtime.reset_transport(0.0);
                     for graph in &mut lookahead_state.graph_runtimes {
-                        graph.reset(0.0);
+                        if clear_graph_deltas {
+                            graph.reset_transport(0.0);
+                        } else {
+                            graph.reset(0.0);
+                        }
                     }
                     publish_graph_visualizations(&state, &lookahead_state.graph_runtimes, 0.0);
                     state.set_neural_visualization(lookahead_state.neural_runtime.visualization_snapshot());

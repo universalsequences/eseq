@@ -282,6 +282,24 @@
                 delay_steps: 3,
                 distribution: sequencer::graph::EdgeDistribution::WeightedChoice,
             }],
+            deltas: vec![
+                sequencer::graph::GraphDeltaEntry {
+                    key: sequencer::graph::GraphDeltaKey::EdgeParam {
+                        from: 0,
+                        to: 1,
+                        param: "weight".to_string(),
+                    },
+                    delta: -0.25,
+                },
+                sequencer::graph::GraphDeltaEntry {
+                    key: sequencer::graph::GraphDeltaKey::NodeParam {
+                        node: 1,
+                        param: "transpose".to_string(),
+                    },
+                    delta: 2.0,
+                },
+            ],
+            delta_leak_per_beat: 0.9946,
         }]);
 
         let Value::List(graphs) = build_graph_visualizations_value(&state) else {
@@ -318,6 +336,24 @@
             panic!("expected dampening matrix row");
         };
         assert_eq!(*dampening_row_0[1].borrow(), Value::Number(0.63));
+
+        let Value::List(delta_rows) = &*graph.get("delta-matrix").unwrap().borrow() else {
+            panic!("expected delta matrix");
+        };
+        let Value::List(delta_row_0) = &*delta_rows[0].borrow() else {
+            panic!("expected delta matrix row");
+        };
+        assert_eq!(*delta_row_0[1].borrow(), Value::Number(-0.25));
+
+        let Value::List(node_delta_rows) =
+            &*graph.get("node-delta-column").unwrap().borrow()
+        else {
+            panic!("expected node delta column");
+        };
+        let Value::List(node_delta_row_1) = &*node_delta_rows[1].borrow() else {
+            panic!("expected node delta row");
+        };
+        assert_eq!(*node_delta_row_1[0].borrow(), Value::Number(2.0));
 
         let Value::List(energy_rows) = &*graph.get("energy-matrix").unwrap().borrow() else {
             panic!("expected energy matrix");

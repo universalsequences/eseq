@@ -75,6 +75,13 @@ pub(in crate::lisp_host) fn register_process_natives(
     process_chain_state: Option<Arc<crate::sequencer::SequencerState>>,
     register_execution_natives: bool,
 ) {
+    if let Some(state) = process_chain_state.as_ref() {
+        register_graph_homeostat_natives(
+            runtime,
+            Arc::clone(state),
+            Arc::clone(&process_eval),
+        );
+    }
     let process_authoring_for_inline_metadata = Arc::clone(&process_authoring);
     runtime.set_inline_widget_metadata_resolver(Rc::new(move |callee, inlet| {
         let registry = process_authoring_for_inline_metadata.lock().ok()?;
@@ -639,6 +646,23 @@ pub(in crate::lisp_host) fn register_process_natives(
     // bodies execute in the scheduler scratch VM, where the name is free; do
     // not replace an established host meaning while registering authoring
     // natives in the UI VM.
+    if runtime.global_value("bars").is_none() {
+        runtime.register_native_with_docs(
+            "bars",
+            "(bars n)",
+            "Convert a 4/4 bar count to quarter-note beats.",
+            move |args, _ctx| {
+                if args.len() != 1 {
+                    return Err("bars expects one number".to_string());
+                }
+                let bars = process_number_arg(args.first(), "bars")?;
+                if !bars.is_finite() || bars < 0.0 {
+                    return Err("bars expects a finite non-negative number".to_string());
+                }
+                Ok(EValue::Number(bars * 4.0))
+            },
+        );
+    }
     if runtime.global_value("track").is_none() {
         runtime.register_native_with_docs(
             "track",
@@ -656,6 +680,24 @@ pub(in crate::lisp_host) fn register_process_natives(
                     return Err("track index must be a non-negative integer".to_string());
                 }
                 let param = process_symbol_name(&args[1])?;
+                if param == "fire-count" {
+                    if args.len() != 4 || process_symbol_name(&args[2])? != "window" {
+                        return Err(
+                            "track :fire-count expects :window and a beat duration".to_string()
+                        );
+                    }
+                    let window = process_number_arg(args.get(3), "track")?;
+                    if !window.is_finite() || window < 0.0 {
+                        return Err(
+                            "track :fire-count window must be finite and non-negative".to_string()
+                        );
+                    }
+                    return Ok(process_map([
+                        ("kind", EValue::Keyword("track-fire-count".to_string())),
+                        ("track", EValue::Number(track)),
+                        ("window", EValue::Number(window)),
+                    ]));
+                }
                 let mut fields = vec![
                     ("kind", EValue::Keyword("track-read".to_string())),
                     ("track", EValue::Number(track)),
@@ -990,6 +1032,30 @@ pub(in crate::lisp_host) fn register_process_natives(
                 process_symbol_name(&value)
             };
             match string_field("kind")?.as_str() {
+                "track-fire-count" => {
+                    let track = match source.get("track").map(|value| value.borrow()) {
+                        Some(value) => process_number_arg(Some(&value), "read")? as usize,
+                        None => return Err("track fire-count source missing track".to_string()),
+                    };
+                    let window = match source.get("window").map(|value| value.borrow()) {
+                        Some(value) => process_number_arg(Some(&value), "read")?,
+                        None => return Err("track fire-count source missing window".to_string()),
+                    };
+                    let count = ctx
+                        .reads
+                        .tracks
+                        .get(track)
+                        .map(|track| {
+                            let lower = ctx.beat - window;
+                            track
+                                .trig_beats
+                                .iter()
+                                .filter(|beat| **beat > lower + 1e-9 && **beat <= ctx.beat + 1e-9)
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    Ok(EValue::Number(count as f64))
+                }
                 "track-read" => {
                     let track = match source.get("track").map(|value| value.borrow()) {
                         Some(value) => process_number_arg(Some(&value), "read")? as usize,
@@ -1217,6 +1283,583 @@ pub(in crate::lisp_host) fn register_process_natives(
             Ok(process_status_value(&registry))
         },
     );
+}
+
+fn register_graph_homeostat_natives(
+    runtime: &mut Runtime,
+    state: Arc<crate::sequencer::SequencerState>,
+    process_eval: SharedProcessEvalContext,
+) {
+    let state_for_nudge_param = Arc::clone(&state);
+    let eval_for_nudge_param = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "graph-nudge-param!",
+        "(graph-nudge-param! graph node :param delta)",
+        "Add an ephemeral process delta to a graph node parameter.",
+        move |args, _ctx| {
+            if args.len() != 4 {
+                return Err("graph-nudge-param! expects graph, node, param, and delta".to_string());
+            }
+            let manifest = homeostat_graph_manifest(&state_for_nudge_param, &args[0])?;
+            let node = process_nonnegative_index(&args[1], "graph node")?;
+            let param = process_symbol_name(&args[2])?;
+            homeostat_validate_node_param(&state_for_nudge_param, &manifest, node, &param)?;
+            let amount = finite_graph_delta(&args[3])?;
+            dispatch_graph_command(
+                &state_for_nudge_param,
+                &eval_for_nudge_param,
+                crate::graph::GraphControlCommand::Nudge(crate::graph::GraphNudge {
+                    graph_id: manifest.id,
+                    graph_name: manifest.name,
+                    key: crate::graph::GraphDeltaKey::NodeParam { node, param },
+                    amount,
+                }),
+                true,
+            )?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let state_for_nudge_node = Arc::clone(&state);
+    let eval_for_nudge_node = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "graph-nudge-node!",
+        "(graph-nudge-node! graph node :delay delta)",
+        "Add an ephemeral process delta to a graph node intrinsic.",
+        move |args, _ctx| {
+            if args.len() != 4 || process_symbol_name(&args[2])? != "delay" {
+                return Err("graph-nudge-node! supports graph, node, :delay, and delta".to_string());
+            }
+            let manifest = homeostat_graph_manifest(&state_for_nudge_node, &args[0])?;
+            let node = process_nonnegative_index(&args[1], "graph node")?;
+            homeostat_validate_node(&state_for_nudge_node, &manifest, node)?;
+            let amount = finite_graph_delta(&args[3])?;
+            dispatch_graph_command(
+                &state_for_nudge_node,
+                &eval_for_nudge_node,
+                crate::graph::GraphControlCommand::Nudge(crate::graph::GraphNudge {
+                    graph_id: manifest.id,
+                    graph_name: manifest.name,
+                    key: crate::graph::GraphDeltaKey::NodeDelay { node },
+                    amount,
+                }),
+                true,
+            )?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let state_for_nudge_edge = Arc::clone(&state);
+    let eval_for_nudge_edge = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "graph-nudge-edge!",
+        "(graph-nudge-edge! graph :from n :to n :weight delta)",
+        "Add an ephemeral process delta to a graph edge parameter.",
+        move |args, _ctx| {
+            let manifest = homeostat_graph_manifest(
+                &state_for_nudge_edge,
+                args.first().ok_or("graph-nudge-edge! expects a graph")?,
+            )?;
+            let (from, to, param, amount) = parse_homeostat_edge_args(&args[1..], true)?;
+            if param != "weight" && param != "dampening" {
+                return Err("graph-nudge-edge! supports :weight or :dampening".to_string());
+            }
+            homeostat_validate_edge(&state_for_nudge_edge, &manifest, from, to, &param)?;
+            dispatch_graph_command(
+                &state_for_nudge_edge,
+                &eval_for_nudge_edge,
+                crate::graph::GraphControlCommand::Nudge(crate::graph::GraphNudge {
+                    graph_id: manifest.id,
+                    graph_name: manifest.name,
+                    key: crate::graph::GraphDeltaKey::EdgeParam { from, to, param },
+                    amount,
+                }),
+                true,
+            )?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let state_for_delta = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-delta",
+        "(graph-delta graph node :param)",
+        "Read the current ephemeral graph node-parameter delta.",
+        move |args, _ctx| {
+            if args.len() != 3 {
+                return Err("graph-delta expects graph, node, and param".to_string());
+            }
+            let manifest = homeostat_graph_manifest(&state_for_delta, &args[0])?;
+            let node = process_nonnegative_index(&args[1], "graph node")?;
+            let param = process_symbol_name(&args[2])?;
+            homeostat_validate_node_param(&state_for_delta, &manifest, node, &param)?;
+            Ok(EValue::Number(
+                published_graph_delta(
+                    &state_for_delta,
+                    manifest.id,
+                    &crate::graph::GraphDeltaKey::NodeParam { node, param },
+                ) as f64,
+            ))
+        },
+    );
+
+    let state_for_delta_edge = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-delta-edge",
+        "(graph-delta-edge graph :from n :to n :weight)",
+        "Read the current ephemeral graph edge-parameter delta.",
+        move |args, _ctx| {
+            let manifest = homeostat_graph_manifest(
+                &state_for_delta_edge,
+                args.first().ok_or("graph-delta-edge expects a graph")?,
+            )?;
+            let (from, to, param, _) = parse_homeostat_edge_args(&args[1..], false)?;
+            homeostat_validate_edge(&state_for_delta_edge, &manifest, from, to, &param)?;
+            Ok(EValue::Number(
+                published_graph_delta(
+                    &state_for_delta_edge,
+                    manifest.id,
+                    &crate::graph::GraphDeltaKey::EdgeParam { from, to, param },
+                ) as f64,
+            ))
+        },
+    );
+
+    let state_for_effective = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-effective-param",
+        "(graph-effective-param graph node :param)",
+        "Read a graph node parameter after authored overrides and ephemeral delta.",
+        move |args, _ctx| {
+            if args.len() != 3 {
+                return Err(
+                    "graph-effective-param expects graph, node, and param".to_string()
+                );
+            }
+            let manifest = homeostat_graph_manifest(&state_for_effective, &args[0])?;
+            let node = process_nonnegative_index(&args[1], "graph node")?;
+            let param = process_symbol_name(&args[2])?;
+            homeostat_validate_node_param(&state_for_effective, &manifest, node, &param)?;
+            let config = homeostat_authored_config(&state_for_effective, &manifest);
+            let authored = config.node_params[node].get(&param).copied().unwrap_or(0.0);
+            let range = config
+                .node_param_ranges
+                .get(&param)
+                .copied()
+                .ok_or_else(|| format!("graph node param :{param} has no declared range"))?;
+            let delta = published_graph_delta(
+                &state_for_effective,
+                manifest.id,
+                &crate::graph::GraphDeltaKey::NodeParam { node, param },
+            );
+            Ok(EValue::Number(crate::graph::effective_delta_value(
+                authored,
+                delta as f64,
+                range,
+            )))
+        },
+    );
+
+    let state_for_clear = Arc::clone(&state);
+    let eval_for_clear = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "graph-clear-deltas!",
+        "(graph-clear-deltas! graph)",
+        "Clear all ephemeral deltas for a graph.",
+        move |args, _ctx| {
+            if args.len() != 1 {
+                return Err("graph-clear-deltas! expects one graph".to_string());
+            }
+            let manifest = homeostat_graph_manifest(&state_for_clear, &args[0])?;
+            dispatch_graph_command(
+                &state_for_clear,
+                &eval_for_clear,
+                crate::graph::GraphControlCommand::Clear {
+                    graph_id: manifest.id,
+                    graph_name: manifest.name,
+                },
+                true,
+            )?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let state_for_leak = Arc::clone(&state);
+    let eval_for_leak = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "graph-delta-leak!",
+        "(graph-delta-leak! graph factor)",
+        "Set the graph delta's per-beat multiplicative leak factor.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("graph-delta-leak! expects graph and factor".to_string());
+            }
+            ensure_outside_process_run(&eval_for_leak, "graph-delta-leak!")?;
+            let manifest = homeostat_graph_manifest(&state_for_leak, &args[0])?;
+            let factor = finite_graph_delta(&args[1])?;
+            if !(0.0..=1.0).contains(&factor) {
+                return Err("graph delta leak factor must be between 0 and 1".to_string());
+            }
+            state_for_leak.push_graph_control_command(crate::graph::GraphControlCommand::SetLeak {
+                graph_id: manifest.id,
+                graph_name: manifest.name,
+                factor,
+            });
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let state_for_commit = Arc::clone(&state);
+    let eval_for_commit = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "graph-commit-deltas!",
+        "(graph-commit-deltas! graph)",
+        "Fold current ephemeral deltas into authored overrides and clear them.",
+        move |args, _ctx| {
+            if args.len() != 1 {
+                return Err("graph-commit-deltas! expects one graph".to_string());
+            }
+            ensure_outside_process_run(&eval_for_commit, "graph-commit-deltas!")?;
+            let manifest = homeostat_graph_manifest(&state_for_commit, &args[0])?;
+            commit_published_graph_deltas(&state_for_commit, &manifest)?;
+            state_for_commit.push_graph_control_command(crate::graph::GraphControlCommand::Clear {
+                graph_id: manifest.id,
+                graph_name: manifest.name,
+            });
+            Ok(EValue::Bool(true))
+        },
+    );
+}
+
+fn process_nonnegative_index(value: &EValue, label: &str) -> Result<usize, String> {
+    let value = process_number_arg(Some(value), label)?;
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
+        return Err(format!("{label} must be a non-negative integer"));
+    }
+    Ok(value as usize)
+}
+
+fn finite_graph_delta(value: &EValue) -> Result<f32, String> {
+    let value = process_number_arg(Some(value), "graph delta")?;
+    if !value.is_finite() || value < f32::MIN as f64 || value > f32::MAX as f64 {
+        return Err("graph delta must be a finite f32 value".to_string());
+    }
+    Ok(value as f32)
+}
+
+fn homeostat_graph_manifest(
+    state: &crate::sequencer::SequencerState,
+    reference: &EValue,
+) -> Result<crate::graph::GraphManifest, String> {
+    let id = match reference {
+        EValue::Number(value) if value.is_finite() && *value >= 0.0 && value.fract() == 0.0 => {
+            Some(*value as u64)
+        }
+        _ => None,
+    };
+    let name = process_symbol_name(reference).ok();
+    state
+        .published_sequencers()
+        .into_iter()
+        .filter_map(|published| published.graph)
+        .find(|manifest| id == Some(manifest.id) || name.as_deref() == Some(&manifest.name))
+        .ok_or_else(|| "graph not found".to_string())
+}
+
+fn homeostat_authored_config(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+) -> crate::graph::GraphRuntimeConfig {
+    let overrides = state
+        .current_graph_overrides()
+        .into_iter()
+        .find(|overrides| {
+            overrides.sequencer_id == manifest.id || overrides.sequencer_name == manifest.name
+        });
+    manifest.runtime_config_with_overrides(overrides.as_ref())
+}
+
+fn homeostat_validate_node(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    node: usize,
+) -> Result<(), String> {
+    let overrides = state
+        .current_graph_overrides()
+        .into_iter()
+        .find(|overrides| {
+            overrides.sequencer_id == manifest.id || overrides.sequencer_name == manifest.name
+        });
+    if node >= manifest.shape.resolved_node_count(overrides.as_ref()) {
+        return Err("graph node index out of range".to_string());
+    }
+    Ok(())
+}
+
+fn homeostat_validate_node_param(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    node: usize,
+    param: &str,
+) -> Result<(), String> {
+    homeostat_validate_node(state, manifest, node)?;
+    if !manifest.node.params.iter().any(|spec| spec.name == param) {
+        return Err(format!("graph node param :{param} has no declared range"));
+    }
+    Ok(())
+}
+
+fn homeostat_validate_edge(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    from: usize,
+    to: usize,
+    param: &str,
+) -> Result<(), String> {
+    homeostat_validate_node(state, manifest, from)?;
+    homeostat_validate_node(state, manifest, to)?;
+    if !manifest
+        .edge_sets
+        .iter()
+        .flat_map(|edge_set| &edge_set.params)
+        .any(|spec| spec.name == param)
+    {
+        return Err(format!("graph edge param :{param} has no declared range"));
+    }
+    Ok(())
+}
+
+fn parse_homeostat_edge_args(
+    args: &[EValue],
+    with_amount: bool,
+) -> Result<(usize, usize, String, f32), String> {
+    let mut from = None;
+    let mut to = None;
+    let mut param = None;
+    let mut amount = 0.0;
+    let mut idx = 0;
+    while idx < args.len() {
+        let key = process_symbol_name(&args[idx])?;
+        idx += 1;
+        if key == "from" || key == "to" {
+            let value = args
+                .get(idx)
+                .ok_or_else(|| format!("graph edge :{key} expects an index"))?;
+            let value = process_nonnegative_index(value, &key)?;
+            if key == "from" {
+                from = Some(value);
+            } else {
+                to = Some(value);
+            }
+            idx += 1;
+            continue;
+        }
+        param = Some(key);
+        if with_amount {
+            amount = finite_graph_delta(
+                args.get(idx)
+                    .ok_or("graph edge nudge parameter expects a delta")?,
+            )?;
+            idx += 1;
+        }
+        if idx != args.len() {
+            return Err("graph edge expects :from, :to, and one parameter".to_string());
+        }
+    }
+    Ok((
+        from.ok_or("graph edge requires :from")?,
+        to.ok_or("graph edge requires :to")?,
+        param.ok_or("graph edge requires a parameter")?,
+        amount,
+    ))
+}
+
+fn dispatch_graph_command(
+    state: &crate::sequencer::SequencerState,
+    process_eval: &SharedProcessEvalContext,
+    command: crate::graph::GraphControlCommand,
+    allow_in_process: bool,
+) -> Result<(), String> {
+    let mut guard = process_eval
+        .lock()
+        .map_err(|_| "failed to lock process eval context".to_string())?;
+    if let Some(ctx) = guard.as_mut() {
+        if ctx.scope == ProcessEvalScope::Run {
+            if !allow_in_process {
+                return Err("graph action is not allowed from a process run".to_string());
+            }
+            ctx.commands
+                .push(crate::process::ProcessRunCommand::Graph(command));
+            return Ok(());
+        }
+    }
+    drop(guard);
+    state.push_graph_control_command(command);
+    Ok(())
+}
+
+fn ensure_outside_process_run(
+    process_eval: &SharedProcessEvalContext,
+    native: &str,
+) -> Result<(), String> {
+    let guard = process_eval
+        .lock()
+        .map_err(|_| "failed to lock process eval context".to_string())?;
+    if guard
+        .as_ref()
+        .is_some_and(|ctx| ctx.scope == ProcessEvalScope::Run)
+    {
+        return Err(format!("{native} is not callable from a process run"));
+    }
+    Ok(())
+}
+
+fn published_graph_delta(
+    state: &crate::sequencer::SequencerState,
+    graph_id: u64,
+    key: &crate::graph::GraphDeltaKey,
+) -> f32 {
+    state
+        .graph_visualizations()
+        .into_iter()
+        .find(|snapshot| snapshot.id == graph_id)
+        .and_then(|snapshot| {
+            snapshot
+                .deltas
+                .into_iter()
+                .find(|entry| &entry.key == key)
+                .map(|entry| entry.delta)
+        })
+        .unwrap_or(0.0)
+}
+
+fn commit_published_graph_deltas(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+) -> Result<(), String> {
+    let deltas = state
+        .graph_visualizations()
+        .into_iter()
+        .find(|snapshot| snapshot.id == manifest.id)
+        .map(|snapshot| snapshot.deltas)
+        .unwrap_or_default();
+    if deltas.is_empty() {
+        return Ok(());
+    }
+    let authored = homeostat_authored_config(state, manifest);
+    let edge_group = manifest
+        .edge_sets
+        .first()
+        .map(crate::graph::edge_set_group_id)
+        .unwrap_or_default();
+    state.edit_current_graph_overrides(|graphs| {
+        let graph = if let Some(index) = graphs.iter().position(|graph| {
+            graph.sequencer_id == manifest.id || graph.sequencer_name == manifest.name
+        }) {
+            &mut graphs[index]
+        } else {
+            graphs.push(crate::graph::ProjectGraphOverrides {
+                sequencer_id: manifest.id,
+                sequencer_name: manifest.name.clone(),
+                ..crate::graph::ProjectGraphOverrides::default()
+            });
+            graphs.last_mut().expect("graph override inserted")
+        };
+        for entry in &deltas {
+            match &entry.key {
+                crate::graph::GraphDeltaKey::NodeDelay { node } => {
+                    let range = crate::graph::GraphDeltaRange {
+                        min: crate::graph::GRAPH_NODE_DELAY_MIN,
+                        max: crate::graph::GRAPH_NODE_DELAY_MAX,
+                        is_int: true,
+                    };
+                    let value = crate::graph::effective_delta_value(
+                        authored.nodes[*node].delay_steps as f64,
+                        entry.delta as f64,
+                        range,
+                    ) as u32;
+                    let intrinsic = graph
+                        .node_intrinsics
+                        .iter_mut()
+                        .find(|item| {
+                            item.group == manifest.node.name && item.instance == *node
+                        });
+                    if let Some(intrinsic) = intrinsic {
+                        intrinsic.delay_steps = Some(value);
+                    } else {
+                        graph.node_intrinsics.push(
+                            crate::graph::ProjectGraphNodeIntrinsicOverride {
+                                group: manifest.node.name.clone(),
+                                instance: *node,
+                                resolution: None,
+                                delay_steps: Some(value),
+                                quantize: None,
+                                route: None,
+                                seed_from: None,
+                                seed_on_reset: None,
+                                duration: None,
+                                swing: None,
+                            },
+                        );
+                    }
+                }
+                crate::graph::GraphDeltaKey::NodeParam { node, param } => {
+                    let range = authored.node_param_ranges[param];
+                    let value = crate::graph::effective_delta_value(
+                        authored.node_params[*node].get(param).copied().unwrap_or(0.0),
+                        entry.delta as f64,
+                        range,
+                    );
+                    if let Some(item) = graph.node_params.iter_mut().find(|item| {
+                        item.group == manifest.node.name
+                            && item.instance == *node
+                            && item.param == *param
+                    }) {
+                        item.value = value;
+                    } else {
+                        graph.node_params.push(crate::graph::ProjectGraphNodeParamOverride {
+                            group: manifest.node.name.clone(),
+                            instance: *node,
+                            param: param.clone(),
+                            value,
+                        });
+                    }
+                }
+                crate::graph::GraphDeltaKey::EdgeParam { from, to, param } => {
+                    let range = authored.edge_param_ranges[param];
+                    let edge = authored
+                        .edges
+                        .iter()
+                        .find(|edge| edge.from == *from && edge.to == *to)
+                        .ok_or("graph delta edge disappeared before commit")?;
+                    let base = if param == "weight" {
+                        edge.weight
+                    } else {
+                        edge.dampening
+                    };
+                    let value =
+                        crate::graph::effective_delta_value(base, entry.delta as f64, range);
+                    if let Some(item) = graph.edge_params.iter_mut().find(|item| {
+                        item.group == edge_group
+                            && item.from == *from
+                            && item.to == *to
+                            && item.param == *param
+                    }) {
+                        item.value = value;
+                    } else {
+                        graph.edge_params.push(crate::graph::ProjectGraphEdgeParamOverride {
+                            group: edge_group.clone(),
+                            from: *from,
+                            to: *to,
+                            param: param.clone(),
+                            value,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    })
 }
 
 pub(in crate::lisp_host) fn register_def_accumulator_dispatch_native(

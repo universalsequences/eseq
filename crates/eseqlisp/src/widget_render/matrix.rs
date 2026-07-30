@@ -191,6 +191,30 @@ fn normalized_value(props: &HashMap<String, Value>, value: f32) -> f32 {
     }
 }
 
+fn display_value(props: &HashMap<String, Value>, value: f32) -> f32 {
+    if !get_bool_prop(props, "diverging", false) {
+        return normalized_value(props, value);
+    }
+    let min = get_f32_prop(props, "min", -1.0);
+    let max = get_f32_prop(props, "max", 1.0);
+    let zero = get_f32_prop(props, "zero", 0.0).clamp(min.min(max), min.max(max));
+    if value >= zero {
+        let span = max - zero;
+        if span.abs() > f32::EPSILON {
+            ((value - zero) / span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    } else {
+        let span = zero - min;
+        if span.abs() > f32::EPSILON {
+            ((zero - value) / span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+}
+
 fn cell_index(node: &LayoutNode, local_col: f32, local_row: f32) -> usize {
     let rows = matrix_rows_from_props(&node.props);
     let cols = matrix_cols_from_props(&node.props);
@@ -349,6 +373,14 @@ fn fill_color(props: &HashMap<String, Value>) -> Color {
     )
 }
 
+fn negative_fill_color(props: &HashMap<String, Value>, default: Color) -> Color {
+    resolve_matrix_color(
+        props,
+        &["negative-fill", "negative-fill-color", "negative-color"],
+        default,
+    )
+}
+
 fn background_color(props: &HashMap<String, Value>) -> Color {
     resolve_matrix_color(
         props,
@@ -376,7 +408,7 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
             let matrix_col = ((x as f32 / width_u16 as f32) * cols as f32)
                 .floor()
                 .min((cols - 1) as f32) as usize;
-            let t = normalized_value(props, matrix[matrix_row][matrix_col]);
+            let t = display_value(props, matrix[matrix_row][matrix_col]);
             let ch = if t >= 0.66 {
                 '#'
             } else if t >= 0.33 {
@@ -625,6 +657,7 @@ impl WidgetDefinition for MatrixWidget {
         let state = get_state(node.widget_id);
         let control = control_from_props(&node.props);
         let color = fill_color(&node.props);
+        let negative_color = negative_fill_color(&node.props, color);
         let bg = background_color(&node.props);
         let border = resolve_named_color(&node.props, "border-color", default_cell_color(bg));
         let hover_border = resolve_named_color(
@@ -647,7 +680,14 @@ impl WidgetDefinition for MatrixWidget {
                 } else {
                     border
                 };
-                let t = normalized_value(&node.props, *value);
+                let t = display_value(&node.props, *value);
+                let cell_color = if get_bool_prop(&node.props, "diverging", false)
+                    && *value < get_f32_prop(&node.props, "zero", 0.0)
+                {
+                    negative_color
+                } else {
+                    color
+                };
                 let rect = Rect {
                     row: cell_row,
                     col: cell_col,
@@ -678,7 +718,7 @@ impl WidgetDefinition for MatrixWidget {
                         uniform_b: [0.0; 4],
                         uniform_c: [0.0; 4],
                         uniform_d: [0.0; 4],
-                        color_a: color.to_rgba(),
+                        color_a: cell_color.to_rgba(),
                         color_b: bg.to_rgba(),
                         color_c: cell_border.to_rgba(),
                         color_d: [0.0; 4],
@@ -736,6 +776,21 @@ mod tests {
     fn value_is_bindable_but_not_size_affecting() {
         assert_eq!(MATRIX_WIDGET.bindable_props(), &["value"]);
         assert!(!MATRIX_WIDGET.size_affecting_props().contains(&"value"));
+    }
+
+    #[test]
+    fn diverging_display_is_neutral_at_zero_and_symmetric_at_extremes() {
+        let props = HashMap::from([
+            ("diverging".to_string(), Value::Bool(true)),
+            ("min".to_string(), Value::Number(-2.0)),
+            ("max".to_string(), Value::Number(2.0)),
+            ("zero".to_string(), Value::Number(0.0)),
+        ]);
+        assert_eq!(display_value(&props, 0.0), 0.0);
+        assert_eq!(display_value(&props, -2.0), 1.0);
+        assert_eq!(display_value(&props, 2.0), 1.0);
+        assert_eq!(display_value(&props, -1.0), 0.5);
+        assert_eq!(display_value(&props, 1.0), 0.5);
     }
 
     #[test]

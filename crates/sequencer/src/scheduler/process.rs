@@ -1278,6 +1278,10 @@ pub(super) fn apply_step_process_commands(
                     }
                 }
             }
+            crate::process::ProcessRunCommand::Graph(_) => {
+                // Graph commands are applied by the scheduler-owned graph runtime
+                // alongside this step-local command pass.
+            }
         }
     }
 }
@@ -1368,6 +1372,7 @@ where
 pub(super) fn invoke_conductor_invocations(
     scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
     process_runtime: &mut crate::process::ProcessRuntime,
+    graph_runtimes: &mut [crate::graph::GraphRuntime],
     invocations: Vec<crate::process::ProcessRunInvocation>,
     debug_accum: bool,
 ) -> bool {
@@ -1378,7 +1383,10 @@ pub(super) fn invoke_conductor_invocations(
             invocation,
             debug_accum,
             |_scratch, _runtime, runtime_id, commands| {
-                if !commands.is_empty() && (debug_accum || debug_routing_enabled()) {
+                apply_graph_process_commands(graph_runtimes, commands);
+                if commands.iter().any(|command| {
+                    !matches!(command, crate::process::ProcessRunCommand::Graph(_))
+                }) && (debug_accum || debug_routing_enabled()) {
                     eprintln!(
                         "[process] conductor {} produced unsupported step commands",
                         runtime_id

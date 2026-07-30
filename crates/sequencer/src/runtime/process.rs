@@ -33,6 +33,8 @@ pub struct ProcessTrackReadSnapshot {
     pub steps: Vec<ProcessResolvedValues>,
     /// Newest fired trigger first; index `n` implements `:trigs-ago n`.
     pub trigs: Vec<ProcessResolvedValues>,
+    /// Beat timestamps aligned with `trigs`, used by bounded window reads.
+    pub trig_beats: Vec<f64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1277,6 +1279,7 @@ pub enum ProcessRunCommand {
     TargetWrite(ProcessTargetWrite),
     VetoBaseEvent,
     Ratchet(ProcessRatchetRequest),
+    Graph(crate::graph::GraphControlCommand),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1578,12 +1581,19 @@ impl ProcessRuntime {
                 self.resolved_track_history
                     .iter()
                     .map(|history| {
-                        let trigs = history
+                        let visible_trigs = history
                             .trigs
                             .iter()
                             .rev()
                             .filter(|entry| trig_is_visible(entry.beat))
+                            .collect::<Vec<_>>();
+                        let trigs = visible_trigs
+                            .iter()
                             .map(|entry| entry.values)
+                            .collect::<Vec<_>>();
+                        let trig_beats = visible_trigs
+                            .iter()
+                            .map(|entry| entry.beat)
                             .collect::<Vec<_>>();
                         let current = trigs.first().copied().unwrap_or(history.base);
                         let steps = history
@@ -1597,6 +1607,7 @@ impl ProcessRuntime {
                             current,
                             steps,
                             trigs,
+                            trig_beats,
                         }
                     })
                     .collect(),
@@ -1678,15 +1689,23 @@ impl ProcessRuntime {
             ) else {
                 continue;
             };
-            let trigs = history
+            let visible_trigs = history
                 .trigs
                 .iter()
                 .rev()
                 .filter(|entry| entry.beat <= beat + 1e-9)
+                .collect::<Vec<_>>();
+            let trigs = visible_trigs
+                .iter()
                 .map(|entry| entry.values)
+                .collect::<Vec<_>>();
+            let trig_beats = visible_trigs
+                .iter()
+                .map(|entry| entry.beat)
                 .collect::<Vec<_>>();
             track_snapshot.current = trigs.first().copied().unwrap_or(history.base);
             track_snapshot.trigs = trigs;
+            track_snapshot.trig_beats = trig_beats;
         }
         snapshot.conductor_observe_tracks = observe_tracks.to_vec();
         snapshot.conductor_play_tracks = play_tracks.to_vec();
