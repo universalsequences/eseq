@@ -68,7 +68,6 @@
             volume: 0.2 * id as f32,
             pan: -1.0 + id as f32,
             mute: id % 2 == 0,
-            solo: id == 1,
             send: 0.3 * id as f32,
             output: crate::sequencer::TrackOutput::Mix,
             sends: vec![crate::sequencer::TrackSendSnapshot {
@@ -404,12 +403,13 @@
         let (scene_pattern_ids_before, override_pattern_id, launched) = {
             let mut scenes = state.pattern.scenes.lock().unwrap();
             let override_id = scenes.fork_track_pattern(0).expect("track pattern fork");
+            assert!(scenes.track_pools[0].edit(override_id, |data| {
+                data.instrument_slot.defaults[0] = 0.53;
+                data.effect_slots[0].defaults[0] = 0.63;
+            }));
             let launched = scenes.track_pools[0]
-                .get_mut(override_id)
+                .get(override_id)
                 .expect("forked pattern");
-            launched.instrument_slot.defaults[0] = 0.53;
-            launched.effect_slots[0].defaults[0] = 0.63;
-            let launched = launched.clone();
             (
                 scenes
                     .scenes
@@ -2056,8 +2056,10 @@
 
         let track_one_override = scenes.fork_track_pattern(1).unwrap();
         scenes.track_pools[1]
-            .get_mut(track_one_override)
+            .patterns
+            .get_mut(&track_one_override)
             .unwrap()
+            .seq
             .track_bits[0] = 77;
 
         let new_scene = scenes.new_scene();
@@ -2099,7 +2101,7 @@
 
         let shared = scenes.scenes[0].cells[0].unwrap();
         assert!(scenes.set_cell(1, 0, shared));
-        scenes.track_pools[0].get_mut(shared).unwrap().track_bits[0] = 123;
+        scenes.track_pools[0].patterns.get_mut(&shared).unwrap().seq.track_bits[0] = 123;
 
         assert_eq!(
             scenes.effective_track_pattern(0).unwrap().track_bits[0],
@@ -2107,7 +2109,7 @@
         );
 
         let forked = scenes.fork_track_pattern(0).unwrap();
-        scenes.track_pools[0].get_mut(forked).unwrap().track_bits[0] = 999;
+        scenes.track_pools[0].patterns.get_mut(&forked).unwrap().seq.track_bits[0] = 999;
 
         assert_eq!(
             scenes.track_pools[0].get(shared).unwrap().track_bits[0],
@@ -2176,7 +2178,7 @@
         let mut scenes = ProjectScenes::from_pattern_snapshots(&[first, second], 0);
         let original_id = scenes.scenes[0].cells[0].unwrap();
         let other_id = scenes.scenes[1].cells[0].unwrap();
-        let mut edited = scenes.effective_track_pattern(0).unwrap().clone();
+        let mut edited = scenes.effective_track_pattern(0).unwrap();
         edited.track_bits[0] = 321;
 
         assert!(scenes.save_effective_track_pattern(0, edited));
@@ -2226,7 +2228,8 @@
         let second = sample_pattern_snapshot(2);
         let mut scenes = ProjectScenes::from_pattern_snapshots(&[first, second], 0);
         let chunk = scenes.scenes[1].cells[1].unwrap();
-        let take = scenes.take_pools[1].insert(None, vec![chunk], 64);
+        let sound = scenes.track_pools[1].refs(chunk).expect("chunk refs");
+        let take = scenes.take_pools[1].insert(None, vec![chunk], 64, sound);
 
         // Undo of "delete track 0" re-appends the track at the end and moves
         // its lane back to index 0; every per-track vector must follow.
@@ -4003,7 +4006,7 @@
             let mut entries = scenes.track_pools[0]
                 .patterns
                 .iter()
-                .map(|(id, data)| (id.0, data.track_bits))
+                .map(|(id, data)| (id.0, data.seq.track_bits))
                 .collect::<Vec<_>>();
             entries.sort_by_key(|(id, _)| *id);
             (entries, scenes.track_pools[0].next_id)
@@ -4039,7 +4042,7 @@
             let mut entries = scenes.track_pools[0]
                 .patterns
                 .iter()
-                .map(|(id, data)| (id.0, data.track_bits))
+                .map(|(id, data)| (id.0, data.seq.track_bits))
                 .collect::<Vec<_>>();
             entries.sort_by_key(|(id, _)| *id);
             (entries, scenes.track_pools[0].next_id)
@@ -4351,9 +4354,10 @@
             .clone();
         let scenes = state.pattern.scenes.lock().unwrap();
         let pattern_id = scenes.effective_pattern_id(0).expect("current pattern");
-        let persisted_plocks = &scenes.track_pools[0]
+        let persisted = scenes.track_pools[0]
             .get(pattern_id)
-            .expect("current pattern data")
+            .expect("current pattern data");
+        let persisted_plocks = &persisted
             .rack_track
             .as_ref()
             .expect("current rack")
@@ -5273,7 +5277,7 @@
         {
             let mut scenes = state.pattern.scenes.lock().unwrap();
             let source_id = scenes.effective_pattern_id(0).unwrap();
-            let clone = scenes.track_pools[0].get(source_id).unwrap().clone();
+            let clone = scenes.track_pools[0].get(source_id).unwrap();
             scenes.track_pools[0].insert(clone);
         }
         state.append_rack_slot_for_all_pattern_snapshots(
@@ -5305,8 +5309,10 @@
         assert_eq!(live.sample_id.as_ref().unwrap().1, "before");
         assert_eq!(live.instrument_slot.node_id, 901);
         let scenes = state.pattern.scenes.lock().unwrap();
-        assert!(scenes.track_pools[0].patterns.values().all(|data| {
-            let slot = &data.rack_track.as_ref().unwrap().slots[1];
+        let pool = &scenes.track_pools[0];
+        assert!(pool.patterns.values().all(|data| {
+            let patch = pool.sounds.patches.get(&data.sound.patch).unwrap();
+            let slot = &patch.rack_track.as_ref().unwrap().slots[1];
             slot.sample_id.as_ref().unwrap().1 == "before"
                 && slot.instrument_slot.node_id == 901
                 && slot.instrument_slot.modulator_node_id == 902
@@ -5319,12 +5325,13 @@
         {
             let mut scenes = state.pattern.scenes.lock().unwrap();
             let first_id = scenes.effective_pattern_id(0).unwrap();
-            let first = scenes.track_pools[0].patterns.get_mut(&first_id).unwrap();
+            let mut first = scenes.track_pools[0].get(first_id).unwrap();
             first.instrument_base_note_offset = 11.0;
             let mut second = first.clone();
             second.instrument_base_note_offset = 22.0;
             let mut third = first.clone();
             third.instrument_base_note_offset = 33.0;
+            assert!(scenes.track_pools[0].store(first_id, first));
             scenes.track_pools[0].insert(second);
             scenes.track_pools[0].insert(third);
             let mut network = crate::neural::ProjectNeuralNetwork::default();
@@ -5366,10 +5373,17 @@
             99.0
         );
         let scenes = state.pattern.scenes.lock().unwrap();
-        let mut offsets = scenes.track_pools[0]
+        let pool = &scenes.track_pools[0];
+        let mut offsets = pool
             .patterns
             .values()
-            .map(|pattern| pattern.instrument_base_note_offset)
+            .map(|pattern| {
+                pool.sounds
+                    .patches
+                    .get(&pattern.sound.patch)
+                    .unwrap()
+                    .instrument_base_note_offset
+            })
             .collect::<Vec<_>>();
         offsets.sort_by(f32::total_cmp);
         assert_eq!(offsets, vec![11.0, 22.0, 33.0]);
@@ -5711,8 +5725,8 @@
             loop_enabled: false,
             next_row_id: 4,
         }));
-        // Adding a track while on scene 0 materializes its current-scene
-        // pattern and stamps the song rows referencing scene 0.
+        // Adding a track materializes a pattern in EVERY scene and stamps
+        // the off-grid song rows of each scene with that scene's pattern.
         state.extend_all_pattern_snapshots_to_track(
             3,
             &[],
@@ -5721,6 +5735,12 @@
             None,
         )
         .unwrap();
+        let (scene0_pattern, scene1_pattern) = state.with_project_scenes(|scenes| {
+            (
+                scenes.scenes[0].cells[2].expect("scene 0 cell"),
+                scenes.scenes[1].cells[2].expect("scene 1 cell"),
+            )
+        });
         let song = state.committed_song().expect("song");
         let lane = |idx: usize| {
             song.rows[idx]
@@ -5730,8 +5750,11 @@
                 .copied()
         };
         assert_eq!(lane(0), None, "beat 0 is grid-aligned: no override");
-        assert_eq!(lane(1), None, "scene 1 rows are untouched");
+        let stamped_scene1 = lane(1).expect("off-grid scene 1 row is stamped");
+        assert_eq!(stamped_scene1.pattern_id, Some(scene1_pattern.0));
+        assert!((stamped_scene1.offset_steps - (4.7 * 4.0) % 16.0).abs() < 1e-9);
         let stamped = lane(2).expect("off-grid scene 0 row is stamped");
+        assert_eq!(stamped.pattern_id, Some(scene0_pattern.0));
         assert!((stamped.offset_steps - (9.3 * 4.0) % 16.0).abs() < 1e-9);
         assert_eq!(lane(3), None, "beat 12 is grid-aligned: no override");
     }
@@ -5782,13 +5805,25 @@
             "the arrangement topology follows the project topology"
         );
         let lane = &arrangement.track_lanes[2];
-        assert_eq!(lane.len(), 2, "only the current scene's spans are stamped");
+        assert_eq!(lane.len(), 3, "every scene span is stamped");
         assert_eq!((lane[0].start_beat, lane[0].end_beat), (0.0, 4.7));
-        assert_eq!((lane[1].start_beat, lane[1].end_beat), (9.3, 16.0));
-        assert_eq!(lane[0].pattern_id, lane[1].pattern_id);
+        assert_eq!((lane[1].start_beat, lane[1].end_beat), (4.7, 9.3));
+        assert_eq!((lane[2].start_beat, lane[2].end_beat), (9.3, 16.0));
+        assert_eq!(
+            lane[0].pattern_id, lane[2].pattern_id,
+            "spans of the same scene share that scene's pattern"
+        );
+        assert_ne!(
+            lane[0].pattern_id, lane[1].pattern_id,
+            "each scene materializes its own pattern for the new track"
+        );
         assert_eq!(lane[0].offset_steps, 0.0);
         assert!(
-            (lane[1].offset_steps - (9.3 * 4.0) % 16.0).abs() < 1e-9,
+            (lane[1].offset_steps - (4.7 * 4.0) % 16.0).abs() < 1e-9,
+            "the scene 1 span keeps global free-run phase"
+        );
+        assert!(
+            (lane[2].offset_steps - (9.3 * 4.0) % 16.0).abs() < 1e-9,
             "the later scene span keeps global free-run phase"
         );
         state.with_project_scenes(|scenes| {
@@ -5803,11 +5838,12 @@
     }
 
     #[test]
-    fn added_track_is_bare_outside_the_current_scene() {
-        // Bare tracks (takes spec 11.1, scoped): growing to a new track
-        // materializes exactly one pattern in the CURRENT scene (the
-        // effective-pattern anchor device edits and history need) and a
-        // None cell in every other scene.
+    fn added_track_materializes_a_pattern_in_every_scene() {
+        // A scene must always resolve a pattern + sound for every track: a
+        // None cell blanks the track's live mirror on launch, so its device
+        // disappears (zero-param instrument slot rejects every knob edit).
+        // Growing to a new track therefore seeds one private pattern per
+        // scene, mirroring new_scene's fork-per-track seeding.
         let state = SequencerState::new(2, vec![vec![], vec![]]);
         state.with_scenes_mut(|scenes| {
             let snapshots = vec![
@@ -5827,15 +5863,23 @@
         state.with_project_scenes(|scenes| {
             assert_eq!(
                 scenes.track_pools[2].patterns.len(),
-                1,
-                "one pattern for the current scene only"
+                2,
+                "one private pattern per scene"
             );
-            assert!(scenes.scenes[0].cells[2].is_some(), "current scene cell");
-            assert_eq!(scenes.scenes[1].cells[2], None, "other scenes stay bare");
+            let scene0 = scenes.scenes[0].cells[2].expect("scene 0 cell");
+            let scene1 = scenes.scenes[1].cells[2].expect("scene 1 cell");
+            assert_ne!(scene0, scene1, "each scene owns its own pattern");
+            for (scene, id) in [(0, scene0), (1, scene1)] {
+                assert_eq!(
+                    scenes.scenes[scene].cell_sounds[2],
+                    scenes.track_pools[2].refs(id).expect("pattern refs"),
+                    "the cell's sound refs follow its pattern"
+                );
+            }
+            scenes.validate_sound_refs().expect("sound refs resolve");
         });
 
-        // The timeline lane projection resolves the bare scenes to nothing:
-        // an empty span, never a synthesized placeholder clip.
+        // Every scene span of the timeline projection resolves.
         let song = ProjectSong {
             rows: vec![song_row(0, 0.0, 0, &[]), song_row(1, 8.0, 1, &[])],
             end_beat: 16.0,
@@ -5844,19 +5888,8 @@
         };
         state.with_project_scenes(|scenes| {
             let lanes = project_lanes(&song, scenes);
-            assert!(lanes[2][0].pattern.is_some(), "current scene's span resolves");
-            assert!(lanes[2][1].pattern.is_none(), "bare scene's span is empty");
-        });
-
-        // Saving an all-empty snapshot into a bare scene keeps it bare. This
-        // track's pool already holds the current scene's pattern, so it is
-        // the non-empty-pool half of the guard that blocks materialization
-        // here; the empty-pool halves are covered by
-        // `lazy_materialization_covers_fully_bare_tracks_only`.
-        state.with_scenes_mut(|scenes| {
-            assert!(scenes.save_scene_snapshot(1, PatternSnapshot::new_default(3, &[])));
-            assert_eq!(scenes.scenes[1].cells[2], None);
-            assert_eq!(scenes.track_pools[2].patterns.len(), 1);
+            assert!(lanes[2][0].pattern.is_some(), "scene 0's span resolves");
+            assert!(lanes[2][1].pattern.is_some(), "scene 1's span resolves");
         });
     }
 
@@ -5914,7 +5947,8 @@
                 .track_pattern_data(1)
                 .expect("chunk data");
             let chunk = scenes.track_pools[1].insert(chunk_data);
-            scenes.take_pools[1].insert(None, vec![chunk], 16);
+            let sound = scenes.track_pools[1].refs(chunk).expect("chunk refs");
+            scenes.take_pools[1].insert(None, vec![chunk], 16, sound);
 
             let mut snapshot = PatternSnapshot::new_default(2, &[]);
             snapshot.track_bits[1][0] |= 1;
@@ -5997,4 +6031,151 @@
         let song = state.committed_song().unwrap();
         assert_eq!(song.rows[0].scene, 0);
         assert_eq!(song.rows[1].scene, 1);
+    }
+
+    #[test]
+    fn remove_track_shifts_live_solo_with_its_track() {
+        let state = make_state_with_tracks(3);
+        let names = vec!["kick".to_string(), "snare".to_string(), "hat".to_string()];
+        let buffer_ids = vec![10, 20, 30];
+        let instrument_types = vec![InstrumentType::Sampler; 3];
+        let effect_descriptors = vec![EffectDescriptor::default_full_chain(); 3];
+
+        // Solo the last track, delete the middle one: solo is live-only
+        // (takes spec 17.8), outside the snapshot restore, so the bit must
+        // be shifted explicitly with its track.
+        state.pattern.track_params[2].set_solo(true);
+        assert!(state.remove_track(
+            1,
+            &buffer_ids,
+            &[44_100; 3],
+            &names,
+            &instrument_types,
+            &effect_descriptors
+        ));
+        assert!(!state.pattern.track_params[0].is_solo());
+        assert!(
+            state.pattern.track_params[1].is_solo(),
+            "solo follows its track down"
+        );
+        assert!(
+            !state.pattern.track_params[2].is_solo(),
+            "trailing lane is cleared"
+        );
+
+        // Deleting the soloed track itself clears the bit — it must not
+        // transfer to the successor.
+        let names = vec!["kick".to_string(), "hat".to_string()];
+        let instrument_types = vec![InstrumentType::Sampler; 2];
+        let effect_descriptors = vec![EffectDescriptor::default_full_chain(); 2];
+        assert!(state.remove_track(
+            1,
+            &[10, 30],
+            &[44_100; 2],
+            &names,
+            &instrument_types,
+            &effect_descriptors
+        ));
+        assert!(!state.pattern.track_params[0].is_solo());
+        assert!(!state.pattern.track_params[1].is_solo());
+    }
+
+    #[test]
+    fn orphaned_entities_do_not_veto_midi_fx_replacement() {
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        // Every referenced patch (and the live mirror) carries one MIDI-FX
+        // device.
+        state.pattern.track_params[0].set_midi_fx_chain(vec!["arp".to_string()]);
+        state.with_scenes_mut(|scenes| {
+            let pool = &mut scenes.track_pools[0];
+            let ids: Vec<PatternId> = pool.patterns.keys().copied().collect();
+            for id in ids {
+                assert!(pool.edit(id, |data| {
+                    data.track_params.midi_fx_chain = vec!["arp".to_string()];
+                }));
+            }
+            // A stale orphan predating the device (chain len 0): reachable
+            // by nothing, it must not veto or receive the replacement.
+            pool.sounds.insert_patch(Patch::new_default());
+        });
+        let descriptor = EffectDescriptor {
+            name: "arp2".to_string(),
+            params: Vec::new(),
+            input_channels: 0,
+            output_channels: 0,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+        };
+        state
+            .replace_midi_fx_slot_in_all_track_patterns(0, 0, "arp2".to_string(), &descriptor)
+            .expect("an unreferenced orphan entity must not veto the replacement");
+        state.with_scenes_mut(|scenes| {
+            for refs in scenes.referenced_track_sounds(0) {
+                let patch = &scenes.track_pools[0].sounds.patches[&refs.patch];
+                assert_eq!(patch.params.midi_fx_chain, vec!["arp2".to_string()]);
+            }
+        });
+    }
+
+    #[test]
+    fn bare_cell_sounds_receive_structural_chain_edits_and_do_not_veto_replacement() {
+        let state = make_state_with_tracks(1);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        // Scene 1 goes bare BEFORE the device exists: its cell keeps a sound
+        // (§17.2) whose chain is empty, and no pattern represents it.
+        let bare_refs = state.with_scenes_mut(|scenes| {
+            let id = scenes.scenes[1].cells[0].expect("scene 1 cell");
+            assert!(scenes.delete_track_pattern(0, id));
+            scenes.scenes[1].cell_sounds[0]
+        });
+        // Add the device the way the app does: live mirror + the structural
+        // sweep over the other patterns — which must include the bare cell.
+        state.pattern.track_params[0].set_midi_fx_chain(vec!["arp".to_string()]);
+        state.with_scenes_mut(|scenes| {
+            let id = scenes.scenes[0].cells[0].expect("scene 0 cell");
+            assert!(scenes.track_pools[0].edit(id, |data| {
+                data.track_params.midi_fx_chain = vec!["arp".to_string()];
+            }));
+            assert!(scenes.edit_other_track_patterns(0, |data| {
+                data.track_params.midi_fx_chain.insert(0, "arp".to_string());
+            }));
+            let patch = &scenes.track_pools[0].sounds.patches[&bare_refs.patch];
+            assert_eq!(
+                patch.params.midi_fx_chain,
+                vec!["arp".to_string()],
+                "the structural edit reaches the bare cell's entity"
+            );
+        });
+        // Replacement validates every referenced entity — a bare cell whose
+        // chain drifted would veto it forever.
+        let descriptor = EffectDescriptor {
+            name: "arp2".to_string(),
+            params: Vec::new(),
+            input_channels: 0,
+            output_channels: 0,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+        };
+        state
+            .replace_midi_fx_slot_in_all_track_patterns(0, 0, "arp2".to_string(), &descriptor)
+            .expect("a bare cell's sound must not veto the replacement");
+        state.with_scenes_mut(|scenes| {
+            let patch = &scenes.track_pools[0].sounds.patches[&bare_refs.patch];
+            assert_eq!(patch.params.midi_fx_chain, vec!["arp2".to_string()]);
+        });
     }

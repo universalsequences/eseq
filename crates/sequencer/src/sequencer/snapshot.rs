@@ -276,7 +276,6 @@ fn capture_live_track(
         volume: tp.get_volume(),
         pan: tp.get_pan(),
         mute: tp.is_muted(),
-        solo: tp.is_solo(),
         send: tp.get_send(),
         output: tp.output(),
         sends: tp.sends(),

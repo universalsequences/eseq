@@ -178,11 +178,23 @@ impl SequencerState {
         let effective_pattern_id = scenes.effective_pattern_id(track);
         let pool = &mut scenes.track_pools[track];
         let mut patterns_with_cleared_locks = 0;
-        for (pattern_id, data) in &mut pool.patterns {
+        // Compose every pattern's pre-reset state first: patterns sharing a
+        // Patch (take chunks) must each report against their own pre-state,
+        // not a sibling's already-reset entity. The reset itself is
+        // idempotent, so per-pattern application through shared refs lands
+        // the same final entity state.
+        let mut ids: Vec<PatternId> = pool.patterns.keys().copied().collect();
+        ids.sort_by_key(|id| id.0);
+        let pre: Vec<(PatternId, TrackPatternData)> = ids
+            .iter()
+            .filter_map(|id| pool.get(*id).map(|data| (*id, data)))
+            .collect();
+        for (pattern_id, mut data) in pre {
             let stored_had_locks = instrument_slot_has_locks(&data.instrument_slot);
             let (cleared_locks, dropped_bindings) =
                 data.reset_instrument_source(descriptor, node_id, modulator_node_id, &source);
-            let cleared_locks = if Some(*pattern_id) == effective_pattern_id {
+            pool.store(pattern_id, data);
+            let cleared_locks = if Some(pattern_id) == effective_pattern_id {
                 live_had_locks || stored_had_locks
             } else {
                 cleared_locks
@@ -214,14 +226,19 @@ impl SequencerState {
                 .effective_pattern_id(track)
                 .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
             let live = pool
-                .patterns
-                .get(&effective_id)
-                .ok_or_else(|| format!("Track {} effective pattern is missing", track + 1))?
-                .instrument_state();
-            let patterns = pool
-                .patterns
-                .iter()
-                .map(|(id, data)| (*id, data.instrument_state()))
+                .patch(effective_id)
+                .zip(pool.seq(effective_id))
+                .map(|(patch, seq)| TrackInstrumentPatternState::capture(patch, seq))
+                .ok_or_else(|| format!("Track {} effective pattern is missing", track + 1))?;
+            let mut ids: Vec<PatternId> = pool.patterns.keys().copied().collect();
+            ids.sort_by_key(|id| id.0);
+            let patterns = ids
+                .into_iter()
+                .filter_map(|id| {
+                    let patch = pool.patch(id)?;
+                    let seq = pool.seq(id)?;
+                    Some((id, TrackInstrumentPatternState::capture(patch, seq)))
+                })
                 .collect();
             let mut neural_overrides = Vec::new();
             for (scene_idx, scene) in scenes.scenes.iter().enumerate() {
@@ -305,10 +322,21 @@ impl SequencerState {
             ));
         }
         for (id, state) in &snapshot.patterns {
-            pool.patterns
-                .get_mut(id)
-                .expect("pattern set was validated")
-                .restore_instrument_state(state, descriptor, node_id, modulator_node_id);
+            // Patch-side fields write through the entity; the three seq-side
+            // fields land on the stored pattern directly — together this is
+            // exactly what the old compose/edit/split round-trip stored,
+            // without cloning step data, chords, or effect slots.
+            let Some(patch) = pool.patch_mut(*id) else {
+                return Err(format!(
+                    "Track {} pattern {} sound is missing during instrument history replay",
+                    track + 1,
+                    id.0
+                ));
+            };
+            state.restore_to_patch(patch, descriptor, node_id, modulator_node_id);
+            if let Some(stored) = pool.patterns.get_mut(id) {
+                state.restore_to_seq(&mut stored.seq);
+            }
         }
         for scene in &mut scenes.scenes {
             for network in &mut scene.neural_networks {
@@ -457,18 +485,25 @@ impl SequencerState {
         let Some(pool) = scenes.track_pools.get_mut(track) else {
             return 0;
         };
+        // Device-wide rack edit: write each distinct Patch once, count per
+        // pattern as before.
+        let TrackPatternPool { patterns, sounds, .. } = pool;
         let mut updated = 0;
-        for pattern in pool.patterns.values_mut() {
-            let Some(slot) = pattern
-                .rack_track
-                .as_mut()
+        let mut seen: HashSet<PatchId> = HashSet::new();
+        for stored in patterns.values() {
+            let Some(slot) = sounds
+                .patches
+                .get_mut(&stored.sound.patch)
+                .and_then(|patch| patch.rack_track.as_mut())
                 .and_then(|rack| rack.slots.get_mut(rack_slot_idx))
             else {
                 continue;
             };
-            slot.instrument_slot
-                .copy_base_values_from(&source.instrument_slot);
-            slot.instrument_base_note_offset = source.instrument_base_note_offset;
+            if seen.insert(stored.sound.patch) {
+                slot.instrument_slot
+                    .copy_base_values_from(&source.instrument_slot);
+                slot.instrument_base_note_offset = source.instrument_base_note_offset;
+            }
             updated += 1;
         }
         updated
@@ -508,12 +543,12 @@ impl SequencerState {
         let Some(id) = scenes.effective_pattern_id(track) else {
             return Ok(());
         };
-        if let Some(data) = scenes
-            .track_pools
-            .get_mut(track)
-            .and_then(|pool| pool.get_mut(id))
-        {
-            data.instrument_run_mode = run_mode;
+        if let Some(pool) = scenes.track_pools.get_mut(track) {
+            if let Some(refs) = pool.refs(id) {
+                if let Some(patch) = pool.sounds.patches.get_mut(&refs.patch) {
+                    patch.instrument_run_mode = run_mode;
+                }
+            }
         }
         Ok(())
     }

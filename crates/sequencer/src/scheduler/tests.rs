@@ -5533,8 +5533,9 @@
             for scene in 0..3 {
                 for track in 0..2 {
                     let id = scenes.scenes[scene].cells[track].expect("scene cell");
-                    let data = scenes.track_pools[track].get_mut(id).expect("pool pattern");
-                    song_mode_configure_pattern(data, (scene + 1) as f32);
+                    assert!(scenes.track_pools[track].edit(id, |data| {
+                        song_mode_configure_pattern(data, (scene + 1) as f32);
+                    }));
                 }
             }
             let mut extra = scenes.track_pools[0]
@@ -5959,14 +5960,16 @@
                 *scenes = crate::sequencer::ProjectScenes::from_pattern_snapshots(&snapshots, 0);
                 for scene in 0..3 {
                     let id = scenes.scenes[scene].cells[0].expect("scene cell");
-                    let data = scenes.track_pools[0].get_mut(id).expect("pool pattern");
-                    song_mode_configure_pattern(data, (scene + 1) as f32);
+                    assert!(scenes.track_pools[0].edit(id, |data| {
+                        song_mode_configure_pattern(data, (scene + 1) as f32);
+                    }));
                     let id = scenes.scenes[scene].cells[1].expect("scene cell");
-                    let data = scenes.track_pools[1].get_mut(id).expect("pool pattern");
-                    data.track_params.num_steps = 8;
-                    data.track_bits = [1, 0, 0, 0];
-                    data.step_data[0][StepParam::Transpose.index()] = 7.0;
-                    data.step_data[0][StepParam::Duration.index()] = 8.0;
+                    assert!(scenes.track_pools[1].edit(id, |data| {
+                        data.track_params.num_steps = 8;
+                        data.track_bits = [1, 0, 0, 0];
+                        data.step_data[0][StepParam::Transpose.index()] = 7.0;
+                        data.step_data[0][StepParam::Duration.index()] = 8.0;
+                    }));
                 }
                 scenes.scenes[0].cells[1].expect("drone cell")
             });
@@ -6131,8 +6134,12 @@
                 chunk_b.step_data[step][StepParam::Transpose.index()] = 6.0;
             }
             let chunk_a = scenes.track_pools[0].insert(chunk);
-            let chunk_b = scenes.track_pools[0].insert(chunk_b);
-            scenes.take_pools[0].insert(None, vec![chunk_a, chunk_b], 296)
+            let sound = scenes.track_pools[0].refs(chunk_a).expect("chunk refs");
+            // Chunks share the take's one Patch/Mix pair (§16.4) — keep the
+            // fixture on-model so entity-sweep double-application bugs are
+            // observable here.
+            let chunk_b = scenes.track_pools[0].insert_with_refs(chunk_b, sound);
+            scenes.take_pools[0].insert(None, vec![chunk_a, chunk_b], 296, sound)
         })
     }
 
@@ -6277,10 +6284,11 @@
                     // hands the rows over — the production `Refresh` path.
                     state.with_scenes_mut(|scenes| {
                         let id = scenes.scenes[0].cells[0].expect("scene 0 cell");
-                        let data = scenes.track_pools[0].get_mut(id).expect("pool pattern");
-                        for step in 0..16 {
-                            data.step_data[step][StepParam::Transpose.index()] = 7.0;
-                        }
+                        assert!(scenes.track_pools[0].edit(id, |data| {
+                            for step in 0..16 {
+                                data.step_data[step][StepParam::Transpose.index()] = 7.0;
+                            }
+                        }));
                     });
                     let refreshed = state.preflight_runtime_song().expect("re-preflight");
                     assert!(
@@ -6676,10 +6684,11 @@
             // Step-indexed transposes on the override pattern so a trigger
             // identifies its step: transpose = 100 + step.
             state.with_scenes_mut(|scenes| {
-                let data = scenes.track_pools[0].get_mut(override_id).expect("pool");
-                for step in 0..16 {
-                    data.step_data[step][StepParam::Transpose.index()] = 100.0 + step as f32;
-                }
+                assert!(scenes.track_pools[0].edit(override_id, |data| {
+                    for step in 0..16 {
+                        data.step_data[step][StepParam::Transpose.index()] = 100.0 + step as f32;
+                    }
+                }));
             });
             // Row 1 starts at beat 5.0 — not a multiple of the 4-beat
             // pattern cycle. Free-run would start at step 4.

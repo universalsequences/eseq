@@ -3615,7 +3615,6 @@ fn encode_track_params(snapshot: &TrackParamsSnapshot) -> Vec<u8> {
         volume,
         pan,
         mute,
-        solo,
         send,
         output,
         sends,
@@ -3642,7 +3641,6 @@ fn encode_track_params(snapshot: &TrackParamsSnapshot) -> Vec<u8> {
     bytes.f32(*volume);
     bytes.f32(*pan);
     bytes.bool(*mute);
-    bytes.bool(*solo);
     bytes.f32(*send);
     match output {
         crate::sequencer::TrackOutput::Mix => bytes.u32(0),
@@ -5942,7 +5940,6 @@ fn scheduler_track_params_changed(
     normalized.volume = after.volume;
     normalized.pan = after.pan;
     normalized.mute = after.mute;
-    normalized.solo = after.solo;
     normalized.send = after.send;
     normalized.sends = after.sends.clone();
     !track_params_bit_exact_eq(&normalized, after)
@@ -5967,9 +5964,6 @@ fn apply_live_track_param_effects(
     }
     if before.mute != after.mute {
         app.push_track_mute(track);
-    }
-    if before.solo != after.solo {
-        app.push_track_solo_mutes();
     }
     if before.output != after.output {
         app.graph_controller().apply_track_output_routing(track);
@@ -9156,10 +9150,12 @@ mod tests {
 
         // Simulate the old-project pool copy: fewer params than the live slot.
         app.state.with_scenes_mut(|scenes| {
-            let data = scenes.track_pools[0].get_mut(pattern).unwrap();
-            let stale_params = (data.instrument_slot.num_params as usize).saturating_sub(3);
-            data.instrument_slot.num_params = stale_params as u32;
-            data.instrument_slot.defaults.truncate(stale_params);
+            assert!(scenes.track_pools[0].edit(pattern, |data| {
+                let stale_params =
+                    (data.instrument_slot.num_params as usize).saturating_sub(3);
+                data.instrument_slot.num_params = stale_params as u32;
+                data.instrument_slot.defaults.truncate(stale_params);
+            }));
         });
         app.state.publish_scheduler_snapshot();
 
@@ -11251,7 +11247,6 @@ mod tests {
             AppCommand::ToggleTrackGate { track: 0 },
             AppCommand::ToggleTrackPolyphonic { track: 0 },
             AppCommand::ToggleTrackMute { track: 0 },
-            AppCommand::ToggleTrackSolo { track: 0 },
             AppCommand::SetTrackMaxPolyphony { track: 0, value: 12 },
             AppCommand::SetTrackAttack { track: 0, ms: 17.25 },
             AppCommand::SetTrackRelease { track: 0, ms: 912.5 },
@@ -11310,6 +11305,11 @@ mod tests {
                 "Slice 3 command {index} returned {outcome:?}",
             );
         }
+        // Solo left the persisted model (takes spec 17.8): it flips the live
+        // atomic but is deliberately outside the round-trip law — no snapshot
+        // diff, no history entry.
+        assert!(try_apply_command(&mut app, AppCommand::ToggleTrackSolo { track: 0 }).is_ok());
+        assert!(app.state.pattern.track_params[0].is_solo());
         finish_active_gesture(&mut app);
         let after = app.state.live_track_params_snapshot(0).unwrap();
         let base_after = app.state.pattern.instrument_base_note_offsets[0]

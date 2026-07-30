@@ -26,6 +26,10 @@ pub struct TrackTake {
     pub chunks: Vec<PatternId>,
     /// Playable length in steps. The lane is silent (never wraps) past this.
     pub total_len_steps: u32,
+    /// The take's sound (takes spec §17.2): one `(patch_ref, mix_ref)` for
+    /// the whole take, shared by every chunk. Chunks hold no device state of
+    /// their own — their stored refs are this pair.
+    pub sound: SoundRefs,
 }
 
 impl TrackTake {
@@ -75,7 +79,13 @@ impl TrackTakePool {
     /// Register a new take over already-inserted chunk patterns and return
     /// its id. The caller owns chunk minting (`TrackPatternPool::insert`)
     /// and invariant upkeep (spec 6.3).
-    pub fn insert(&mut self, name: Option<String>, chunks: Vec<PatternId>, total_len_steps: u32) -> TakeId {
+    pub fn insert(
+        &mut self,
+        name: Option<String>,
+        chunks: Vec<PatternId>,
+        total_len_steps: u32,
+        sound: SoundRefs,
+    ) -> TakeId {
         let id = TakeId(self.next_take_id);
         self.next_take_id = self.next_take_id.saturating_add(1);
         let name = name.unwrap_or_else(|| format!("Take {}", id.0 + 1));
@@ -84,6 +94,7 @@ impl TrackTakePool {
             name,
             chunks,
             total_len_steps,
+            sound,
         });
         id
     }
@@ -140,6 +151,16 @@ pub fn validate_track_take_pool(
                 take.chunks.len() * MAX_STEPS
             ));
         }
+        if !pattern_pool.sounds.resolves(take.sound) {
+            return Err(format!(
+                "Track {} take {} holds a sound ref that does not resolve \
+                 (patch {} / mix {})",
+                track + 1,
+                take.id.0,
+                take.sound.patch.0,
+                take.sound.mix.0
+            ));
+        }
         for chunk in &take.chunks {
             if !pattern_pool.contains(*chunk) {
                 return Err(format!(
@@ -177,11 +198,45 @@ pub fn validate_track_take_pool(
     Ok(())
 }
 
+/// Bit-exact device-half agreement between two patterns, at §16.4 fan-out
+/// scope (instrument/effect/MIDI-FX authoring values + base note offset).
+/// Used by the take-chunk no-divergence assertion and by the §17.7 migration
+/// collapse (a divergence found there is a latent §16-era bug worth
+/// reporting).
+pub(crate) fn track_pattern_device_state_agrees(
+    a: &TrackPatternData,
+    b: &TrackPatternData,
+) -> bool {
+    a.instrument_slot
+        .authoring_values()
+        .bit_exact_eq(&b.instrument_slot.authoring_values())
+        && a.instrument_base_note_offset.to_bits() == b.instrument_base_note_offset.to_bits()
+        && a.effect_slots.len() == b.effect_slots.len()
+        && a.effect_slots
+            .iter()
+            .zip(&b.effect_slots)
+            .all(|(left, right)| left.authoring_values().bit_exact_eq(&right.authoring_values()))
+        && a.midi_fx_slots.len() == b.midi_fx_slots.len()
+        && a.midi_fx_slots
+            .iter()
+            .zip(&b.midi_fx_slots)
+            .all(|(left, right)| left.authoring_values().bit_exact_eq(&right.authoring_values()))
+}
+
 /// Takes spec 16.4: a take's device snapshot is duplicated per chunk (16.8),
 /// so every chunk must carry the same one. Debug-only — the fan-out in
 /// `edit.rs` is what keeps it true.
 #[cfg(debug_assertions)]
 fn take_chunk_device_state_agrees(take: &TrackTake, pattern_pool: &TrackPatternPool) -> bool {
+    // Structural fast path (§17.2): chunks that share the take's entities
+    // cannot diverge — there is nothing to diverge.
+    if take
+        .chunks
+        .iter()
+        .all(|id| pattern_pool.refs(*id) == Some(take.sound))
+    {
+        return true;
+    }
     let mut chunks = take.chunks.iter().filter_map(|id| pattern_pool.get(*id));
     let Some(first) = chunks.next() else {
         return true;
@@ -228,11 +283,18 @@ mod tests {
         pool
     }
 
+    fn test_sound() -> SoundRefs {
+        SoundRefs {
+            patch: PatchId(0),
+            mix: MixId(0),
+        }
+    }
+
     #[test]
     fn take_pool_insert_allocates_monotonic_ids_and_names() {
         let mut takes = TrackTakePool::default();
-        let a = takes.insert(None, vec![PatternId(1)], 100);
-        let b = takes.insert(Some("Riff".into()), vec![PatternId(2)], 12);
+        let a = takes.insert(None, vec![PatternId(1)], 100, test_sound());
+        let b = takes.insert(Some("Riff".into()), vec![PatternId(2)], 12, test_sound());
         assert_eq!(a, TakeId(0));
         assert_eq!(b, TakeId(1));
         assert_eq!(takes.next_take_id, 2);
@@ -240,15 +302,15 @@ mod tests {
         assert_eq!(takes.get(b).unwrap().name, "Riff");
         // Removal never frees an id.
         takes.remove(a).expect("removed");
-        let c = takes.insert(None, vec![PatternId(3)], 8);
+        let c = takes.insert(None, vec![PatternId(3)], 8, test_sound());
         assert_eq!(c, TakeId(2));
     }
 
     #[test]
     fn claimed_reports_every_chunk_across_takes() {
         let mut takes = TrackTakePool::default();
-        takes.insert(None, vec![PatternId(1), PatternId(2)], 512);
-        takes.insert(None, vec![PatternId(5)], 64);
+        takes.insert(None, vec![PatternId(1), PatternId(2)], 512, test_sound());
+        takes.insert(None, vec![PatternId(5)], 64, test_sound());
         let claimed: HashSet<PatternId> = takes.claimed().collect();
         assert_eq!(
             claimed,
@@ -265,6 +327,7 @@ mod tests {
             name: "Take 1".into(),
             chunks: vec![PatternId(1), PatternId(2)],
             total_len_steps: MAX_STEPS as u32 + 40,
+            sound: test_sound(),
         };
         assert_eq!(take.chunk_step_at(0.0), Some((0, 0.0)));
         assert_eq!(take.chunk_step_at(MAX_STEPS as f64 - 0.5), Some((0, MAX_STEPS as f64 - 0.5)));
@@ -283,7 +346,8 @@ mod tests {
         let mut scene_ids = HashSet::new();
 
         let mut takes = TrackTakePool::default();
-        takes.insert(None, vec![PatternId(1)], 10);
+        let sound = pattern_pool.refs(PatternId(1)).expect("pattern 1 refs");
+        takes.insert(None, vec![PatternId(1)], 10, sound);
         validate_track_take_pool(0, &takes, &pattern_pool, &scene_ids).expect("valid");
 
         // Chunk missing from the pattern pool.
@@ -306,7 +370,7 @@ mod tests {
 
         // Chunk shared between two takes.
         let mut broken = takes.clone();
-        broken.insert(None, vec![PatternId(1)], 5);
+        broken.insert(None, vec![PatternId(1)], 5, sound);
         let err = validate_track_take_pool(0, &broken, &pattern_pool, &scene_ids).unwrap_err();
         assert!(err.contains("more than one take"), "{err}");
 

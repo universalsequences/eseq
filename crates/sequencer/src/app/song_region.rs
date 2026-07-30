@@ -851,7 +851,7 @@ impl App {
             let chunks: Option<Vec<TrackPatternData>> = take
                 .chunks
                 .iter()
-                .map(|chunk| scenes.track_pools.get(track)?.get(*chunk).cloned())
+                .map(|chunk| scenes.track_pools.get(track)?.get(*chunk))
                 .collect();
             Some((take.name.clone(), chunks?, take.total_len_steps))
         });
@@ -1039,15 +1039,14 @@ mod tests {
         state.with_scenes_mut(|scenes| {
             for track in 0..tracks {
                 for id in 1..=3u64 {
-                    let data = scenes.track_pools[track]
-                        .get_mut(PatternId(id))
-                        .expect("pool pattern");
-                    data.track_params.num_steps = 16;
-                    for step in 0..16 {
-                        data.track_bits[step / 64] |= 1 << (step % 64);
-                        data.step_data[step][StepParam::Transpose.index()] =
-                            (track as u64 * 10 + id) as f32;
-                    }
+                    assert!(scenes.track_pools[track].edit(PatternId(id), |data| {
+                        data.track_params.num_steps = 16;
+                        for step in 0..16 {
+                            data.track_bits[step / 64] |= 1 << (step % 64);
+                            data.step_data[step][StepParam::Transpose.index()] =
+                                (track as u64 * 10 + id) as f32;
+                        }
+                    }));
                 }
             }
         });

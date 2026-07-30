@@ -1842,6 +1842,12 @@ impl App {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
+        // §17.4 prune-on-save: drop orphaned entities from the LIVE pools
+        // before capturing. This is the one seam the spec sanctions, and it
+        // is safe here because nothing holds Patch/Mix ids into the live
+        // pools from outside `ProjectScenes` — undo lane snapshots clone
+        // pools wholesale, so history entries stay self-consistent.
+        self.state.prune_unreferenced_sounds();
         // Takes spec 6.1/11.1: record per-scene cell presence (the dense
         // `patterns` bank cannot encode a bare lane) and serialize each
         // track's take pool with its chunk patterns inline — chunks are in
@@ -1876,7 +1882,6 @@ impl App {
                         .track_pools
                         .get(track)
                         .and_then(|pool| pool.get(*chunk_id))
-                        .cloned()
                         .ok_or_else(|| {
                             format!(
                                 "Track {} take '{}' references chunk pattern {} which is \
@@ -1937,6 +1942,141 @@ impl App {
             take_pools
         };
 
+        // Sound ref structure (takes spec 18.1 step 5): per track, which
+        // entity each scene cell, cell pattern, and take references. Entity
+        // ids are the live per-track PatchId/MixId values — unique within
+        // the track, meaningful only within this file. Content stays in the
+        // dense bank / take chunks, except entities referenced ONLY by bare
+        // cells (no pattern to carry them), which serialize as
+        // `orphan_sounds` carriers. Unreferenced entities are pruned simply
+        // by never being named here (§17.4 prune-on-save).
+        let mut track_sounds: Vec<crate::project::ProjectTrackSounds> =
+            Vec::with_capacity(num_tracks);
+        for track in 0..num_tracks {
+            let pool = scenes_for_takes.track_pools.get(track);
+            let to_refs = |refs: crate::sequencer::SoundRefs| crate::project::ProjectSoundRefs {
+                patch: refs.patch.0,
+                mix: refs.mix.0,
+            };
+            let cells: Vec<crate::project::ProjectSoundRefs> = scenes_for_takes
+                .scenes
+                .iter()
+                .map(|scene| {
+                    scene
+                        .cell_sounds
+                        .get(track)
+                        .copied()
+                        .map(to_refs)
+                        .unwrap_or(crate::project::ProjectSoundRefs {
+                            patch: u64::MAX,
+                            mix: u64::MAX,
+                        })
+                })
+                .collect();
+            let patterns: Vec<Option<crate::project::ProjectSoundRefs>> = scenes_for_takes
+                .scenes
+                .iter()
+                .map(|scene| {
+                    scene
+                        .cells
+                        .get(track)
+                        .copied()
+                        .flatten()
+                        .and_then(|id| pool.and_then(|pool| pool.refs(id)))
+                        .map(to_refs)
+                })
+                .collect();
+            let takes: Vec<crate::project::ProjectSoundRefs> = scenes_for_takes
+                .take_pools
+                .get(track)
+                .map(|takes| takes.takes.iter().map(|take| to_refs(take.sound)).collect())
+                .unwrap_or_default();
+            // Which entity ids the file already carries content for: cell
+            // patterns ride the dense bank, take chunks their take entry.
+            let mut carried_patches: std::collections::HashSet<u64> =
+                std::collections::HashSet::new();
+            let mut carried_mixes: std::collections::HashSet<u64> =
+                std::collections::HashSet::new();
+            for refs in patterns.iter().flatten() {
+                carried_patches.insert(refs.patch);
+                carried_mixes.insert(refs.mix);
+            }
+            for refs in &takes {
+                carried_patches.insert(refs.patch);
+                carried_mixes.insert(refs.mix);
+            }
+            // Any cell naming an uncarried entity gets a content carrier for
+            // its pair (one per distinct pair — bare cells left behind by a
+            // pattern delete can share). A pair whose carried half is
+            // duplicated into the carrier is harmless: the loader seeds only
+            // ids that content-carrying referents didn't already claim.
+            let mut orphan_sounds = Vec::new();
+            let mut emitted: std::collections::HashSet<(u64, u64)> =
+                std::collections::HashSet::new();
+            for refs in &cells {
+                if refs.patch == u64::MAX || refs.mix == u64::MAX {
+                    continue;
+                }
+                if carried_patches.contains(&refs.patch) && carried_mixes.contains(&refs.mix) {
+                    continue;
+                }
+                if !emitted.insert((refs.patch, refs.mix)) {
+                    continue;
+                }
+                let data = pool.and_then(|pool| {
+                    pool.compose_bare_sound(crate::sequencer::SoundRefs {
+                        patch: crate::sequencer::PatchId(refs.patch),
+                        mix: crate::sequencer::MixId(refs.mix),
+                    })
+                });
+                let Some(data) = data else {
+                    // Dangling refs (always-resolves invariant violated): the
+                    // content is already unrecoverable; keep the save usable.
+                    debug_assert!(false, "bare cell refs do not resolve on track {track}");
+                    continue;
+                };
+                let mut snapshot = PatternSnapshot::new_default(num_tracks, &[]);
+                snapshot.set_track_pattern_data(track, data);
+                let mut sample_paths = vec![None; num_tracks];
+                let mut sample_names = vec![String::new(); num_tracks];
+                let (buffer_id, sample_name, _) = snapshot.sample_ids[track].clone();
+                if snapshot
+                    .instrument_types
+                    .get(track)
+                    .copied()
+                    .unwrap_or(InstrumentType::Sampler)
+                    == InstrumentType::Sampler
+                    && !sample_name.is_empty()
+                {
+                    sample_paths[track] = self
+                        .resolve_sample_path_for_snapshot(
+                            usize::MAX,
+                            track,
+                            buffer_id,
+                            &sample_name,
+                        )?
+                        .map(|path| path.to_string_lossy().to_string());
+                }
+                sample_names[track] = sample_name;
+                orphan_sounds.push(crate::project::ProjectOrphanSound {
+                    patch: refs.patch,
+                    mix: refs.mix,
+                    data: ProjectPattern::from_snapshot(
+                        &snapshot,
+                        sample_paths,
+                        sample_names,
+                        Vec::new(),
+                    ),
+                });
+            }
+            track_sounds.push(crate::project::ProjectTrackSounds {
+                cells,
+                patterns,
+                takes,
+                orphan_sounds,
+            });
+        }
+
         Ok(ProjectFile {
             version: project_file_version(),
             name: project_name.to_string(),
@@ -1994,6 +2134,7 @@ impl App {
             },
             scene_cell_presence,
             take_pools,
+            track_sounds,
         })
     }
 
@@ -3000,6 +3141,7 @@ impl App {
             record_armed,
             scene_cell_presence,
             take_pools,
+            track_sounds,
         } = pending.project;
         let bank = pending.built_patterns;
         let bus_pattern_bank = pending.built_bus_patterns;
@@ -3055,6 +3197,51 @@ impl App {
         }
         self.state
             .install_project_arrangement(&scene_cell_presence, loaded_take_pools);
+        // v7 sound ref structure (takes spec 18.1 step 5): re-link referents
+        // that shared an entity when the file was saved. Legacy files carry
+        // no structure — the canonical migration above (private entities per
+        // pattern, take chunks collapsed) is already the correct shape.
+        // Orphan-sound carriers (bare-cell content) convert through the same
+        // snapshot path as take chunks, sample resolution included.
+        let mut sound_model = Vec::with_capacity(track_sounds.len());
+        for (track, sounds) in track_sounds.into_iter().enumerate() {
+            let mut carriers = Vec::with_capacity(sounds.orphan_sounds.len());
+            for carrier in sounds.orphan_sounds {
+                let (snapshot, _, fallback_count) = self
+                    .project_pattern_into_snapshot(carrier.data, &mut pending.sample_assets)?;
+                let data = snapshot.track_pattern_data(track).ok_or_else(|| {
+                    format!(
+                        "Sound carrier is missing lane data for track {}",
+                        track + 1
+                    )
+                })?;
+                pending.fallback_samples += fallback_count;
+                carriers.push((carrier.patch, carrier.mix, data));
+            }
+            sound_model.push((
+                sounds
+                    .cells
+                    .into_iter()
+                    .map(|refs| (refs.patch, refs.mix))
+                    .collect::<Vec<_>>(),
+                sounds
+                    .patterns
+                    .into_iter()
+                    .map(|refs| refs.map(|refs| (refs.patch, refs.mix)))
+                    .collect::<Vec<_>>(),
+                sounds
+                    .takes
+                    .into_iter()
+                    .map(|refs| (refs.patch, refs.mix))
+                    .collect::<Vec<_>>(),
+                carriers,
+            ));
+        }
+        self.state.apply_project_sound_model(&sound_model);
+        // Relinking abandons the privately minted entities of every referent
+        // that adopted a canonical one; drop those orphans now instead of
+        // carrying them until the first save prunes them.
+        self.state.prune_unreferenced_sounds();
         // Per-track record-arm flags (takes spec 8.1), persisted like
         // mute/solo. The UI-shared arm vector syncs FROM `graph.record_armed`
         // on the next tick via `record_arm_sync_pending`.
@@ -4436,6 +4623,7 @@ mod tests {
             record_armed: Vec::new(),
             scene_cell_presence: Vec::new(),
             take_pools: Vec::new(),
+            track_sounds: Vec::new(),
         }
     }
 

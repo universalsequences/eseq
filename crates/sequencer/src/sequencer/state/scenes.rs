@@ -25,10 +25,16 @@ pub struct TrackPatternCellView {
     pub overridden: bool,
 }
 
+/// One track's pattern pool, in the split storage form (takes spec §17.2):
+/// patterns hold sequence data plus `(patch_ref, mix_ref)`, and the device
+/// state lives in the co-located entity pools. The pool API composes and
+/// decomposes `TrackPatternData` (the working type) at its edge, so a
+/// `store`/`edit` writes the device half through the pattern's refs.
 #[derive(Clone, Debug)]
 pub struct TrackPatternPool {
-    pub patterns: HashMap<PatternId, TrackPatternData>,
+    pub patterns: HashMap<PatternId, StoredPattern>,
     pub next_id: u64,
+    pub sounds: TrackSoundPool,
 }
 
 #[derive(Clone, Debug)]
@@ -49,6 +55,8 @@ pub struct TrackSidechainPatternState {
 pub struct TrackPatternLaneState {
     pub pool: TrackPatternPool,
     pub scene_cells: Vec<Option<PatternId>>,
+    /// Per-scene cell sound refs for this lane, parallel to `scene_cells`.
+    pub cell_sounds: Vec<SoundRefs>,
     pub track_override: Option<PatternId>,
     pub scene_references: Vec<SceneTrackReferenceState>,
     pub sidechains: Vec<TrackSidechainPatternState>,
@@ -60,15 +68,40 @@ impl Default for TrackPatternPool {
             patterns: HashMap::new(),
             // Reserve 0 for atomic/sentinel uses; real track pattern ids start at 1.
             next_id: 1,
+            sounds: TrackSoundPool::default(),
         }
     }
 }
 
 impl TrackPatternPool {
+    /// Insert a pattern, minting a private Patch + Mix for it (today's copy
+    /// semantics — §18.1 step 4: in S1 a fresh pattern always forks).
     pub fn insert(&mut self, data: TrackPatternData) -> PatternId {
+        let (seq, patch, mix) = data.split();
+        let sound = self.sounds.insert(patch, mix);
+        self.insert_stored(StoredPattern { seq, sound })
+    }
+
+    /// Insert a pattern whose sound is an existing entity pair (take chunks
+    /// share their take's Patch/Mix). The device half of `data` is dropped —
+    /// the shared entities are already the sound — unless a ref is somehow
+    /// unpopulated, in which case it seeds the entity.
+    pub fn insert_with_refs(&mut self, data: TrackPatternData, sound: SoundRefs) -> PatternId {
+        let (seq, patch, mix) = data.split();
+        self.sounds.patches.entry(sound.patch).or_insert(patch);
+        self.sounds.mixes.entry(sound.mix).or_insert(mix);
+        // If the defensive seed above actually fired, keep the mint cursors
+        // ahead of the seeded ids — a later mint colliding with one would
+        // silently replace the entity under every referent sharing it.
+        self.sounds.next_patch_id = self.sounds.next_patch_id.max(sound.patch.0.saturating_add(1));
+        self.sounds.next_mix_id = self.sounds.next_mix_id.max(sound.mix.0.saturating_add(1));
+        self.insert_stored(StoredPattern { seq, sound })
+    }
+
+    fn insert_stored(&mut self, stored: StoredPattern) -> PatternId {
         let id = PatternId(self.next_id.max(1));
         self.next_id = id.0.saturating_add(1).max(1);
-        self.patterns.insert(id, data);
+        self.patterns.insert(id, stored);
         id
     }
 
@@ -76,16 +109,96 @@ impl TrackPatternPool {
         self.patterns.contains_key(&id)
     }
 
-    pub fn get(&self, id: PatternId) -> Option<&TrackPatternData> {
-        self.patterns.get(&id)
+    /// Compose the working form of a pattern (sequence half + resolved
+    /// Patch/Mix). Owned: the split storage has no contiguous
+    /// `TrackPatternData` to hand out by reference.
+    pub fn get(&self, id: PatternId) -> Option<TrackPatternData> {
+        let stored = self.patterns.get(&id)?;
+        let patch = self.sounds.patches.get(&stored.sound.patch)?;
+        let mix = self.sounds.mixes.get(&stored.sound.mix)?;
+        Some(TrackPatternData::compose(&stored.seq, patch, mix))
     }
 
-    pub fn get_mut(&mut self, id: PatternId) -> Option<&mut TrackPatternData> {
-        self.patterns.get_mut(&id)
+    pub fn seq(&self, id: PatternId) -> Option<&TrackPatternSeq> {
+        self.patterns.get(&id).map(|stored| &stored.seq)
     }
 
+    pub fn refs(&self, id: PatternId) -> Option<SoundRefs> {
+        self.patterns.get(&id).map(|stored| stored.sound)
+    }
+
+    pub fn patch(&self, id: PatternId) -> Option<&Patch> {
+        self.sounds.patches.get(&self.patterns.get(&id)?.sound.patch)
+    }
+
+    /// Mutable access to the Patch entity a pattern references. Device edits
+    /// through this write the entity — every pattern sharing it hears them.
+    pub fn patch_mut(&mut self, id: PatternId) -> Option<&mut Patch> {
+        let sound = self.patterns.get(&id)?.sound;
+        self.sounds.patches.get_mut(&sound.patch)
+    }
+
+    /// Replace a pattern wholesale: the sequence half lands on the stored
+    /// pattern, the device half writes through its refs (§18.1 step 3 —
+    /// this is the write path that makes every save-back an entity write).
+    pub fn store(&mut self, id: PatternId, data: TrackPatternData) -> bool {
+        let Some(stored) = self.patterns.get_mut(&id) else {
+            return false;
+        };
+        let (seq, patch, mix) = data.split();
+        let sound = stored.sound;
+        stored.seq = seq;
+        self.sounds.patches.insert(sound.patch, patch);
+        self.sounds.mixes.insert(sound.mix, mix);
+        true
+    }
+
+    /// Compose, run `edit`, decompose-store. In S1 every entity has one
+    /// pattern, so this coincides with an in-place mutation.
+    pub fn edit(&mut self, id: PatternId, edit: impl FnOnce(&mut TrackPatternData)) -> bool {
+        let Some(mut data) = self.get(id) else {
+            return false;
+        };
+        edit(&mut data);
+        self.store(id, data)
+    }
+
+    /// Compose-edit-store every pattern in the pool. Only for IDEMPOTENT
+    /// edits: patterns sharing a sound (a take's chunks) write the same
+    /// entities once per pattern. Non-idempotent device transforms (index
+    /// remaps, structural pushes) must iterate `sounds` entities instead.
+    pub fn edit_all(&mut self, mut edit: impl FnMut(PatternId, &mut TrackPatternData)) {
+        let ids: Vec<PatternId> = self.patterns.keys().copied().collect();
+        for id in ids {
+            self.edit(id, |data| edit(id, data));
+        }
+    }
+
+    /// Remove a pattern, returning its composed form. Its entities stay in
+    /// the pool (§17.4: never GC'd behind the user's back mid-session;
+    /// unreferenced entities are pruned at save).
     pub fn remove(&mut self, id: PatternId) -> Option<TrackPatternData> {
-        self.patterns.remove(&id)
+        let composed = self.get(id)?;
+        self.patterns.remove(&id);
+        Some(composed)
+    }
+
+    /// Every `(patch_ref, mix_ref)` reachable from a pattern in this pool.
+    pub fn referenced_sounds(&self) -> HashSet<SoundRefs> {
+        self.patterns.values().map(|stored| stored.sound).collect()
+    }
+
+    /// Compose a sound's content onto an empty default sequence — the save
+    /// carrier for entities referenced only by bare cells, which no pattern
+    /// or take chunk serializes.
+    pub fn compose_bare_sound(&self, refs: SoundRefs) -> Option<TrackPatternData> {
+        let patch = self.sounds.patches.get(&refs.patch)?;
+        let mix = self.sounds.mixes.get(&refs.mix)?;
+        Some(TrackPatternData::compose(
+            &TrackPatternSeq::new_default(),
+            patch,
+            mix,
+        ))
     }
 }
 
@@ -94,6 +207,11 @@ pub struct Scene {
     pub id: SceneId,
     pub name: String,
     pub cells: Vec<Option<PatternId>>,
+    /// Per-track sound refs (takes spec §17.2 "scene cell" referent), kept
+    /// parallel to `cells`. Always resolves — "no steps" never means "no
+    /// sound": a cell with a pattern shares that pattern's refs; a cell
+    /// without one keeps the last adopted refs (or a minted default).
+    pub cell_sounds: Vec<SoundRefs>,
     pub bus_patterns: Vec<BusPatternSnapshot>,
     // These are scene-level because per-track launches must not swap project-wide
     // modulation, neural, or graph routing state.
@@ -133,15 +251,30 @@ impl ProjectScenes {
 
         for (scene_idx, snapshot) in snapshots.iter().enumerate() {
             let mut cells = vec![None; track_count];
+            let mut cell_sounds = Vec::with_capacity(track_count);
             for track in 0..track_count {
-                if let Some(data) = snapshot.track_pattern_data(track) {
-                    cells[track] = Some(track_pools[track].insert(data));
+                match snapshot.track_pattern_data(track) {
+                    Some(data) => {
+                        let id = track_pools[track].insert(data);
+                        cells[track] = Some(id);
+                        cell_sounds.push(
+                            track_pools[track].refs(id).expect("pattern just inserted"),
+                        );
+                    }
+                    // No pattern lane in the snapshot: the cell still needs
+                    // a resolving sound (§17.2 always-resolves invariant).
+                    None => cell_sounds.push(
+                        track_pools[track]
+                            .sounds
+                            .insert(Patch::new_default(), Mix::default()),
+                    ),
                 }
             }
             scenes.push(Scene {
                 id: SceneId(scene_idx as u64 + 1),
                 name: format!("Scene {}", scene_idx + 1),
                 cells,
+                cell_sounds,
                 bus_patterns: Vec::new(),
                 mod_connections: snapshot.mod_connections.clone(),
                 neural_networks: snapshot.neural_networks.clone(),
@@ -151,10 +284,18 @@ impl ProjectScenes {
         }
 
         if scenes.is_empty() {
+            let cell_sounds = (0..track_count)
+                .map(|track| {
+                    track_pools[track]
+                        .sounds
+                        .insert(Patch::new_default(), Mix::default())
+                })
+                .collect();
             scenes.push(Scene {
                 id: SceneId(1),
                 name: "Scene 1".to_string(),
                 cells: vec![None; track_count],
+                cell_sounds,
                 bus_patterns: Vec::new(),
                 mod_connections: Vec::new(),
                 neural_networks: Vec::new(),
@@ -199,8 +340,8 @@ impl ProjectScenes {
                         .get(track)
                         .copied()
                         .flatten()
-                        .and_then(|id| self.track_pools[track].get(id))
-                        .map(|data| data.sample_id.clone())
+                        .and_then(|id| self.track_pools[track].patch(id))
+                        .map(|patch| patch.sample_id.clone())
                         .unwrap_or((-1, String::new(), 44_100))
                 })
                 .collect(),
@@ -235,7 +376,7 @@ impl ProjectScenes {
             let Some(id) = scene.cells.get(track).copied().flatten() else {
                 continue;
             };
-            let Some(data) = self.track_pools[track].get(id).cloned() else {
+            let Some(data) = self.track_pools[track].get(id) else {
                 continue;
             };
             snapshot.set_track_pattern_data(track, data);
@@ -271,8 +412,12 @@ impl ProjectScenes {
             self.track_pools.push(TrackPatternPool::default());
             self.take_pools.push(TrackTakePool::default());
             self.track_overrides.push(None);
+            let pool = self.track_pools.last_mut().expect("just pushed");
             for scene in &mut self.scenes {
                 scene.cells.push(None);
+                scene
+                    .cell_sounds
+                    .push(pool.sounds.insert(Patch::new_default(), Mix::default()));
             }
         }
         while self.take_pools.len() < self.track_pools.len() {
@@ -282,7 +427,13 @@ impl ProjectScenes {
             return false;
         };
         while scene.cells.len() < snapshot.track_bits.len() {
+            let track = scene.cells.len();
             scene.cells.push(None);
+            scene.cell_sounds.push(
+                self.track_pools[track]
+                    .sounds
+                    .insert(Patch::new_default(), Mix::default()),
+            );
         }
         scene.mod_connections = snapshot.mod_connections.clone();
         scene.neural_networks = snapshot.neural_networks.clone();
@@ -336,12 +487,13 @@ impl ProjectScenes {
                 if !has_grid_pattern && data.track_bits.iter().any(|bits| *bits != 0) {
                     let id = self.track_pools[track].insert(data);
                     scene.cells[track] = Some(id);
+                    if let Some(refs) = self.track_pools[track].refs(id) {
+                        scene.cell_sounds[track] = refs;
+                    }
                 }
                 continue;
             };
-            if let Some(slot) = self.track_pools[track].get_mut(id) {
-                *slot = data;
-            }
+            self.track_pools[track].store(id, data);
         }
         true
     }
@@ -480,24 +632,46 @@ impl ProjectScenes {
             })
     }
 
-    pub fn effective_track_pattern(&self, track: usize) -> Option<&TrackPatternData> {
+    /// Composed working form of the track's effective pattern. Owned: the
+    /// split storage (§17.2) has no contiguous `TrackPatternData` to lend.
+    pub fn effective_track_pattern(&self, track: usize) -> Option<TrackPatternData> {
         let id = self.effective_pattern_id(track)?;
         self.track_pools.get(track)?.get(id)
+    }
+
+    /// The effective cell's sound (override pattern's refs first, else the
+    /// current scene cell's refs) — always resolves for a valid track.
+    pub fn effective_sound_refs(&self, track: usize) -> Option<SoundRefs> {
+        if let Some(id) = self.track_overrides.get(track).copied().flatten() {
+            if let Some(refs) = self.track_pools.get(track)?.refs(id) {
+                return Some(refs);
+            }
+        }
+        if let Some(id) = self
+            .scenes
+            .get(self.current_scene)
+            .and_then(|scene| scene.cells.get(track))
+            .copied()
+            .flatten()
+        {
+            if let Some(refs) = self.track_pools.get(track)?.refs(id) {
+                return Some(refs);
+            }
+        }
+        self.scenes
+            .get(self.current_scene)?
+            .cell_sounds
+            .get(track)
+            .copied()
     }
 
     pub fn save_effective_track_pattern(&mut self, track: usize, data: TrackPatternData) -> bool {
         let Some(id) = self.effective_pattern_id(track) else {
             return false;
         };
-        let Some(slot) = self
-            .track_pools
+        self.track_pools
             .get_mut(track)
-            .and_then(|pool| pool.get_mut(id))
-        else {
-            return false;
-        };
-        *slot = data;
-        true
+            .is_some_and(|pool| pool.store(id, data))
     }
 
     pub fn launch_scene(&mut self, scene: usize) -> Option<Vec<Option<TrackPatternData>>> {
@@ -505,7 +679,7 @@ impl ProjectScenes {
         let mut track_patterns = Vec::with_capacity(scene_cells.len());
         for (track, cell) in scene_cells.iter().copied().enumerate() {
             let data = match cell {
-                Some(id) => Some(self.track_pools.get(track)?.get(id)?.clone()),
+                Some(id) => Some(self.track_pools.get(track)?.get(id)?),
                 None => None,
             };
             track_patterns.push(data);
@@ -521,7 +695,7 @@ impl ProjectScenes {
         track: usize,
         id: PatternId,
     ) -> Option<TrackPatternData> {
-        let data = self.track_pools.get(track)?.get(id)?.clone();
+        let data = self.track_pools.get(track)?.get(id)?;
         *self.track_overrides.get_mut(track)? = Some(id);
         Some(data)
     }
@@ -539,7 +713,7 @@ impl ProjectScenes {
             .copied()
             .map(|track| {
                 let id = scene.cells.get(track).copied().flatten()?;
-                let data = self.track_pools.get(track)?.get(id)?.clone();
+                let data = self.track_pools.get(track)?.get(id)?;
                 Some((track, id, data))
             })
             .collect::<Option<Vec<_>>>()?;
@@ -592,9 +766,12 @@ impl ProjectScenes {
         let Some(pool) = self.track_pools.get(track) else {
             return false;
         };
-        if !pool.contains(id) {
+        // Assigning a pattern to a cell repoints the cell's sound at the
+        // pattern's (§17.3: after any launch/assignment, cell and pattern
+        // name the same entities).
+        let Some(refs) = pool.refs(id) else {
             return false;
-        }
+        };
         let Some(scene) = self.scenes.get_mut(scene) else {
             return false;
         };
@@ -603,6 +780,9 @@ impl ProjectScenes {
         }
 
         scene.cells[track] = Some(id);
+        if let Some(cell_sound) = scene.cell_sounds.get_mut(track) {
+            *cell_sound = refs;
+        }
         true
     }
 
@@ -619,7 +799,7 @@ impl ProjectScenes {
     }
 
     pub fn fork_track_pattern(&mut self, track: usize) -> Option<PatternId> {
-        let source = self.effective_track_pattern(track)?.clone();
+        let source = self.effective_track_pattern(track)?;
         let id = self.track_pools.get_mut(track)?.insert(source);
         *self.track_overrides.get_mut(track)? = Some(id);
         Some(id)
@@ -649,10 +829,14 @@ impl ProjectScenes {
         if track >= self.scenes.get(self.current_scene)?.cells.len() {
             return None;
         }
-        let source = self.track_pools.get(track)?.get(source_id)?.clone();
+        let source = self.track_pools.get(track)?.get(source_id)?;
         let id = self.track_pools.get_mut(track)?.insert(source);
+        let refs = self.track_pools.get(track)?.refs(id)?;
         let scene = self.scenes.get_mut(self.current_scene)?;
         scene.cells[track] = Some(id);
+        if let Some(cell_sound) = scene.cell_sounds.get_mut(track) {
+            *cell_sound = refs;
+        }
         *self.track_overrides.get_mut(track)? = None;
         Some(id)
     }
@@ -687,9 +871,30 @@ impl ProjectScenes {
     pub fn new_scene(&mut self) -> usize {
         let source_scene = self.scenes.get(self.current_scene).cloned();
         let mut cells = vec![None; self.track_pools.len()];
+        let mut cell_sounds = Vec::with_capacity(self.track_pools.len());
         for track in 0..self.track_pools.len() {
-            if let Some(source) = self.effective_track_pattern(track).cloned() {
-                cells[track] = Some(self.track_pools[track].insert(source));
+            // Scene create forks eagerly per track (§17.3): a cloned pattern
+            // inserted into the pool mints a fresh Patch + Mix, and the new
+            // cell adopts them. A track with no effective pattern still
+            // forks its current cell's sound so the new cell resolves.
+            match self.effective_track_pattern(track) {
+                Some(source) => {
+                    let id = self.track_pools[track].insert(source);
+                    cells[track] = Some(id);
+                    cell_sounds.push(
+                        self.track_pools[track]
+                            .refs(id)
+                            .expect("pattern just inserted"),
+                    );
+                }
+                None => {
+                    let source_refs = self.effective_sound_refs(track);
+                    let sounds = &mut self.track_pools[track].sounds;
+                    cell_sounds.push(match source_refs {
+                        Some(refs) => sounds.fork(refs),
+                        None => sounds.insert(Patch::new_default(), Mix::default()),
+                    });
+                }
             }
         }
 
@@ -720,6 +925,7 @@ impl ProjectScenes {
             id: SceneId(next_id),
             name: format!("Scene {}", scene_idx + 1),
             cells,
+            cell_sounds,
             bus_patterns,
             mod_connections,
             neural_networks,
@@ -757,6 +963,9 @@ impl ProjectScenes {
             if track < scene.cells.len() {
                 scene.cells.remove(track);
             }
+            if track < scene.cell_sounds.len() {
+                scene.cell_sounds.remove(track);
+            }
         }
         if track < self.track_overrides.len() {
             self.track_overrides.remove(track);
@@ -791,6 +1000,101 @@ impl ProjectScenes {
         removed
     }
 
+    /// Every sound entity pair still reachable on `track` — pattern refs
+    /// (take chunks are pool patterns, so they're included), scene cell
+    /// refs, and take sounds. Anything outside this set is an orphan:
+    /// invisible to the model, awaiting pruning (§17.4).
+    pub fn referenced_track_sounds(&self, track: usize) -> HashSet<SoundRefs> {
+        let mut keep = self
+            .track_pools
+            .get(track)
+            .map(|pool| pool.referenced_sounds())
+            .unwrap_or_default();
+        for scene in &self.scenes {
+            if let Some(refs) = scene.cell_sounds.get(track) {
+                keep.insert(*refs);
+            }
+        }
+        if let Some(takes) = self.take_pools.get(track) {
+            for take in &takes.takes {
+                keep.insert(take.sound);
+            }
+        }
+        keep
+    }
+
+    /// Drop every orphaned entity from every track's pool (§17.4 pruning).
+    /// Safe wherever no one holds `PatchId`/`MixId` into the pools from
+    /// outside `ProjectScenes` — undo lane snapshots clone pools wholesale,
+    /// so they stay self-consistent regardless.
+    pub fn prune_unreferenced_sounds(&mut self) -> usize {
+        let mut removed = 0;
+        for track in 0..self.track_pools.len() {
+            let keep = self.referenced_track_sounds(track);
+            let pool = &mut self.track_pools[track].sounds;
+            let before = pool.patches.len() + pool.mixes.len();
+            pool.retain_refs(&keep);
+            removed += before - (pool.patches.len() + pool.mixes.len());
+        }
+        removed
+    }
+
+    /// The §17.2 always-resolves invariant: every scene cell, pool pattern,
+    /// and take holds `(patch_ref, mix_ref)` that resolve in its track's
+    /// entity pool — unconditionally. (§18.1 exit criterion.)
+    pub fn validate_sound_refs(&self) -> Result<(), String> {
+        for (track, pool) in self.track_pools.iter().enumerate() {
+            for (id, stored) in &pool.patterns {
+                if !pool.sounds.resolves(stored.sound) {
+                    return Err(format!(
+                        "Track {} pattern {} holds a sound ref that does not resolve",
+                        track + 1,
+                        id.0
+                    ));
+                }
+            }
+        }
+        for (scene_idx, scene) in self.scenes.iter().enumerate() {
+            if scene.cell_sounds.len() != scene.cells.len() {
+                return Err(format!(
+                    "Scene {} cell sounds ({}) are not parallel to cells ({})",
+                    scene_idx + 1,
+                    scene.cell_sounds.len(),
+                    scene.cells.len()
+                ));
+            }
+            for (track, refs) in scene.cell_sounds.iter().enumerate() {
+                let resolves = self
+                    .track_pools
+                    .get(track)
+                    .is_some_and(|pool| pool.sounds.resolves(*refs));
+                if !resolves {
+                    return Err(format!(
+                        "Scene {} track {} cell sound does not resolve",
+                        scene_idx + 1,
+                        track + 1
+                    ));
+                }
+            }
+        }
+        for (track, takes) in self.take_pools.iter().enumerate() {
+            for take in &takes.takes {
+                let resolves = self
+                    .track_pools
+                    .get(track)
+                    .is_some_and(|pool| pool.sounds.resolves(take.sound));
+                if !resolves {
+                    return Err(format!(
+                        "Track {} take {} sound does not resolve",
+                        track + 1,
+                        take.id.0
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn edit_other_track_patterns<F>(&mut self, track: usize, mut edit: F) -> bool
     where
         F: FnMut(&mut TrackPatternData),
@@ -799,10 +1103,56 @@ impl ProjectScenes {
         let Some(pool) = self.track_pools.get_mut(track) else {
             return false;
         };
-        for (id, data) in &mut pool.patterns {
-            if Some(*id) != current_effective {
-                edit(data);
+        // Callers apply structural (non-idempotent) device edits — slot
+        // inserts/removes/moves — so each distinct sound entity must be
+        // visited exactly once: patterns sharing a Patch (a take's chunks)
+        // are edited through one representative.
+        let effective_sound = current_effective.and_then(|id| pool.refs(id));
+        let mut representatives: Vec<PatternId> = Vec::new();
+        let mut seen: HashSet<PatchId> = HashSet::new();
+        let mut ids: Vec<PatternId> = pool.patterns.keys().copied().collect();
+        ids.sort_by_key(|id| id.0);
+        for id in ids {
+            if Some(id) == current_effective {
+                continue;
             }
+            let Some(sound) = pool.refs(id) else {
+                continue;
+            };
+            if Some(sound.patch) == effective_sound.map(|refs| refs.patch) {
+                continue;
+            }
+            if seen.insert(sound.patch) {
+                representatives.push(id);
+            }
+        }
+        for id in representatives {
+            pool.edit(id, |data| edit(data));
+        }
+        // Bare-cell sounds (§17.2 "no steps ≠ no sound"): an entity
+        // referenced only by a scene cell has no pattern representative,
+        // but it is still a live sound — the same structural edit must
+        // reach it, or its device chain drifts from the track's and later
+        // slot edits fail validation against it.
+        let mut cell_only: Vec<SoundRefs> = Vec::new();
+        for scene in &self.scenes {
+            if let Some(refs) = scene.cell_sounds.get(track) {
+                if !seen.contains(&refs.patch)
+                    && Some(refs.patch) != effective_sound.map(|refs| refs.patch)
+                    && seen.insert(refs.patch)
+                {
+                    cell_only.push(*refs);
+                }
+            }
+        }
+        for refs in cell_only {
+            let Some(mut data) = pool.compose_bare_sound(refs) else {
+                continue;
+            };
+            edit(&mut data);
+            let (_seq, patch, mix) = data.split();
+            pool.sounds.patches.insert(refs.patch, patch);
+            pool.sounds.mixes.insert(refs.mix, mix);
         }
         true
     }

@@ -1930,7 +1930,7 @@ mod tests {
         let mut app = test_app();
         let chunk = app
             .state
-            .with_project_scenes(|scenes| scenes.track_pools[0].get(PatternId(1)).cloned())
+            .with_project_scenes(|scenes| scenes.track_pools[0].get(PatternId(1)))
             .expect("pool pattern");
         // 40 steps at four per beat == 10 beats of content.
         let take = app

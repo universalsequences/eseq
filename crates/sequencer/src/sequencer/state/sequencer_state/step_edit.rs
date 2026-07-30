@@ -525,12 +525,13 @@ impl SequencerState {
     ) -> Result<bool, String> {
         let mut scenes = self.pattern.scenes.lock().unwrap();
         let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
-        let data = scenes
+        let stored = scenes
             .track_pools
             .get_mut(track)
-            .and_then(|pool| pool.get_mut(pattern_id))
-            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
-        data.track_params = snapshot.clone();
+            .is_some_and(|pool| pool.edit(pattern_id, |data| data.track_params = snapshot.clone()));
+        if !stored {
+            return Err("Track Pattern target no longer exists".to_string());
+        }
         if is_effective {
             let live = self
                 .pattern
@@ -572,12 +573,13 @@ impl SequencerState {
     ) -> Result<bool, String> {
         let mut scenes = self.pattern.scenes.lock().unwrap();
         let is_effective = self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id);
-        let data = scenes
+        let stored = scenes
             .track_pools
             .get_mut(track)
-            .and_then(|pool| pool.get_mut(pattern_id))
-            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
-        data.instrument_base_note_offset = value;
+            .is_some_and(|pool| pool.edit(pattern_id, |data| data.instrument_base_note_offset = value));
+        if !stored {
+            return Err("Track Pattern target no longer exists".to_string());
+        }
         if is_effective {
             self.pattern
                 .instrument_base_note_offsets
@@ -650,10 +652,12 @@ impl SequencerState {
     ) -> Result<bool, String> {
         let mut scenes = self.pattern.scenes.lock().unwrap();
         let is_effective = self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id);
-        let data = scenes
+        let pool = scenes
             .track_pools
             .get_mut(track)
-            .and_then(|pool| pool.get_mut(pattern_id))
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+        let mut data = pool
+            .get(pattern_id)
             .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
         let mut stored_slot = data.instrument_slot.clone();
         if let Err(error) = stored_slot.apply_authoring_values(&values.slot) {
@@ -689,6 +693,7 @@ impl SequencerState {
         data.instrument_base_note_offset = f32::from_bits(values.base_note_offset_bits);
         data.track_sound_state = values.sound_state.clone();
         data.key_lock_variant_registry = values.key_lock_variant_registry.clone();
+        pool.store(pattern_id, data);
         if let Some((slot, snapshot)) = live_slot {
             snapshot.restore(slot);
             self.pattern
@@ -735,8 +740,8 @@ impl SequencerState {
         scenes
             .track_pools
             .get(track)
-            .and_then(|pool| pool.get(pattern_id))
-            .and_then(|data| data.effect_slots.get(slot_idx))
+            .and_then(|pool| pool.patch(pattern_id))
+            .and_then(|patch| patch.effect_slots.get(slot_idx))
             .map(EffectSlotSnapshot::authoring_values)
             .ok_or_else(|| "Track Pattern effect target no longer exists".to_string())
     }
@@ -757,7 +762,7 @@ impl SequencerState {
             .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
         pool.patterns
             .iter()
-            .map(|(pattern, data)| {
+            .map(|(pattern, stored)| {
                 let slots = if *pattern == effective {
                     self.pattern
                         .effect_chains
@@ -769,7 +774,11 @@ impl SequencerState {
                         .map(EffectSlotSnapshot::capture_authoring_values)
                         .collect()
                 } else {
-                    data.effect_slots
+                    pool.sounds
+                        .patches
+                        .get(&stored.sound.patch)
+                        .ok_or_else(|| "stored effect patch is missing".to_string())?
+                        .effect_slots
                         .iter()
                         .skip(first_slot)
                         .take(slot_count)
@@ -812,14 +821,19 @@ impl SequencerState {
             if values.len() != descriptors.len() {
                 return Err("effect-chain pattern layout mismatch".to_string());
             }
-            let data = pool.patterns.get_mut(pattern).expect("pattern set was validated");
+            let refs = pool.refs(*pattern).expect("pattern set was validated");
+            let patch = pool
+                .sounds
+                .patches
+                .get_mut(&refs.patch)
+                .ok_or_else(|| "stored effect patch is missing".to_string())?;
             for (offset, ((descriptor, (node_id, modulator_node_id)), values)) in descriptors
                 .iter()
                 .zip(node_ids)
                 .zip(values)
                 .enumerate()
             {
-                let slot = data
+                let slot = patch
                     .effect_slots
                     .get_mut(first_slot + offset)
                     .ok_or_else(|| "stored effect slot is missing".to_string())?;
@@ -893,20 +907,31 @@ impl SequencerState {
         let process_chains = pool
             .patterns
             .iter()
-            .map(|(id, data)| {
-                (*id, if *id == effective { live_chain.clone() } else { data.process_chain.clone() })
+            .map(|(id, stored)| {
+                (
+                    *id,
+                    if *id == effective {
+                        live_chain.clone()
+                    } else {
+                        pool.sounds
+                            .patches
+                            .get(&stored.sound.patch)
+                            .map(|patch| patch.process_chain.clone())
+                            .unwrap_or_default()
+                    },
+                )
             })
             .collect();
         let project_process_lane_overrides = pool
             .patterns
             .iter()
-            .map(|(id, data)| {
+            .map(|(id, stored)| {
                 (
                     *id,
                     if *id == effective {
                         live_lane_overrides.clone()
                     } else {
-                        data.project_process_lane_overrides.clone()
+                        stored.seq.project_process_lane_overrides.clone()
                     },
                 )
             })
@@ -975,12 +1000,14 @@ impl SequencerState {
             .track_pools
             .get_mut(track)
             .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
-        for data in pool.patterns.values_mut() {
-            remap_chain(&mut data.process_chain, old_to_new);
+        // Non-idempotent index remap: visit each Patch entity once (take
+        // chunks share one), never once per pattern.
+        for patch in pool.sounds.patches.values_mut() {
+            remap_chain(&mut patch.process_chain, old_to_new);
             crate::process::rebind_track_process_chain_effect_param_ids(
-                &mut data.process_chain,
+                &mut patch.process_chain,
                 effect_descriptors,
-                &data.effect_slots,
+                &patch.effect_slots,
             );
         }
         for scene in &mut scenes.scenes {
@@ -1080,16 +1107,21 @@ impl SequencerState {
         let mut live_chain = None;
         let mut live_lane_overrides = None;
         for (id, saved_chain) in &snapshot.process_chains {
-            let data = pool.patterns.get_mut(id).expect("pattern set was validated");
+            let refs = pool.refs(*id).expect("pattern set was validated");
+            let patch = pool
+                .sounds
+                .patches
+                .get_mut(&refs.patch)
+                .ok_or_else(|| "stored effect patch is missing".to_string())?;
             let mut chain = saved_chain.clone();
             crate::process::refresh_track_process_chain_binding_param_ids(
                 &mut chain,
                 None,
                 None,
                 effect_descriptors,
-                &data.effect_slots,
+                &patch.effect_slots,
             );
-            data.process_chain = chain.clone();
+            patch.process_chain = chain.clone();
             if *id == effective {
                 live_chain = Some(chain);
             }
@@ -1098,6 +1130,7 @@ impl SequencerState {
             pool.patterns
                 .get_mut(id)
                 .expect("pattern set was validated")
+                .seq
                 .project_process_lane_overrides = saved.clone();
             if *id == effective {
                 live_lane_overrides = Some(saved.clone());
@@ -1195,8 +1228,8 @@ impl SequencerState {
         scenes
             .track_pools
             .get(track)
-            .and_then(|pool| pool.get(pattern_id))
-            .and_then(|data| data.midi_fx_slots.get(slot_idx))
+            .and_then(|pool| pool.patch(pattern_id))
+            .and_then(|patch| patch.midi_fx_slots.get(slot_idx))
             .map(EffectSlotSnapshot::authoring_values)
             .ok_or_else(|| "Track Pattern MIDI-FX target no longer exists".to_string())
     }
@@ -1215,7 +1248,7 @@ impl SequencerState {
             .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
         pool.patterns
             .iter()
-            .map(|(pattern, data)| {
+            .map(|(pattern, stored)| {
                 let slots = if *pattern == effective {
                     self.pattern
                         .midi_fx_slots
@@ -1225,7 +1258,11 @@ impl SequencerState {
                         .map(EffectSlotSnapshot::capture_authoring_values)
                         .collect()
                 } else {
-                    data.midi_fx_slots
+                    pool.sounds
+                        .patches
+                        .get(&stored.sound.patch)
+                        .ok_or_else(|| "stored MIDI-FX patch is missing".to_string())?
+                        .midi_fx_slots
                         .iter()
                         .map(EffectSlotSnapshot::authoring_values)
                         .collect()
@@ -1265,14 +1302,19 @@ impl SequencerState {
             if values.len() != crate::lisp_host::MAX_MIDI_FX_SLOTS {
                 return Err("MIDI-FX pattern layout is invalid".to_string());
             }
-            let data = pool.patterns.get_mut(pattern).expect("pattern set was validated");
-            data.track_params.midi_fx_chain = names.to_vec();
+            let refs = pool.refs(*pattern).expect("pattern set was validated");
+            let patch = pool
+                .sounds
+                .patches
+                .get_mut(&refs.patch)
+                .ok_or_else(|| "stored MIDI-FX patch is missing".to_string())?;
+            patch.params.midi_fx_chain = names.to_vec();
             for slot_idx in 0..crate::lisp_host::MAX_MIDI_FX_SLOTS {
                 let descriptor = descriptors
                     .get(slot_idx)
                     .cloned()
                     .unwrap_or_else(EffectDescriptor::empty_custom_slot);
-                let slot = data
+                let slot = patch
                     .midi_fx_slots
                     .get_mut(slot_idx)
                     .ok_or_else(|| "stored MIDI-FX slot is missing".to_string())?;
@@ -1328,8 +1370,9 @@ impl SequencerState {
             .track_pools
             .get_mut(track)
             .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
-        for data in pool.patterns.values_mut() {
-            remap_chain(&mut data.process_chain, old_to_new);
+        // Non-idempotent remap: once per Patch entity.
+        for patch in pool.sounds.patches.values_mut() {
+            remap_chain(&mut patch.process_chain, old_to_new);
         }
         drop(scenes);
         let mut chains = self.pattern.process_chains.lock().unwrap();
@@ -1363,8 +1406,19 @@ impl SequencerState {
         Ok(pool
             .patterns
             .iter()
-            .map(|(id, data)| {
-                (*id, if *id == effective { live.clone() } else { data.process_chain.clone() })
+            .map(|(id, stored)| {
+                (
+                    *id,
+                    if *id == effective {
+                        live.clone()
+                    } else {
+                        pool.sounds
+                            .patches
+                            .get(&stored.sound.patch)
+                            .map(|patch| patch.process_chain.clone())
+                            .unwrap_or_default()
+                    },
+                )
             })
             .collect())
     }
@@ -1389,10 +1443,13 @@ impl SequencerState {
         }
         let mut live = None;
         for (id, chain) in saved {
-            pool.patterns
-                .get_mut(id)
-                .expect("pattern set was validated")
-                .process_chain = chain.clone();
+            let refs = pool.refs(*id).expect("pattern set was validated");
+            let patch = pool
+                .sounds
+                .patches
+                .get_mut(&refs.patch)
+                .ok_or_else(|| "stored process patch is missing".to_string())?;
+            patch.process_chain = chain.clone();
             if *id == effective {
                 live = Some(chain.clone());
             }
@@ -1429,17 +1486,22 @@ impl SequencerState {
     ) -> Result<bool, String> {
         let mut scenes = self.pattern.scenes.lock().unwrap();
         let is_effective = self.mirror_device_pattern_id(track, &scenes) == Some(pattern_id);
-        let data = scenes
+        let stored = scenes
             .track_pools
             .get_mut(track)
-            .and_then(|pool| pool.get_mut(pattern_id))
-            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
-        let stored = if midi_fx {
-            data.midi_fx_slots.get_mut(slot_idx)
-        } else {
-            data.effect_slots.get_mut(slot_idx)
-        }
-        .ok_or_else(|| "stored device target no longer exists".to_string())?;
+            .and_then(|pool| {
+                let refs = pool.refs(pattern_id)?;
+                pool.sounds.patches.get_mut(&refs.patch)
+            })
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())
+            .and_then(|patch| {
+                if midi_fx {
+                    patch.midi_fx_slots.get_mut(slot_idx)
+                } else {
+                    patch.effect_slots.get_mut(slot_idx)
+                }
+                .ok_or_else(|| "stored device target no longer exists".to_string())
+            })?;
         let mut stored_next = stored.clone();
         stored_next.apply_authoring_values(values)?;
         let live = if is_effective {
@@ -1490,8 +1552,8 @@ impl SequencerState {
         scenes
             .track_pools
             .get(track)
-            .and_then(|pool| pool.get(pattern_id))
-            .and_then(|data| data.rack_track.as_ref())
+            .and_then(|pool| pool.patch(pattern_id))
+            .and_then(|patch| patch.rack_track.as_ref())
             .and_then(|rack| rack.slots.get(slot_idx))
             .map(RackSlotSnapshot::authoring_values)
             .ok_or_else(|| "Track Pattern rack slot target no longer exists".to_string())
@@ -1509,8 +1571,11 @@ impl SequencerState {
         let stored = scenes
             .track_pools
             .get_mut(track)
-            .and_then(|pool| pool.get_mut(pattern_id))
-            .and_then(|data| data.rack_track.as_mut())
+            .and_then(|pool| {
+                let refs = pool.refs(pattern_id)?;
+                pool.sounds.patches.get_mut(&refs.patch)
+            })
+            .and_then(|patch| patch.rack_track.as_mut())
             .and_then(|rack| rack.slots.get_mut(slot_idx))
             .ok_or_else(|| "Track Pattern rack slot target no longer exists".to_string())?;
         let mut stored_next = stored.clone();
@@ -1550,12 +1615,12 @@ impl SequencerState {
         let num_steps = num_steps.clamp(1, MAX_STEPS);
         let mut scenes = self.pattern.scenes.lock().unwrap();
         let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
-        let data = scenes
+        let stored = scenes
             .track_pools
             .get_mut(track)
-            .and_then(|pool| pool.get_mut(pattern_id))
+            .and_then(|pool| pool.patterns.get_mut(&pattern_id))
             .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
-        data.track_params.num_steps = num_steps;
+        stored.seq.params.num_steps = num_steps;
         if is_effective {
             self.pattern
                 .track_params
@@ -1605,10 +1670,12 @@ impl SequencerState {
             if is_effective && !initially_effective {
                 return Err("Track Pattern became active during step replay".to_string());
             }
-            let data = scenes
+            let pool = scenes
                 .track_pools
                 .get_mut(track)
-                .and_then(|pool| pool.get_mut(pattern_id))
+                .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+            let mut data = pool
+                .get(pattern_id)
                 .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
             for (step, snapshot) in cells {
                 if !data.restore_step_snapshot(*step, snapshot) {
@@ -1616,6 +1683,7 @@ impl SequencerState {
                 }
             }
             data.plock_variant_registry = variant_registry.clone();
+            pool.store(pattern_id, data);
             is_effective
         };
 

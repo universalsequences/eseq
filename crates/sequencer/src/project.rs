@@ -43,7 +43,20 @@ const RACK_PRESETS_DIR: &str = "presets/racks";
 //       on load (`migrate_legacy_backdrops`, applied in `finish_project_load`
 //       against the live scenes) so a v5 project keeps sounding exactly as it
 //       did, and are then saved as version 6.
-const PROJECT_FILE_VERSION: u32 = 6;
+//   7 — the Sounds model (takes spec 17/18.1): device state is pooled as
+//       per-track Patch/Mix entities referenced by pool patterns, scene
+//       cells, and takes. The dense pattern bank still carries the composed
+//       content; `track_sounds` additionally serializes the REF STRUCTURE
+//       (which referents share which entity), so post-S1 sharing survives a
+//       round trip. Entities referenced only by bare cells (no pattern to
+//       carry their content) ride along as `orphan_sounds` carriers — an
+//       empty-sequence pattern per entity pair, reusing the take-chunk wire
+//       format. Version-<=6 files load through the §17.7 migration: a
+//       private Patch+Mix per pattern, take-chunk duplicates collapsed onto
+//       one entity pair, cells adopting their pattern's refs. `solo` left
+//       the persisted model (live-only); the field is still written (false)
+//       for wire-shape stability and ignored on load.
+const PROJECT_FILE_VERSION: u32 = 7;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectSoundPreset {
@@ -114,6 +127,57 @@ pub struct ProjectFile {
     /// scene cell, so they serialize here, inline with their take.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub take_pools: Vec<ProjectTrackTakePool>,
+    /// Per-track sound ref structure (takes spec 17.2/18.1): which scene
+    /// cells, cell patterns, and takes share which Patch/Mix entity. Empty
+    /// for legacy files — the §17.7 migration then derives the canonical
+    /// private-entities-per-pattern shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub track_sounds: Vec<ProjectTrackSounds>,
+}
+
+/// One referent's sound refs (takes spec 17.2), as file-local entity ids.
+/// Ids are scoped per track and carry identity only — entity CONTENT rides
+/// the dense pattern bank / take chunks exactly as before, which stays the
+/// single content authority (referents sharing an entity serialize identical
+/// content by construction).
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct ProjectSoundRefs {
+    pub patch: u64,
+    pub mix: u64,
+}
+
+/// Per-track sound ref structure (takes spec 18.1 step 5).
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct ProjectTrackSounds {
+    /// Per scene: the scene cell's refs (always present — §17.2
+    /// always-resolves).
+    #[serde(default)]
+    pub cells: Vec<ProjectSoundRefs>,
+    /// Per scene: the cell PATTERN's refs (`None` where the cell is bare).
+    #[serde(default)]
+    pub patterns: Vec<Option<ProjectSoundRefs>>,
+    /// Per take, parallel to `take_pools[track].takes`. Chunk patterns share
+    /// the take's refs by construction and are not listed separately.
+    #[serde(default)]
+    pub takes: Vec<ProjectSoundRefs>,
+    /// Content carriers for entities named above but backed by no pattern or
+    /// take chunk (§17.2 bare cells: "no steps ≠ no sound"). The dense bank
+    /// only serializes cell-pattern content and take chunks only their own,
+    /// so a sound referenced solely by a bare cell would otherwise reload as
+    /// defaults. One entry per uncarried `(patch, mix)` pair.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orphan_sounds: Vec<ProjectOrphanSound>,
+}
+
+/// One carrier: the entity pair's file-local ids plus their content, composed
+/// onto an empty sequence and stored as a full-width `ProjectPattern` (only
+/// the owning track's lane is meaningful) — the same wire format and
+/// load-time sample resolution as take chunks.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectOrphanSound {
+    pub patch: u64,
+    pub mix: u64,
+    pub data: ProjectPattern,
 }
 
 /// Serialized form of one track's `TrackTakePool` (takes spec 6.1).
@@ -180,6 +244,8 @@ struct ProjectFileWire {
     scene_cell_presence: Vec<Vec<bool>>,
     #[serde(default)]
     take_pools: Vec<ProjectTrackTakePool>,
+    #[serde(default)]
+    track_sounds: Vec<ProjectTrackSounds>,
 }
 
 impl<'de> Deserialize<'de> for ProjectFile {
@@ -211,8 +277,26 @@ impl<'de> Deserialize<'de> for ProjectFile {
             record_armed: wire.record_armed,
             scene_cell_presence: wire.scene_cell_presence,
             take_pools: wire.take_pools,
+            track_sounds: wire.track_sounds,
         };
         project.normalize_device_instances().map_err(D::Error::custom)?;
+        // A take with no chunks is structurally impossible (registration
+        // rejects empty chunk lists), and the loader would skip it silently
+        // — desyncing the positional `track_sounds.takes` alignment so
+        // later takes adopt the wrong sound. Reject it with a name instead.
+        for (track, pool) in project.take_pools.iter().enumerate() {
+            for take in &pool.takes {
+                if take.chunks.is_empty() {
+                    return Err(D::Error::custom(format!(
+                        "invalid project take pools: track {} take '{}' (id {}) \
+                         has no chunk patterns",
+                        track + 1,
+                        take.name,
+                        take.id
+                    )));
+                }
+            }
+        }
         // Reject malformed arrangement data with an actionable error rather
         // than clamping, reordering, or dropping invalid references (spec
         // 6.1). Pattern pools are rebuilt from scene cells on load, so track
@@ -1477,7 +1561,8 @@ impl From<TrackParamsSnapshot> for ProjectTrackParams {
             volume: value.volume,
             pan: value.pan,
             mute: value.mute,
-            solo: value.solo,
+            // takes spec 17.8: solo is live-only; never persisted again.
+            solo: false,
             send: value.send,
             output: ProjectTrackOutput::from(value.output),
             sends: value
@@ -1513,7 +1598,6 @@ impl From<ProjectTrackParams> for TrackParamsSnapshot {
             volume: value.volume,
             pan: value.pan,
             mute: value.mute,
-            solo: value.solo,
             send: value.send,
             output: TrackOutput::from(value.output),
             sends: value
@@ -3046,6 +3130,7 @@ mod tests {
             record_armed: Vec::new(),
             scene_cell_presence: Vec::new(),
             take_pools: Vec::new(),
+            track_sounds: Vec::new(),
         }
     }
 
@@ -3313,6 +3398,70 @@ mod tests {
         let json = serde_json::to_string(&bare).expect("serialize project");
         assert!(!json.contains("take_pools"), "empty take pools are skipped");
         assert!(!json.contains("scene_cell_presence"), "full presence is skipped");
+    }
+
+    #[test]
+    fn takes_with_no_chunks_are_rejected_on_load() {
+        let mut project = sample_project();
+        project.take_pools = vec![ProjectTrackTakePool {
+            takes: vec![ProjectTake {
+                id: 1,
+                name: "Ghost".to_string(),
+                total_len_steps: 16,
+                chunks: Vec::new(),
+            }],
+            next_take_id: 2,
+        }];
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let error = match serde_json::from_str::<ProjectFile>(&json) {
+            Ok(_) => panic!("a take with no chunk patterns must be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("has no chunk patterns"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn orphan_sound_carriers_round_trip_and_default_empty() {
+        let mut project = sample_project();
+        project.track_sounds = vec![ProjectTrackSounds {
+            cells: vec![ProjectSoundRefs { patch: 5, mix: 6 }],
+            patterns: vec![None],
+            takes: Vec::new(),
+            orphan_sounds: vec![ProjectOrphanSound {
+                patch: 5,
+                mix: 6,
+                data: project.patterns[0].clone(),
+            }],
+        }];
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+        let sounds = &restored.track_sounds[0];
+        assert_eq!(sounds.orphan_sounds.len(), 1);
+        assert_eq!(
+            (sounds.orphan_sounds[0].patch, sounds.orphan_sounds[0].mix),
+            (5, 6)
+        );
+
+        // Files written before carriers existed load with the empty default,
+        // and a track with no bare-cell-only entities writes no field.
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        let sounds = value
+            .as_object_mut()
+            .and_then(|object| object.get_mut("track_sounds"))
+            .and_then(|sounds| sounds.as_array_mut())
+            .and_then(|sounds| sounds[0].as_object_mut())
+            .expect("track sounds entry is a json object");
+        sounds.remove("orphan_sounds");
+        let restored: ProjectFile =
+            serde_json::from_value(value).expect("deserialize pre-carrier project");
+        assert!(restored.track_sounds[0].orphan_sounds.is_empty());
+        let mut bare = sample_project();
+        bare.track_sounds = vec![ProjectTrackSounds::default()];
+        let json = serde_json::to_string(&bare).expect("serialize project");
+        assert!(!json.contains("orphan_sounds"), "empty carriers are skipped");
     }
 
     #[test]

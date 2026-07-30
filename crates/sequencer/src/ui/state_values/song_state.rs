@@ -188,7 +188,7 @@ fn build_pending_content(
                 let data = scenes.track_pools.get(*track)?.get(*pattern)?;
                 let num_steps = data.track_params.num_steps.max(1);
                 let mut events = Vec::new();
-                flatten_pattern_events(data, 0.0, num_steps, &mut events);
+                flatten_pattern_events(&data, 0.0, num_steps, &mut events);
                 events.truncate(LANE_PATTERN_EVENT_CAP);
                 Some(PendingTrackEventContent {
                     track: *track,
@@ -471,7 +471,7 @@ pub(crate) fn collect_lane_pattern_events(
                     let length_beats =
                         data.track_params.timebase.step_beats(num_steps) * num_steps as f64;
                     let mut events = Vec::new();
-                    flatten_pattern_events(data, 0.0, num_steps, &mut events);
+                    flatten_pattern_events(&data, 0.0, num_steps, &mut events);
                     events.truncate(LANE_PATTERN_EVENT_CAP);
                     Some(LanePatternEvents {
                         pattern_id: id,
@@ -525,7 +525,7 @@ pub(crate) fn collect_lane_pattern_events(
                     if limit == 0 || events.len() >= LANE_PATTERN_EVENT_CAP {
                         break;
                     }
-                    flatten_pattern_events(data, base as f64, limit, &mut events);
+                    flatten_pattern_events(&data, base as f64, limit, &mut events);
                 }
                 events.truncate(LANE_PATTERN_EVENT_CAP);
                 entries.push(LanePatternEvents {

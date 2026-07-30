@@ -48,14 +48,13 @@ mod tests {
         );
         state.with_scenes_mut(|scenes| {
             for id in 1..=3u64 {
-                let data = scenes.track_pools[0]
-                    .get_mut(PatternId(id))
-                    .expect("pool pattern");
-                data.track_params.num_steps = 16;
-                for step in 0..16 {
-                    data.track_bits[step / 64] |= 1 << (step % 64);
-                    data.step_data[step][StepParam::Transpose.index()] = id as f32;
-                }
+                assert!(scenes.track_pools[0].edit(PatternId(id), |data| {
+                    data.track_params.num_steps = 16;
+                    for step in 0..16 {
+                        data.track_bits[step / 64] |= 1 << (step % 64);
+                        data.step_data[step][StepParam::Transpose.index()] = id as f32;
+                    }
+                }));
             }
         });
         let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
@@ -142,7 +141,7 @@ mod tests {
         // 16 from scene 2's (transpose 3) — so committed playback of the
         // region is unchanged.
         let chunk = app.state.with_project_scenes(|scenes| {
-            scenes.track_pools[0].get(take.chunks[0]).cloned().unwrap()
+            scenes.track_pools[0].get(take.chunks[0]).unwrap()
         });
         for step in 0..32 {
             assert!(
@@ -229,7 +228,6 @@ mod tests {
         let chunk = app.state.with_project_scenes(|scenes| {
             scenes.track_pools[0]
                 .get(take.chunks[0])
-                .cloned()
                 .expect("take chunk")
         });
         assert!(
@@ -387,8 +385,9 @@ mod tests {
         // A note in the second chunk (take step 260 → chunk 1, local 4).
         let chunk1 = app.state.track_take(0, take_id).expect("take").chunks[1];
         app.state.with_scenes_mut(|scenes| {
-            let data = scenes.track_pools[0].get_mut(chunk1).expect("chunk 1");
-            data.track_bits[0] |= 1 << 4;
+            assert!(scenes.track_pools[0].edit(chunk1, |data| {
+                data.track_bits[0] |= 1 << 4;
+            }));
         });
 
         // Split the take clip at beat 8 so a clip anchored at source step 16
@@ -508,11 +507,9 @@ mod tests {
             .expect("conversion succeeds");
         let chunk0 = app.state.track_take(0, take_id).expect("take").chunks[0];
         app.state.with_scenes_mut(|scenes| {
-            scenes.track_pools[0]
-                .get_mut(chunk0)
-                .expect("chunk pattern")
-                .track_params
-                .volume = 0.9;
+            assert!(scenes.track_pools[0].edit(chunk0, |data| {
+                data.track_params.volume = 0.9;
+            }));
         });
         let scene_pattern = app
             .state
@@ -617,11 +614,9 @@ mod tests {
         // The take's device snapshot diverges from the scene cells: a
         // distinctive volume on the chunk (the scene patterns keep default).
         app.state.with_scenes_mut(|scenes| {
-            scenes.track_pools[0]
-                .get_mut(chunk0)
-                .expect("chunk pattern")
-                .track_params
-                .volume = 0.25;
+            assert!(scenes.track_pools[0].edit(chunk0, |data| {
+                data.track_params.volume = 0.25;
+            }));
         });
         let scene_volume = app.state.pattern.track_params[0].get_volume();
         assert!((scene_volume - 0.25).abs() > 1e-3, "fixture needs divergence");
@@ -965,7 +960,6 @@ impl App {
             .get(track)
             .and_then(|pool| bound.and_then(|id| pool.get(id)))
             .or_else(|| scenes_before.effective_track_pattern(track))
-            .cloned()
             .or_else(|| PatternSnapshot::new_default(1, &[]).track_pattern_data(0))
             .ok_or_else(|| format!("Could not build an empty take for track {}", track + 1))?;
         template.track_params.num_steps = MAX_STEPS;
@@ -1260,7 +1254,7 @@ impl App {
                     (data, local.floor() as usize)
                 }
             };
-            chunks[dst / MAX_STEPS].copy_step_content_from(dst % MAX_STEPS, src_data, src_step);
+            chunks[dst / MAX_STEPS].copy_step_content_from(dst % MAX_STEPS, &src_data, src_step);
         }
         Ok((chunks, total_len_steps))
     }

@@ -447,7 +447,6 @@ impl SequencerState {
                             .track_pools
                             .get(track)
                             .and_then(|pool| pool.get(id))
-                            .cloned()
                         else {
                             // A launched cell that doesn't resolve: bail so
                             // the control-side apply reports the error.
@@ -646,7 +645,6 @@ impl SequencerState {
                             .track_pools
                             .get(track)
                             .and_then(|pool| pool.get(id))
-                            .cloned()
                             .ok_or_else(|| {
                                 format!(
                                     "Song row resolves track {} to pattern {} which is not \
@@ -812,7 +810,7 @@ impl SequencerState {
             let current_scene = self.current_scene_index();
             scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask());
             let id = scenes.clone_track_pattern_into_current_scene(track)?;
-            let data = scenes.effective_track_pattern(track)?.clone();
+            let data = scenes.effective_track_pattern(track)?;
             (id, data)
         };
         data.restore_to(self, track);
@@ -847,7 +845,7 @@ impl SequencerState {
             let current_scene = self.current_scene_index();
             scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask());
             let id = scenes.clone_track_pattern_id_into_current_scene(track, source_id)?;
-            let data = scenes.effective_track_pattern(track)?.clone();
+            let data = scenes.effective_track_pattern(track)?;
             (id, data)
         };
         data.restore_to(self, track);
@@ -904,7 +902,7 @@ impl SequencerState {
                 ));
             }
             let replacement = if was_effective {
-                scenes.effective_track_pattern(track).cloned()
+                scenes.effective_track_pattern(track)
             } else {
                 None
             };
@@ -962,7 +960,6 @@ impl SequencerState {
                     .track_pools
                     .get(track)
                     .and_then(|pool| pool.get(pattern_id))
-                    .cloned()
             } else {
                 None
             }

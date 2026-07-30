@@ -54,22 +54,35 @@ impl SequencerState {
             return Err("MIDI-FX replacement target is empty".to_string());
         }
         let mut scenes = self.pattern.scenes.lock().unwrap();
+        // Validate and mutate only entities the model can still reach:
+        // orphans (un-pruned leftovers of pattern deletes and relinks) may
+        // predate this slot entirely, and letting one veto the edit would
+        // block it forever.
+        let referenced: HashSet<PatchId> = scenes
+            .referenced_track_sounds(track)
+            .into_iter()
+            .map(|refs| refs.patch)
+            .collect();
         let pool = scenes
             .track_pools
             .get_mut(track)
             .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
-        if pool.patterns.values().any(|data| {
-            slot_idx >= data.track_params.midi_fx_chain.len()
-                || slot_idx >= data.midi_fx_slots.len()
+        if pool.sounds.patches.iter().any(|(id, patch)| {
+            referenced.contains(id)
+                && (slot_idx >= patch.params.midi_fx_chain.len()
+                    || slot_idx >= patch.midi_fx_slots.len())
         }) {
             return Err("stored MIDI-FX replacement target is missing".to_string());
         }
         live_chain[slot_idx] = name.clone();
         self.pattern.track_params[track].set_midi_fx_chain(live_chain);
         self.pattern.midi_fx_slots[track][slot_idx].apply_descriptor(descriptor, 0);
-        for data in pool.patterns.values_mut() {
-            data.track_params.midi_fx_chain[slot_idx] = name.clone();
-            data.midi_fx_slots[slot_idx].sync_to_descriptor(descriptor, 0);
+        for (id, patch) in pool.sounds.patches.iter_mut() {
+            if !referenced.contains(id) {
+                continue;
+            }
+            patch.params.midi_fx_chain[slot_idx] = name.clone();
+            patch.midi_fx_slots[slot_idx].sync_to_descriptor(descriptor, 0);
         }
         Ok(())
     }
@@ -93,15 +106,16 @@ impl SequencerState {
     }
 
     pub fn remove_bus_references_from_all_track_patterns(&self, bus_id: BusId) {
+        // Whole-pool sweep is fine here (unlike the MIDI-FX replace above):
+        // idempotent, cannot fail, and scrubbing a dead bus from an orphan
+        // entity is harmless.
         let mut scenes = self.pattern.scenes.lock().unwrap();
         for pool in &mut scenes.track_pools {
-            for data in pool.patterns.values_mut() {
-                if data.track_params.output == TrackOutput::Bus(bus_id) {
-                    data.track_params.output = TrackOutput::Mix;
+            for mix in pool.sounds.mixes.values_mut() {
+                if mix.output == TrackOutput::Bus(bus_id) {
+                    mix.output = TrackOutput::Mix;
                 }
-                data.track_params
-                    .sends
-                    .retain(|send| send.destination != bus_id);
+                mix.sends.retain(|send| send.destination != bus_id);
             }
         }
     }
@@ -118,9 +132,9 @@ impl SequencerState {
         let mut scenes = self.pattern.scenes.lock().unwrap();
         let mut changed = false;
         if let Some(pool) = scenes.track_pools.get_mut(track) {
-            for data in pool.patterns.values_mut() {
-                if data.track_params.output != output {
-                    data.track_params.output = output.clone();
+            for mix in pool.sounds.mixes.values_mut() {
+                if mix.output != output {
+                    mix.output = output.clone();
                     changed = true;
                 }
             }

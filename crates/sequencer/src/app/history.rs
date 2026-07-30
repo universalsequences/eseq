@@ -1326,7 +1326,7 @@ fn slot_plocks_heap_bytes(plocks: &StepSlotPlocks) -> usize {
 fn track_params_heap_bytes(snapshot: &TrackParamsSnapshot) -> usize {
     let TrackParamsSnapshot {
         gate: _, attack_ms: _, release_ms: _, swing: _, swing_resolution: _, num_steps: _,
-        volume: _, pan: _, mute: _, solo: _, send: _, output: _, sends, polyphonic: _,
+        volume: _, pan: _, mute: _, send: _, output: _, sends, polyphonic: _,
         max_polyphony: _, timebase: _, accumulator_idx: _, script_accumulator_name,
         midi_fx_chain, midi_fx_position: _, accum_limit: _, accum_mode: _, fts_scale: _,
         mute_group: _, global_transpose: _,
