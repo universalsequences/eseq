@@ -764,7 +764,39 @@ A scene macro's script surface swaps the mapping editor for reusable scene contr
 The "diff: N params" readout (computed lazily when the surface is visible) is the
 main affordance telling the player the push will actually do something.
 
-### 8.7 Phase 6 deliverables
+### 8.7 Interaction with the Sounds model (2026-07-30)
+
+§17 of `docs/takes-and-additive-arrangement-recording-spec.md` (pooled
+Patch/Mix entities, cell-owned refs) lands under this phase as follows —
+decided there, recorded here:
+
+- **The diff read changes shape, not meaning**: "target scene's per-track
+  param state" (§8.2 step 1) becomes "the target cell's Patch/Mix pool
+  entries," one hop shorter. Live-reference stays locked and gets truer —
+  the press-time diff reads the pool entity's current values, so tuning a
+  shared patch from *any* referent retunes the push.
+- **Shared sound → empty diff → no-op morph.** If the live and target
+  cells reference the same Patch, there is nothing to push toward for
+  that track. Correct semantics, free of charge; the "diff: N params"
+  readout (§8.6) naturally shows it.
+- **Mix joins the morph**: the diff also covers the Mix entity's
+  continuous fields (volume, pan, sends), gated by the same `track_mask`.
+  Discrete Mix state never lerps: `mute` and `output` are excluded (same
+  reasoning as chain structure, §8.3); `solo` no longer exists in the
+  persisted model.
+- **Override-leak invariant (hard)**: morph values live only in the
+  Phase-1 override layer and must never reach a save-back path. Under
+  §17 save-back writes to *pool entities*, so a leaked override corrupts
+  every referent of a shared Patch/Mix at once, silently. The base-vs-
+  override separation carries a debug assertion at every capture seam.
+- **Every ref repoint routes through the §3.6 restore pass.** Pattern
+  launch repoints cell refs under §17, so a pattern steal is a repoint
+  (and release repoints back to the captured origin refs); palette
+  re-links and take/row boundaries are the same event. None of these are
+  a "manual scene switch" for §8.5's disengage rule — only a user-
+  initiated scene/pattern launch outside the macro's own steal counts.
+
+### 8.8 Phase 6 deliverables
 
 - `MacroKind::Scene` + `SceneMacroConfig` + diff-at-engage in the engine.
 - Structural-match + descriptor-domain lerp helpers (+ tests: log-domain morph,

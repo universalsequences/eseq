@@ -609,8 +609,11 @@ called from the `arrangement-clip-move` host command.
 
 - Title bar is a widget **prop**; `0` (default) is bit-identical to today —
   piano-roll never sees any of this.
-- Clip body (below the bar) is a **selection surface**, not a move surface;
-  move/resize live on the bar only. Plain body click = place edit cursor.
+- Clip body (below the bar) is a **region surface**, not a move surface;
+  move/resize live on the bar only. In FX mode a plain body click places the
+  edit cursor. While the explicit arrangement piano roll is open, that same
+  press retargets the clip editor before retaining the body-marquee drag
+  behavior; body double-click still performs no mode transition.
 - Region state is Rust-owned (`App::song_region_selection`), published as
   `SEQ.song-region`. A MARQUEE region is mutually exclusive with
   clip/scene-event selection and releases the sound binding; a clip selection

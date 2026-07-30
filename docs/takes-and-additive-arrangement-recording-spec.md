@@ -241,8 +241,10 @@ scheduler consume identical resolution.
 
 ### 6.4 Lifecycle
 
-- Takes are created only by take recording (section 8) — no UI mints empty
-  takes in V1.
+- Takes are created by take recording (section 8), region consolidation, or
+  an explicit empty-space arrangement double-click. The latter mints a real
+  silent take with at least one owned chunk, paints a take-backed clip, and
+  selects it for editing; it never creates a sourceless placeholder clip.
 - Deleting a take deletes its chunk patterns from the pool and removes every
   song override referencing it (those lanes fall back to scene-cell
   resolution unless the user had layered explicit-empty elsewhere). One undo
@@ -915,3 +917,440 @@ Deliberate scope calls, all noted rather than silently dropped:
   is the selected clip and already highlights (now driven by the persistent
   Rust-side `SEQ.song-bound-clip`, so it survives view switches per 16.6).
   Under rule 2 the playing clip does not yet carry a distinct highlight.
+
+## 17. Sounds — shared parameter entities and the palette
+
+Status: design addendum, 2026-07-29; revised 2026-07-30 (cell-owned refs,
+patch/mix split, pattern-launch repointing). Successor to §16's
+edit-routing model: §16 answered "which box does this edit land in?"; this
+section removes the accidental boxes so the question mostly stops arising.
+Unbuilt.
+
+### 17.1 The diagnosis
+
+A pool pattern today fuses two things into one object: **sequence data**
+(steps, p-locks, length/timebase) and its **parameters** (instrument slot,
+fx slots, midi-fx, track params). Every take chunk clones the whole
+fusion, so recording two takes on one track mints three
+equal-until-they-aren't parameter snapshots (take 1, take 2, the scene's
+effective pattern) with no representable notion that they are *the same
+sound*. §16's binding, the chunk fan-out invariant, and the "▸ Take 2"
+panel badge are all compensation for that missing identity.
+
+The hardware being modeled does not fuse these either: an Elektron pattern
+carries its own working copy of the track sound, and the **Sound pool** is
+what you deliberately pull from. This section adds exactly that split.
+
+### 17.2 The entities
+
+Two kinds of pool entity, id'd and **owned by nobody** (see 17.4):
+
+- A **Patch**: the device half of today's `TrackPatternData` —
+  `instrument_slot`, `effect_slots`, `midi_fx_slots`, plus the
+  device-shaped track params (gate, attack/release, polyphony, mute
+  group; exact field table in 17.8).
+- A **Mix**: the mixer half — volume, pan, sends, output routing, mute.
+  Not a third kind of state: a second pooled entity with exactly the same
+  fork/share/re-link rules as the Patch. The only place the two differ is
+  one gesture default (palette Apply, 17.6). `solo` leaves the persisted
+  model entirely — it is exclusive-across-tracks live performance state
+  and is no longer snapshotted per pattern.
+
+"Sound" in prose below means the `(patch_ref, mix_ref)` pair.
+
+Three kinds of referent hold sound refs:
+
+- **Scene cell** (per scene × track): `(patch_ref, mix_ref,
+  Option<pattern>)`. The refs are "what this track currently sounds like
+  in this scene" — a live pointer that follows launches (17.3). The
+  pattern is optional sequence content; **"no steps" never means "no
+  sound."**
+- **Pool pattern**: `(steps, p-locks, grid fields, patch_ref, mix_ref)`.
+  The refs are the pattern's durable identity as a launchable object —
+  the ref-ified version of today's inlined params. The same pattern
+  placed in two scenes is the same sound in both, as today.
+- **Take**: one `(patch_ref, mix_ref)` for the whole take. Chunks hold no
+  device state at all — this completes the §16.8 hoisting and makes the
+  no-divergence invariant structural: there is nothing to diverge.
+
+P-locks are unchanged: per-step deltas resolved over the referenced patch
+at trigger time, exactly as they resolve over the pattern snapshot today.
+
+**The always-resolves invariant**: every scene cell, pool pattern, and
+take holds refs that resolve, unconditionally. There is no state in which
+a track has no parameters — which also unblocks fully-bare tracks (the
+"effective-pattern coupling" that blocked them in Phase A/B dissolves: a
+track with zero patterns anywhere is well-defined through its cell refs).
+
+### 17.3 Ref flow — launch repoints, edits write through
+
+The full read path is one hop: **cell refs → pool**. Nothing resolves
+through a chain.
+
+- **Scene create → eager fork.** Per track: mint a fresh Patch and Mix
+  (cloned from the current cell's), point both the new cell and its new
+  pattern at them. Cell and pattern coincide by construction. Tweaking
+  scene 2 never bleeds into scene 1, with zero ceremony — per-scene
+  volume/mute divergence (scene 1 at 0.5, scene 2 at 0.7; scene 1 muted,
+  scene 2 not) is preserved exactly, carried by the forked Mixes. No
+  copy-on-write anywhere: an edit's blast radius must never depend on
+  invisible not-yet-forked state, and lazy forking silently mints sounds
+  (the same trap as computed variants, 17.6).
+- **Pattern launch → repoint.** Launching a pool pattern into a cell
+  repoints the cell's refs to the pattern's refs. This is what preserves
+  the branch-away workflow: launch pattern 7 over scene 1's cell and the
+  volume dips to pattern 7's finely tuned level (its Mix came along);
+  post-launch fader tweaks write into pattern 7's Mix and survive
+  relaunch (today's save-back behavior, without the save-back). After any
+  launch, cell and pattern name the same entities, so a panel edit has
+  exactly one destination.
+- **Pattern cleared from a cell** (track plays nothing in this scene):
+  the cell's refs simply remain. Monitor still sounds, the panel still
+  binds, takes still have something to reference.
+- **Take record → share.** Punch-in stores the bound cell's refs on the
+  take (§16.2's record-clone leg becomes a ref, not a clone). Recording
+  is performing the current sound, not designing a new one. This is the
+  fix for the two-takes case: both takes and the scene cell point at one
+  Patch/Mix, so a synth or fader edit lands once and applies everywhere.
+  A take recorded mid-branch shares the branched pattern's sound — you
+  recorded what you were hearing.
+- **Palette apply → re-link** (17.6) and **"own parameters" → fork**:
+  the explicit divergence/convergence gestures. Fork clones the entity
+  and repoints one referent; lighter than promoting a take to a full
+  track pattern, which remains the gesture for when you also want
+  session-grid steps and p-locking.
+- **Gaps between clips hold the last resolved refs.** An empty span is
+  *no events*, not *no sound*; the engine binding does not reset between
+  take 1 and take 2. Parameter reset on an empty span is a bug under
+  this model — the state that caused it is unrepresentable.
+
+Sharing consequences, stated plainly:
+
+- All takes on a track (default: sharing the scene's sound) have **one**
+  fader, one mute, one patch. That is the intended Ableton-like behavior.
+- Pattern 5's sound is shared wherever pattern 5 appears — launch it in
+  scene 1, tweak the filter, and scene 2's cell using pattern 5 hears the
+  tweak. Consistent with today (one pool pattern, one param set); the
+  palette makes the sharing legible instead of implicit. Forking scene
+  2's cell gives "same steps, different patch per scene" — not
+  expressible at all today without duplicating the pattern.
+- Cells that link one Patch but forked Mixes give "scene 3 shares scene
+  1's patch, but is muted / at a different level."
+
+### 17.4 Ownership and lifecycle
+
+Pool entities have **no owner** — a cell/pattern/take *has* a sound,
+never *owns* one. Post-fork privacy is a refcount of 1, not a different
+relationship: once scene 3 links scene 1's patch, both cells just point
+at Patch A and neither is the "original." Editing it is editing Patch A,
+not "scene 3 following scene 1"; deleting scene 1 cannot orphan scene 3.
+
+Unreferenced entities are kept (palette-as-library, like Elektron's Sound
+pool — an abandoned fork remains grabbable) with an explicit palette
+"clean up unused" gesture; at minimum, prune on save. Never GC'd behind
+the user's back mid-session.
+
+An edit to a shared entity is **one undo entry affecting all referents**
+— correct semantics, not an accident to engineer around.
+
+### 17.5 What this replaces in §16
+
+The binding resolution order (16.3), selection lifecycle (16.6), and the
+panel badge survive verbatim — the binding now resolves to the bound
+source's `(patch_ref, mix_ref)` instead of a pattern's device snapshot.
+Simplified or deleted:
+
+- **Chunk fan-out (16.4) and the no-divergence assertion** — gone;
+  structural.
+- **The 16.5 propagation gestures** — subsumed by palette re-link/fork.
+  "Push to pattern" becomes re-linking the scene cell to the take's
+  refs; "apply to all takes" stops being needed as a repair tool since
+  takes share by default.
+- **The `capture_current_pattern_snapshot` borrow hazard (16.11)** —
+  shrinks. The live mirror remains as the panel/engine surface, but
+  device state saves back to pool entities, not to whichever pattern the
+  scene owns, so a bound take can no longer leak devices into the scene
+  pattern; the release/re-bind dance around scene capture goes away for
+  the device half.
+- **"Why did the sound reset in the gap"** — unrepresentable (17.3).
+- The panel badge stops being a warning label and becomes the truth:
+  "editing **Patch A** — used by Scene 1, Scene 3, Take 2."
+
+### 17.6 The palette (UI)
+
+Identity is **explicit refs, never computed equality**. Float params
+never re-converge once wiggled; content-hashed "variants" would silently
+mint on every nudge and desync the display from the user's mental model.
+Explicit refs give the p-lock-variant semantics that already work in this
+app: a variant is a thing, editing it applies everywhere it's used,
+applying it elsewhere is deliberate.
+
+- **Clip indicator**: a subtle dot/affordance on timeline clips whose
+  patch is not the track's scene-effective patch (gray base = the
+  scene-effective sound, colors for forks — same visual language as
+  p-lock variants).
+- **Palette overlay**: opened from the clip and from the
+  instrument-panel binding badge: lists the track's pool entries —
+  color, name, referents ("used by: Scene 1, Scene 3, Take 2"; the
+  reverse index of the refs) — and offers per-entry:
+  - **Apply** — re-link this referent's `patch_ref` only (reference
+    semantics: future edits to that patch follow). "Grab the cool patch
+    from pattern 3" means the patch, not its fader position.
+  - **Apply with mix** — the explicit variant that re-links both refs.
+  - **Fork** — "own parameters": clone and repoint.
+  Apply-as-copy is deliberately not offered as a default; fork is always
+  one gesture away.
+- This serves the "great steps, bum patch" case (grab pattern 3's patch
+  for this take without touching its steps) and the "new scene, keep the
+  sound linked" case (create the scene — forked — then Apply the old
+  scene's entry to the new cell).
+- Duplication is not a concern: 40 scenes minting 40 near-identical
+  sounds per track matches today's storage, with identity made visible.
+  The palette may group by fork lineage for display, but lineage never
+  affects edit semantics.
+
+### 17.7 Migration
+
+At project load, every existing pool pattern and every take (collapsing
+its per-chunk duplicates, which §16.4 guarantees are identical) mints a
+private Patch + Mix and takes refs; every scene cell adopts its effective
+pattern's refs (a cell with no pattern adopts the track's
+current-scene-effective refs, or defaults). Behavior-identical by
+construction; sharing only begins with post-migration gestures.
+Serialization gains the two pools + refs; old projects load through the
+converter, new saves write the split model. `solo` is dropped from
+snapshots on load.
+
+### 17.8 Field split (TrackParamsSnapshot)
+
+- **Patch**: `gate`, `attack_ms`, `release_ms`, `polyphonic`,
+  `max_polyphony`, `midi_fx_chain`, `midi_fx_position`, `mute_group`.
+- **Mix**: `volume`, `pan`, `send`, `sends`, `output`, `mute`. (`output`
+  routing changes are the expensive path — a re-link that changes
+  routing may trigger an engine rebuild, not just param pushes.)
+- **Pattern (sequence side)**: `swing`, `swing_resolution`, `num_steps`,
+  `timebase` (§16.11 already carves these out of
+  `restore_device_state_to`), `accumulator_idx`,
+  `script_accumulator_name`, `accum_limit`, `accum_mode` (step-process
+  state), `fts_scale`, `global_transpose` (they change what the steps
+  *mean*; re-linking a patch must never change a clip's groove or pitch
+  mapping).
+- **Dropped from the persisted model**: `solo`.
+
+### 17.9 Locked decisions
+
+- Two pooled entity kinds, Patch and Mix; identical fork/share/re-link
+  rules; the pair is "the sound." Solo is live-only.
+- Refs live on scene cells, pool patterns, and takes; take chunks carry
+  no device state. Every ref always resolves ("no steps" ≠ "no sound");
+  read path is one hop, no chains.
+- Scene create forks eagerly (both entities), per track. No
+  copy-on-write anywhere in the model.
+- Pattern launch repoints the cell's refs to the pattern's refs;
+  clearing a pattern leaves the cell's refs in place.
+- Take punch-in shares the bound cell's refs.
+- Palette identity is explicit; nothing is ever derived from parameter
+  equality. Apply re-links the patch only; Apply-with-mix is the
+  explicit variant; copy is never a default.
+- Pool entities have no owner; lifecycle is refcount + explicit cleanup,
+  never silent mid-session GC.
+- Session/pattern-mode behavior is preserved exactly through migration
+  (private entities per pattern), including per-scene volume/mute and
+  launch-brings-its-mix.
+- Gaps between clips hold the last resolved refs; parameter reset on an
+  empty span is a bug under this model.
+- An edit to a shared entity is one undo entry affecting all referents.
+
+### 17.10 Scene-macro / morph seam (resolved 2026-07-30)
+
+The "what does a morph write when two cells share a Mix" worry dissolves:
+a scene-macro push writes **no base values at all** — the press-time diff
+feeds the macro spec's Phase-1 engine override layer, and release
+discards it (MACRO_MAPPING_SPEC.md §8.2, cross-referenced there as §8.7).
+Decisions:
+
+- **Shared sound → empty diff → no-op morph**, per track. Same Patch on
+  the live and target cell means nothing to push toward. Correct and
+  free.
+- **Mix's continuous fields (volume/pan/sends) join the morph diff**,
+  under the same `track_mask`. `mute`/`output` never lerp (discrete;
+  same reasoning as chain structure); `solo` no longer exists persisted.
+- **Override-leak invariant (hard, elevated by this model)**: engaged-
+  macro override values must never reach a save-back. Save-back now
+  writes pool entities, so one leaked value into a shared Patch/Mix
+  corrupts every referent silently — debug assertion at every capture
+  seam, not hygiene.
+- **Ref repoints are scene switches for override purposes**: pattern
+  launch, pattern steal (a launch under this model; its release repoints
+  back to captured origin refs), palette re-link, and take/row
+  boundaries all route through the macro spec's §3.6 restore pass — one
+  seam, not four. The macro's own steal never triggers §8.5's
+  manual-switch disengage; only user-initiated launches do.
+
+### 17.11 Naming and colors (resolved 2026-07-30)
+
+- Auto-assign at mint: a color from the track's palette set plus an
+  auto-name ("Patch 3", "Mix 2"). Naming is never required — scene
+  create stays zero-ceremony.
+- Rename-on-demand from the palette overlay only.
+- Colors are **unique per track** while the color set lasts (strict
+  p-lock-variant semantics: a timeline dot's color identifies exactly
+  one entity on that track); entities minted past the set fall back to
+  name-only display (no color dot, listed in the overlay as usual).
+  Colors free up when an entity is cleaned up (17.4).
+
+### 17.12 Remaining calls (resolved 2026-07-30)
+
+- **Cross-track palette: punted for V1.** Entities are per-track;
+  cross-track apply is a structural-matching problem (same rule as the
+  morph diff, macro spec §8.2) for a niche gesture. Revisit if
+  "same instrument on two tracks, share the patch" becomes a real
+  workflow.
+- **Key locks ride the Patch.** They are part of the sound and
+  presetable — and structurally already are: locks live per device slot
+  (`slot.key_locks`, the per-note map inside instrument/effect slot
+  data, `project.rs:1187`), which is exactly the data that becomes the
+  Patch entity. Consequences, all intended: key locks are shared across
+  referents of a Patch, forked at scene create, and grabbed along with
+  "the cool patch from pattern 3." Per-note resolution at
+  voice-assignment time is untouched. Note the `param_node_id`
+  staleness guard on lock application (`plock_variants.rs:418`) — the
+  re-stamping fix from the p-lock identity work must also run when a
+  palette re-link rebinds a Patch to the engine.
+
+No open questions remain; §17 is build-ready.
+
+## 18. Sounds implementation plan (§17)
+
+Status: plan, 2026-07-30. Three phases, strictly ordered; each lands and
+soaks independently. Phase S1 is a behavior-identical refactor verifiable
+against today's test suite; S2 is the deliberate behavior change; S3 is
+UI only. Verified seams cited as of this writing.
+
+### 18.1 Phase S1 — pool entities + migration (behavior-identical)
+
+Goal: the data model of §17.2 exists and everything reads through refs,
+while observable behavior is bit-identical to today.
+
+1. **Split the structs.** Carve `TrackPatternData`
+   (`sequencer/state/track_pattern_data.rs:4`) per the 17.8 field table
+   into `Patch` (devices + `gate`/`attack_ms`/`release_ms`/polyphony/
+   `mute_group`/midi-fx) and `Mix` (volume/pan/sends/`output`/`mute`);
+   sequence fields stay. Key locks move with their slots (inside `Patch`)
+   automatically — they live in slot data (`project.rs:1187`).
+   `solo` moves to live-only session state.
+2. **Pools + refs.** Per-track entity pools (ids scoped per track,
+   cross-track refs are a type error, per 17.12). Add
+   `(patch_ref, mix_ref)` to: scene cells (alongside the existing
+   pattern assignment), pool patterns (replacing the inlined halves),
+   and `TrackTake` (`sequencer/state/takes.rs:19`); delete device state
+   from take chunks entirely.
+3. **Route the reads.** The §16.11 mirror machinery generalizes rather
+   than rewrites: `mirror_device_pattern_id`
+   (`sequencer/state/sequencer_state/song_playback.rs:491`) becomes
+   "mirror refs"; `restore_device_state_to`
+   (`track_pattern_data.rs:566`) loads from entities; the eight
+   capture/restore sites in `step_edit.rs` write entities. Save-back
+   (`capture_current_pattern_snapshot`,
+   `sequencer_state/accessors.rs:4`) writes the cell's entities — this
+   is what deletes the §16.11 borrow hazard for the device half, and
+   `release_bound_device_state` (`song_playback.rs:507`) should shrink
+   to the step-grid half or disappear. Song preflight
+   (`song_playback.rs` row-snapshot build) resolves refs instead of
+   cloning chunk snapshots.
+4. **Launch = repoint.** Scene launch and per-track pattern launch set
+   the cell refs from the launched pattern; scene create mints forks for
+   cell + new pattern. In S1 these coincide with today's copy semantics
+   because every entity has exactly one referent post-migration.
+5. **Migration.** Project converter: mint private Patch+Mix per pool
+   pattern; per take, collapse chunk duplicates (§16.4 guarantees they
+   are identical — debug-assert during conversion, first divergence
+   found is a §16-era bug worth knowing about); cells adopt their
+   effective pattern's refs, cells with no pattern adopt the track's
+   current-effective refs; drop `solo`. Old loader kept; new saves write
+   pools + refs. Round-trip test: old project → load → save → load,
+   audio-relevant state identical.
+6. **Exit criteria.** Entire existing suite passes untouched (scoped
+   runs, `-p sequencer`); a new invariant test walks every cell/pattern/
+   take asserting refs resolve. No UI change, no felt change.
+
+Risks: this is the serialization change, so it should merge alone and
+soak. The known 17 metal_seq layout failures and 5 lib failures from the
+takes work stay the baseline.
+
+### 18.2 Phase S2 — sharing semantics (the behavior change)
+
+Goal: the §17.3 ref-flow rules become real. Everything here is
+user-visible and lands together, because half-sharing is the confusing
+state.
+
+1. **Take record shares.** Punch-in (`app/take_recording.rs`) stores the
+   bound cell's refs on the take instead of cloning a template;
+   `clear_step_content` (`track_pattern_data.rs:52`) loses its
+   keep-the-devices job. §16.4 chunk fan-out and the
+   `validate_track_take_pool` no-divergence assertion are deleted
+   (structural now).
+2. **Binding resolves to refs.** `app/sound_binding.rs` keeps the §16.3
+   order and 16.6 lifecycle but binds `(patch_ref, mix_ref)`. Panel
+   edits write the entity once + direct engine push when audible;
+   row-snapshot invalidation unchanged. The §16.5 gestures and their
+   host commands are retired (subsumed by S3's palette; keep the
+   natives as thin aliases until then or remove — decide at PR time).
+3. **Gaps hold refs.** At song row transitions and empty spans, the
+   engine binding retains the last resolved refs instead of resetting to
+   the scene pattern's params. Test: two takes one bar apart, params
+   audibly continuous across the gap, no monitor silence.
+4. **Mixer path joins.** Track-param edits (fader/pan/sends/mute) route
+   to the bound Mix — the completion of the take-sound-binding mixer
+   fix. Per-scene divergence test: scene 1 vol 0.5 / scene 2 vol 0.7
+   survives; cross-take sharing test: fader edit while take 2 selected
+   is heard on take 1.
+5. **Undo.** Entity edits are one history entry; restore fans to all
+   referents by construction (it edits the entity). Drag invalidation
+   follows the undo-drag pattern (targeted, no ui_epoch bump).
+6. **Re-stamp on re-link/rebind.** Any repoint that rebinds a Patch to
+   the engine runs the `param_node_id` re-stamping pass, or key locks
+   and p-locks silently die (`plock_variants.rs:411-418` staleness
+   guards; cf. the p-lock identity fix).
+7. **Macro seam (§17.10 / macro spec §8.7).** Repoints route through the
+   §3.6 restore pass (one seam for launch/steal/re-link/boundaries);
+   override-leak debug assertion at every capture seam. If macro Phase 1
+   is unbuilt when S2 lands, land the assertion seam anyway — save-back
+   is the surface being guarded, not the macro.
+8. **Exit criteria.** New tests: two-takes shared edit, gap continuity,
+   fader fan-out, per-scene isolation (fork), pattern-launch repoint
+   brings mix, relaunch preserves post-launch tweaks, re-link re-stamps
+   locks. The §16 tests that asserted fan-out equality flip to asserting
+   ref identity.
+
+### 18.3 Phase S3 — palette UI
+
+Goal: 17.6 + 17.11, all reads through new state-value surfaces, all
+writes through host commands (UI in lisp — build lists with `each`,
+never `map`).
+
+1. **Read surface**: per-track palette list (entity id, color, name,
+   referent list — the reverse index) as a `SEQ.*` value; clip dot data
+   joins the existing lane-event payloads. Respect the instrument-panel
+   caveat from §16's scope calls: the badge rides the `inst` map, not a
+   new panel-scope `SEQ.*` read.
+2. **Commands**: `sound-apply {target, patch}` /
+   `sound-apply-with-mix` / `sound-fork` / `sound-rename` /
+   `sound-cleanup-unused`, all single undo entries; apply/fork route
+   through the S2 repoint path (restore pass + re-stamp included).
+3. **Color allocator**: per-track, unique while the set lasts, recycle
+   on cleanup, name-only fallback past the set (17.11).
+4. **Overlay + indicator**: clip dot when patch ≠ scene-effective;
+   overlay from clip and binding badge; badge becomes
+   "Patch A — used by Scene 1, Scene 3, Take 2."
+5. **Exit criteria**: UI-script layout tests for overlay/dot; end-to-end
+   test of the two flagship gestures — "grab pattern 3's patch for this
+   take" (steps untouched, mix untouched) and "new scene, keep sound
+   linked" (create → Apply old entry).
+
+### 18.4 Explicitly out of scope
+
+Cross-track palette (17.12), `snap_structure_at` morph follow-ups (macro
+spec §8.3), palette lineage display, and any change to p-lock variant
+storage. The §16.8 "hoist to `TrackTake`" note is superseded by S1
+rather than implemented as written.

@@ -1,6 +1,6 @@
 # Clip Edit Target — Unified Focus, Double-Click-to-Piano-Roll, Clip Panel
 
-Status: rev 2, 2026-07-29 — **all four slices shipped** on branch
+Status: rev 4, 2026-07-29 — **all four slices shipped** on branch
 `clip-edit-target` (unmerged), each through a multi-agent review gate with
 fixes applied. Slice A: `app/focus.rs` (EditFocus over the sound binding),
 `FocusStepGesture`/`begin_for` in `app/edit.rs` (pool-first, take chunks as
@@ -15,6 +15,21 @@ merge-key coalesced), `arr_clip_slide_offset` band slide, window overlay
 (`:window-marker`/`:window-span`/`:window-repeat`). Slice D: clip panel
 column inside the `*piano-roll*` buffer (`focus_clip_fields`,
 `arr_clip_set_offset`, `focus-clip-resize`/`focus-set-offset`).
+
+Rev 3 adds the arrangement authoring follow-up: double-clicking empty space
+in a track lane mints a silent take-backed clip over the widget's default
+create span, selects it as the existing sound/edit binding, and opens the
+piano roll. Take chunks, the clip, and any required song-end extension are
+one undo entry. This deliberately uses a real take rather than weakening the
+arrangement invariant that silence is the absence of a clip.
+
+Rev 4 makes the lower panel an explicit Ableton-style mode while arrangement
+is visible. Track-header double-click always enters FX/device mode. Clip-title
+or empty-space double-click enters arrangement piano-roll mode (the latter
+first creates a silent take clip). While that piano roll is open, a single
+click anywhere on a clip retargets it and an empty-space click keeps the mode
+open with a measured “No clip selected” state. In FX mode clip bodies remain
+cursor/region surfaces, and body double-click never changes modes.
 
 Implementation notes vs rev 1 (code won where they differed):
 
@@ -201,12 +216,16 @@ bug (`track-pattern-switch-paths`).
 
 Interaction summary:
 
-| gesture | effect |
-|---|---|
-| single-click clip (title bar / bar-less body) | binds sound + one-clip region + selects track (today's behavior, unchanged) |
-| **double-click clip title bar** | bind (as above) **+ open piano roll** on the clip's source |
-| click background / clear | unbind → follow mode |
-| leave arrangement / enter session mode | unbind → follow mode (§4.2) |
+| lower-panel mode | gesture | effect |
+|---|---|---|
+| FX | single-click clip title | bind clip; keep FX mode |
+| FX | single/double-click clip body | park cursor / start region; keep FX mode |
+| FX | **double-click clip title** | bind clip + enter arrangement piano-roll mode |
+| FX | **double-click empty space** | create and bind a silent take clip + enter arrangement piano-roll mode |
+| Piano roll | single-click anywhere on any track's clip | bind/retarget that clip and track; keep piano-roll mode |
+| Piano roll | click empty space | unbind and render “No clip selected”; keep piano-roll mode |
+| Piano roll | **double-click track header** | enter FX mode for that track |
+| Either | leave arrangement / enter session mode | leave arrangement clip mode (§4.2) |
 
 ### 3.3 Lifecycle rules
 

@@ -56,12 +56,19 @@ failing test's subject overlaps your diff at all; if it does not, verify the
 failure pre-exists by running that one test in a temporary `git worktree` of
 HEAD (see "Working tree safety"), then report it as pre-existing and move on.
 
-Known pre-existing failures: none. As of 2026-07-28 the full suite
-(`cargo nextest run -p sequencer -p eseqlisp`) is green: 3310 passed,
-18 skipped (`#[ignore]`d benchmarks/captures). If a broader run fails, treat it
-as a real signal — verify against a clean-HEAD worktree as described above, and
-if a failure genuinely pre-exists your change, update this list with the test
-name and evidence rather than leaving it undocumented.
+Known pre-existing failures:
+
+- `state_values::tests::metal_seq_piano_roll_lisp_loads` expects the empty
+  piano-roll lane scroll to be 40, while the current fit formula produces 39.
+  Reproduced on 2026-07-29 with the exact nextest target in an isolated worktree
+  at clean HEAD `c4fcf064`.
+
+As of 2026-07-28 the full suite (`cargo nextest run -p sequencer -p eseqlisp`)
+was green: 3310 passed, 18 skipped (`#[ignore]`d benchmarks/captures). If a
+broader run fails, treat it as a real signal — verify against a clean-HEAD
+worktree as described above, and if a failure genuinely pre-exists your change,
+update this list with the test name and evidence rather than leaving it
+undocumented.
 
 ## Working tree safety
 
