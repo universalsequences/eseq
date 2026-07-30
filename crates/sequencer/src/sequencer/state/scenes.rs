@@ -182,6 +182,19 @@ impl TrackPatternPool {
     pub fn referenced_sounds(&self) -> HashSet<SoundRefs> {
         self.patterns.values().map(|stored| stored.sound).collect()
     }
+
+    /// Compose a sound's content onto an empty default sequence — the save
+    /// carrier for entities referenced only by bare cells, which no pattern
+    /// or take chunk serializes.
+    pub fn compose_bare_sound(&self, refs: SoundRefs) -> Option<TrackPatternData> {
+        let patch = self.sounds.patches.get(&refs.patch)?;
+        let mix = self.sounds.mixes.get(&refs.mix)?;
+        Some(TrackPatternData::compose(
+            &TrackPatternSeq::new_default(),
+            patch,
+            mix,
+        ))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -944,6 +957,9 @@ impl ProjectScenes {
         for scene in &mut self.scenes {
             if track < scene.cells.len() {
                 scene.cells.remove(track);
+            }
+            if track < scene.cell_sounds.len() {
+                scene.cell_sounds.remove(track);
             }
         }
         if track < self.track_overrides.len() {

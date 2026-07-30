@@ -708,19 +708,25 @@ impl SequencerState {
     /// minted) entities as canonical; later referents naming the same file
     /// id repoint to them. Content is identical across such referents by
     /// construction (the save composed it from one entity), so re-linking
-    /// never changes what anything sounds like. Tuple per track:
-    /// `(cells-per-scene, patterns-per-scene, takes)` of file-local
-    /// `(patch, mix)` ids; `u64::MAX` marks an absent placeholder.
+    /// never changes what anything sounds like. Referents are processed in
+    /// content-priority order — patterns, then takes, then orphan carriers,
+    /// then cells — so an id's canonical entity always comes from a referent
+    /// whose content the file actually carried (cells carry none). Tuple per
+    /// track: `(cells-per-scene, patterns-per-scene, takes, carriers)` of
+    /// file-local `(patch, mix)` ids; `u64::MAX` marks an absent
+    /// placeholder; carriers additionally hold the composed content for
+    /// entities no pattern or chunk serialized (bare cells, §17.2).
     pub(crate) fn apply_project_sound_model(
         &self,
         track_sounds: &[(
             Vec<(u64, u64)>,
             Vec<Option<(u64, u64)>>,
             Vec<(u64, u64)>,
+            Vec<(u64, u64, TrackPatternData)>,
         )],
     ) {
         let mut scenes = self.pattern.scenes.lock().unwrap();
-        for (track, (cells, patterns, takes)) in track_sounds.iter().enumerate() {
+        for (track, (cells, patterns, takes, carriers)) in track_sounds.iter().enumerate() {
             if track >= scenes.track_pools.len() {
                 break;
             }
@@ -758,31 +764,6 @@ impl SequencerState {
                     }
                 }
             }
-            for (scene_idx, (file_patch, file_mix)) in cells.iter().enumerate() {
-                if *file_patch == u64::MAX || *file_mix == u64::MAX {
-                    continue;
-                }
-                let Some(live) = scenes
-                    .scenes
-                    .get(scene_idx)
-                    .and_then(|scene| scene.cell_sounds.get(track))
-                    .copied()
-                else {
-                    continue;
-                };
-                let canonical_patch = *patch_map.entry(*file_patch).or_insert(live.patch);
-                let canonical_mix = *mix_map.entry(*file_mix).or_insert(live.mix);
-                if let Some(cell_sound) = scenes
-                    .scenes
-                    .get_mut(scene_idx)
-                    .and_then(|scene| scene.cell_sounds.get_mut(track))
-                {
-                    *cell_sound = SoundRefs {
-                        patch: canonical_patch,
-                        mix: canonical_mix,
-                    };
-                }
-            }
             for (take_idx, (file_patch, file_mix)) in takes.iter().enumerate() {
                 let Some(live) = scenes
                     .take_pools
@@ -816,6 +797,58 @@ impl SequencerState {
                             stored.sound = canonical;
                         }
                     }
+                }
+            }
+            // Orphan carriers: content for entities no pattern or chunk
+            // serialized (bare cells). Seed only the ids still unclaimed —
+            // a carrier's other half may duplicate content a pattern
+            // already canonicalized, and that copy must lose.
+            for (file_patch, file_mix, data) in carriers {
+                if *file_patch == u64::MAX || *file_mix == u64::MAX {
+                    continue;
+                }
+                let need_patch = !patch_map.contains_key(file_patch);
+                let need_mix = !mix_map.contains_key(file_mix);
+                if !need_patch && !need_mix {
+                    continue;
+                }
+                let Some(pool) = scenes.track_pools.get_mut(track) else {
+                    continue;
+                };
+                let (_seq, patch, mix) = data.clone().split();
+                if need_patch {
+                    patch_map.insert(*file_patch, pool.sounds.insert_patch(patch));
+                }
+                if need_mix {
+                    mix_map.insert(*file_mix, pool.sounds.insert_mix(mix));
+                }
+            }
+            // Cells last: they carry no content of their own, so they only
+            // ever adopt entities seeded above — falling back to their live
+            // (migration-minted) refs when the file id is unknown.
+            for (scene_idx, (file_patch, file_mix)) in cells.iter().enumerate() {
+                if *file_patch == u64::MAX || *file_mix == u64::MAX {
+                    continue;
+                }
+                let Some(live) = scenes
+                    .scenes
+                    .get(scene_idx)
+                    .and_then(|scene| scene.cell_sounds.get(track))
+                    .copied()
+                else {
+                    continue;
+                };
+                let canonical_patch = *patch_map.entry(*file_patch).or_insert(live.patch);
+                let canonical_mix = *mix_map.entry(*file_mix).or_insert(live.mix);
+                if let Some(cell_sound) = scenes
+                    .scenes
+                    .get_mut(scene_idx)
+                    .and_then(|scene| scene.cell_sounds.get_mut(track))
+                {
+                    *cell_sound = SoundRefs {
+                        patch: canonical_patch,
+                        mix: canonical_mix,
+                    };
                 }
             }
         }

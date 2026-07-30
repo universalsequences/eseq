@@ -217,6 +217,19 @@ pub struct TrackPatternSeq {
     pub key_lock_variant_registry: PlockVariantRegistry,
 }
 
+impl TrackPatternSeq {
+    /// The default (empty) sequence half, derived from the same default
+    /// pattern every fresh lane starts from. Used to compose content
+    /// carriers for entities that have no pattern referent (bare cells).
+    pub fn new_default() -> Self {
+        PatternSnapshot::new_default(1, &[])
+            .track_pattern_data(0)
+            .expect("default snapshot has lane 0")
+            .split()
+            .0
+    }
+}
+
 impl TrackPatternData {
     /// Decompose the composed working form into stored halves (§17.8 split).
     pub fn split(self) -> (TrackPatternSeq, Patch, Mix) {
@@ -581,5 +594,116 @@ mod tests {
         reloaded.apply_project_sound_model(&[]);
         compare(&loaded, &reloaded);
         compare(&source, &reloaded);
+    }
+
+    /// §17.2 across persistence: a bare cell's sound — an entity no pattern
+    /// or take chunk serializes — rides an orphan carrier and survives a
+    /// save-shaped export → load.
+    #[test]
+    fn bare_cell_sound_survives_round_trip_via_carrier() {
+        let source = state_with_scenes(1, 2);
+        // Scene 1: distinctive device + mixer state, then delete the
+        // pattern — the cell goes bare but keeps the sound.
+        let (cell_refs, carrier_data) = source.with_scenes_mut(|scenes| {
+            let id = scenes.scenes[1].cells[0].expect("scene 1 cell");
+            assert!(scenes.track_pools[0].edit(id, |data| {
+                data.track_params.volume = 0.77;
+                data.track_params.attack_ms = 42.0;
+                data.instrument_base_note_offset = 9.0;
+            }));
+            assert!(scenes.delete_track_pattern(0, id));
+            assert!(scenes.scenes[1].cells[0].is_none());
+            let refs = scenes.scenes[1].cell_sounds[0];
+            let data = scenes.track_pools[0]
+                .compose_bare_sound(refs)
+                .expect("bare cell refs resolve");
+            (refs, data)
+        });
+
+        // Save-shaped export: dense bank + presence + ref structure +
+        // the carrier the save path would emit for the uncarried pair.
+        let bank = source.export_pattern_repository();
+        let (presence, cells, patterns) = source.with_project_scenes(|scenes| {
+            let presence: Vec<Vec<bool>> = scenes
+                .scenes
+                .iter()
+                .map(|scene| vec![scene.cells[0].is_some()])
+                .collect();
+            let cells: Vec<(u64, u64)> = scenes
+                .scenes
+                .iter()
+                .map(|scene| {
+                    let refs = scene.cell_sounds[0];
+                    (refs.patch.0, refs.mix.0)
+                })
+                .collect();
+            let patterns: Vec<Option<(u64, u64)>> = scenes
+                .scenes
+                .iter()
+                .map(|scene| {
+                    scene.cells[0]
+                        .and_then(|id| scenes.track_pools[0].refs(id))
+                        .map(|refs| (refs.patch.0, refs.mix.0))
+                })
+                .collect();
+            (presence, cells, patterns)
+        });
+
+        let loaded = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        loaded.replace_pattern_repository(bank, 0);
+        loaded.install_project_arrangement(&presence, Vec::new());
+        loaded.apply_project_sound_model(&[(
+            cells,
+            patterns,
+            Vec::new(),
+            vec![(cell_refs.patch.0, cell_refs.mix.0, carrier_data)],
+        )]);
+
+        loaded.with_project_scenes(|scenes| {
+            scenes.validate_sound_refs().expect("refs resolve");
+            assert!(scenes.scenes[1].cells[0].is_none(), "cell stays bare");
+            let refs = scenes.scenes[1].cell_sounds[0];
+            let data = scenes.track_pools[0]
+                .compose_bare_sound(refs)
+                .expect("carrier entity resolves");
+            assert_eq!(data.track_params.volume.to_bits(), 0.77f32.to_bits());
+            assert_eq!(data.track_params.attack_ms.to_bits(), 42.0f32.to_bits());
+            assert_eq!(data.instrument_base_note_offset.to_bits(), 9.0f32.to_bits());
+            // Scene 0's cell still shares its pattern's entities.
+            let id = scenes.scenes[0].cells[0].expect("scene 0 cell");
+            assert_eq!(
+                scenes.track_pools[0].refs(id),
+                Some(scenes.scenes[0].cell_sounds[0])
+            );
+        });
+    }
+
+    /// Deleting a track shifts every scene's `cell_sounds` together with
+    /// `cells` (the parallel-vector law a track MOVE already obeys).
+    #[test]
+    fn remove_track_keeps_cell_sounds_aligned() {
+        let state = state_with_scenes(3, 2);
+        // Make track 2's sound recognizable so the shift is observable.
+        let marker = state.with_scenes_mut(|scenes| {
+            let id = scenes.scenes[0].cells[2].expect("track 2 cell");
+            assert!(scenes.track_pools[2].edit(id, |data| {
+                data.track_params.volume = 0.31;
+            }));
+            scenes.scenes[0].cell_sounds[2]
+        });
+        state.with_scenes_mut(|scenes| {
+            assert!(scenes.remove_track(1));
+            scenes.validate_sound_refs().expect("refs stay aligned");
+            for scene in &scenes.scenes {
+                assert_eq!(scene.cell_sounds.len(), scene.cells.len());
+            }
+            // Former track 2 now lives at index 1 and still resolves its
+            // own sound against the pool that moved with it.
+            assert_eq!(scenes.scenes[0].cell_sounds[1], marker);
+            let data = scenes.track_pools[1]
+                .compose_bare_sound(marker)
+                .expect("shifted refs resolve");
+            assert_eq!(data.track_params.volume.to_bits(), 0.31f32.to_bits());
+        });
     }
 }

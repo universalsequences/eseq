@@ -48,7 +48,10 @@ const RACK_PRESETS_DIR: &str = "presets/racks";
 //       cells, and takes. The dense pattern bank still carries the composed
 //       content; `track_sounds` additionally serializes the REF STRUCTURE
 //       (which referents share which entity), so post-S1 sharing survives a
-//       round trip. Version-<=6 files load through the §17.7 migration: a
+//       round trip. Entities referenced only by bare cells (no pattern to
+//       carry their content) ride along as `orphan_sounds` carriers — an
+//       empty-sequence pattern per entity pair, reusing the take-chunk wire
+//       format. Version-<=6 files load through the §17.7 migration: a
 //       private Patch+Mix per pattern, take-chunk duplicates collapsed onto
 //       one entity pair, cells adopting their pattern's refs. `solo` left
 //       the persisted model (live-only); the field is still written (false)
@@ -157,6 +160,24 @@ pub struct ProjectTrackSounds {
     /// the take's refs by construction and are not listed separately.
     #[serde(default)]
     pub takes: Vec<ProjectSoundRefs>,
+    /// Content carriers for entities named above but backed by no pattern or
+    /// take chunk (§17.2 bare cells: "no steps ≠ no sound"). The dense bank
+    /// only serializes cell-pattern content and take chunks only their own,
+    /// so a sound referenced solely by a bare cell would otherwise reload as
+    /// defaults. One entry per uncarried `(patch, mix)` pair.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orphan_sounds: Vec<ProjectOrphanSound>,
+}
+
+/// One carrier: the entity pair's file-local ids plus their content, composed
+/// onto an empty sequence and stored as a full-width `ProjectPattern` (only
+/// the owning track's lane is meaningful) — the same wire format and
+/// load-time sample resolution as take chunks.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectOrphanSound {
+    pub patch: u64,
+    pub mix: u64,
+    pub data: ProjectPattern,
 }
 
 /// Serialized form of one track's `TrackTakePool` (takes spec 6.1).
@@ -3360,6 +3381,47 @@ mod tests {
         let json = serde_json::to_string(&bare).expect("serialize project");
         assert!(!json.contains("take_pools"), "empty take pools are skipped");
         assert!(!json.contains("scene_cell_presence"), "full presence is skipped");
+    }
+
+    #[test]
+    fn orphan_sound_carriers_round_trip_and_default_empty() {
+        let mut project = sample_project();
+        project.track_sounds = vec![ProjectTrackSounds {
+            cells: vec![ProjectSoundRefs { patch: 5, mix: 6 }],
+            patterns: vec![None],
+            takes: Vec::new(),
+            orphan_sounds: vec![ProjectOrphanSound {
+                patch: 5,
+                mix: 6,
+                data: project.patterns[0].clone(),
+            }],
+        }];
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+        let sounds = &restored.track_sounds[0];
+        assert_eq!(sounds.orphan_sounds.len(), 1);
+        assert_eq!(
+            (sounds.orphan_sounds[0].patch, sounds.orphan_sounds[0].mix),
+            (5, 6)
+        );
+
+        // Files written before carriers existed load with the empty default,
+        // and a track with no bare-cell-only entities writes no field.
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        let sounds = value
+            .as_object_mut()
+            .and_then(|object| object.get_mut("track_sounds"))
+            .and_then(|sounds| sounds.as_array_mut())
+            .and_then(|sounds| sounds[0].as_object_mut())
+            .expect("track sounds entry is a json object");
+        sounds.remove("orphan_sounds");
+        let restored: ProjectFile =
+            serde_json::from_value(value).expect("deserialize pre-carrier project");
+        assert!(restored.track_sounds[0].orphan_sounds.is_empty());
+        let mut bare = sample_project();
+        bare.track_sounds = vec![ProjectTrackSounds::default()];
+        let json = serde_json::to_string(&bare).expect("serialize project");
+        assert!(!json.contains("orphan_sounds"), "empty carriers are skipped");
     }
 
     #[test]
