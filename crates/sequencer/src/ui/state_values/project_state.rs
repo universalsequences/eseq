@@ -224,7 +224,12 @@ pub(crate) fn evaluate_project_scratch_on_ui_runtime(
     let result = if report.success {
         Ok(())
     } else {
-        Err(report.failure_message())
+        let failure = report.failure_message();
+        eprintln!(
+            "metal_seq: project scratch UI eval failed path={} error={failure}",
+            project_scratch_source_path().display()
+        );
+        Err(failure)
     };
     editor.process_lisp_reload_report(report);
     if let Some(status) = editor.runtime_mut().take_status_message() {

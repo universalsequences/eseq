@@ -114,7 +114,7 @@
     (list 1 0 0 0 0 0 0 0)))
 
 (defstate g8-weights (list))
-(defstate g8-piano-press-depth 1.0)
+(defstate g8-piano-press-depth 0.6)
 
 (def g8-read-weights ()
   (map
@@ -264,7 +264,7 @@
       (box
         :padding 0.85
         :gap 0.6
-        :width 87
+        :width 95
         :height 45
         (v-stack :gap 0.5 :width :fill
           ;; ── sequencer-level config (on top) ──
@@ -405,7 +405,7 @@
                     (graph-edge g8-name :from r :to c :weight v))))))
           (box
             :debug-name "graph-8x8-piano-panel"
-            :padding 0.55
+            :padding 1
             :background-color :mixer-strip-bg
             :border-color :mixer-strip-border
             :corner-radius 12
@@ -416,7 +416,7 @@
               :tracks (range 0 g8-node-count)
               :overlap-mode :loudest
               :press-depth g8-piano-press-depth
-              :start-note 24
+              :start-note 12
               :key-count 80
               :width 84
               :height 4.5)))))))

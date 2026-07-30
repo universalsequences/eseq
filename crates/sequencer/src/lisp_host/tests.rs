@@ -1311,7 +1311,13 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .expect("install sequencer tab registration test stub");
         runtime
             .eval_str(
-                "(def seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
+                r#"
+                (def graph-8x8-registered-tab nil)
+                (def seq-register-script-step-sequencer-tab
+                  (label buffer sequencer source-path)
+                  (set! graph-8x8-registered-tab
+                    (list label buffer sequencer source-path)))
+                "#,
             )
             .expect("install script sequencer tab registration test stub");
 
@@ -1321,6 +1327,23 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         ))
         .expect("read graph 8x8 demo script");
         runtime.eval_str(&source).expect("evaluate graph 8x8 demo");
+        assert_eq!(
+            runtime
+                .eval_str("graph-8x8-registered-tab")
+                .expect("read graph tab registration"),
+            Some(Value::List(
+                [
+                    "8x8",
+                    "*8x8*",
+                    "neural-8x8-demo",
+                    "",
+                ]
+                .into_iter()
+                .map(|value| Rc::new(RefCell::new(Value::String(value.to_string()))))
+                .collect(),
+            )),
+            "the script must reach tab registration after publishing its graph and UI"
+        );
         assert!(
             state.current_graph_overrides().is_empty(),
             "loading the graph demo must publish graph/UI without writing pattern overrides"
