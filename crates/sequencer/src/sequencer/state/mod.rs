@@ -60,6 +60,8 @@ mod pattern_snapshot;
 pub use pattern_snapshot::*;
 mod track_pattern_data;
 pub use track_pattern_data::*;
+mod sound_entities;
+pub use sound_entities::*;
 mod scenes;
 pub use scenes::*;
 mod takes;

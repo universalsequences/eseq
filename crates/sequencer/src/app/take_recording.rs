@@ -310,7 +310,7 @@ mod tests {
         app.state.with_scenes_mut(|scenes| {
             let pool = scenes.track_pools.get_mut(0).expect("track pool");
             for pattern in pool.patterns.values_mut() {
-                pattern.track_params.timebase = crate::sequencer::Timebase::Eighth;
+                pattern.seq.params.timebase = crate::sequencer::Timebase::Eighth;
             }
         });
         assert!(app.take_record_note(0, press_at_beats(anchor, 12.3), 60.0, 1.0));
@@ -511,7 +511,6 @@ impl App {
                     bound
                         .and_then(|id| pool.get(id))
                         .or_else(|| scenes.effective_track_pattern(track))
-                        .cloned()
                 })
                 .or_else(|| {
                     PatternSnapshot::new_default(1, &[]).track_pattern_data(0)

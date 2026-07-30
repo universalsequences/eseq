@@ -351,7 +351,6 @@ impl App {
                                 .track_pools
                                 .get(track)
                                 .and_then(|pool| pool.get(pattern))
-                                .cloned()
                         });
                         let Some(data) = data else { continue };
                         if !self.state.borrow_track_device_state(track, pattern, &data) {
@@ -758,7 +757,7 @@ pub(crate) mod tests {
 
         let chunk = || -> TrackPatternData {
             let mut data = state
-                .with_project_scenes(|scenes| scenes.effective_track_pattern(0).cloned())
+                .with_project_scenes(|scenes| scenes.effective_track_pattern(0))
                 .expect("effective pattern");
             data.clear_step_content();
             data
@@ -1086,11 +1085,9 @@ pub(crate) mod tests {
         // Give the take a sound of its own so an unbind is observable.
         app.state.with_scenes_mut(|scenes| {
             for chunk in &chunks {
-                scenes.track_pools[0]
-                    .get_mut(*chunk)
-                    .expect("chunk in pool")
-                    .instrument_slot
-                    .defaults[0] = 0.75;
+                assert!(scenes.track_pools[0].edit(*chunk, |data| {
+                    data.instrument_slot.defaults[0] = 0.75;
+                }));
             }
         });
         app.set_use_arrangement(true).expect("song mode on");

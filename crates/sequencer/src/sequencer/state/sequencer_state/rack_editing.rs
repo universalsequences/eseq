@@ -112,7 +112,12 @@ impl SequencerState {
         }
         for scene_idx in 0..scenes.scenes.len() {
             while scenes.scenes[scene_idx].cells.len() < track_count {
+                let lane = scenes.scenes[scene_idx].cells.len();
+                let refs = scenes.track_pools[lane]
+                    .sounds
+                    .insert(Patch::new_default(), Mix::default());
                 scenes.scenes[scene_idx].cells.push(None);
+                scenes.scenes[scene_idx].cell_sounds.push(refs);
             }
         }
         let current_scene = scenes.current_scene;
@@ -120,7 +125,14 @@ impl SequencerState {
         if let Some(scene) = scenes.scenes.get(current_scene) {
             if scene.cells.get(track).copied().flatten().is_none() {
                 let id = scenes.track_pools[track].insert(default_data);
+                let refs = scenes.track_pools[track].refs(id);
                 scenes.scenes[current_scene].cells[track] = Some(id);
+                if let (Some(refs), Some(cell_sound)) = (
+                    refs,
+                    scenes.scenes[current_scene].cell_sounds.get_mut(track),
+                ) {
+                    *cell_sound = refs;
+                }
                 materialized = Some(id);
             }
         }
@@ -155,11 +167,23 @@ impl SequencerState {
         let Some(pool) = scenes.track_pools.get_mut(track) else {
             return 0;
         };
-        let mut seeded = 0;
-        for data in pool.patterns.values_mut() {
-            if data.sample_id.0 < 0 {
-                data.sample_id = sample_id.clone();
-                seeded += 1;
+        // Patterns whose Patch still has no real sample, counted before any
+        // write (take chunks share a Patch; each still counts as today).
+        let unseeded: Vec<PatchId> = pool
+            .patterns
+            .values()
+            .filter(|stored| {
+                pool.sounds
+                    .patches
+                    .get(&stored.sound.patch)
+                    .is_some_and(|patch| patch.sample_id.0 < 0)
+            })
+            .map(|stored| stored.sound.patch)
+            .collect();
+        let seeded = unseeded.len();
+        for patch_id in unseeded {
+            if let Some(patch) = pool.sounds.patches.get_mut(&patch_id) {
+                patch.sample_id = sample_id.clone();
             }
         }
         seeded
@@ -177,9 +201,9 @@ impl SequencerState {
         let Some(pool) = scenes.track_pools.get_mut(track) else {
             return;
         };
-        for data in pool.patterns.values_mut() {
-            prepare_track_pattern_data_for_rack(data);
-            data.rack_track = Some(rack_track.clone());
+        for patch in pool.sounds.patches.values_mut() {
+            prepare_patch_for_rack(patch);
+            patch.rack_track = Some(rack_track.clone());
         }
     }
 
@@ -269,7 +293,7 @@ impl SequencerState {
             .map(EffectSlotSnapshot::capture)
             .collect::<Vec<_>>();
 
-        let make_slot = |data: &TrackPatternData| {
+        let make_slot = |data: &Patch| {
             let mut track_sound_state = data.track_sound_state.clone();
             track_sound_state.engine_id = engine_id;
             let mut slot = RackSlotSnapshot {
@@ -301,13 +325,13 @@ impl SequencerState {
             let effective_id = scenes.effective_pattern_id(track)?;
             let pool = scenes.track_pools.get_mut(track)?;
             let mut effective_rack = None;
-            // Pattern ids are stable identities shared by scene cells and the
-            // optional launched-pattern override. Migrating each pool entry in
-            // place preserves those mappings without cloning or re-keying any
-            // pattern.
-            for (pattern_id, data) in pool.patterns.iter_mut() {
-                let slot = make_slot(data);
-                if *pattern_id == effective_id {
+            // Pattern ids stay untouched — the migration rewrites each Patch
+            // ENTITY in place (once each; take chunks share one), so scene
+            // cells and the launched-pattern override keep their mappings.
+            let effective_patch = pool.refs(effective_id).map(|refs| refs.patch);
+            for (patch_id, patch) in pool.sounds.patches.iter_mut() {
+                let slot = make_slot(patch);
+                if Some(*patch_id) == effective_patch {
                     effective_rack = Some(RackTrackSnapshot {
                         routing: RackRouting::Broadcast,
                         slots: vec![slot.clone()],
@@ -316,11 +340,11 @@ impl SequencerState {
                         runtime_macro_track: 0,
                     });
                 }
-                prepare_track_pattern_data_for_rack(data);
-                data.effect_slots = (0..crate::lisp_host::MAX_CUSTOM_FX)
+                prepare_patch_for_rack(patch);
+                patch.effect_slots = (0..crate::lisp_host::MAX_CUSTOM_FX)
                     .map(|_| EffectSlotSnapshot::new_empty())
                     .collect();
-                data.rack_track = Some(RackTrackSnapshot {
+                patch.rack_track = Some(RackTrackSnapshot {
                     routing: RackRouting::Broadcast,
                     slots: vec![slot],
                     macros: default_rack_macros(),
@@ -406,16 +430,16 @@ impl SequencerState {
         let id = scenes
             .effective_pattern_id(track)
             .expect("validated current pattern id before rack slot append");
-        let data = scenes
+        let patch = scenes
             .track_pools
             .get_mut(track)
-            .and_then(|pool| pool.get_mut(id))
+            .and_then(|pool| pool.patch_mut(id))
             .expect("validated current pattern data before rack slot append");
-        prepare_track_pattern_data_for_rack(data);
-        match data.rack_track.as_mut() {
+        prepare_patch_for_rack(patch);
+        match patch.rack_track.as_mut() {
             Some(rack_track) => rack_track.slots.push(slot),
             None => {
-                data.rack_track = Some(RackTrackSnapshot {
+                patch.rack_track = Some(RackTrackSnapshot {
                     routing,
                     slots: vec![slot],
                     macros: default_rack_macros(),
@@ -451,12 +475,12 @@ impl SequencerState {
         let Some(pool) = scenes.track_pools.get_mut(track) else {
             return;
         };
-        for data in pool.patterns.values_mut() {
-            prepare_track_pattern_data_for_rack(data);
-            match data.rack_track.as_mut() {
+        for patch in pool.sounds.patches.values_mut() {
+            prepare_patch_for_rack(patch);
+            match patch.rack_track.as_mut() {
                 Some(rack_track) => rack_track.slots.push(slot.clone()),
                 None => {
-                    data.rack_track = Some(RackTrackSnapshot {
+                    patch.rack_track = Some(RackTrackSnapshot {
                         routing,
                         slots: vec![slot.clone()],
                         macros: default_rack_macros(),
@@ -488,8 +512,8 @@ impl SequencerState {
 
         let mut scenes = self.pattern.scenes.lock().unwrap();
         if let Some(pool) = scenes.track_pools.get_mut(track) {
-            for data in pool.patterns.values_mut() {
-                if let Some(rack_track) = data.rack_track.as_mut() {
+            for patch in pool.sounds.patches.values_mut() {
+                if let Some(rack_track) = patch.rack_track.as_mut() {
                     if slot_idx < rack_track.slots.len() {
                         rack_track.slots.remove(slot_idx);
                         remove_rack_macro_slot_targets(&mut rack_track.macros, slot_idx);
@@ -515,10 +539,11 @@ impl SequencerState {
             let Some(id) = scenes.effective_pattern_id(track) else {
                 return false;
             };
-            let Some(data) = scenes.track_pools.get(track).and_then(|pool| pool.get(id)) else {
+            let Some(patch) = scenes.track_pools.get(track).and_then(|pool| pool.patch(id))
+            else {
                 return false;
             };
-            let Some(rack_track) = data.rack_track.as_ref() else {
+            let Some(rack_track) = patch.rack_track.as_ref() else {
                 return false;
             };
             if rack_track.slots.get(slot_idx).is_none() {
@@ -536,12 +561,12 @@ impl SequencerState {
         let id = scenes
             .effective_pattern_id(track)
             .expect("validated current pattern id before rack slot removal");
-        let data = scenes
+        let patch = scenes
             .track_pools
             .get_mut(track)
-            .and_then(|pool| pool.get_mut(id))
+            .and_then(|pool| pool.patch_mut(id))
             .expect("validated current pattern data before rack slot removal");
-        let rack_track = data
+        let rack_track = patch
             .rack_track
             .as_mut()
             .expect("validated current rack track before rack slot removal");
@@ -570,10 +595,11 @@ impl SequencerState {
             let Some(id) = scenes.effective_pattern_id(track) else {
                 return false;
             };
-            let Some(data) = scenes.track_pools.get(track).and_then(|pool| pool.get(id)) else {
+            let Some(patch) = scenes.track_pools.get(track).and_then(|pool| pool.patch(id))
+            else {
                 return false;
             };
-            let Some(rack_track) = data.rack_track.as_ref() else {
+            let Some(rack_track) = patch.rack_track.as_ref() else {
                 return false;
             };
             if rack_track.slots.get(slot_idx).is_none() {
@@ -594,13 +620,13 @@ impl SequencerState {
         let id = scenes
             .effective_pattern_id(track)
             .expect("validated current pattern id before source replacement");
-        let data = scenes
+        let patch = scenes
             .track_pools
             .get_mut(track)
-            .and_then(|pool| pool.get_mut(id))
+            .and_then(|pool| pool.patch_mut(id))
             .expect("validated current pattern data before source replacement");
-        prepare_track_pattern_data_for_rack(data);
-        let rack_track = data
+        prepare_patch_for_rack(patch);
+        let rack_track = patch
             .rack_track
             .as_mut()
             .expect("validated current rack track before source replacement");
@@ -632,8 +658,8 @@ impl SequencerState {
 
         let mut scenes = self.pattern.scenes.lock().unwrap();
         if let Some(pool) = scenes.track_pools.get_mut(track) {
-            for data in pool.patterns.values_mut() {
-                if let Some(rack_track) = data.rack_track.as_mut() {
+            for patch in pool.sounds.patches.values_mut() {
+                if let Some(rack_track) = patch.rack_track.as_mut() {
                     if let Some(slot) = rack_track.slots.get_mut(slot_idx) {
                         replace_rack_slot_source_preserving_controls(slot, &replacement);
                     }
@@ -670,12 +696,12 @@ impl SequencerState {
         let mut synced_current = false;
         let mut scenes = self.pattern.scenes.lock().unwrap();
         if let Some(id) = scenes.effective_pattern_id(track) {
-            if let Some(data) = scenes
+            if let Some(patch) = scenes
                 .track_pools
                 .get_mut(track)
-                .and_then(|pool| pool.get_mut(id))
+                .and_then(|pool| pool.patch_mut(id))
             {
-                if let Some(rack_track) = data.rack_track.as_mut() {
+                if let Some(rack_track) = patch.rack_track.as_mut() {
                     sync_slots(&mut rack_track.slots);
                     synced_current = true;
                 }
@@ -719,21 +745,21 @@ impl SequencerState {
         let Some(pool) = scenes.track_pools.get_mut(track) else {
             return false;
         };
-        if pool.patterns.values().any(|data| {
-            data.rack_track
-                .as_ref()
+        if pool.patterns.values().any(|stored| {
+            pool.sounds
+                .patches
+                .get(&stored.sound.patch)
+                .and_then(|patch| patch.rack_track.as_ref())
                 .is_none_or(|rack| rack.slots.len() != bindings.len())
         }) {
             return false;
         }
-        for data in pool.patterns.values_mut() {
-            sync_slots(
-                &mut data
-                    .rack_track
-                    .as_mut()
-                    .expect("rack topology was validated")
-                    .slots,
-            );
+        for patch in pool.sounds.patches.values_mut() {
+            if let Some(rack) = patch.rack_track.as_mut() {
+                if rack.slots.len() == bindings.len() {
+                    sync_slots(&mut rack.slots);
+                }
+            }
         }
         true
     }
@@ -782,8 +808,8 @@ impl SequencerState {
             if scenes
                 .track_pools
                 .get(track)
-                .and_then(|pool| pool.get(pattern_id))
-                .and_then(|data| data.rack_track.as_ref())
+                .and_then(|pool| pool.patch(pattern_id))
+                .and_then(|patch| patch.rack_track.as_ref())
                 .and_then(|rack| rack.macros.get(index))
                 .is_none()
             {
@@ -808,8 +834,8 @@ impl SequencerState {
         let rack_macro = scenes
             .track_pools
             .get_mut(track)
-            .and_then(|pool| pool.get_mut(pattern_id))
-            .and_then(|data| data.rack_track.as_mut())
+            .and_then(|pool| pool.patch_mut(pattern_id))
+            .and_then(|patch| patch.rack_track.as_mut())
             .and_then(|rack| rack.macros.get_mut(index))
             .expect("validated rack macro");
         update(rack_macro);
@@ -881,8 +907,8 @@ impl SequencerState {
             .track_pools
             .get_mut(track)
         {
-            for data in pool.patterns.values_mut() {
-                if let Some(rack) = data.rack_track.as_mut() {
+            for patch in pool.sounds.patches.values_mut() {
+                if let Some(rack) = patch.rack_track.as_mut() {
                     update(&mut rack.macros);
                 }
             }
@@ -918,8 +944,8 @@ impl SequencerState {
             let Some(slot) = scenes
                 .track_pools
                 .get(track)
-                .and_then(|pool| pool.get(pattern_id))
-                .and_then(|data| data.rack_track.as_ref())
+                .and_then(|pool| pool.patch(pattern_id))
+                .and_then(|patch| patch.rack_track.as_ref())
                 .and_then(|rack| rack.slots.get(slot_idx))
             else {
                 return false;
@@ -935,8 +961,8 @@ impl SequencerState {
             .effective_pattern_id(track)
             .expect("validated effective rack pattern before mutation");
         let slot = scenes.track_pools[track]
-            .get_mut(pattern_id)
-            .and_then(|data| data.rack_track.as_mut())
+            .patch_mut(pattern_id)
+            .and_then(|patch| patch.rack_track.as_mut())
             .and_then(|rack| rack.slots.get_mut(slot_idx))
             .expect("validated current rack slot before mutation");
         update(slot);
@@ -971,9 +997,11 @@ impl SequencerState {
             let Some(pool) = scenes.track_pools.get(track) else {
                 return false;
             };
-            if pool.patterns.values().any(|data| {
-                data.rack_track
-                    .as_ref()
+            if pool.patterns.values().any(|stored| {
+                pool.sounds
+                    .patches
+                    .get(&stored.sound.patch)
+                    .and_then(|patch| patch.rack_track.as_ref())
                     .and_then(|rack| rack.slots.get(slot_idx))
                     .is_none()
             }) {
@@ -994,12 +1022,14 @@ impl SequencerState {
             .track_pools
             .get_mut(track)
             .expect("validated rack pattern pool before structural mutation");
-        for data in pool.patterns.values_mut() {
-            let slot = data
+        for patch in pool.sounds.patches.values_mut() {
+            let Some(slot) = patch
                 .rack_track
                 .as_mut()
                 .and_then(|rack| rack.slots.get_mut(slot_idx))
-                .expect("validated stored rack slot before structural mutation");
+            else {
+                continue;
+            };
             update(slot);
         }
         true
@@ -1026,10 +1056,12 @@ impl SequencerState {
             .get(track)
             .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
         let mut patterns = Vec::with_capacity(pool.patterns.len());
-        for (pattern_id, data) in &pool.patterns {
-            let slot = data
-                .rack_track
-                .as_ref()
+        for (pattern_id, stored) in &pool.patterns {
+            let slot = pool
+                .sounds
+                .patches
+                .get(&stored.sound.patch)
+                .and_then(|patch| patch.rack_track.as_ref())
                 .and_then(|rack| rack.slots.get(slot_index))
                 .cloned()
                 .ok_or_else(|| {
@@ -1061,8 +1093,11 @@ impl SequencerState {
         let scenes = self.pattern.scenes.lock().unwrap();
         let pool = scenes.track_pools.get(track)
             .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
-        let patterns = pool.patterns.iter().map(|(pattern, data)| {
-            data.rack_track.as_ref()
+        let patterns = pool.patterns.iter().map(|(pattern, stored)| {
+            pool.sounds
+                .patches
+                .get(&stored.sound.patch)
+                .and_then(|patch| patch.rack_track.as_ref())
                 .map(|rack| (*pattern, rack.macros.clone()))
                 .ok_or_else(|| format!("Track {} pattern {:?} has no rack", track + 1, pattern))
         }).collect::<Result<Vec<_>, String>>()?;
@@ -1083,8 +1118,8 @@ impl SequencerState {
             return Err(format!("Track {} rack macro pattern topology changed", track + 1));
         }
         for (pattern, macros) in &snapshot.patterns {
-            let rack = pool.patterns.get_mut(pattern)
-                .and_then(|data| data.rack_track.as_mut())
+            let rack = pool.patch_mut(*pattern)
+                .and_then(|patch| patch.rack_track.as_mut())
                 .ok_or_else(|| format!("Track {} pattern {:?} has no rack", track + 1, pattern))?;
             rack.macros.clone_from(macros);
         }
@@ -1112,8 +1147,8 @@ impl SequencerState {
         let pool = scenes.track_pools.get_mut(track)
             .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
         for (pattern, saved) in &snapshot.patterns {
-            let slot = pool.patterns.get_mut(pattern)
-                .and_then(|data| data.rack_track.as_mut())
+            let slot = pool.patch_mut(*pattern)
+                .and_then(|patch| patch.rack_track.as_mut())
                 .and_then(|rack| rack.slots.get_mut(snapshot.slot_index))
                 .ok_or_else(|| format!("Track {} pattern {:?} lost rack slot {}", track + 1, pattern, snapshot.slot_index + 1))?;
             copy_effects(slot, saved);
@@ -1152,9 +1187,8 @@ impl SequencerState {
             .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
         if pool.patterns.len() != snapshot.patterns.len()
             || snapshot.patterns.iter().any(|(id, _)| {
-                pool.patterns
-                    .get(id)
-                    .and_then(|data| data.rack_track.as_ref())
+                pool.patch(*id)
+                    .and_then(|patch| patch.rack_track.as_ref())
                     .and_then(|rack| rack.slots.get(snapshot.slot_index))
                     .is_none()
             })
@@ -1166,9 +1200,8 @@ impl SequencerState {
         }
         for (pattern_id, saved) in &snapshot.patterns {
             let slot = pool
-                .patterns
-                .get_mut(pattern_id)
-                .and_then(|data| data.rack_track.as_mut())
+                .patch_mut(*pattern_id)
+                .and_then(|patch| patch.rack_track.as_mut())
                 .and_then(|rack| rack.slots.get_mut(snapshot.slot_index))
                 .expect("rack pattern topology was validated");
             sync_slot(slot, saved);
@@ -1209,9 +1242,8 @@ impl SequencerState {
             .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
         if pool.patterns.len() != snapshot.patterns.len()
             || snapshot.patterns.iter().any(|(id, _)| {
-                pool.patterns
-                    .get(id)
-                    .and_then(|data| data.rack_track.as_ref())
+                pool.patch(*id)
+                    .and_then(|patch| patch.rack_track.as_ref())
                     .and_then(|rack| rack.slots.get(snapshot.slot_index))
                     .is_none()
             })
@@ -1250,9 +1282,8 @@ impl SequencerState {
             .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
         if pool.patterns.len() != snapshot.patterns.len()
             || snapshot.patterns.iter().any(|(id, _)| {
-                pool.patterns
-                    .get(id)
-                    .and_then(|data| data.rack_track.as_ref())
+                pool.patch(*id)
+                    .and_then(|patch| patch.rack_track.as_ref())
                     .is_none_or(|rack| rack.slots.len() != snapshot.slot_index)
             })
         {

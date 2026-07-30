@@ -290,7 +290,6 @@ impl SequencerState {
                                     .track_pools
                                     .get(track)
                                     .and_then(|pool| pool.get(*id))
-                                    .cloned()
                                     .expect("pattern lane resolved above");
                                 resolved_pattern_ids.push(Some(*id));
                                 resolved_sources.push(LaneSource::Pattern(*id));
@@ -319,7 +318,6 @@ impl SequencerState {
                                         .track_pools
                                         .get(track)
                                         .and_then(|pool| pool.get(chunk_id))
-                                        .cloned()
                                         .ok_or_else(|| {
                                             format!(
                                                 "Take {} on track {} references chunk \

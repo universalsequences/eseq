@@ -72,7 +72,7 @@ impl SequencerState {
         params.set_volume(defaults.volume);
         params.set_pan(defaults.pan);
         params.set_mute(defaults.mute);
-        params.set_solo(defaults.solo);
+        params.set_solo(false);
         params.set_send(defaults.send);
         params.set_output(defaults.output);
         params.set_sends(defaults.sends);
@@ -396,6 +396,13 @@ impl SequencerState {
         let scene_cells = scenes.scenes.iter()
             .map(|scene| scene.cells.get(track_idx).copied().flatten())
             .collect();
+        let cell_sounds = scenes.scenes.iter()
+            .map(|scene| {
+                scene.cell_sounds.get(track_idx).copied().ok_or_else(|| {
+                    format!("Track {} scene cell sound is missing", track_idx + 1)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let track_override = scenes.track_overrides.get(track_idx).copied().flatten();
         let scene_references = scenes.scenes.iter().map(|scene| SceneTrackReferenceState {
             mod_connections: scene.mod_connections.clone(),
@@ -419,9 +426,12 @@ impl SequencerState {
             if sidechain_slots.is_empty() {
                 continue;
             }
-            for (pattern, data) in &owner_pool.patterns {
+            for (pattern, stored) in &owner_pool.patterns {
+                let Some(patch) = owner_pool.sounds.patches.get(&stored.sound.patch) else {
+                    continue;
+                };
                 let slots = sidechain_slots.iter().filter_map(|slot| {
-                    data.effect_slots.get(*slot).cloned().map(|state| (*slot, state))
+                    patch.effect_slots.get(*slot).cloned().map(|state| (*slot, state))
                 }).collect::<Vec<_>>();
                 if !slots.is_empty() {
                     sidechains.push(TrackSidechainPatternState {
@@ -435,6 +445,7 @@ impl SequencerState {
         Ok(TrackPatternLaneState {
             pool,
             scene_cells,
+            cell_sounds,
             track_override,
             scene_references,
             sidechains,
@@ -453,8 +464,14 @@ impl SequencerState {
         if scenes.scenes.len() != snapshot.scene_cells.len() {
             return Err("Track history scene topology no longer matches the project".to_string());
         }
-        for (scene, cell) in scenes.scenes.iter_mut().zip(&snapshot.scene_cells) {
+        for ((scene, cell), cell_sound) in scenes
+            .scenes
+            .iter_mut()
+            .zip(&snapshot.scene_cells)
+            .zip(&snapshot.cell_sounds)
+        {
             scene.cells[track] = *cell;
+            scene.cell_sounds[track] = *cell_sound;
         }
         let current = scenes.current_scene;
         let live = scenes.scene_snapshot(current)
@@ -486,6 +503,8 @@ impl SequencerState {
         {
             let cell = scene.cells.remove(last);
             scene.cells.insert(target, cell);
+            let cell_sound = scene.cell_sounds.remove(last);
+            scene.cell_sounds.insert(target, cell_sound);
             if scene.cells[target] != *expected_cell {
                 return Err("Restored Track Pattern assignment changed during insertion".to_string());
             }
@@ -494,8 +513,11 @@ impl SequencerState {
             scene.graph_overrides = references.graph_overrides.clone();
         }
         for saved in &snapshot.sidechains {
-            let Some(data) = scenes.track_pools.get_mut(saved.owner_track)
-                .and_then(|pool| pool.patterns.get_mut(&saved.pattern)) else {
+            let Some(patch) = scenes.track_pools.get_mut(saved.owner_track)
+                .and_then(|pool| {
+                    let refs = pool.refs(saved.pattern)?;
+                    pool.sounds.patches.get_mut(&refs.patch)
+                }) else {
                 return Err(format!(
                     "Sidechain history target track {} pattern {:?} is missing",
                     saved.owner_track + 1,
@@ -503,7 +525,7 @@ impl SequencerState {
                 ));
             };
             for (slot, state) in &saved.slots {
-                let Some(target_slot) = data.effect_slots.get_mut(*slot) else {
+                let Some(target_slot) = patch.effect_slots.get_mut(*slot) else {
                     return Err(format!("Sidechain history effect slot {} is missing", slot + 1));
                 };
                 *target_slot = state.clone();
@@ -565,8 +587,10 @@ impl SequencerState {
                 let Some(pool) = scenes.track_pools.get_mut(owner_track) else {
                     continue;
                 };
-                for data in pool.patterns.values_mut() {
-                    data.remap_sidechain_references_after_track_delete(
+                // Non-idempotent index remap: visit each Patch entity once
+                // (take chunks share one), never once per pattern.
+                for patch in pool.sounds.patches.values_mut() {
+                    patch.remap_sidechain_references_after_track_delete(
                         owner_track,
                         track_descs,
                         track_idx,
@@ -622,9 +646,9 @@ impl SequencerState {
             let Some(pool) = scenes.track_pools.get_mut(track_idx) else {
                 return false;
             };
-            for data in pool.patterns.values_mut() {
+            pool.edit_all(|_, data| {
                 data.clear(track_idx, effect_descriptors, InstrumentType::Sampler);
-            }
+            });
         }
 
         self.clear_live_track_lane(track_idx);

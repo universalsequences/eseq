@@ -1368,7 +1368,8 @@ mod tests {
         let chunk_data = scenes.track_pools[0].get(PatternId(1)).unwrap().clone();
         let chunk_a = scenes.track_pools[0].insert(chunk_data.clone());
         let chunk_b = scenes.track_pools[0].insert(chunk_data);
-        let take = scenes.take_pools[0].insert(None, vec![chunk_a, chunk_b], 300);
+        let sound = scenes.track_pools[0].refs(chunk_a).expect("chunk refs");
+        let take = scenes.take_pools[0].insert(None, vec![chunk_a, chunk_b], 300, sound);
         (scenes, take)
     }
 

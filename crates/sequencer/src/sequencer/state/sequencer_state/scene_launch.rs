@@ -447,7 +447,6 @@ impl SequencerState {
                             .track_pools
                             .get(track)
                             .and_then(|pool| pool.get(id))
-                            .cloned()
                         else {
                             // A launched cell that doesn't resolve: bail so
                             // the control-side apply reports the error.
@@ -646,7 +645,6 @@ impl SequencerState {
                             .track_pools
                             .get(track)
                             .and_then(|pool| pool.get(id))
-                            .cloned()
                             .ok_or_else(|| {
                                 format!(
                                     "Song row resolves track {} to pattern {} which is not \
@@ -904,7 +902,7 @@ impl SequencerState {
                 ));
             }
             let replacement = if was_effective {
-                scenes.effective_track_pattern(track).cloned()
+                scenes.effective_track_pattern(track)
             } else {
                 None
             };
@@ -962,7 +960,6 @@ impl SequencerState {
                     .track_pools
                     .get(track)
                     .and_then(|pool| pool.get(pattern_id))
-                    .cloned()
             } else {
                 None
             }

@@ -1876,7 +1876,6 @@ impl App {
                         .track_pools
                         .get(track)
                         .and_then(|pool| pool.get(*chunk_id))
-                        .cloned()
                         .ok_or_else(|| {
                             format!(
                                 "Track {} take '{}' references chunk pattern {} which is \
@@ -1937,6 +1936,60 @@ impl App {
             take_pools
         };
 
+        // Sound ref structure (takes spec 18.1 step 5): per track, which
+        // entity each scene cell, cell pattern, and take references. Entity
+        // ids are the live per-track PatchId/MixId values — unique within
+        // the track, meaningful only within this file. Content stays in the
+        // dense bank; unreferenced entities are pruned simply by never being
+        // named here (§17.4 prune-on-save).
+        let track_sounds: Vec<crate::project::ProjectTrackSounds> = (0..num_tracks)
+            .map(|track| {
+                let pool = scenes_for_takes.track_pools.get(track);
+                let to_refs = |refs: crate::sequencer::SoundRefs| crate::project::ProjectSoundRefs {
+                    patch: refs.patch.0,
+                    mix: refs.mix.0,
+                };
+                let cells = scenes_for_takes
+                    .scenes
+                    .iter()
+                    .map(|scene| {
+                        scene
+                            .cell_sounds
+                            .get(track)
+                            .copied()
+                            .map(to_refs)
+                            .unwrap_or(crate::project::ProjectSoundRefs {
+                                patch: u64::MAX,
+                                mix: u64::MAX,
+                            })
+                    })
+                    .collect();
+                let patterns = scenes_for_takes
+                    .scenes
+                    .iter()
+                    .map(|scene| {
+                        scene
+                            .cells
+                            .get(track)
+                            .copied()
+                            .flatten()
+                            .and_then(|id| pool.and_then(|pool| pool.refs(id)))
+                            .map(to_refs)
+                    })
+                    .collect();
+                let takes = scenes_for_takes
+                    .take_pools
+                    .get(track)
+                    .map(|takes| takes.takes.iter().map(|take| to_refs(take.sound)).collect())
+                    .unwrap_or_default();
+                crate::project::ProjectTrackSounds {
+                    cells,
+                    patterns,
+                    takes,
+                }
+            })
+            .collect();
+
         Ok(ProjectFile {
             version: project_file_version(),
             name: project_name.to_string(),
@@ -1994,6 +2047,7 @@ impl App {
             },
             scene_cell_presence,
             take_pools,
+            track_sounds,
         })
     }
 
@@ -3000,6 +3054,7 @@ impl App {
             record_armed,
             scene_cell_presence,
             take_pools,
+            track_sounds,
         } = pending.project;
         let bank = pending.built_patterns;
         let bus_pattern_bank = pending.built_bus_patterns;
@@ -3055,6 +3110,33 @@ impl App {
         }
         self.state
             .install_project_arrangement(&scene_cell_presence, loaded_take_pools);
+        // v7 sound ref structure (takes spec 18.1 step 5): re-link referents
+        // that shared an entity when the file was saved. Legacy files carry
+        // no structure — the canonical migration above (private entities per
+        // pattern, take chunks collapsed) is already the correct shape.
+        let sound_model: Vec<_> = track_sounds
+            .into_iter()
+            .map(|track| {
+                (
+                    track
+                        .cells
+                        .into_iter()
+                        .map(|refs| (refs.patch, refs.mix))
+                        .collect::<Vec<_>>(),
+                    track
+                        .patterns
+                        .into_iter()
+                        .map(|refs| refs.map(|refs| (refs.patch, refs.mix)))
+                        .collect::<Vec<_>>(),
+                    track
+                        .takes
+                        .into_iter()
+                        .map(|refs| (refs.patch, refs.mix))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        self.state.apply_project_sound_model(&sound_model);
         // Per-track record-arm flags (takes spec 8.1), persisted like
         // mute/solo. The UI-shared arm vector syncs FROM `graph.record_armed`
         // on the next tick via `record_arm_sync_pending`.
@@ -4436,6 +4518,7 @@ mod tests {
             record_armed: Vec::new(),
             scene_cell_presence: Vec::new(),
             take_pools: Vec::new(),
+            track_sounds: Vec::new(),
         }
     }
 

@@ -397,7 +397,7 @@ impl SequencerState {
         let scene = scenes.scenes.get(scene)?;
         let pattern_id = scene.cells.get(track).copied().flatten()?;
         let pattern = scenes.track_pools.get(track)?.get(pattern_id)?;
-        Some(read(pattern))
+        Some(read(&pattern))
     }
 
     pub fn pattern_repository_len(&self) -> usize {
@@ -450,14 +450,37 @@ impl SequencerState {
         if track >= scenes.track_pools.len() {
             return Err(format!("track {} does not exist", track + 1));
         }
-        let chunk_ids: Vec<PatternId> = {
+        // One sound for the whole take (§17.2): the first chunk mints the
+        // take's Patch + Mix; every further chunk shares them. Incoming
+        // chunks were cloned from one template, so their device halves agree
+        // (§16.4) — assert it, because a divergence here is a latent bug.
+        let (chunk_ids, take_sound) = {
             let pool = &mut scenes.track_pools[track];
-            chunks.into_iter().map(|data| pool.insert(data)).collect()
+            let mut chunks = chunks.into_iter();
+            let first = chunks.next().expect("checked non-empty above");
+            let mut ids = Vec::with_capacity(chunks.len() + 1);
+            let mut rest = Vec::new();
+            for (idx, data) in chunks.enumerate() {
+                debug_assert!(
+                    crate::sequencer::state::track_pattern_device_state_agrees(&first, &data),
+                    "take chunk {} device state diverges from chunk 0 at registration \
+                     (takes spec 16.4)",
+                    idx + 1
+                );
+                rest.push(data);
+            }
+            let first_id = pool.insert(first);
+            let sound = pool.refs(first_id).expect("chunk just inserted");
+            ids.push(first_id);
+            for data in rest {
+                ids.push(pool.insert_with_refs(data, sound));
+            }
+            (ids, sound)
         };
         while scenes.take_pools.len() < scenes.track_pools.len() {
             scenes.take_pools.push(TrackTakePool::default());
         }
-        Ok(scenes.take_pools[track].insert(name, chunk_ids, total_len_steps))
+        Ok(scenes.take_pools[track].insert(name, chunk_ids, total_len_steps, take_sound))
     }
 
     /// Resize a take's playable length (takes spec 6.1 invariants preserved).
@@ -486,19 +509,23 @@ impl SequencerState {
             })?;
         let needed_chunks = (new_len_steps as usize).div_ceil(MAX_STEPS).max(1);
         let template_id = *take.chunks.first().expect("takes always have a chunk");
+        let take_sound = take.sound;
         let existing = take.chunks.len();
         let mut minted = Vec::new();
         if needed_chunks > existing {
             let mut blank = scenes.track_pools[track]
                 .get(template_id)
-                .cloned()
                 .ok_or_else(|| {
                     format!("take {}'s template chunk is missing from the pool", take_id.0)
                 })?;
             blank.clear_step_content();
             blank.track_params.num_steps = MAX_STEPS;
             for _ in existing..needed_chunks {
-                minted.push(scenes.track_pools[track].insert(blank.clone()));
+                // New chunks share the take's Patch/Mix (§17.2): device
+                // agreement is structural rather than kept by cloning.
+                minted.push(
+                    scenes.track_pools[track].insert_with_refs(blank.clone(), take_sound),
+                );
             }
         }
         let doomed: Vec<PatternId> = {
@@ -618,8 +645,44 @@ impl SequencerState {
                 let Some(pool) = scenes.track_pools.get_mut(track) else {
                     continue;
                 };
-                let chunks: Vec<PatternId> =
-                    chunk_data.into_iter().map(|data| pool.insert(data)).collect();
+                // §17.7 migration: collapse the per-chunk device duplicates
+                // into one Patch + Mix shared by every chunk and the take.
+                // §16.4 guarantees the serialized chunks are identical; a
+                // divergence found here is a latent §16-era bug — report it.
+                let mut chunk_data = chunk_data.into_iter();
+                let Some(first) = chunk_data.next() else {
+                    continue;
+                };
+                let mut chunks = Vec::with_capacity(chunk_data.len() + 1);
+                let first_id = pool.insert(first);
+                let sound = pool.refs(first_id).expect("chunk just inserted");
+                chunks.push(first_id);
+                for (idx, data) in chunk_data.enumerate() {
+                    let agrees = pool.get(first_id).is_some_and(|first| {
+                        crate::sequencer::state::track_pattern_device_state_agrees(
+                            &first, &data,
+                        )
+                    });
+                    if !agrees {
+                        eprintln!(
+                            "[takes-migration] track {} take {}: chunk {} device state \
+                             diverges from chunk 0 (takes spec 16.4 violation in the \
+                             saved project); collapsing to chunk 0's sound",
+                            track + 1,
+                            id,
+                            idx + 1
+                        );
+                        debug_assert!(
+                            false,
+                            "take chunk device state diverged during migration \
+                             (track {}, take {}, chunk {})",
+                            track + 1,
+                            id,
+                            idx + 1
+                        );
+                    }
+                    chunks.push(pool.insert_with_refs(data, sound));
+                }
                 let Some(take_pool) = scenes.take_pools.get_mut(track) else {
                     continue;
                 };
@@ -628,11 +691,132 @@ impl SequencerState {
                     name,
                     chunks,
                     total_len_steps,
+                    sound,
                 });
                 take_pool.next_take_id = take_pool.next_take_id.max(id.saturating_add(1));
             }
             if let Some(take_pool) = scenes.take_pools.get_mut(track) {
                 take_pool.next_take_id = take_pool.next_take_id.max(next_take_id);
+            }
+        }
+    }
+
+    /// Apply a project file's serialized sound ref STRUCTURE (takes spec
+    /// 18.1 step 5) after pools/cells/takes are installed. Per track, file
+    /// entity ids that name the same entity across referents are re-linked
+    /// to one live entity: the first referent seen keeps its (freshly
+    /// minted) entities as canonical; later referents naming the same file
+    /// id repoint to them. Content is identical across such referents by
+    /// construction (the save composed it from one entity), so re-linking
+    /// never changes what anything sounds like. Tuple per track:
+    /// `(cells-per-scene, patterns-per-scene, takes)` of file-local
+    /// `(patch, mix)` ids; `u64::MAX` marks an absent placeholder.
+    pub(crate) fn apply_project_sound_model(
+        &self,
+        track_sounds: &[(
+            Vec<(u64, u64)>,
+            Vec<Option<(u64, u64)>>,
+            Vec<(u64, u64)>,
+        )],
+    ) {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        for (track, (cells, patterns, takes)) in track_sounds.iter().enumerate() {
+            if track >= scenes.track_pools.len() {
+                break;
+            }
+            let mut patch_map: HashMap<u64, PatchId> = HashMap::new();
+            let mut mix_map: HashMap<u64, MixId> = HashMap::new();
+            // Patterns first: they carry the content, so their minted
+            // entities become the canonical ones.
+            for (scene_idx, file_refs) in patterns.iter().enumerate() {
+                let Some((file_patch, file_mix)) = *file_refs else {
+                    continue;
+                };
+                let Some(pattern_id) = scenes
+                    .scenes
+                    .get(scene_idx)
+                    .and_then(|scene| scene.cells.get(track))
+                    .copied()
+                    .flatten()
+                else {
+                    continue;
+                };
+                let Some(pool) = scenes.track_pools.get_mut(track) else {
+                    continue;
+                };
+                let Some(live) = pool.refs(pattern_id) else {
+                    continue;
+                };
+                let canonical_patch = *patch_map.entry(file_patch).or_insert(live.patch);
+                let canonical_mix = *mix_map.entry(file_mix).or_insert(live.mix);
+                if canonical_patch != live.patch || canonical_mix != live.mix {
+                    if let Some(stored) = pool.patterns.get_mut(&pattern_id) {
+                        stored.sound = SoundRefs {
+                            patch: canonical_patch,
+                            mix: canonical_mix,
+                        };
+                    }
+                }
+            }
+            for (scene_idx, (file_patch, file_mix)) in cells.iter().enumerate() {
+                if *file_patch == u64::MAX || *file_mix == u64::MAX {
+                    continue;
+                }
+                let Some(live) = scenes
+                    .scenes
+                    .get(scene_idx)
+                    .and_then(|scene| scene.cell_sounds.get(track))
+                    .copied()
+                else {
+                    continue;
+                };
+                let canonical_patch = *patch_map.entry(*file_patch).or_insert(live.patch);
+                let canonical_mix = *mix_map.entry(*file_mix).or_insert(live.mix);
+                if let Some(cell_sound) = scenes
+                    .scenes
+                    .get_mut(scene_idx)
+                    .and_then(|scene| scene.cell_sounds.get_mut(track))
+                {
+                    *cell_sound = SoundRefs {
+                        patch: canonical_patch,
+                        mix: canonical_mix,
+                    };
+                }
+            }
+            for (take_idx, (file_patch, file_mix)) in takes.iter().enumerate() {
+                let Some(live) = scenes
+                    .take_pools
+                    .get(track)
+                    .and_then(|takes| takes.takes.get(take_idx))
+                    .map(|take| take.sound)
+                else {
+                    continue;
+                };
+                let canonical_patch = *patch_map.entry(*file_patch).or_insert(live.patch);
+                let canonical_mix = *mix_map.entry(*file_mix).or_insert(live.mix);
+                let canonical = SoundRefs {
+                    patch: canonical_patch,
+                    mix: canonical_mix,
+                };
+                if canonical == live {
+                    continue;
+                }
+                let chunk_ids: Vec<PatternId> = scenes
+                    .take_pools
+                    .get_mut(track)
+                    .and_then(|takes| takes.takes.get_mut(take_idx))
+                    .map(|take| {
+                        take.sound = canonical;
+                        take.chunks.clone()
+                    })
+                    .unwrap_or_default();
+                if let Some(pool) = scenes.track_pools.get_mut(track) {
+                    for chunk in chunk_ids {
+                        if let Some(stored) = pool.patterns.get_mut(&chunk) {
+                            stored.sound = canonical;
+                        }
+                    }
+                }
             }
         }
     }
@@ -802,7 +986,7 @@ impl SequencerState {
             .track_pools
             .get(track)
             .and_then(|pool| pool.get(pattern))
-            .map(f)
+            .map(|pattern| f(&pattern))
     }
 
     /// Targeted pool write seam (clip-edit-target spec 3.4): mutate one pool
@@ -827,8 +1011,13 @@ impl SequencerState {
         scenes
             .track_pools
             .get_mut(track)
-            .and_then(|pool| pool.get_mut(pattern))
-            .map(f)
+            .and_then(|pool| {
+                let mut data = pool.get(pattern)?;
+                let result = f(&mut data);
+                pool.store(pattern, data);
+                Some(result)
+            })
+            .map(|result| result)
     }
 
     /// Edit the committed song in place (topology remaps, future editing
@@ -860,18 +1049,15 @@ impl SequencerState {
             .ok_or_else(|| format!("Track {} does not exist", track + 1))?;
         let sound = pool
             .get(source)
-            .ok_or_else(|| format!("Pattern {} is not in the track's pool", source.0))?
-            .clone();
+            .ok_or_else(|| format!("Pattern {} is not in the track's pool", source.0))?;
         let mut copied = 0;
         for target in targets {
             if *target == source {
                 continue;
             }
-            let Some(data) = pool.get_mut(*target) else {
-                continue;
-            };
-            data.copy_device_state_from(&sound);
-            copied += 1;
+            if pool.edit(*target, |data| data.copy_device_state_from(&sound)) {
+                copied += 1;
+            }
         }
         Ok(copied)
     }
@@ -904,7 +1090,14 @@ impl SequencerState {
             return None;
         }
         let id = scenes.track_pools.get_mut(track)?.insert(data);
-        *scenes.scenes.get_mut(current)?.cells.get_mut(track)? = Some(id);
+        let refs = scenes.track_pools.get(track)?.refs(id)?;
+        {
+            let scene = scenes.scenes.get_mut(current)?;
+            *scene.cells.get_mut(track)? = Some(id);
+            if let Some(cell_sound) = scene.cell_sounds.get_mut(track) {
+                *cell_sound = refs;
+            }
+        }
         drop(scenes);
         // The scene now resolves a pattern for this track; the launch-time
         // silencing for the empty cell no longer applies.
@@ -1081,15 +1274,10 @@ impl SequencerState {
         }) else {
             return false;
         };
-        let Some(slot) = scenes
+        scenes
             .track_pools
             .get_mut(track)
-            .and_then(|pool| pool.get_mut(id))
-        else {
-            return false;
-        };
-        *slot = data;
-        true
+            .is_some_and(|pool| pool.store(id, data))
     }
 
     pub fn save_current_track_midi_fx_snapshot(&self, track: usize) -> bool {
@@ -1155,12 +1343,22 @@ impl SequencerState {
         let Some(pool) = scenes.track_pools.get_mut(track) else {
             return 0;
         };
+        // Device-wide edit: write each distinct Patch entity once (take
+        // chunks share one), while still counting per pattern as before.
+        let TrackPatternPool { patterns, sounds, .. } = pool;
         let mut updated = 0;
-        for pattern in pool.patterns.values_mut() {
-            if let Some(slot) = pattern.effect_slots.get_mut(slot_idx) {
+        let mut seen: HashSet<PatchId> = HashSet::new();
+        for stored in patterns.values() {
+            let Some(patch) = sounds.patches.get_mut(&stored.sound.patch) else {
+                continue;
+            };
+            let Some(slot) = patch.effect_slots.get_mut(slot_idx) else {
+                continue;
+            };
+            if seen.insert(stored.sound.patch) {
                 slot.copy_base_values_from(&source_slot);
-                updated += 1;
             }
+            updated += 1;
         }
         updated
     }
@@ -1183,12 +1381,20 @@ impl SequencerState {
         let Some(pool) = scenes.track_pools.get_mut(track) else {
             return 0;
         };
+        let TrackPatternPool { patterns, sounds, .. } = pool;
         let mut updated = 0;
-        for pattern in pool.patterns.values_mut() {
-            if let Some(slot) = pattern.midi_fx_slots.get_mut(slot_idx) {
+        let mut seen: HashSet<PatchId> = HashSet::new();
+        for stored in patterns.values() {
+            let Some(patch) = sounds.patches.get_mut(&stored.sound.patch) else {
+                continue;
+            };
+            let Some(slot) = patch.midi_fx_slots.get_mut(slot_idx) else {
+                continue;
+            };
+            if seen.insert(stored.sound.patch) {
                 slot.copy_base_values_from(&source_slot);
-                updated += 1;
             }
+            updated += 1;
         }
         updated
     }
@@ -1210,11 +1416,18 @@ impl SequencerState {
         let Some(pool) = scenes.track_pools.get_mut(track) else {
             return 0;
         };
-        for pattern in pool.patterns.values_mut() {
-            pattern.instrument_slot.copy_base_values_from(&source_slot);
-            pattern.instrument_base_note_offset = source_base_note;
+        let TrackPatternPool { patterns, sounds, .. } = pool;
+        let mut seen: HashSet<PatchId> = HashSet::new();
+        for stored in patterns.values() {
+            if !seen.insert(stored.sound.patch) {
+                continue;
+            }
+            if let Some(patch) = sounds.patches.get_mut(&stored.sound.patch) {
+                patch.instrument_slot.copy_base_values_from(&source_slot);
+                patch.instrument_base_note_offset = source_base_note;
+            }
         }
-        pool.patterns.len()
+        patterns.len()
     }
 
 }

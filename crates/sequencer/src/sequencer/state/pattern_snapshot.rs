@@ -405,6 +405,16 @@ pub(super) fn prepare_track_pattern_data_for_rack(data: &mut TrackPatternData) {
     data.track_sound_state.engine_id = None;
 }
 
+/// Patch-entity twin of `prepare_track_pattern_data_for_rack` (§17.2: the
+/// instrument binding lives on the Patch).
+pub(super) fn prepare_patch_for_rack(patch: &mut Patch) {
+    patch.instrument_type = InstrumentType::Rack;
+    patch.instrument_run_mode = CustomInstrumentRunMode::Instrument;
+    patch.instrument_slot = EffectSlotSnapshot::new_empty();
+    patch.instrument_base_note_offset = 0.0;
+    patch.track_sound_state.engine_id = None;
+}
+
 pub(super) fn replace_rack_slot_source_preserving_controls(
     slot: &mut RackSlotSnapshot,
     replacement: &RackSlotSnapshot,

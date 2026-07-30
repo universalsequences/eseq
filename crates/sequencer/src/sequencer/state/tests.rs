@@ -68,7 +68,6 @@
             volume: 0.2 * id as f32,
             pan: -1.0 + id as f32,
             mute: id % 2 == 0,
-            solo: id == 1,
             send: 0.3 * id as f32,
             output: crate::sequencer::TrackOutput::Mix,
             sends: vec![crate::sequencer::TrackSendSnapshot {
@@ -404,12 +403,13 @@
         let (scene_pattern_ids_before, override_pattern_id, launched) = {
             let mut scenes = state.pattern.scenes.lock().unwrap();
             let override_id = scenes.fork_track_pattern(0).expect("track pattern fork");
+            assert!(scenes.track_pools[0].edit(override_id, |data| {
+                data.instrument_slot.defaults[0] = 0.53;
+                data.effect_slots[0].defaults[0] = 0.63;
+            }));
             let launched = scenes.track_pools[0]
-                .get_mut(override_id)
+                .get(override_id)
                 .expect("forked pattern");
-            launched.instrument_slot.defaults[0] = 0.53;
-            launched.effect_slots[0].defaults[0] = 0.63;
-            let launched = launched.clone();
             (
                 scenes
                     .scenes
@@ -2056,8 +2056,10 @@
 
         let track_one_override = scenes.fork_track_pattern(1).unwrap();
         scenes.track_pools[1]
-            .get_mut(track_one_override)
+            .patterns
+            .get_mut(&track_one_override)
             .unwrap()
+            .seq
             .track_bits[0] = 77;
 
         let new_scene = scenes.new_scene();
@@ -2099,7 +2101,7 @@
 
         let shared = scenes.scenes[0].cells[0].unwrap();
         assert!(scenes.set_cell(1, 0, shared));
-        scenes.track_pools[0].get_mut(shared).unwrap().track_bits[0] = 123;
+        scenes.track_pools[0].patterns.get_mut(&shared).unwrap().seq.track_bits[0] = 123;
 
         assert_eq!(
             scenes.effective_track_pattern(0).unwrap().track_bits[0],
@@ -2107,7 +2109,7 @@
         );
 
         let forked = scenes.fork_track_pattern(0).unwrap();
-        scenes.track_pools[0].get_mut(forked).unwrap().track_bits[0] = 999;
+        scenes.track_pools[0].patterns.get_mut(&forked).unwrap().seq.track_bits[0] = 999;
 
         assert_eq!(
             scenes.track_pools[0].get(shared).unwrap().track_bits[0],
@@ -2226,7 +2228,8 @@
         let second = sample_pattern_snapshot(2);
         let mut scenes = ProjectScenes::from_pattern_snapshots(&[first, second], 0);
         let chunk = scenes.scenes[1].cells[1].unwrap();
-        let take = scenes.take_pools[1].insert(None, vec![chunk], 64);
+        let sound = scenes.track_pools[1].refs(chunk).expect("chunk refs");
+        let take = scenes.take_pools[1].insert(None, vec![chunk], 64, sound);
 
         // Undo of "delete track 0" re-appends the track at the end and moves
         // its lane back to index 0; every per-track vector must follow.
@@ -4003,7 +4006,7 @@
             let mut entries = scenes.track_pools[0]
                 .patterns
                 .iter()
-                .map(|(id, data)| (id.0, data.track_bits))
+                .map(|(id, data)| (id.0, data.seq.track_bits))
                 .collect::<Vec<_>>();
             entries.sort_by_key(|(id, _)| *id);
             (entries, scenes.track_pools[0].next_id)
@@ -4039,7 +4042,7 @@
             let mut entries = scenes.track_pools[0]
                 .patterns
                 .iter()
-                .map(|(id, data)| (id.0, data.track_bits))
+                .map(|(id, data)| (id.0, data.seq.track_bits))
                 .collect::<Vec<_>>();
             entries.sort_by_key(|(id, _)| *id);
             (entries, scenes.track_pools[0].next_id)
@@ -4351,9 +4354,10 @@
             .clone();
         let scenes = state.pattern.scenes.lock().unwrap();
         let pattern_id = scenes.effective_pattern_id(0).expect("current pattern");
-        let persisted_plocks = &scenes.track_pools[0]
+        let persisted = scenes.track_pools[0]
             .get(pattern_id)
-            .expect("current pattern data")
+            .expect("current pattern data");
+        let persisted_plocks = &persisted
             .rack_track
             .as_ref()
             .expect("current rack")
@@ -5305,8 +5309,10 @@
         assert_eq!(live.sample_id.as_ref().unwrap().1, "before");
         assert_eq!(live.instrument_slot.node_id, 901);
         let scenes = state.pattern.scenes.lock().unwrap();
-        assert!(scenes.track_pools[0].patterns.values().all(|data| {
-            let slot = &data.rack_track.as_ref().unwrap().slots[1];
+        let pool = &scenes.track_pools[0];
+        assert!(pool.patterns.values().all(|data| {
+            let patch = pool.sounds.patches.get(&data.sound.patch).unwrap();
+            let slot = &patch.rack_track.as_ref().unwrap().slots[1];
             slot.sample_id.as_ref().unwrap().1 == "before"
                 && slot.instrument_slot.node_id == 901
                 && slot.instrument_slot.modulator_node_id == 902
@@ -5319,12 +5325,13 @@
         {
             let mut scenes = state.pattern.scenes.lock().unwrap();
             let first_id = scenes.effective_pattern_id(0).unwrap();
-            let first = scenes.track_pools[0].patterns.get_mut(&first_id).unwrap();
+            let mut first = scenes.track_pools[0].get(first_id).unwrap();
             first.instrument_base_note_offset = 11.0;
             let mut second = first.clone();
             second.instrument_base_note_offset = 22.0;
             let mut third = first.clone();
             third.instrument_base_note_offset = 33.0;
+            assert!(scenes.track_pools[0].store(first_id, first));
             scenes.track_pools[0].insert(second);
             scenes.track_pools[0].insert(third);
             let mut network = crate::neural::ProjectNeuralNetwork::default();
@@ -5366,10 +5373,17 @@
             99.0
         );
         let scenes = state.pattern.scenes.lock().unwrap();
-        let mut offsets = scenes.track_pools[0]
+        let pool = &scenes.track_pools[0];
+        let mut offsets = pool
             .patterns
             .values()
-            .map(|pattern| pattern.instrument_base_note_offset)
+            .map(|pattern| {
+                pool.sounds
+                    .patches
+                    .get(&pattern.sound.patch)
+                    .unwrap()
+                    .instrument_base_note_offset
+            })
             .collect::<Vec<_>>();
         offsets.sort_by(f32::total_cmp);
         assert_eq!(offsets, vec![11.0, 22.0, 33.0]);
@@ -5914,7 +5928,8 @@
                 .track_pattern_data(1)
                 .expect("chunk data");
             let chunk = scenes.track_pools[1].insert(chunk_data);
-            scenes.take_pools[1].insert(None, vec![chunk], 16);
+            let sound = scenes.track_pools[1].refs(chunk).expect("chunk refs");
+            scenes.take_pools[1].insert(None, vec![chunk], 16, sound);
 
             let mut snapshot = PatternSnapshot::new_default(2, &[]);
             snapshot.track_bits[1][0] |= 1;

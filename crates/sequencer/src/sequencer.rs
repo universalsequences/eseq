@@ -50,6 +50,7 @@ pub use state::{
     StepCellSnapshot,
     StepSlotPlocks, StepSnapshot, TrackId,
     TrackInstrumentPatternState, TrackInstrumentPatternStateSnapshot, TrackOutputEvent,
+    Mix, MixId, Patch, PatchId, SoundRefs, StoredPattern, TrackPatternSeq, TrackSoundPool,
     Scene, SceneId, TrackPatternCellView, TrackPatternData, TrackPatternId, TrackPatternPool, TrackRegistry, TrackRegistryError,
     TrackPatternLaneState,
     NeuralInstrumentOverrideState, TrackEffectBindingStateSnapshot,

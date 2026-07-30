@@ -833,7 +833,60 @@ impl TrackPatternData {
         deleted_track: usize,
         old_track_count: usize,
     ) {
-        for (slot_idx, slot) in self.effect_slots.iter_mut().enumerate() {
+        remap_slot_sidechain_references_after_track_delete(
+            &mut self.effect_slots,
+            owner_track_old,
+            effect_descriptors,
+            deleted_track,
+            old_track_count,
+        );
+    }
+
+    pub(super) fn remove_midi_fx_slot(&mut self, slot_idx: usize) {
+        if slot_idx < self.track_params.midi_fx_chain.len() {
+            self.track_params.midi_fx_chain.remove(slot_idx);
+        }
+        if slot_idx >= self.midi_fx_slots.len() {
+            return;
+        }
+        for idx in slot_idx..self.midi_fx_slots.len().saturating_sub(1) {
+            self.midi_fx_slots[idx] = self.midi_fx_slots[idx + 1].clone();
+        }
+        if let Some(last) = self.midi_fx_slots.last_mut() {
+            last.clear();
+        }
+    }
+}
+
+impl Patch {
+    /// Same remap, on the Patch entity (device-wide edits visit each entity
+    /// once — take chunks share one).
+    pub(super) fn remap_sidechain_references_after_track_delete(
+        &mut self,
+        owner_track_old: usize,
+        effect_descriptors: &[EffectDescriptor],
+        deleted_track: usize,
+        old_track_count: usize,
+    ) {
+        remap_slot_sidechain_references_after_track_delete(
+            &mut self.effect_slots,
+            owner_track_old,
+            effect_descriptors,
+            deleted_track,
+            old_track_count,
+        );
+    }
+}
+
+pub(super) fn remap_slot_sidechain_references_after_track_delete(
+    effect_slots: &mut [EffectSlotSnapshot],
+    owner_track_old: usize,
+    effect_descriptors: &[EffectDescriptor],
+    deleted_track: usize,
+    old_track_count: usize,
+) {
+    for (slot_idx, slot) in effect_slots.iter_mut().enumerate() {
+        {
             let Some(desc) = effect_descriptors.get(slot_idx) else {
                 continue;
             };
@@ -872,22 +925,9 @@ impl TrackPatternData {
             }
         }
     }
+}
 
-    pub(super) fn remove_midi_fx_slot(&mut self, slot_idx: usize) {
-        if slot_idx < self.track_params.midi_fx_chain.len() {
-            self.track_params.midi_fx_chain.remove(slot_idx);
-        }
-        if slot_idx >= self.midi_fx_slots.len() {
-            return;
-        }
-        for idx in slot_idx..self.midi_fx_slots.len().saturating_sub(1) {
-            self.midi_fx_slots[idx] = self.midi_fx_slots[idx + 1].clone();
-        }
-        if let Some(last) = self.midi_fx_slots.last_mut() {
-            last.clear();
-        }
-    }
-
+impl TrackPatternData {
     pub(super) fn insert_midi_fx_slot(&mut self, slot_idx: usize, name: String, desc: &EffectDescriptor) {
         let insert_idx = slot_idx.min(self.track_params.midi_fx_chain.len());
         self.track_params.midi_fx_chain.insert(insert_idx, name);

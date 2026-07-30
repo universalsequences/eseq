@@ -366,7 +366,6 @@ pub(super) fn capture_track_params_snapshot(track_params: &TrackParams) -> Track
         volume: track_params.get_volume(),
         pan: track_params.get_pan(),
         mute: track_params.is_muted(),
-        solo: track_params.is_solo(),
         send: track_params.get_send(),
         output: track_params.output(),
         sends: track_params.sends(),
@@ -395,7 +394,6 @@ pub(super) fn restore_track_params_snapshot(track_params: &TrackParams, snapshot
     track_params.set_volume(snapshot.volume);
     track_params.set_pan(snapshot.pan);
     track_params.set_mute(snapshot.mute);
-    track_params.set_solo(snapshot.solo);
     track_params.set_send(snapshot.send);
     track_params.set_output(snapshot.output.clone());
     track_params.set_sends(snapshot.sends.clone());

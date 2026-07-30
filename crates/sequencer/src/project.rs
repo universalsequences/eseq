@@ -43,7 +43,17 @@ const RACK_PRESETS_DIR: &str = "presets/racks";
 //       on load (`migrate_legacy_backdrops`, applied in `finish_project_load`
 //       against the live scenes) so a v5 project keeps sounding exactly as it
 //       did, and are then saved as version 6.
-const PROJECT_FILE_VERSION: u32 = 6;
+//   7 — the Sounds model (takes spec 17/18.1): device state is pooled as
+//       per-track Patch/Mix entities referenced by pool patterns, scene
+//       cells, and takes. The dense pattern bank still carries the composed
+//       content; `track_sounds` additionally serializes the REF STRUCTURE
+//       (which referents share which entity), so post-S1 sharing survives a
+//       round trip. Version-<=6 files load through the §17.7 migration: a
+//       private Patch+Mix per pattern, take-chunk duplicates collapsed onto
+//       one entity pair, cells adopting their pattern's refs. `solo` left
+//       the persisted model (live-only); the field is still written (false)
+//       for wire-shape stability and ignored on load.
+const PROJECT_FILE_VERSION: u32 = 7;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectSoundPreset {
@@ -114,6 +124,39 @@ pub struct ProjectFile {
     /// scene cell, so they serialize here, inline with their take.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub take_pools: Vec<ProjectTrackTakePool>,
+    /// Per-track sound ref structure (takes spec 17.2/18.1): which scene
+    /// cells, cell patterns, and takes share which Patch/Mix entity. Empty
+    /// for legacy files — the §17.7 migration then derives the canonical
+    /// private-entities-per-pattern shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub track_sounds: Vec<ProjectTrackSounds>,
+}
+
+/// One referent's sound refs (takes spec 17.2), as file-local entity ids.
+/// Ids are scoped per track and carry identity only — entity CONTENT rides
+/// the dense pattern bank / take chunks exactly as before, which stays the
+/// single content authority (referents sharing an entity serialize identical
+/// content by construction).
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct ProjectSoundRefs {
+    pub patch: u64,
+    pub mix: u64,
+}
+
+/// Per-track sound ref structure (takes spec 18.1 step 5).
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct ProjectTrackSounds {
+    /// Per scene: the scene cell's refs (always present — §17.2
+    /// always-resolves).
+    #[serde(default)]
+    pub cells: Vec<ProjectSoundRefs>,
+    /// Per scene: the cell PATTERN's refs (`None` where the cell is bare).
+    #[serde(default)]
+    pub patterns: Vec<Option<ProjectSoundRefs>>,
+    /// Per take, parallel to `take_pools[track].takes`. Chunk patterns share
+    /// the take's refs by construction and are not listed separately.
+    #[serde(default)]
+    pub takes: Vec<ProjectSoundRefs>,
 }
 
 /// Serialized form of one track's `TrackTakePool` (takes spec 6.1).
@@ -180,6 +223,8 @@ struct ProjectFileWire {
     scene_cell_presence: Vec<Vec<bool>>,
     #[serde(default)]
     take_pools: Vec<ProjectTrackTakePool>,
+    #[serde(default)]
+    track_sounds: Vec<ProjectTrackSounds>,
 }
 
 impl<'de> Deserialize<'de> for ProjectFile {
@@ -211,6 +256,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
             record_armed: wire.record_armed,
             scene_cell_presence: wire.scene_cell_presence,
             take_pools: wire.take_pools,
+            track_sounds: wire.track_sounds,
         };
         project.normalize_device_instances().map_err(D::Error::custom)?;
         // Reject malformed arrangement data with an actionable error rather
@@ -1477,7 +1523,8 @@ impl From<TrackParamsSnapshot> for ProjectTrackParams {
             volume: value.volume,
             pan: value.pan,
             mute: value.mute,
-            solo: value.solo,
+            // takes spec 17.8: solo is live-only; never persisted again.
+            solo: false,
             send: value.send,
             output: ProjectTrackOutput::from(value.output),
             sends: value
@@ -1513,7 +1560,6 @@ impl From<ProjectTrackParams> for TrackParamsSnapshot {
             volume: value.volume,
             pan: value.pan,
             mute: value.mute,
-            solo: value.solo,
             send: value.send,
             output: TrackOutput::from(value.output),
             sends: value
@@ -3046,6 +3092,7 @@ mod tests {
             record_armed: Vec::new(),
             scene_cell_presence: Vec::new(),
             take_pools: Vec::new(),
+            track_sounds: Vec::new(),
         }
     }
 

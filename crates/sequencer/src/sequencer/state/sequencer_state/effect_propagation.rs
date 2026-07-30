@@ -58,18 +58,18 @@ impl SequencerState {
             .track_pools
             .get_mut(track)
             .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
-        if pool.patterns.values().any(|data| {
-            slot_idx >= data.track_params.midi_fx_chain.len()
-                || slot_idx >= data.midi_fx_slots.len()
+        if pool.sounds.patches.values().any(|patch| {
+            slot_idx >= patch.params.midi_fx_chain.len()
+                || slot_idx >= patch.midi_fx_slots.len()
         }) {
             return Err("stored MIDI-FX replacement target is missing".to_string());
         }
         live_chain[slot_idx] = name.clone();
         self.pattern.track_params[track].set_midi_fx_chain(live_chain);
         self.pattern.midi_fx_slots[track][slot_idx].apply_descriptor(descriptor, 0);
-        for data in pool.patterns.values_mut() {
-            data.track_params.midi_fx_chain[slot_idx] = name.clone();
-            data.midi_fx_slots[slot_idx].sync_to_descriptor(descriptor, 0);
+        for patch in pool.sounds.patches.values_mut() {
+            patch.params.midi_fx_chain[slot_idx] = name.clone();
+            patch.midi_fx_slots[slot_idx].sync_to_descriptor(descriptor, 0);
         }
         Ok(())
     }
@@ -95,13 +95,11 @@ impl SequencerState {
     pub fn remove_bus_references_from_all_track_patterns(&self, bus_id: BusId) {
         let mut scenes = self.pattern.scenes.lock().unwrap();
         for pool in &mut scenes.track_pools {
-            for data in pool.patterns.values_mut() {
-                if data.track_params.output == TrackOutput::Bus(bus_id) {
-                    data.track_params.output = TrackOutput::Mix;
+            for mix in pool.sounds.mixes.values_mut() {
+                if mix.output == TrackOutput::Bus(bus_id) {
+                    mix.output = TrackOutput::Mix;
                 }
-                data.track_params
-                    .sends
-                    .retain(|send| send.destination != bus_id);
+                mix.sends.retain(|send| send.destination != bus_id);
             }
         }
     }
@@ -118,9 +116,9 @@ impl SequencerState {
         let mut scenes = self.pattern.scenes.lock().unwrap();
         let mut changed = false;
         if let Some(pool) = scenes.track_pools.get_mut(track) {
-            for data in pool.patterns.values_mut() {
-                if data.track_params.output != output {
-                    data.track_params.output = output.clone();
+            for mix in pool.sounds.mixes.values_mut() {
+                if mix.output != output {
+                    mix.output = output.clone();
                     changed = true;
                 }
             }
