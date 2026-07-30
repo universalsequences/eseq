@@ -528,7 +528,7 @@ impl SequencerState {
             (0..64)
                 .filter(|track| mask >> track & 1 == 1)
                 .filter_map(|track| {
-                    Some((track, scenes.effective_track_pattern(track)?.clone()))
+                    Some((track, scenes.effective_track_pattern(track)?))
                 })
                 .collect()
         };

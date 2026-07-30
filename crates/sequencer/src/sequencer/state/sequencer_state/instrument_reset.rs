@@ -226,14 +226,19 @@ impl SequencerState {
                 .effective_pattern_id(track)
                 .ok_or_else(|| format!("Track {} has no effective pattern", track + 1))?;
             let live = pool
-                .get(effective_id)
-                .ok_or_else(|| format!("Track {} effective pattern is missing", track + 1))?
-                .instrument_state();
+                .patch(effective_id)
+                .zip(pool.seq(effective_id))
+                .map(|(patch, seq)| TrackInstrumentPatternState::capture(patch, seq))
+                .ok_or_else(|| format!("Track {} effective pattern is missing", track + 1))?;
             let mut ids: Vec<PatternId> = pool.patterns.keys().copied().collect();
             ids.sort_by_key(|id| id.0);
             let patterns = ids
                 .into_iter()
-                .filter_map(|id| pool.get(id).map(|data| (id, data.instrument_state())))
+                .filter_map(|id| {
+                    let patch = pool.patch(id)?;
+                    let seq = pool.seq(id)?;
+                    Some((id, TrackInstrumentPatternState::capture(patch, seq)))
+                })
                 .collect();
             let mut neural_overrides = Vec::new();
             for (scene_idx, scene) in scenes.scenes.iter().enumerate() {
@@ -317,14 +322,20 @@ impl SequencerState {
             ));
         }
         for (id, state) in &snapshot.patterns {
-            if !pool.edit(*id, |data| {
-                data.restore_instrument_state(state, descriptor, node_id, modulator_node_id);
-            }) {
+            // Patch-side fields write through the entity; the three seq-side
+            // fields land on the stored pattern directly — together this is
+            // exactly what the old compose/edit/split round-trip stored,
+            // without cloning step data, chords, or effect slots.
+            let Some(patch) = pool.patch_mut(*id) else {
                 return Err(format!(
                     "Track {} pattern {} sound is missing during instrument history replay",
                     track + 1,
                     id.0
                 ));
+            };
+            state.restore_to_patch(patch, descriptor, node_id, modulator_node_id);
+            if let Some(stored) = pool.patterns.get_mut(id) {
+                state.restore_to_seq(&mut stored.seq);
             }
         }
         for scene in &mut scenes.scenes {

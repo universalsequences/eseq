@@ -866,8 +866,9 @@ impl SequencerState {
         (0..track_count)
             .map(|track| {
                 scenes
-                    .effective_track_pattern(track)
-                    .map(|data| data.sample_id.clone())
+                    .effective_pattern_id(track)
+                    .and_then(|id| scenes.track_pools.get(track)?.patch(id))
+                    .map(|patch| patch.sample_id.clone())
                     .unwrap_or((-1, String::new(), 44_100))
             })
             .collect()

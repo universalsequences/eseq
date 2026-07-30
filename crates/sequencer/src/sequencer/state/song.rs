@@ -628,7 +628,7 @@ mod tests {
     /// `test_scenes` plus one 300-step, two-chunk take on track 0.
     fn scenes_with_take() -> (ProjectScenes, TakeId) {
         let mut scenes = test_scenes();
-        let chunk_data = scenes.track_pools[0].get(PatternId(1)).unwrap().clone();
+        let chunk_data = scenes.track_pools[0].get(PatternId(1)).unwrap();
         let chunk_a = scenes.track_pools[0].insert(chunk_data.clone());
         let chunk_b = scenes.track_pools[0].insert(chunk_data);
         let sound = scenes.track_pools[0].refs(chunk_a).expect("chunk refs");
@@ -1059,7 +1059,7 @@ mod tests {
     fn song_for_serialization_rejects_pattern_not_in_any_scene_cell() {
         let mut scenes = test_scenes();
         // Fork a pattern into track 1's pool without assigning it to a cell.
-        let source = scenes.track_pools[1].get(PatternId(1)).unwrap().clone();
+        let source = scenes.track_pools[1].get(PatternId(1)).unwrap();
         let orphan = scenes.track_pools[1].insert(source);
         let mut song = valid_song();
         song.rows[0].overrides = vec![over(1, orphan.0)];

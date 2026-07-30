@@ -1365,7 +1365,7 @@ mod tests {
     /// steps per beat the take is playable for 75 beats.
     fn scenes_with_take() -> (ProjectScenes, TakeId) {
         let mut scenes = test_scenes();
-        let chunk_data = scenes.track_pools[0].get(PatternId(1)).unwrap().clone();
+        let chunk_data = scenes.track_pools[0].get(PatternId(1)).unwrap();
         let chunk_a = scenes.track_pools[0].insert(chunk_data.clone());
         let chunk_b = scenes.track_pools[0].insert(chunk_data);
         let sound = scenes.track_pools[0].refs(chunk_a).expect("chunk refs");
@@ -2243,7 +2243,7 @@ mod tests {
     fn arrangement_for_serialization_rejects_pattern_not_in_any_scene_cell() {
         let mut scenes = test_scenes();
         // Fork a pattern into track 1's pool without assigning it to a cell.
-        let source = scenes.track_pools[1].get(PatternId(1)).unwrap().clone();
+        let source = scenes.track_pools[1].get(PatternId(1)).unwrap();
         let orphan = scenes.track_pools[1].insert(source);
         let mut arr = valid_arrangement();
         arr.track_lanes[1] = vec![clip(1, 16.0, 24.0, orphan.0)];

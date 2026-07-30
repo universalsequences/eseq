@@ -810,7 +810,7 @@ impl SequencerState {
             let current_scene = self.current_scene_index();
             scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask());
             let id = scenes.clone_track_pattern_into_current_scene(track)?;
-            let data = scenes.effective_track_pattern(track)?.clone();
+            let data = scenes.effective_track_pattern(track)?;
             (id, data)
         };
         data.restore_to(self, track);
@@ -845,7 +845,7 @@ impl SequencerState {
             let current_scene = self.current_scene_index();
             scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask());
             let id = scenes.clone_track_pattern_id_into_current_scene(track, source_id)?;
-            let data = scenes.effective_track_pattern(track)?.clone();
+            let data = scenes.effective_track_pattern(track)?;
             (id, data)
         };
         data.restore_to(self, track);

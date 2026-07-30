@@ -247,54 +247,67 @@ pub(super) fn instrument_slot_has_locks(slot: &EffectSlotSnapshot) -> bool {
             .any(|tensor| tensor.plocks.iter().any(Option::is_some))
 }
 
-impl TrackPatternData {
-    pub(super) fn instrument_state(&self) -> TrackInstrumentPatternState {
-        TrackInstrumentPatternState {
-            instrument_slot: self.instrument_slot.clone(),
-            instrument_base_note_offset: self.instrument_base_note_offset,
-            track_sound_state: self.track_sound_state.clone(),
-            sample_id: self.sample_id.clone(),
-            instrument_type: self.instrument_type,
-            instrument_run_mode: self.instrument_run_mode,
-            rack_track: self.rack_track.clone(),
-            process_chain: self.process_chain.clone(),
-            project_process_lane_overrides: self.project_process_lane_overrides.clone(),
-            plock_variant_registry: self.plock_variant_registry.clone(),
-            key_lock_variant_registry: self.key_lock_variant_registry.clone(),
+impl TrackInstrumentPatternState {
+    /// Capture straight from the stored halves — behavior-identical to
+    /// composing the pattern first: every captured field lives on the Patch
+    /// except the three seq-side lanes (`project_process_lane_overrides` and
+    /// the two variant registries).
+    pub(super) fn capture(patch: &Patch, seq: &TrackPatternSeq) -> Self {
+        Self {
+            instrument_slot: patch.instrument_slot.clone(),
+            instrument_base_note_offset: patch.instrument_base_note_offset,
+            track_sound_state: patch.track_sound_state.clone(),
+            sample_id: patch.sample_id.clone(),
+            instrument_type: patch.instrument_type,
+            instrument_run_mode: patch.instrument_run_mode,
+            rack_track: patch.rack_track.clone(),
+            process_chain: patch.process_chain.clone(),
+            project_process_lane_overrides: seq.project_process_lane_overrides.clone(),
+            plock_variant_registry: seq.plock_variant_registry.clone(),
+            key_lock_variant_registry: seq.key_lock_variant_registry.clone(),
         }
     }
 
-    pub(super) fn restore_instrument_state(
-        &mut self,
-        state: &TrackInstrumentPatternState,
+    /// Apply the patch-side half of this state (the exact writes the old
+    /// composed `restore_instrument_state` landed on device fields).
+    pub(super) fn restore_to_patch(
+        &self,
+        patch: &mut Patch,
         descriptor: &EffectDescriptor,
         node_id: u32,
         modulator_node_id: u32,
     ) {
-        let mut instrument_slot = state.instrument_slot.clone();
+        let mut instrument_slot = self.instrument_slot.clone();
         instrument_slot.sync_to_descriptor_with_modulator(
             descriptor,
             node_id,
             modulator_node_id,
         );
-        self.instrument_slot = instrument_slot;
-        self.instrument_base_note_offset = state.instrument_base_note_offset;
-        self.track_sound_state = state.track_sound_state.clone();
-        self.sample_id = state.sample_id.clone();
-        self.instrument_type = state.instrument_type;
-        self.instrument_run_mode = state.instrument_run_mode;
-        self.rack_track = state.rack_track.clone();
-        self.process_chain = state.process_chain.clone();
+        patch.instrument_slot = instrument_slot;
+        patch.instrument_base_note_offset = self.instrument_base_note_offset;
+        patch.track_sound_state = self.track_sound_state.clone();
+        patch.sample_id = self.sample_id.clone();
+        patch.instrument_type = self.instrument_type;
+        patch.instrument_run_mode = self.instrument_run_mode;
+        patch.rack_track = self.rack_track.clone();
+        patch.process_chain = self.process_chain.clone();
         crate::process::rebind_track_process_chain_instrument_param_ids(
-            &mut self.process_chain,
+            &mut patch.process_chain,
             descriptor,
-            &self.instrument_slot,
+            &patch.instrument_slot,
         );
-        self.project_process_lane_overrides = state.project_process_lane_overrides.clone();
-        self.plock_variant_registry = state.plock_variant_registry.clone();
-        self.key_lock_variant_registry = state.key_lock_variant_registry.clone();
     }
 
+    /// Apply the seq-side residue: the three captured fields that live on
+    /// the stored pattern rather than the Patch.
+    pub(super) fn restore_to_seq(&self, seq: &mut TrackPatternSeq) {
+        seq.project_process_lane_overrides = self.project_process_lane_overrides.clone();
+        seq.plock_variant_registry = self.plock_variant_registry.clone();
+        seq.key_lock_variant_registry = self.key_lock_variant_registry.clone();
+    }
+}
+
+impl TrackPatternData {
     pub(super) fn capture_step_snapshot(&self, step: usize) -> Option<StepSnapshot> {
         if step >= MAX_STEPS {
             return None;

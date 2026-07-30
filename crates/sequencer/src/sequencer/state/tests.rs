@@ -2178,7 +2178,7 @@
         let mut scenes = ProjectScenes::from_pattern_snapshots(&[first, second], 0);
         let original_id = scenes.scenes[0].cells[0].unwrap();
         let other_id = scenes.scenes[1].cells[0].unwrap();
-        let mut edited = scenes.effective_track_pattern(0).unwrap().clone();
+        let mut edited = scenes.effective_track_pattern(0).unwrap();
         edited.track_bits[0] = 321;
 
         assert!(scenes.save_effective_track_pattern(0, edited));
@@ -5277,7 +5277,7 @@
         {
             let mut scenes = state.pattern.scenes.lock().unwrap();
             let source_id = scenes.effective_pattern_id(0).unwrap();
-            let clone = scenes.track_pools[0].get(source_id).unwrap().clone();
+            let clone = scenes.track_pools[0].get(source_id).unwrap();
             scenes.track_pools[0].insert(clone);
         }
         state.append_rack_slot_for_all_pattern_snapshots(
