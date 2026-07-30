@@ -728,19 +728,25 @@ pub(super) fn apply_piano_roll_history_host_command(
         .get("action")
         .map(|value| value.borrow().clone())
         .ok_or_else(|| "piano-roll edit action was missing".to_string())?;
-    let plan = piano_roll_history_plan(&app.state, track, &action, clipboard)?
+    // The App is the authority on the edit target (clip-edit-target spec 3.2):
+    // resolve the focus here, plan and apply against it, and record through
+    // the focus-aware mutation so pool/take targets get pool-first writes.
+    let focus = app.track_edit_focus(track);
+    let lanes = PianoRollLanes::new(&app.state, track, PianoRollFocusSpec::from_focus(focus));
+    let plan = piano_roll_history_plan(&lanes, &action, clipboard)?
         .ok_or_else(|| "piano-roll action is not recordable at this boundary".to_string())?;
     let mut status = None;
-    let outcome = app::edit::apply_recorded_step_mutation(
+    let outcome = app::edit::apply_recorded_focus_step_mutation(
         app,
-        track,
+        focus,
         &plan.steps,
         plan.label,
         |app| {
+            let lanes =
+                PianoRollLanes::new(&app.state, track, PianoRollFocusSpec::from_focus(focus));
             status = Some(
                 apply_piano_roll_action_with_clipboard(
-                    &app.state,
-                    track,
+                    &lanes,
                     selection,
                     move_state,
                     clipboard,
@@ -762,7 +768,7 @@ pub(super) fn apply_piano_roll_history_host_command(
 pub(super) struct ActivePianoRollHistoryGesture {
     pub(super) kind: PianoRollDragKind,
     pub(super) track: usize,
-    pub(super) transaction: app::edit::StepGestureTransaction,
+    pub(super) transaction: app::edit::FocusStepGesture,
 }
 
 pub(super) fn piano_roll_host_action(payload: &Value) -> Result<(usize, Value), String> {
@@ -792,10 +798,14 @@ pub(super) fn apply_piano_roll_gesture_update(
     let Some(PianoRollGestureCommand::Update(kind)) = piano_roll_gesture_command(&action) else {
         return Err("piano-roll gesture update action was invalid".to_string());
     };
-    if active
-        .as_ref()
-        .is_some_and(|gesture| gesture.kind != kind || gesture.track != track)
-    {
+    // Resolve the focus authoritatively from the App (clip-edit-target spec
+    // 3.2). A live gesture whose resolved focus moved — scene launch,
+    // re-bind, invalidation — is rolled back rather than continued against
+    // the wrong target (spec 3.3.3).
+    let focus = app.track_edit_focus(track);
+    if active.as_ref().is_some_and(|gesture| {
+        gesture.kind != kind || gesture.track != track || gesture.transaction.focus() != focus
+    }) {
         let previous = active.take().expect("active gesture disappeared");
         previous
             .transaction
@@ -803,7 +813,8 @@ pub(super) fn apply_piano_roll_gesture_update(
             .map_err(|error| format!("could not roll back interrupted gesture: {error:?}"))?;
         *move_state.lock().unwrap() = None;
     }
-    let touched = piano_roll_gesture_touched_steps(&app.state, track, move_state, &action)?;
+    let lanes = PianoRollLanes::new(&app.state, track, PianoRollFocusSpec::from_focus(focus));
+    let touched = piano_roll_gesture_touched_steps(&lanes, move_state, &action)?;
     if active.is_none() {
         let label = match kind {
             PianoRollDragKind::Move => "Move piano-roll notes",
@@ -812,7 +823,7 @@ pub(super) fn apply_piano_roll_gesture_update(
         *active = Some(ActivePianoRollHistoryGesture {
             kind,
             track,
-            transaction: app::edit::StepGestureTransaction::begin(app, track, &touched, label)
+            transaction: app::edit::FocusStepGesture::begin(app, focus, &touched, label)
                 .map_err(|error| format!("could not begin piano-roll gesture: {error:?}"))?,
         });
     } else if let Err(error) = active
@@ -831,9 +842,9 @@ pub(super) fn apply_piano_roll_gesture_update(
             )),
         };
     }
+    let lanes = PianoRollLanes::new(&app.state, track, PianoRollFocusSpec::from_focus(focus));
     let status = match apply_piano_roll_action(
-        &app.state,
-        track,
+        &lanes,
         selection,
         move_state,
         &action,

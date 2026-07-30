@@ -326,6 +326,141 @@ pub fn sync_beats(val: f32) -> f64 {
     }
 }
 
+pub fn ceil_to_grid(value: f64, grid: f64) -> f64 {
+    let rem = value % grid;
+    if rem > 1e-9 {
+        value + (grid - rem)
+    } else {
+        value
+    }
+}
+
+/// A pattern's real beat↔step geometry: the same per-step boundaries the
+/// scheduler clock plays (per-step timebase plocks, sync-plock grid waits,
+/// and the step-0-sync cycle padding), exposed as a continuous bijection
+/// between fractional step positions `[0, num_steps)` and cycle beats
+/// `[0, cycle_beats)`.
+///
+/// This is the `steps()` mapping of takes spec 7.1 — "the track's live
+/// beat→step mapping, the same mapping the free-running clock uses" — used
+/// for offset stamping so that anchored song playback reproduces free-run
+/// phase exactly, including on patterns with timebase/sync plocks. It must
+/// stay in lockstep with `scheduler::clock::precompute_boundaries` and the
+/// runtime's `offset_beats` resolution: positions inside a sync wait (or the
+/// end-of-cycle sync padding) map linearly across the whole inter-boundary
+/// span, matching the runtime's span interpolation.
+#[derive(Clone, Debug)]
+pub struct PatternStepGeometry {
+    num_steps: usize,
+    /// `num_steps + 1` entries; `boundaries[s]` is where step `s` fires,
+    /// `boundaries[num_steps]` the unpadded pattern end.
+    boundaries: Vec<f64>,
+    /// Pattern end padded to step 0's sync grid — the wrap modulus the
+    /// scheduler clock uses.
+    cycle_beats: f64,
+}
+
+impl PatternStepGeometry {
+    const EPS: f64 = 1e-9;
+
+    /// Build from per-step data: `step_info(s)` returns the step's timebase
+    /// override and raw Sync param value.
+    pub fn new(
+        num_steps: usize,
+        base_timebase: Timebase,
+        mut step_info: impl FnMut(usize) -> (Option<Timebase>, f32),
+    ) -> Self {
+        let ns = num_steps.max(1);
+        let mut boundaries = vec![0.0_f64; ns + 1];
+        let mut accum = 0.0_f64;
+        let mut sync0 = 0.0_f64;
+        for s in 0..ns {
+            let (tb_override, sync_val) = step_info(s);
+            let tb = tb_override.unwrap_or(base_timebase);
+            let sync_b = sync_beats(sync_val);
+            if s == 0 {
+                sync0 = sync_b;
+            }
+            if sync_b > Self::EPS {
+                accum = ceil_to_grid(accum, sync_b);
+            }
+            boundaries[s] = accum;
+            accum += tb.step_beats(ns);
+        }
+        boundaries[ns] = accum;
+        let cycle_beats = if sync0 > Self::EPS {
+            ceil_to_grid(accum, sync0).max(Self::EPS)
+        } else {
+            accum.max(Self::EPS)
+        };
+        Self {
+            num_steps: ns,
+            boundaries,
+            cycle_beats,
+        }
+    }
+
+    pub fn num_steps(&self) -> usize {
+        self.num_steps
+    }
+
+    pub fn cycle_beats(&self) -> f64 {
+        self.cycle_beats
+    }
+
+    /// The beat span step `s`'s fractional index range `[s, s+1)` covers:
+    /// up to the next step's boundary (including any sync wait), or to the
+    /// padded cycle end for the last step.
+    fn span(&self, s: usize) -> f64 {
+        let end = if s + 1 < self.num_steps {
+            self.boundaries[s + 1]
+        } else {
+            self.cycle_beats
+        };
+        (end - self.boundaries[s]).max(Self::EPS)
+    }
+
+    /// Cycle-beat position of a fractional step offset (wraps modulo the
+    /// pattern length). Mirrors the runtime's `offset_beats` resolution.
+    pub fn beats_at_steps(&self, offset_steps: f64) -> f64 {
+        if self.num_steps == 0 {
+            return 0.0;
+        }
+        let steps = offset_steps.rem_euclid(self.num_steps as f64);
+        let step = (steps.floor() as usize).min(self.num_steps - 1);
+        let frac = steps - step as f64;
+        self.boundaries[step] + frac * self.span(step)
+    }
+
+    /// Fractional step position at a beat position (wraps modulo the padded
+    /// cycle). Inverse of `beats_at_steps`.
+    pub fn steps_at_beats(&self, beats: f64) -> f64 {
+        let pos = beats.rem_euclid(self.cycle_beats);
+        let idx = self.boundaries[..self.num_steps].partition_point(|b| *b <= pos);
+        let step = idx.saturating_sub(1);
+        let frac = ((pos - self.boundaries[step]) / self.span(step)).clamp(0.0, 1.0);
+        (step as f64 + frac).min(self.num_steps as f64)
+    }
+
+    /// Advance a step offset by `delta_beats` of playback, wrapping at the
+    /// cycle. The raw advance, no boundary collapse.
+    pub fn advance(&self, offset_steps: f64, delta_beats: f64) -> f64 {
+        self.steps_at_beats(self.beats_at_steps(offset_steps) + delta_beats)
+    }
+
+    /// `advance` with the stamping rule's boundary-epsilon collapse to 0, so
+    /// an offset landing on a pattern boundary stamps an implicit zero.
+    pub fn advanced_offset(&self, offset_steps: f64, delta_beats: f64) -> f64 {
+        let advanced = self.advance(offset_steps, delta_beats);
+        let ns = self.num_steps as f64;
+        if advanced < 1e-9 || advanced > ns - 1e-9 {
+            0.0
+        } else {
+            advanced
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StepParam {
     Duration = 0,
@@ -1396,7 +1531,7 @@ impl SwingResolutionPLockData {
 
 #[cfg(test)]
 mod tests {
-    use super::StepParam;
+    use super::{PatternStepGeometry, StepParam, Timebase};
 
     fn assert_close(actual: f32, expected: f32) {
         assert!(
@@ -1420,5 +1555,69 @@ mod tests {
         assert_close(StepParam::Duration.normalize(32.0), 1.0);
         assert_close(StepParam::Duration.denormalize_slider(1.0), 32.0);
         assert_close(StepParam::Duration.denormalize_slider(0.75), 3.875);
+    }
+
+    fn assert_close64(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    fn plain_geometry() -> PatternStepGeometry {
+        PatternStepGeometry::new(16, Timebase::Sixteenth, |_| (None, 0.0))
+    }
+
+    /// Step 0 plocked to an eighth (0.5 beats) and sync-plocked to the
+    /// 1-beat grid (padding the cycle from 4.75 to 5.0); step 5 carries the
+    /// same sync plock, creating a mid-pattern grid wait from 1.5 to 2.0.
+    fn plocked_geometry() -> PatternStepGeometry {
+        PatternStepGeometry::new(16, Timebase::Sixteenth, |step| match step {
+            0 => (Some(Timebase::Eighth), 3.0),
+            5 => (None, 3.0),
+            _ => (None, 0.0),
+        })
+    }
+
+    #[test]
+    fn plain_pattern_geometry_matches_uniform_mapping() {
+        let geometry = plain_geometry();
+        assert_close64(geometry.cycle_beats(), 4.0);
+        assert_close64(geometry.steps_at_beats(5.3), (5.3_f64 * 4.0).rem_euclid(16.0));
+        assert_close64(geometry.beats_at_steps(6.5), 6.5 / 4.0);
+        assert_close64(geometry.advanced_offset(4.0, 1.25), 9.0);
+        assert_close64(geometry.advanced_offset(4.0, 3.0), 0.0);
+    }
+
+    #[test]
+    fn plocked_pattern_geometry_uses_real_boundaries() {
+        let geometry = plocked_geometry();
+        // Boundaries: step 0 lasts 0.5, steps 1-4 at 0.25 reach 1.5, step 5
+        // sync-waits to 2.0, steps 5-15 end at 4.75, cycle pads to 5.0.
+        assert_close64(geometry.cycle_beats(), 5.0);
+        assert_close64(geometry.beats_at_steps(5.0), 2.0);
+        assert_close64(geometry.beats_at_steps(1.0), 0.5);
+        // A free-run launch at beat 5.3 is 0.3 beats into the second cycle —
+        // 60% through the half-beat step 0, NOT the uniform 5.2 steps.
+        assert_close64(geometry.steps_at_beats(5.3), 0.6);
+        // Positions inside the sync wait (1.5..2.0) interpolate across step
+        // 4's whole span and round-trip exactly.
+        let mid_wait = geometry.steps_at_beats(1.75);
+        assert_close64(geometry.beats_at_steps(mid_wait), 1.75);
+        // The end-of-cycle sync padding (4.75..5.0) is representable too.
+        let in_padding = geometry.steps_at_beats(4.9);
+        assert_close64(geometry.beats_at_steps(in_padding), 4.9);
+    }
+
+    #[test]
+    fn geometry_stamp_round_trips_free_run_phase() {
+        let geometry = plocked_geometry();
+        for beat in [0.0, 0.3, 1.6, 4.99, 5.3, 12.75, 47.1] {
+            let stamped = geometry.steps_at_beats(beat);
+            assert_close64(
+                geometry.beats_at_steps(stamped),
+                beat.rem_euclid(geometry.cycle_beats()),
+            );
+        }
     }
 }

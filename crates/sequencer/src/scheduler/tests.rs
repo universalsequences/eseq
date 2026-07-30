@@ -718,6 +718,87 @@
         assert_eq!(triggers[0].step, 0);
     }
 
+    /// Recording an arrangement stamps free-run phase through the pattern's
+    /// REAL geometry (`PatternStepGeometry`); anchored song playback of that
+    /// stamp must then reproduce the free-run performance trigger-for-trigger
+    /// — including on patterns with timebase and sync plocks, where the old
+    /// uniform base-timebase stamping drifted the clip clock against the
+    /// transport and made sync plocks snap to the wrong grid.
+    #[test]
+    fn anchored_playback_reproduces_free_run_with_timebase_and_sync_plocks() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.toggle_play();
+        for step in 0..16 {
+            state.toggle_step_and_clear_plocks(0, step);
+        }
+        let mut snapshot = (*state.latest_scheduler_snapshot()).clone();
+        {
+            let track = Arc::make_mut(&mut snapshot.tracks[0]);
+            // Step 0: half-beat step + 1-beat sync grid (pads the cycle to
+            // 5.0); step 5: 1-beat sync grid (mid-pattern wait 1.5 -> 2.0).
+            track.steps[0].timebase_override = Some(Timebase::Eighth);
+            track.steps[0].params[StepParam::Sync.index()] = 3.0;
+            track.steps[5].params[StepParam::Sync.index()] = 3.0;
+        }
+
+        let run = |clock: &mut SnapshotSequencerClock| {
+            let mut triggers = Vec::new();
+            while clock.total_beats < 24.0 {
+                triggers.extend(
+                    clock
+                        .process_chunk(512, &snapshot, &state)
+                        .into_iter()
+                        .map(|trigger| (trigger.step, trigger.absolute_beats)),
+                );
+            }
+            triggers
+        };
+
+        let mut free_run = SnapshotSequencerClock::new(48_000);
+        let free_triggers = run(&mut free_run);
+
+        // The unquantized scene change the performance made at beat 5.3,
+        // stamped with the same real geometry capture uses.
+        let geometry = crate::sequencer::PatternStepGeometry::new(
+            16,
+            Timebase::Sixteenth,
+            |step| match step {
+                0 => (Some(Timebase::Eighth), 3.0),
+                5 => (None, 3.0),
+                _ => (None, 0.0),
+            },
+        );
+        let anchor_beat = 5.3;
+        let offset = geometry.steps_at_beats(anchor_beat);
+        let mut anchored = SnapshotSequencerClock::new(48_000);
+        anchored.set_song_row_anchors(anchor_beat, &[offset]);
+        let anchored_triggers = run(&mut anchored);
+
+        assert_eq!(free_triggers.len(), anchored_triggers.len());
+        for (free, anchored) in free_triggers.iter().zip(&anchored_triggers) {
+            assert_eq!(free.0, anchored.0, "step order must match free-run");
+            assert!(
+                (free.1 - anchored.1).abs() < 1e-3,
+                "step {} fired at {} anchored vs {} free-run",
+                free.0,
+                anchored.1,
+                free.1
+            );
+        }
+
+        // The user-facing guarantee: the sync-plocked steps stay on the
+        // global transport's 1-beat grid under the anchored (recorded) clip.
+        for (step, beats) in &anchored_triggers {
+            if *step == 0 || *step == 5 {
+                let distance = (beats - beats.round()).abs();
+                assert!(
+                    distance < 1e-3,
+                    "sync-plocked step {step} fired off the transport grid at {beats}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn snapshot_clock_suppresses_triggers_for_scene_silenced_tracks() {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);

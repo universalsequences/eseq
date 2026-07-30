@@ -75,6 +75,12 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_ui_epoch: usize,
     pub(crate) prev_fx_epoch: usize,
     pub(crate) prev_sound_binding_epoch: usize,
+    /// Identity of the CLIP-derived piano-roll surfaces (clip panel, window
+    /// overlay, clip kind): `(selected (track, clip id), clip source kind,
+    /// committed-song revision)`. They are keyed off the clip SELECTION,
+    /// which can move while the resolved write focus stays put, so the focus
+    /// spec alone is not enough to decide whether they need republishing.
+    pub(crate) prev_focus_clip_surface: (Option<(usize, u64)>, Option<&'static str>, u64),
     pub(crate) prev_instrument_active_notes: Vec<u8>,
     pub(crate) prev_active_buffer_name: String,
     pub(crate) prev_selected_neural_neurons:
@@ -110,6 +116,7 @@ pub(crate) struct SharedHandles {
     pub(crate) selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons,
     pub(crate) piano_roll_selection: Arc<Mutex<HashSet<u64>>>,
     pub(crate) piano_roll_move_state: Arc<Mutex<Option<PianoRollMoveState>>>,
+    pub(crate) piano_roll_focus: SharedPianoRollFocus,
     pub(crate) step_clipboard:
         Arc<Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>>,
     pub(crate) ui_epoch: Arc<AtomicUsize>,

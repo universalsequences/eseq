@@ -68,6 +68,16 @@ pub(super) const COMMANDS: &[&str] = &[
     // Region move (region spec 6.2) needs no clipboard, so it runs with the
     // other arrangement primitives in `run`.
     "song-region-move",
+    // Edit-focus loop bar (clip-edit-target spec 5): pinned-pattern length,
+    // its gesture seal, and the band-body loop-window slide.
+    "focus-set-num-steps",
+    "focus-finish-num-steps",
+    "focus-slide-band",
+    // Clip panel (clip-edit-target spec 6): Start/End + Start-offset fields,
+    // and the take-focus Length field.
+    "focus-clip-resize",
+    "focus-set-offset",
+    "focus-take-set-length",
     "sound-push-to-pattern",
     "sound-apply-to-all-takes",
 ];
@@ -355,6 +365,49 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             let map = payload_map(payload)?;
             let delta_beats = require_number(map, "delta-beats")?;
             app.song_region_move(delta_beats)
+        }
+        // --- edit-focus loop bar (clip-edit-target spec 5) -------------
+        "focus-set-num-steps" => {
+            let map = payload_map(payload)?;
+            let track = require_track(map)?;
+            let length = require_number(map, "length")?;
+            app.set_pinned_pattern_num_steps(track, length.round().max(1.0) as usize)?;
+            Ok(format!("Pattern loop: {} steps", length.round()))
+        }
+        "focus-finish-num-steps" => {
+            let map = payload_map(payload)?;
+            let track = require_track(map)?;
+            app.finish_focused_pattern_num_steps(track);
+            Ok("Pattern loop resize committed".to_string())
+        }
+        "focus-slide-band" => {
+            let map = payload_map(payload)?;
+            let track = require_track(map)?;
+            let delta_steps = require_number(map, "delta-steps")?;
+            app.slide_focused_clip_offset(track, delta_steps)?;
+            Ok(format!("Loop window slid by {delta_steps} step(s)"))
+        }
+        "focus-clip-resize" => {
+            let map = payload_map(payload)?;
+            let track = require_track(map)?;
+            let start_beat = require_number(map, "start-beat")?;
+            let end_beat = require_number(map, "end-beat")?;
+            app.resize_focused_clip(track, start_beat, end_beat)?;
+            Ok(format!("Clip resized to beats {start_beat}-{end_beat}"))
+        }
+        "focus-take-set-length" => {
+            let map = payload_map(payload)?;
+            let track = require_track(map)?;
+            let length = require_number(map, "length")?;
+            app.set_focused_take_length(track, length)?;
+            Ok(format!("Take length: {} steps", length.round()))
+        }
+        "focus-set-offset" => {
+            let map = payload_map(payload)?;
+            let track = require_track(map)?;
+            let offset_steps = require_number(map, "offset-steps")?;
+            app.set_focused_clip_offset(track, offset_steps)?;
+            Ok(format!("Clip start offset set to {offset_steps}"))
         }
         "arrangement-clip-resize" => {
             let map = payload_map(payload)?;
@@ -745,6 +798,16 @@ pub(super) fn handle(
             // A successful edit clears the latched rejection so the
             // arrangement banner disappears.
             app.song_edit_error = None;
+            // Every command here can move what the piano roll's clip-shaped
+            // surfaces read (focus-num-steps, the window overlay, the clip
+            // panel's Start/End/Offset) without moving the FOCUS itself —
+            // a clip resize/move/region edit changes the pinned clip's span
+            // and offset. These are one-shot edits, so an unconditional
+            // resync is cheap and keeps the overlay from going stale.
+            ctx.shared.ui_invalidations.push(UiInvalidation::PianoRoll {
+                track: ctx.shared.current_track.load(Ordering::Relaxed),
+                change: PianoRollInvalidation::Items,
+            });
             editor.handle_host_event(HostEvent::Status(status));
         }
         Err(error) => {

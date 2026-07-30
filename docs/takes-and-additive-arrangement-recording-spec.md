@@ -482,8 +482,15 @@ overrides per the existing consolidation rule.
 For each spliced row, every lane resolved from a launch that free-ran (all
 launches do, today — launch quantization or not, the pattern joins the
 global clock) gets a materialized override with
-`offset_steps = steps(row.start_beat) mod L` per 7.2, so committed playback
-reproduces the performance bit-exactly. Lanes inside the region that the
+`offset_steps = steps(row.start_beat - record_clock_origin) mod L` per 7.2,
+so committed playback reproduces the performance bit-exactly.
+`record_clock_origin` is the capture's `timeline_start_beat` — the
+arrangement beat at record-clock zero. The launched lanes audibly free-ran
+against the RECORD clock (zeroed where playback started, e.g. the cursor),
+not the arrangement timeline; stamping raw timeline beats rotates any
+pattern whose real cycle doesn't divide the start position (invisible on
+4-beat patterns recorded from a bar line, badly audible with timebase/sync
+p-locks). Lanes inside the region that the
 performer never touched inherit the pre-existing arrangement's resolution
 (and keep whatever offsets those clips already had) — the splice materializes
 them as overrides on the captured rows so scene-clears-overrides
@@ -634,10 +641,18 @@ independently shippable.
   session-only? Leaning serialize, matching mute/solo.
 - Should Back to Song also have per-track return (click the track's latch
   indicator) in V1, or global-only first?
-- `offset_steps` units under per-step timebase plocks: the spec defines the
-  mapping as the track's live beat→step function; confirm during Phase A
-  that swing plocks inside a pattern don't make `steps()` non-invertible in
-  a way that matters for resize-left stamping.
+- `offset_steps` units under per-step timebase plocks: RESOLVED. The
+  initial build stamped under the pattern's *base* timebase only, which
+  disagreed with the runtime's live-boundary resolution on plocked patterns
+  — anchored playback of an unquantized capture drifted against the
+  transport and sync plocks snapped to the wrong grid. Stamping now inverts
+  the real geometry (`PatternStepGeometry`: timebase plocks, sync waits,
+  cycle padding), the exact inverse of the runtime's `offset_beats`, so
+  `steps()` is the live mapping as 7.1 specifies. Positions inside a sync
+  wait interpolate across the whole inter-boundary span on both sides, so
+  the mapping stays a bijection. Swing plocks never participate: swing
+  offsets trigger sample times downstream of the boundary geometry, so it
+  cannot make `steps()` non-invertible.
 - Whether the dev harness in Phase C ("region → take") is worth promoting
   to a user feature (consolidate/flatten), which would also be the seed of
   comping.

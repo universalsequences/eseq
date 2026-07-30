@@ -659,7 +659,7 @@ pub(crate) fn build_song_bindings_snapshot(
         capture_failed: app.song_capture_failed,
         capture_error: app.song_capture_error.clone(),
         edit_error: app.song_edit_error.clone(),
-        manual_latch: app.state.song_manual_latch_mask() != 0,
+        manual_latch: app.state.song_manual_latch_mask() != 0 || app.state.song_scene_latch(),
         take_lane_states: song_take_lane_states(app),
         bound_clip: app
             .song_clip_selection

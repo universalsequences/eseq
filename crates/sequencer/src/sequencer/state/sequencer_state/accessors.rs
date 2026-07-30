@@ -264,6 +264,7 @@ impl SequencerState {
             quantized_launches: crate::quantized_launch::QuantizedLaunchMailbox::default(),
             song_playback: SongPlaybackMailbox::default(),
             song_manual_latch: AtomicU64::new(0),
+            song_scene_latch: AtomicBool::new(false),
             song_take_lane_mask: AtomicU64::new(0),
             sound_binding_borrowed: AtomicU64::new(0),
             sound_binding_patterns: Mutex::new(HashMap::new()),
@@ -451,6 +452,85 @@ impl SequencerState {
         Ok(scenes.take_pools[track].insert(name, chunk_ids, total_len_steps))
     }
 
+    /// Resize a take's playable length (takes spec 6.1 invariants preserved).
+    /// Growing past the current chunk coverage mints fresh chunks cloned from
+    /// an existing one with the step content cleared — cloning keeps the
+    /// per-chunk device snapshot in agreement (spec 16.4). Shrinking keeps
+    /// chunks that still hold notes (re-growing restores them) but drops
+    /// trailing chunks with no active steps, so a grow-then-shrink round trip
+    /// leaves the scenes exactly as they were.
+    pub(crate) fn resize_track_take(
+        &self,
+        track: usize,
+        take_id: TakeId,
+        new_len_steps: u32,
+    ) -> Result<(), String> {
+        if new_len_steps == 0 {
+            return Err("a take must keep a positive length".to_string());
+        }
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let take = scenes
+            .take_pools
+            .get(track)
+            .and_then(|takes| takes.get(take_id))
+            .ok_or_else(|| {
+                format!("take {} does not exist on track {}", take_id.0, track + 1)
+            })?;
+        let needed_chunks = (new_len_steps as usize).div_ceil(MAX_STEPS).max(1);
+        let template_id = *take.chunks.first().expect("takes always have a chunk");
+        let existing = take.chunks.len();
+        let mut minted = Vec::new();
+        if needed_chunks > existing {
+            let mut blank = scenes.track_pools[track]
+                .get(template_id)
+                .cloned()
+                .ok_or_else(|| {
+                    format!("take {}'s template chunk is missing from the pool", take_id.0)
+                })?;
+            blank.clear_step_content();
+            blank.track_params.num_steps = MAX_STEPS;
+            for _ in existing..needed_chunks {
+                minted.push(scenes.track_pools[track].insert(blank.clone()));
+            }
+        }
+        let doomed: Vec<PatternId> = {
+            let take = scenes.take_pools[track].get_mut(take_id).expect("located above");
+            take.chunks.extend(minted);
+            take.total_len_steps = new_len_steps;
+            let mut doomed = Vec::new();
+            while take.chunks.len() > needed_chunks {
+                doomed.push(*take.chunks.last().expect("longer than needed_chunks >= 1"));
+                take.chunks.pop();
+            }
+            doomed
+        };
+        // Only content-free chunks may leave, and only from the tail down:
+        // chunk order is positional (index i covers steps [i·256, (i+1)·256)),
+        // so a surviving chunk pins every chunk below it in place. Chunks that
+        // still hold notes stay claimed so re-growing the take restores them.
+        let mut kept = Vec::new();
+        for chunk in doomed {
+            // `doomed` is in pop order: highest chunk index first.
+            let empty = scenes.track_pools[track]
+                .get(chunk)
+                .is_some_and(|data| data.track_bits.iter().all(|word| *word == 0));
+            if empty && kept.is_empty() {
+                scenes.track_pools[track].remove(chunk);
+            } else {
+                kept.push(chunk);
+            }
+        }
+        if !kept.is_empty() {
+            kept.reverse();
+            scenes.take_pools[track]
+                .get_mut(take_id)
+                .expect("located above")
+                .chunks
+                .extend(kept);
+        }
+        Ok(())
+    }
+
     /// Remove a take and delete its chunk patterns from the pattern pool
     /// (takes spec 6.4). The caller owns removing song overrides that
     /// reference the take and committing the combined undo entry.
@@ -613,6 +693,16 @@ impl SequencerState {
         self.pattern.arrangement.lock().unwrap().clone()
     }
 
+    /// Borrow the committed arrangement in place. Per-frame readers (the
+    /// piano-roll focus playhead) must use this instead of
+    /// `committed_arrangement`, which deep-clones every lane on every call.
+    pub fn with_committed_arrangement<R>(
+        &self,
+        f: impl FnOnce(Option<&ProjectArrangement>) -> R,
+    ) -> R {
+        f(self.pattern.arrangement.lock().unwrap().as_ref())
+    }
+
     /// Clear the authored arrangement and its compiled song together.
     ///
     /// Project topology teardown must use this before removing tracks. An
@@ -690,6 +780,47 @@ impl SequencerState {
     /// (docs/song-mode-spec.md 5.5); the scenes lock is held only for `f`.
     pub fn with_project_scenes<R>(&self, f: impl FnOnce(&ProjectScenes) -> R) -> R {
         f(&self.pattern.scenes.lock().unwrap())
+    }
+
+    /// Read one pool pattern's stored data. `None` when the pattern is gone.
+    pub fn with_pool_pattern<R>(
+        &self,
+        track: usize,
+        pattern: PatternId,
+        f: impl FnOnce(&TrackPatternData) -> R,
+    ) -> Option<R> {
+        let scenes = self.pattern.scenes.lock().unwrap();
+        scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.get(pattern))
+            .map(f)
+    }
+
+    /// Targeted pool write seam (clip-edit-target spec 3.4): mutate one pool
+    /// pattern's stored data in place. Callers must only address patterns
+    /// that are NOT currently effective for `track` — the effective pattern's
+    /// truth is the live mirror, and writing its pool copy underneath it
+    /// would desync the two (the `capture_pattern_step_cells` rule). The
+    /// focus resolution guarantees this; gestures bail when it moves.
+    pub fn with_pool_pattern_mut<R>(
+        &self,
+        track: usize,
+        pattern: PatternId,
+        f: impl FnOnce(&mut TrackPatternData) -> R,
+    ) -> Option<R> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        debug_assert!(
+            scenes.effective_pattern_id(track) != Some(pattern),
+            "pool write addressed track {track}'s EFFECTIVE pattern {}; the live \
+             mirror owns it (clip-edit-target spec 3.4)",
+            pattern.0
+        );
+        scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(pattern))
+            .map(f)
     }
 
     /// Edit the committed song in place (topology remaps, future editing
@@ -792,15 +923,14 @@ impl SequencerState {
         scene_idx: usize,
         pattern: PatternId,
     ) {
-        let mapping = self.with_project_scenes(|scenes| {
+        let geometry = self.with_project_scenes(|scenes| {
             let data = scenes.track_pools.get(track)?.get(pattern)?;
-            let num_steps = data.track_params.num_steps.max(1);
-            let step_beats = data.track_params.timebase.step_beats(num_steps);
-            (step_beats > 0.0).then(|| (1.0 / step_beats, num_steps as f64))
+            Some(data.step_geometry())
         });
-        let Some((steps_per_beat, num_steps)) = mapping else {
+        let Some(geometry) = geometry else {
             return;
         };
+        let num_steps = geometry.num_steps() as f64;
         self.with_committed_song_mut(|song| {
             let Some(song) = song.as_mut() else {
                 return;
@@ -811,7 +941,7 @@ impl SequencerState {
                 {
                     continue;
                 }
-                let offset = (row.start_beat * steps_per_beat).rem_euclid(num_steps);
+                let offset = geometry.steps_at_beats(row.start_beat);
                 if offset < 1e-9 || offset > num_steps - 1e-9 {
                     continue;
                 }
@@ -909,11 +1039,54 @@ impl SequencerState {
             .scenes
             .lock()
             .unwrap()
-            .save_scene_snapshot(current_pattern, snapshot)
+            .save_scene_snapshot_masked(current_pattern, snapshot, self.stale_live_lane_mask())
+    }
+
+    /// Write one lane out of a scene-derived snapshot into the pattern that
+    /// lane currently resolves to (track override first, then the scene
+    /// cell). The per-track save-back sites below build their snapshot from
+    /// `scene_snapshot`, so every OTHER lane in it carries that scene's CELL
+    /// content; pushing the whole grid through `save_scene_snapshot_masked`
+    /// would write that cell content over any lane that has a track override
+    /// (a launched clip), destroying the pattern being played. A stale lane
+    /// with no override is skipped for the same reason the masked full-grid
+    /// save skips it.
+    fn save_scene_track_lane(
+        scenes: &mut ProjectScenes,
+        scene_idx: usize,
+        track: usize,
+        snapshot: &PatternSnapshot,
+        stale_mask: u64,
+    ) -> bool {
+        let Some(data) = snapshot.track_pattern_data(track) else {
+            return false;
+        };
+        let override_id = scenes.track_overrides.get(track).copied().flatten();
+        if track < 64 && stale_mask >> track & 1 == 1 && override_id.is_none() {
+            return false;
+        }
+        let Some(id) = override_id.or_else(|| {
+            scenes
+                .scenes
+                .get(scene_idx)
+                .and_then(|scene| scene.cells.get(track).copied().flatten())
+        }) else {
+            return false;
+        };
+        let Some(slot) = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(id))
+        else {
+            return false;
+        };
+        *slot = data;
+        true
     }
 
     pub fn save_current_track_midi_fx_snapshot(&self, track: usize) -> bool {
         let current_pattern = self.current_pattern_index();
+        let stale_mask = self.stale_live_lane_mask();
         let mut scenes = self.pattern.scenes.lock().unwrap();
         let Some(mut snapshot) = scenes.scene_snapshot(current_pattern) else {
             return false;
@@ -932,11 +1105,12 @@ impl SequencerState {
             .iter()
             .map(EffectSlotSnapshot::capture)
             .collect();
-        scenes.save_scene_snapshot(current_pattern, snapshot)
+        Self::save_scene_track_lane(&mut scenes, current_pattern, track, &snapshot, stale_mask)
     }
 
     pub fn save_current_track_effect_snapshot(&self, track: usize) -> bool {
         let current_pattern = self.current_pattern_index();
+        let stale_mask = self.stale_live_lane_mask();
         let mut scenes = self.pattern.scenes.lock().unwrap();
         let Some(mut snapshot) = scenes.scene_snapshot(current_pattern) else {
             return false;
@@ -952,7 +1126,7 @@ impl SequencerState {
         let effect_descriptors = self.scratch_effect_descriptors.lock().unwrap().clone();
         let instrument_descriptors = self.scratch_instrument_descriptors.lock().unwrap().clone();
         snapshot.refresh_process_binding_param_ids(&effect_descriptors, &instrument_descriptors);
-        scenes.save_scene_snapshot(current_pattern, snapshot)
+        Self::save_scene_track_lane(&mut scenes, current_pattern, track, &snapshot, stale_mask)
     }
 
     pub fn copy_current_effect_values_to_all_track_patterns(

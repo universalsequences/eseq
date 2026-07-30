@@ -136,7 +136,7 @@ impl App {
     /// Rule 1 candidate: the selection's source, dropped when it no longer
     /// exists (16.6 cause 4 — deleting the selected clip falls back without
     /// any explicit unbinding).
-    fn selected_bound_source(&self, track: usize) -> Option<BoundSource> {
+    pub(crate) fn selected_bound_source(&self, track: usize) -> Option<BoundSource> {
         // Dormant while the timeline is off screen (16.6): in the Seq tab
         // nothing renders the bound clip, so a selection silently owning the
         // device panel reads as the panel showing the wrong sound.
@@ -666,7 +666,8 @@ impl App {
             == Some(&crate::sequencer::InstrumentType::Rack)
         {
             self.push_rack_slot_instrument_defaults_for_track(track);
-        } else if !self.is_sampler_track(track) {
+        } else if !self.is_sampler_track(track) && !self.instrument_defaults_push_would_stomp(track)
+        {
             self.push_instrument_defaults_for_track(track);
         }
     }

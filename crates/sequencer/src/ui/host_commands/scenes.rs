@@ -552,7 +552,7 @@ pub(super) fn handle(
                     &expanded_step_projection,
                 );
             }
-            sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
+            sync_piano_roll_state(rt, app, &state, ct, &piano_roll_selection);
             sync_step_param_lists(rt, &state, ct);
             sync_track_mixer_state(rt, &app, &state);
             sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
@@ -729,7 +729,7 @@ pub(super) fn handle(
                         }
                         sync_expanded_elapsed = started.elapsed();
                         let started = Instant::now();
-                        sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
+                        sync_piano_roll_state(rt, app, &state, ct, &piano_roll_selection);
                         sync_piano_elapsed = started.elapsed();
                         let started = Instant::now();
                         sync_step_param_lists(rt, &state, ct);

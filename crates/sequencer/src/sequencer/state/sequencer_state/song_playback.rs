@@ -30,9 +30,10 @@ enum LaneResolution {
     Pattern {
         id: PatternId,
         offset_steps: f64,
-        /// `(steps_per_beat, num_steps)` under the pattern's base timebase —
-        /// the `steps()` mapping offsets are stamped in (takes spec 7.2).
-        mapping: (f64, f64),
+        /// The pattern's real beat↔step geometry (per-step timebase and sync
+        /// plocks included) — the `steps()` mapping offsets are stamped and
+        /// advanced in (takes spec 7.1/7.2).
+        geometry: PatternStepGeometry,
     },
     Take {
         id: TakeId,
@@ -142,18 +143,10 @@ impl SequencerState {
                                         id.0
                                     )
                                 })?;
-                            let num_steps = data.track_params.num_steps.max(1) as usize;
-                            let step_beats =
-                                data.track_params.timebase.step_beats(num_steps);
-                            let mapping = if step_beats > 0.0 {
-                                (1.0 / step_beats, num_steps as f64)
-                            } else {
-                                (0.0, num_steps as f64)
-                            };
                             LaneResolution::Pattern {
                                 id,
                                 offset_steps,
-                                mapping,
+                                geometry: data.step_geometry(),
                             }
                         }
                         LaneSource::Take(take_id) => {
@@ -277,11 +270,19 @@ impl SequencerState {
                             LaneResolution::Pattern {
                                 id,
                                 offset_steps,
-                                mapping: (steps_per_beat, num_steps),
+                                geometry,
                             } => {
-                                let advanced = if delta_beats > 0.0 && *steps_per_beat > 0.0 {
-                                    snap_steps(offset_steps + delta_beats * steps_per_beat)
-                                        .rem_euclid(*num_steps)
+                                let advanced = if delta_beats > 0.0 {
+                                    // Advance in the pattern's real geometry,
+                                    // snap before wrapping (boundary-coincident
+                                    // rows must land exactly on the step), then
+                                    // wrap through the one shared window helper
+                                    // (clip-edit-target spec 5.1).
+                                    pattern_play_step(
+                                        snap_steps(geometry.advance(*offset_steps, delta_beats)),
+                                        0.0,
+                                        (0.0, geometry.num_steps() as f64),
+                                    )
                                 } else {
                                     *offset_steps
                                 };
@@ -423,6 +424,23 @@ impl SequencerState {
         self.song_manual_latch.load(Ordering::Acquire)
     }
 
+    /// Bitmask of lanes whose live-grid content does not belong to the
+    /// current scene: song-latched lanes (the performer's launch is live
+    /// there) and scene-silenced lanes (an explicit-empty row override left
+    /// stale content in the live grid on purpose — see the mirror comment in
+    /// `apply_song_row_latched`). Pass this to `save_scene_snapshot_masked`
+    /// so a live-grid save-back never clones foreign content over a scene
+    /// cell's real pattern.
+    pub fn stale_live_lane_mask(&self) -> u64 {
+        let mut mask = self.song_manual_latch_mask();
+        for track in 0..self.pattern.scene_silenced.len().min(64) {
+            if self.is_scene_silenced(track) {
+                mask |= 1 << track;
+            }
+        }
+        mask
+    }
+
     /// Latch specific tracks (a manual track launch during song playback).
     pub fn latch_song_manual_override(&self, tracks: impl IntoIterator<Item = usize>) {
         let mut bits = 0u64;
@@ -534,12 +552,27 @@ impl SequencerState {
     /// Latch every track (a manual scene launch latches globally, spec 10).
     pub fn latch_song_manual_override_all(&self, track_count: usize) {
         self.latch_song_manual_override(0..track_count.min(64));
+        self.latch_song_scene_override();
+    }
+
+    /// Scene-scoped latch (spec 10): a manual SCENE launch suspends the
+    /// song's scene-level authority too — the row mirror must leave the
+    /// current scene, the `current_pattern` atomic, and the bus pattern with
+    /// the performer (scene-keyed reactive bindings and bus/group fx recall
+    /// hang off them and would audibly re-apply the row's scene).
+    pub fn latch_song_scene_override(&self) {
+        self.song_scene_latch.store(true, Ordering::Release);
+    }
+
+    pub fn song_scene_latch(&self) -> bool {
+        self.song_scene_latch.load(Ordering::Acquire)
     }
 
     /// Back to Song / punch-out: the song resumes launch authority for
     /// every lane (takes spec 10). Transient state; never serialized.
     pub fn clear_song_manual_latch(&self) {
         self.song_manual_latch.store(0, Ordering::Release);
+        self.song_scene_latch.store(false, Ordering::Release);
         // Every caller is a transport boundary (stop, cancel, punch-out) or
         // Back to Song, which re-applies the current row immediately after
         // (recomputing the mask) — so the take-lane bits reset here too.

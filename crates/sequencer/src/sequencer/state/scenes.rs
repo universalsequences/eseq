@@ -250,6 +250,23 @@ impl ProjectScenes {
     }
 
     pub fn save_scene_snapshot(&mut self, scene_idx: usize, snapshot: PatternSnapshot) -> bool {
+        self.save_scene_snapshot_masked(scene_idx, snapshot, 0)
+    }
+
+    /// Save a live-grid snapshot into a scene, skipping lanes whose live
+    /// content does not belong to that scene. A set bit in `stale_mask`
+    /// marks such a lane (song-latched or row-silenced): its live grid holds
+    /// performer/leftover content, and writing it through the scene cell
+    /// would overwrite an unrelated pool pattern with a clone of whatever
+    /// happens to be live. A stale lane is still saved when a track override
+    /// pins its own pattern id — that write is a self-write into the pattern
+    /// the lane is actually playing.
+    pub fn save_scene_snapshot_masked(
+        &mut self,
+        scene_idx: usize,
+        snapshot: PatternSnapshot,
+        stale_mask: u64,
+    ) -> bool {
         while self.track_pools.len() < snapshot.track_bits.len() {
             self.track_pools.push(TrackPatternPool::default());
             self.take_pools.push(TrackTakePool::default());
@@ -280,14 +297,27 @@ impl ProjectScenes {
             let Some(data) = snapshot.track_pattern_data(track) else {
                 continue;
             };
-            let Some(id) = self
+            let resolved = self
                 .track_overrides
                 .get(track)
                 .copied()
                 .flatten()
                 .or_else(|| scene.cells.get(track).copied().flatten())
-                .filter(|id| self.track_pools[track].contains(*id))
-            else {
+                .filter(|id| self.track_pools[track].contains(*id));
+            // A stale lane holds foreign content: skip it so the save-back
+            // never clones it over the pattern the cell really points at. A
+            // track override pins the lane's own pattern id, so that write is
+            // a self-write and stays allowed. A lane that resolves to nothing
+            // has no pattern to clobber, so it still falls through to the
+            // lazy bare-track materialization below.
+            if track < 64
+                && stale_mask >> track & 1 == 1
+                && self.track_overrides.get(track).copied().flatten().is_none()
+                && resolved.is_some()
+            {
+                continue;
+            }
+            let Some(id) = resolved else {
                 // Bare track (takes spec 11.1): no pattern exists anywhere
                 // for this lane — the pool is EMPTY, which distinguishes a
                 // bare track from a deliberately cleared cell (cleared

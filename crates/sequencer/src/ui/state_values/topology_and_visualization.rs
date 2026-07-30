@@ -111,7 +111,7 @@ pub(crate) fn sync_track_topology_state(
         state.pattern.track_params[current_track_idx].get_num_steps(),
     );
     rt.set_reactive("SEQ", "steps", build_steps_value(state, current_track_idx));
-    sync_piano_roll_state(rt, state, current_track_idx, piano_roll_selection);
+    sync_piano_roll_state(rt, app, state, current_track_idx, piano_roll_selection);
     sync_step_param_lists(rt, state, current_track_idx);
     sync_track_mixer_state(rt, app, state);
     sync_bus_mixer_state(rt, app);

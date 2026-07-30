@@ -9963,6 +9963,65 @@ fn focused_timeline_delete_emits_delete_items_action() {
     assert_eq!(super::get_first_list_number(&action, "ids"), Some(10.0));
 }
 
+/// A clicked clip is published on BOTH per-lane channels (a click selects and
+/// binds the sound), so the widget must dedup them: two copies of the id here
+/// meant Backspace emitted two :delete-items for one clip — the first delete
+/// succeeded and the second errored on the already-gone id.
+#[test]
+fn focused_timeline_delete_dedups_selected_and_bound_channel_ids() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(30, 8);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :focusable true
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list (dict :id 10 :lane 0 :start 4 :end 8))
+                    :selected-id 10
+                    :bound-id 10
+                    :view-start 0
+                    :view-duration 16
+                    :snap 1
+                    :on-action |e| (set! last-action e)))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(30, 8);
+
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 11, 2),
+        1,
+        1,
+        30,
+        8,
+    );
+    editor.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+
+    let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+    assert_eq!(
+        super::get_map_field_keyword(&action, "type"),
+        Some("delete-items".to_string())
+    );
+    let Value::Map(map) = &action else {
+        panic!("delete action is a map");
+    };
+    let ids = map.get("ids").expect("action carries :ids");
+    let Value::List(ids) = &*ids.borrow() else {
+        panic!(":ids is a list");
+    };
+    assert_eq!(ids.len(), 1, "the selected+bound clip is named exactly once");
+    assert!(
+        matches!(&*ids[0].borrow(), Value::Number(n) if *n == 10.0),
+        "the one id is the clip's"
+    );
+}
+
 #[test]
 fn focused_timeline_cmd_a_emits_select_all_action() {
     let runtime = Runtime::new();

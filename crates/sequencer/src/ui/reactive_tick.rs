@@ -84,11 +84,14 @@ pub(crate) fn reactive_tick_and_render(
             ));
             ctx.meters.cached_track_peak_levels =
                 read_track_peak_levels(app.graph.lg, &ctx.shared.track_pan_ids.lock().unwrap());
-            ctx.meters.cached_rack_slot_peak_levels = read_rack_slot_peak_levels(app.graph.lg, &app);
+            ctx.meters.cached_rack_slot_peak_levels =
+                read_rack_slot_peak_levels(app.graph.lg, &app);
             ctx.meters.cached_bus_peak_levels =
                 read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
-            (ctx.meters.cached_modulator_phases, ctx.meters.cached_modulator_levels) =
-                read_modulator_display_values(app.graph.lg, &app);
+            (
+                ctx.meters.cached_modulator_phases,
+                ctx.meters.cached_modulator_levels,
+            ) = read_modulator_display_values(app.graph.lg, &app);
             ctx.meters.last_meter_poll_at = Instant::now();
         }
         let mut needs_reactive_cycle = false;
@@ -174,7 +177,13 @@ pub(crate) fn reactive_tick_and_render(
                 );
             }
             rt.set_reactive("SEQ", "steps", build_steps_value(&ctx.shared.state, ct));
-            sync_piano_roll_state(rt, &ctx.shared.state, ct, &ctx.shared.piano_roll_selection);
+            sync_piano_roll_state(
+                rt,
+                &app,
+                &ctx.shared.state,
+                ct,
+                &ctx.shared.piano_roll_selection,
+            );
             sync_step_param_lists(rt, &ctx.shared.state, ct);
             sync_track_mixer_state(rt, &app, &ctx.shared.state);
             sync_bus_mixer_state(rt, &app);
@@ -185,7 +194,12 @@ pub(crate) fn reactive_tick_and_render(
             rt.set_reactive(
                 "SEQ",
                 "effects",
-                build_effects_value(&ctx.shared.state, ct, &app.graph.effect_descriptors, &ctx.shared.selected_steps),
+                build_effects_value(
+                    &ctx.shared.state,
+                    ct,
+                    &app.graph.effect_descriptors,
+                    &ctx.shared.selected_steps,
+                ),
             );
             rt.set_reactive(
                 "SEQ",
@@ -378,7 +392,11 @@ pub(crate) fn reactive_tick_and_render(
         if master_meter_visible && ctx.meters.cached_peak_l_level != ctx.frame.prev_peak_l_level {
             needs_reactive_cycle |= editor
                 .runtime_mut()
-                .set_reactive("SEQ", "master-peak-l", Value::Number(ctx.meters.cached_peak_l_level))
+                .set_reactive(
+                    "SEQ",
+                    "master-peak-l",
+                    Value::Number(ctx.meters.cached_peak_l_level),
+                )
                 .effects_dirty;
             ctx.frame.prev_peak_l_level = ctx.meters.cached_peak_l_level;
         }
@@ -388,7 +406,11 @@ pub(crate) fn reactive_tick_and_render(
         if master_meter_visible && ctx.meters.cached_peak_r_level != ctx.frame.prev_peak_r_level {
             needs_reactive_cycle |= editor
                 .runtime_mut()
-                .set_reactive("SEQ", "master-peak-r", Value::Number(ctx.meters.cached_peak_r_level))
+                .set_reactive(
+                    "SEQ",
+                    "master-peak-r",
+                    Value::Number(ctx.meters.cached_peak_r_level),
+                )
                 .effects_dirty;
             ctx.frame.prev_peak_r_level = ctx.meters.cached_peak_r_level;
         }
@@ -594,6 +616,65 @@ pub(crate) fn reactive_tick_and_render(
         ) {
             needs_reactive_cycle = true;
         }
+        // Edit-focus refresh (clip-edit-target spec 3): project the
+        // App-resolved target into the cell the `seq-piano-roll-action`
+        // native reads, and re-sync the piano roll whenever the focus itself
+        // moved — a clip bind/unbind, a scene launch changing the effective
+        // pattern under a pinned id, or a source dying (spec 3.3.1).
+        {
+            let focus = PianoRollFocusSpec::from_focus(app.track_edit_focus(ct));
+            let focus_changed = {
+                let mut cell = ctx.shared.piano_roll_focus.lock().unwrap();
+                std::mem::replace(&mut *cell, focus) != focus
+            };
+            // The clip-shaped surfaces (`focus-clip-*`, the window overlay,
+            // the clip-use label) are keyed off the clip SELECTION, not the
+            // resolved write focus: two clips over the same pool pattern both
+            // resolve `Pool(p)`, and a pinned clip whose pattern is the
+            // effective one resolves `Live`. Diff the selection identity —
+            // plus the committed-song revision, which moves whenever the
+            // clip's start/end/offset does — so a re-select never leaves the
+            // panel and the overlay on the previous clip's numbers.
+            let clip_surface_key = (
+                app.song_clip_selection
+                    .map(|selection| (selection.track, selection.clip_id.0)),
+                app.focus_clip_source_kind(ct),
+                ctx.shared.state.committed_song_revision(),
+            );
+            let clip_surface_changed = ctx.frame.prev_focus_clip_surface != clip_surface_key;
+            ctx.frame.prev_focus_clip_surface = clip_surface_key;
+            if focus_changed {
+                // The note set under the editor was just replaced, so any
+                // surviving selection would address the *new* source's ids
+                // (delete/nudge/move all act on the raw id set). Drop it the
+                // same way a track switch does.
+                let cleared_piano_selection = {
+                    let mut selection = ctx.shared.piano_roll_selection.lock().unwrap();
+                    let had_selection = !selection.is_empty();
+                    selection.clear();
+                    had_selection
+                };
+                *ctx.shared.piano_roll_move_state.lock().unwrap() = None;
+                if cleared_piano_selection {
+                    ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            if focus_changed || clip_surface_changed {
+                let rt = editor.runtime_mut();
+                sync_piano_roll_state(
+                    rt,
+                    &app,
+                    &ctx.shared.state,
+                    ct,
+                    &ctx.shared.piano_roll_selection,
+                );
+                needs_reactive_cycle = true;
+            }
+            if current_track_playhead_visible {
+                needs_reactive_cycle |=
+                    sync_piano_roll_playhead(editor.runtime_mut(), &app, ct, playhead as usize);
+            }
+        }
         let mirror_epoch = app.song_row_mirror_epoch;
         if (epoch != ctx.frame.prev_pattern_epoch
             || mirror_epoch != ctx.frame.prev_song_row_mirror_epoch)
@@ -634,7 +715,13 @@ pub(crate) fn reactive_tick_and_render(
             rt.set_reactive("SEQ", "steps", build_steps_value(&ctx.shared.state, ct));
             sync_current_steps_elapsed = started.elapsed();
             let started = Instant::now();
-            sync_all_track_sequencer_state(rt, &ctx.shared.state, &app, ct, &ctx.shared.selected_steps);
+            sync_all_track_sequencer_state(
+                rt,
+                &ctx.shared.state,
+                &app,
+                ct,
+                &ctx.shared.selected_steps,
+            );
             sync_sequencer_elapsed = started.elapsed();
             let started = Instant::now();
             if sequencer_visible {
@@ -649,7 +736,13 @@ pub(crate) fn reactive_tick_and_render(
             }
             sync_expanded_elapsed = started.elapsed();
             let started = Instant::now();
-            sync_piano_roll_state(rt, &ctx.shared.state, ct, &ctx.shared.piano_roll_selection);
+            sync_piano_roll_state(
+                rt,
+                &app,
+                &ctx.shared.state,
+                ct,
+                &ctx.shared.piano_roll_selection,
+            );
             sync_piano_elapsed = started.elapsed();
             let started = Instant::now();
             sync_step_param_lists(rt, &ctx.shared.state, ct);
@@ -781,7 +874,13 @@ pub(crate) fn reactive_tick_and_render(
                 rt.set_reactive("SEQ", "steps", build_steps_value(&ctx.shared.state, ct));
                 sync_step_param_lists(rt, &ctx.shared.state, ct);
                 if metal_visible || sequencer_visible {
-                    sync_all_track_sequencer_state(rt, &ctx.shared.state, &app, ct, &ctx.shared.selected_steps);
+                    sync_all_track_sequencer_state(
+                        rt,
+                        &ctx.shared.state,
+                        &app,
+                        ct,
+                        &ctx.shared.selected_steps,
+                    );
                 }
                 if sequencer_visible {
                     let _ = sync_all_expanded_step_viewports(
@@ -833,7 +932,13 @@ pub(crate) fn reactive_tick_and_render(
                     "selected-steps",
                     build_selection_value(&ctx.shared.selected_steps),
                 );
-                sync_piano_roll_state(rt, &ctx.shared.state, ct, &ctx.shared.piano_roll_selection);
+                sync_piano_roll_state(
+                    rt,
+                    &app,
+                    &ctx.shared.state,
+                    ct,
+                    &ctx.shared.piano_roll_selection,
+                );
                 rt.set_reactive(
                     "SEQ",
                     "step-has-plocks",
@@ -848,7 +953,11 @@ pub(crate) fn reactive_tick_and_render(
             rt.set_reactive(
                 "SEQ",
                 "delete-target-version",
-                Value::Number(ctx.shared.active_delete_target_version.load(Ordering::Relaxed) as f64),
+                Value::Number(
+                    ctx.shared
+                        .active_delete_target_version
+                        .load(Ordering::Relaxed) as f64,
+                ),
             );
             sync_mixer_delete_target_binding_fields(
                 rt,
@@ -999,11 +1108,9 @@ pub(crate) fn reactive_tick_and_render(
             if app.is_sampler_track(ct) {
                 let ph = read_sampler_playhead_seconds(&app, ct);
                 if ph > 0.0 {
-                    editor.runtime_mut().set_reactive(
-                        "SEQ",
-                        "sampler-playhead",
-                        Value::Number(ph),
-                    );
+                    editor
+                        .runtime_mut()
+                        .set_reactive("SEQ", "sampler-playhead", Value::Number(ph));
                     needs_reactive_cycle = true;
                 }
             }
@@ -1119,8 +1226,11 @@ pub(crate) fn reactive_tick_and_render(
 
     if editor.needs_redraw() && last_render_at.elapsed() >= inputs.frame_interval {
         let frame_build_started = Instant::now();
-        let tiled_frame =
-            eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, inputs.cols, inputs.rows);
+        let tiled_frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+            &mut editor,
+            inputs.cols,
+            inputs.rows,
+        );
         let frame_build_elapsed = frame_build_started.elapsed();
         let render_started = Instant::now();
         let render_status = backend

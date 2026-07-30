@@ -43047,6 +43047,10 @@
                 ("song-bound-clip", Value::Nil),
                 ("track-colors", test_track_colors()),
                 ("tp-num-steps", Value::Number(16.0)),
+                ("focus-num-steps", Value::Number(16.0)),
+                ("focus-label", Value::String(String::new())),
+                ("focus-live", Value::Bool(true)),
+                ("piano-roll-playhead", Value::Number(-1.0)),
                 ("piano-roll-lanes", build_piano_roll_lanes_value()),
                 ("piano-roll-items", Value::List(vec![])),
                 ("piano-roll-selection", Value::List(vec![])),
@@ -43078,7 +43082,18 @@
         let layout = editor
             .widget_layout()
             .expect("piano roll should have a widget layout");
-        assert_eq!(layout.widget_type, "timeline");
+        // The buffer wraps a clip-panel + timeline row (clip-edit-target
+        // spec 4.4/6); the timeline itself keeps every prop below.
+        assert_eq!(layout.widget_type, "box");
+        fn find_timeline(
+            node: &eseqlisp::layout::LayoutNode,
+        ) -> Option<&eseqlisp::layout::LayoutNode> {
+            if node.widget_type == "timeline" {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_timeline)
+        }
+        let layout = find_timeline(&layout).expect("timeline inside the piano-roll stack");
         let expected_track_color = test_number_list(&[0.96, 0.28, 0.52]);
         assert_eq!(
             layout.props.get("item-color"),
@@ -43129,7 +43144,7 @@
                 .runtime_mut()
                 .eval_str("piano-roll-lane-scroll")
                 .expect("read empty piano roll lane scroll"),
-            Some(Value::Number(39.0)),
+            Some(Value::Number(40.0)),
             "empty piano roll should center C4 at the default lower-pane height"
         );
         assert_eq!(
@@ -43137,7 +43152,7 @@
                 .runtime_mut()
                 .eval_str("(piano-roll-max-lane-scroll)")
                 .expect("read default piano roll max lane scroll"),
-            Some(Value::Number(78.0)),
+            Some(Value::Number(80.0)),
             "default lower-pane height should allow scrolling below C4"
         );
         editor
@@ -43161,6 +43176,7 @@
         let layout = editor
             .widget_layout()
             .expect("piano roll should still have a widget layout");
+        let layout = find_timeline(&layout).expect("timeline inside the piano-roll stack");
         assert_eq!(
             layout.props.get("create-duration"),
             Some(&Value::Number(2.5)),
@@ -43174,6 +43190,7 @@
         let layout = editor
             .widget_layout()
             .expect("piano roll should still have a widget layout");
+        let layout = find_timeline(&layout).expect("timeline inside the piano-roll stack");
         assert_eq!(
             layout.props.get("create-duration"),
             Some(&Value::Number(3.25)),
@@ -43187,6 +43204,7 @@
         let layout = editor
             .widget_layout()
             .expect("piano roll should still have a widget layout");
+        let layout = find_timeline(&layout).expect("timeline inside the piano-roll stack");
         assert_eq!(
             layout.props.get("cursor-time"),
             Some(&Value::Number(4.5)),
@@ -43284,7 +43302,7 @@
                 .runtime_mut()
                 .eval_str("piano-roll-lane-scroll")
                 .expect("read fitted piano roll lane scroll"),
-            Some(Value::Number(31.0))
+            Some(Value::Number(32.0))
         );
     }
 
@@ -43327,7 +43345,7 @@
         state.pattern.patterns[track].set_step_active(step, true);
         runtime.set_reactive("SEQ", "current-track", Value::Number(track as f64));
 
-        sync_piano_roll_state(&mut runtime, &state, track, &selection);
+        sync_piano_roll_note_state(&mut runtime, &PianoRollLanes::live(&state, track), &selection);
 
         assert_eq!(
             runtime
@@ -43351,7 +43369,7 @@
             runtime
                 .eval_str("piano-roll-lane-scroll")
                 .expect("read fitted lane scroll after sync"),
-            Some(Value::Number(39.0))
+            Some(Value::Number(40.0))
         );
     }
 
@@ -43397,7 +43415,7 @@
             ("end", Value::Number(5.5)),
         ]);
         assert!(piano_roll_action_mutates_pattern(&action));
-        apply_piano_roll_action(&state, 0, &piano_roll_selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, 0), &piano_roll_selection, &move_state, &action)
             .expect("create piano roll note");
 
         sync_single_track_sequencer_state(
@@ -43479,7 +43497,7 @@
             ("time", Value::Number(4.0)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("resize action");
 
         assert_eq!(state.pattern.chord_data[track].get_duration(step, 0), 2.0);
@@ -43511,7 +43529,7 @@
             ("duration-delta", Value::Number(1.0)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("resize action");
 
         assert_eq!(
@@ -43538,7 +43556,7 @@
             ("end", Value::Number(3.5)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("create action");
 
         assert!(state.pattern.patterns[track].is_active(2));
@@ -43551,7 +43569,7 @@
         assert_eq!(state.pattern.chord_data[track].get_delay(2, 0), 0.5);
         assert_eq!(state.pattern.step_data[track].get(2, StepParam::Delay), 0.0);
 
-        let items = build_piano_roll_items_value(&state, track, &selection);
+        let items = build_piano_roll_items_value(&PianoRollLanes::live(&state, track), &selection);
         let Value::List(items) = items else {
             panic!("expected item list");
         };
@@ -43586,7 +43604,7 @@
             ("lane", Value::Number(48.0)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("move action");
 
         assert!(!state.pattern.patterns[track].is_active(2));
@@ -43614,7 +43632,7 @@
                 ("start", Value::Number(start)),
                 ("end", Value::Number(start + 1.0)),
             ]);
-            apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+            apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
                 .expect("create action");
         }
 
@@ -43649,8 +43667,7 @@
             ),
         ]);
         apply_piano_roll_action_with_clipboard(
-            &state,
-            track,
+            &PianoRollLanes::live(&state, track),
             &selection,
             &move_state,
             &clipboard,
@@ -43663,8 +43680,7 @@
             ("time", Value::Number(4.5)),
         ]);
         apply_piano_roll_action_with_clipboard(
-            &state,
-            track,
+            &PianoRollLanes::live(&state, track),
             &selection,
             &move_state,
             &clipboard,
@@ -43713,7 +43729,7 @@
             ("delta-lane", Value::Number(0.0)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("nudge action");
 
         assert!(!state.pattern.patterns[track].is_active(step));
@@ -43752,7 +43768,7 @@
             ("delta-lane", Value::Number(0.0)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("nudge action");
 
         assert_eq!(state.pattern.chord_data[track].count(step), 1);
@@ -43792,7 +43808,7 @@
             ("duration-delta", Value::Number(1.0)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("resize action");
 
         let mut durations_by_transpose = (0..state.pattern.chord_data[track].count(step))
@@ -43846,9 +43862,9 @@
             ("duration-delta", Value::Number(-1.0)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &first)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &first)
             .expect("first resize action");
-        apply_piano_roll_action(&state, track, &selection, &move_state, &second)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &second)
             .expect("second resize action");
 
         let mut durations_by_transpose = (0..state.pattern.chord_data[track].count(step))
@@ -43890,7 +43906,7 @@
             ),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("delete action");
 
         assert_eq!(state.pattern.chord_data[track].count(step), 1);
@@ -43918,7 +43934,7 @@
             ),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("delete action");
 
         assert_eq!(state.pattern.chord_data[track].count(step), 2);
@@ -43936,7 +43952,7 @@
         state.pattern.patterns[track].set_step_active(step, true);
         state.pattern.step_data[track].set(step, StepParam::Duration, 0.5);
 
-        let items = build_piano_roll_items_value(&state, track, &selection);
+        let items = build_piano_roll_items_value(&PianoRollLanes::live(&state, track), &selection);
         let Value::List(items) = items else {
             panic!("expected item list");
         };
@@ -43954,7 +43970,7 @@
             ("time", Value::Number(2.125)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("resize action");
 
         assert_eq!(
@@ -43979,7 +43995,7 @@
             ("lane-b", Value::Number(1.0)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("marquee action");
 
         assert!(selection.lock().unwrap().is_empty());
@@ -44002,7 +44018,7 @@
             ("time", Value::Number(2.125)),
         ]);
 
-        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+        apply_piano_roll_action(&PianoRollLanes::live(&state, track), &selection, &move_state, &action)
             .expect("resize action");
 
         assert_eq!(

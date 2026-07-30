@@ -182,6 +182,22 @@ struct TimelineView {
     content_length: Option<f64>,
     content_length_min: f64,
     content_length_max: f64,
+    /// Dragging the loop band's BODY slides the loop window (clip-edit-target
+    /// spec 5.1: band-body drag = slide window; today ≡ phase shift). Off by
+    /// default; the piano roll opts in.
+    band_slide: bool,
+    /// Emit `:double-click-item` for a title-bar double-click (clip-edit
+    /// target spec 4). Opt-in per instance: an instance that does not handle
+    /// it (the scene lane) must NOT have the event consumed, or the second
+    /// press would silently stop starting its drag gesture.
+    double_click_items: bool,
+    /// Loop-window overlay over the header band (clip-edit-target spec 5):
+    /// a start marker at the source step under the clip's left edge…
+    window_marker: Option<f64>,
+    /// …the played window when the clip span is shorter than the source…
+    window_span: Option<(f64, f64)>,
+    /// …or a repeat-count badge when the span covers several passes.
+    window_repeat: Option<f64>,
     time_ruler: Option<TimeRuler>,
     playhead_time: Option<f64>,
     cursor_time: Option<f64>,
@@ -923,6 +939,82 @@ fn build_metal_primitives(
                     bg: theme::STATUS_BG(),
                 },
             ));
+        }
+        // Loop-window overlay (clip-edit-target spec 5): the played window
+        // and its start marker over the band, or a repeat-count badge when
+        // the clip span covers several passes of the source.
+        if let Some((_, y, _, height)) = loop_band {
+            let content_len = view.content_length.unwrap_or(0.0);
+            let view_end = view.view_start + view.view_duration;
+            let mut band_segment = |seg_start: f64, seg_end: f64, alpha: f32| {
+                let seg_start = seg_start.max(view.view_start).max(0.0);
+                let seg_end = seg_end.min(content_len).min(view_end);
+                if seg_end <= seg_start {
+                    return;
+                }
+                let x0 = view.x_for_time(seg_start).max(content.col);
+                let x1 = view
+                    .x_for_time(seg_end)
+                    .min(content.col + content.width);
+                if x1 <= x0 {
+                    return;
+                }
+                primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                    x: x0,
+                    y,
+                    width: x1 - x0,
+                    height,
+                    color: crate::backend::Color {
+                        a: alpha,
+                        ..view.loop_color
+                    },
+                }));
+            };
+            if let Some((span_start, span_end)) = view.window_span {
+                // The window may wrap past the source end (the phase offset
+                // slid it): draw the tail from 0.
+                band_segment(span_start, span_end.min(content_len), 0.34);
+                if span_end > content_len {
+                    band_segment(0.0, span_end - content_len, 0.34);
+                }
+            }
+            if let Some(marker) = view.window_marker {
+                if marker >= view.view_start && marker < view_end && marker < content_len {
+                    let x = view.x_for_time(marker);
+                    if x >= content.col && x <= content.col + content.width {
+                        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                            x: x - 0.09,
+                            y,
+                            width: 0.18,
+                            height,
+                            color: crate::backend::Color {
+                                a: 1.0,
+                                ..view.loop_color
+                            },
+                        }));
+                    }
+                }
+            }
+            if let Some(repeat) = view.window_repeat {
+                let text = format!("×{}", repeat.round() as i64);
+                let band_end = view
+                    .x_for_time(content_len.min(view_end))
+                    .min(content.col + content.width);
+                primitives.push(MetalPrimitive::ProportionalText(
+                    MetalProportionalTextPrimitive {
+                        row: y + (height - 0.86).max(0.0) * 0.5,
+                        col: (band_end - text.chars().count() as f32 * 0.62 - 0.3)
+                            .max(content.col),
+                        align_width: 0.0,
+                        h_align: 0.0,
+                        text,
+                        font_size: 10.0,
+                        scale: 1.0,
+                        fg: theme::FG_MUTED(),
+                        bg: theme::STATUS_BG(),
+                    },
+                ));
+            }
         }
         if let Some((x, y, width, height)) = loop_band {
             let border_color = crate::backend::Color {
@@ -1790,9 +1882,18 @@ fn item_cycle_separator_xs(
     item: &TimelineItem,
     viewport: super::WidgetViewport,
 ) -> Vec<f32> {
-    let Some(TimelineItemContent::Dots { cycle, phase, .. }) = &item.content else {
+    let Some(TimelineItemContent::Dots {
+        cycle, phase, wrap, ..
+    }) = &item.content
+    else {
         return Vec::new();
     };
+    // Non-wrapping content (takes) plays its source exactly once: there are
+    // no repeat play-throughs, so there is no loop boundary to cue — an item
+    // stretched past the source end is silence, not another pass.
+    if !wrap {
+        return Vec::new();
+    }
     let span = item.end - item.start;
     if span <= 0.0 {
         return Vec::new();
@@ -1903,7 +2004,10 @@ fn push_item_content_primitives(
     }
     match &item.content {
         Some(TimelineItemContent::Dots {
-            dots, cycle, phase, ..
+            dots,
+            cycle,
+            phase,
+            wrap,
         }) => {
             let span = item.end - item.start;
             if span <= 0.0 {
@@ -1960,7 +2064,14 @@ fn push_item_content_primitives(
             };
             // One partial source cycle can straddle the left edge, hence the
             // extra iteration beyond the number of complete visible cycles.
-            let repetitions = (1.0 / cycle).ceil().min(512.0) as usize + 1;
+            // Non-wrapping content (takes) never repeats: one pass only, so
+            // the stretch past the source end stays visibly empty — extending
+            // a take must read as growth, not looping.
+            let repetitions = if *wrap {
+                (1.0 / cycle).ceil().min(512.0) as usize + 1
+            } else {
+                1
+            };
             for index in 0..repetitions {
                 for dot in dots {
                     let offset = (dot.offset - phase + index as f64) * cycle;
@@ -2046,6 +2157,28 @@ impl TimelineView {
                 .map(|length| length.max(0.0)),
             content_length_min: get_num(props, "content-length-min", 1.0).max(0.0),
             content_length_max: get_num(props, "content-length-max", 256.0).max(1.0),
+            band_slide: props
+                .get("band-slide")
+                .and_then(as_bool)
+                .unwrap_or(false),
+            double_click_items: props
+                .get("double-click-items")
+                .and_then(as_bool)
+                .unwrap_or(false),
+            window_marker: props
+                .get("window-marker")
+                .and_then(as_number)
+                .filter(|marker| *marker >= 0.0),
+            window_span: props.get("window-span").and_then(|value| {
+                let Value::List(items) = value else { return None };
+                let start = as_number(&items.first()?.borrow())?;
+                let end = as_number(&items.get(1)?.borrow())?;
+                (end > start).then_some((start, end))
+            }),
+            window_repeat: props
+                .get("window-repeat")
+                .and_then(as_number)
+                .filter(|count| *count > 1.0),
             time_ruler: props
                 .get("time-ruler")
                 .and_then(get_map)
@@ -2161,14 +2294,22 @@ impl TimelineView {
     /// edge clamps to [0, end-1] and re-anchors the content phase by the
     /// split rule (patterns wrap, takes clamp at zero).
     fn apply_bound_channels(&mut self, props: &HashMap<String, Value>) {
-        let selected_id = get_num(props, "selected-id", -1.0);
-        if selected_id >= 0.0 {
-            self.selection.push(Value::Number(selected_id));
-        }
-        let bound_id = get_num(props, "bound-id", -1.0);
-        if bound_id >= 0.0 {
-            self.selection.push(Value::Number(bound_id));
-        }
+        // A clicked clip is usually BOTH channels (a click selects and binds
+        // the sound), so pushing without the dedup would hold the same id
+        // twice — and Backspace would emit two :delete-items for one clip,
+        // deleting it and then erroring on the second, already-gone id.
+        let mut select = |id: f64| {
+            if id >= 0.0
+                && !self
+                    .selection
+                    .iter()
+                    .any(|existing| matches!(existing, Value::Number(n) if *n == id))
+            {
+                self.selection.push(Value::Number(id));
+            }
+        };
+        select(get_num(props, "selected-id", -1.0));
+        select(get_num(props, "bound-id", -1.0));
         let ghost_region_a = get_num(props, "ghost-region-a", f64::NAN);
         let ghost_region_b = get_num(props, "ghost-region-b", f64::NAN);
         let ghost_kind = get_num(props, "ghost-kind", 0.0);
@@ -2288,6 +2429,20 @@ impl TimelineView {
             return None;
         }
         Some((x, self.rect.row, width, self.rect.height))
+    }
+
+    /// The loop band's vertical extent inside the header — the SAME geometry
+    /// the metal renderer draws (clip-edit-target spec 5.1: band-BODY drag =
+    /// slide window; the ruler rows above the band must keep scrubbing).
+    fn loop_band_rows(&self) -> Option<(f32, f32)> {
+        let chrome = (self.header_height - self.header_bottom_gutter).max(0.0);
+        if chrome <= 0.2 {
+            return None;
+        }
+        let y = self.rect.row + (chrome * 0.55).min(chrome - 0.18);
+        let bottom_inset = 0.08_f32.min(chrome * 0.12);
+        let height = (chrome - (y - self.rect.row) - bottom_inset).max(0.12);
+        Some((y, y + height))
     }
 
     fn loop_band_rect(&self) -> Option<(f32, f32)> {
@@ -2971,7 +3126,27 @@ impl TimelineView {
                     ("lane", Value::Number(current_lane as f64)),
                     ("row", Value::Number(local_row as f64)),
                 ])),
-                HitRegion::Header => Some(map_value(vec![("kind", keyword(":scrub"))])),
+                HitRegion::Header => {
+                    // With band-slide enabled, a drag starting inside the
+                    // loop band slides the loop window (clip-edit-target
+                    // spec 5.1) instead of scrubbing; the plain click still
+                    // parks the cursor via pointer-down as before.
+                    let raw_time = self.time_at_col(local_col);
+                    let in_band = self
+                        .content_length
+                        .is_some_and(|length| raw_time >= 0.0 && raw_time < length)
+                        && self
+                            .loop_band_rows()
+                            .is_some_and(|(top, bottom)| local_row >= top && local_row < bottom);
+                    if self.band_slide && in_band {
+                        Some(map_value(vec![
+                            ("kind", keyword(":slide-band")),
+                            ("anchor-time", Value::Number(raw_time)),
+                        ]))
+                    } else {
+                        Some(map_value(vec![("kind", keyword(":scrub"))]))
+                    }
+                }
                 HitRegion::Sidebar { lane } => Some(map_value(vec![
                     ("kind", keyword(":sidebar")),
                     ("lane", Value::Number(lane as f64)),
@@ -3088,6 +3263,19 @@ impl TimelineView {
                     ("end", Value::Number(start + default_duration)),
                 ]))
             }
+            // Title bar only (clip-edit-target spec 4, locked decision 5):
+            // "the top part of the clip" opens its editor. Body and edge hits
+            // keep returning None so a body double-click starts nothing, and
+            // instances that never handle the action (the scene lane) opt
+            // out entirely so the press still starts its normal gesture.
+            HitRegion::ItemTitleBar { item } if self.double_click_items => Some(action_map(vec![
+                ("type", keyword(":double-click-item")),
+                ("ids", list_value(vec![item.id])),
+                (
+                    "time",
+                    Value::Number(self.cursor_snap_time(self.time_at_col(local_col))),
+                ),
+            ])),
             _ => None,
         }
     }
@@ -3222,6 +3410,13 @@ impl TimelineView {
                 Some(action_map(vec![
                     ("type", keyword(":resize-content-length")),
                     ("length", Value::Number(length)),
+                ]))
+            }
+            Some(Value::Keyword(kind)) if kind == "slide-band" => {
+                let anchor = as_number(gesture.get("anchor-time")?)?;
+                Some(action_map(vec![
+                    ("type", keyword(":slide-band")),
+                    ("delta-time", Value::Number(raw_time - anchor)),
                 ]))
             }
             Some(Value::Keyword(kind)) if kind == "marquee" => {
@@ -3563,6 +3758,17 @@ impl TimelineView {
                 Some(action_map(vec![
                     ("type", keyword(":finish-resize-content-length")),
                     ("length", Value::Number(length)),
+                ]))
+            }
+            // Terminal for a band slide: one action with the TOTAL delta, so
+            // the host lowers the whole drag to a single undoable primitive
+            // (clip-edit-target spec 5: slide = phase edit).
+            Some(Value::Keyword(kind)) if kind == "slide-band" => {
+                let anchor = as_number(gesture.get("anchor-time")?)?;
+                let raw_time = self.time_at_col(local_col);
+                Some(action_map(vec![
+                    ("type", keyword(":finish-slide-band")),
+                    ("delta-time", Value::Number(raw_time - anchor)),
                 ]))
             }
             _ => None,
@@ -5205,6 +5411,107 @@ mod tests {
         );
     }
 
+    /// A take stretched past its source end (`:wrap false`, cycle < 1 —
+    /// e.g. the grow-resize ghost) must read as GROWTH: one pass of dots,
+    /// no tiled repeats, no loop-boundary segmentation.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn non_wrapping_take_content_never_tiles_dots_or_loop_segments() {
+        let props = HashMap::from([
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(1.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(12.0)),
+                    (
+                        "content",
+                        map_value_raw(vec![
+                            (
+                                "dots",
+                                list_value_raw(vec![map_value_raw(vec![
+                                    ("offset", number_value(0.25)),
+                                    ("value", number_value(0.5)),
+                                ])]),
+                            ),
+                            ("cycle", number_value(0.5)),
+                            ("wrap", Value::Bool(false)),
+                        ]),
+                    ),
+                ])]),
+            ),
+            ("title-bar-height".to_string(), number_value(1.0)),
+            ("item-corner-radius".to_string(), number_value(0.4)),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(0.0)),
+        ]);
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 160.0,
+            height: 4.0,
+        };
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1920.0,
+            vp_h: 1080.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 12.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let node = LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "timeline".to_string(),
+            rect,
+            props: props.clone(),
+            children: Vec::new(),
+            focusable: false,
+        };
+
+        let view = TimelineView::from_props(&node.props, rect);
+        assert!(
+            item_cycle_separator_xs(&view, &view.items[0], viewport).is_empty(),
+            "a non-wrapping item has no repeat play-throughs to cue"
+        );
+
+        let primitives = build_metal_primitives(&node, viewport);
+        let dot_quads: Vec<_> = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                MetalPrimitive::Quad(quad)
+                    if (quad.color.a - 0.78).abs() < f32::EPSILON
+                        && (quad.color.r - 0.02).abs() < f32::EPSILON =>
+                {
+                    Some(quad)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dot_quads.len(),
+            1,
+            "one source pass only — a second tiled copy would read as looping"
+        );
+        // The single pass lands at source offset 0.25 of the first (and
+        // only) cycle: item offset 0.125 → beat 5 → x 50.
+        assert!(
+            (dot_quads[0].x - 50.0).abs() < 1.0,
+            "the dot stays at its absolute source position, got x {}",
+            dot_quads[0].x
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn title_barred_loop_clip_uses_abutting_rounded_fill_segments() {
@@ -6439,6 +6746,169 @@ mod tests {
             map.get("end").map(|value| value.borrow().clone()),
             Some(Value::Number(6.5))
         );
+    }
+
+    /// Clip-edit-target spec 5.1: with band-slide enabled, a drag starting
+    /// inside the loop band slides the window — the drag frames report the
+    /// running delta and the release carries the TOTAL delta for the host's
+    /// single undoable phase edit. Without the prop, the header still scrubs.
+    #[test]
+    fn band_slide_gesture_reports_running_and_total_delta() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("header-height".to_string(), number_value(2.0)),
+            ("content-length".to_string(), number_value(16.0)),
+            ("band-slide".to_string(), Value::Bool(true)),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+        ]);
+        let rect = Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 32.0,
+            height: 8.0,
+        };
+        let view = TimelineView::from_props(&props, rect);
+        // With header-height 2 the band occupies rows [1.1, 1.92): press
+        // INSIDE the band body at time 4 (col 8).
+        let gesture = view.begin_gesture(8.0, 1.5).expect("band gesture begins");
+        let Value::Map(map) = &gesture else {
+            panic!("expected gesture map");
+        };
+        assert_eq!(
+            map.get("kind").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("slide-band".to_string()))
+        );
+        assert_eq!(
+            map.get("anchor-time").map(|value| value.borrow().clone()),
+            Some(Value::Number(4.0))
+        );
+
+        let action = view
+            .handle_pointer_drag(14.0, 1.5, Some(&gesture))
+            .expect("drag reports delta");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("slide-band".to_string()))
+        );
+        assert_eq!(
+            map.get("delta-time").map(|value| value.borrow().clone()),
+            Some(Value::Number(3.0))
+        );
+
+        let action = view
+            .handle_pointer_up(14.0, 1.5, Some(&gesture))
+            .expect("release reports total delta");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("finish-slide-band".to_string()))
+        );
+        assert_eq!(
+            map.get("delta-time").map(|value| value.borrow().clone()),
+            Some(Value::Number(3.0))
+        );
+
+        // The RULER rows above the band keep scrubbing even with the prop
+        // on (spec 5.1: band-BODY drag, not the whole header).
+        let gesture = view.begin_gesture(8.0, 0.5).expect("ruler press begins");
+        let Value::Map(map) = &gesture else {
+            panic!("expected gesture map");
+        };
+        assert_eq!(
+            map.get("kind").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("scrub".to_string()))
+        );
+
+        // Without the prop, a band-body press scrubs as before.
+        let mut plain = props.clone();
+        plain.remove("band-slide");
+        let view = TimelineView::from_props(&plain, rect);
+        let gesture = view.begin_gesture(8.0, 1.5).expect("scrub begins");
+        let Value::Map(map) = &gesture else {
+            panic!("expected gesture map");
+        };
+        assert_eq!(
+            map.get("kind").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("scrub".to_string()))
+        );
+    }
+
+    /// Clip-edit-target spec 4 (locked decision 5): a double-click on an
+    /// item's TITLE BAR emits :double-click-item; the body stays inert so a
+    /// body double-click starts nothing surprising.
+    #[test]
+    fn double_click_on_item_title_bar_emits_double_click_item() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("snap".to_string(), number_value(1.0)),
+            ("title-bar-height".to_string(), number_value(0.9)),
+            ("double-click-items".to_string(), Value::Bool(true)),
+            ("header-height".to_string(), number_value(0.0)),
+            ("lane-height".to_string(), number_value(3.0)),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(7.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(12.0)),
+                ])]),
+            ),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        // The item spans cols 8..24; col 16 is well clear of both edge
+        // handles. Row 0.2 is inside the 0.9-row title bar.
+        let action = view
+            .handle_double_click(16.0, 0.2)
+            .expect("title-bar double-click emits an action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("double-click-item".to_string()))
+        );
+        let Some(ids) = map.get("ids").map(|value| value.borrow().clone()) else {
+            panic!("expected ids");
+        };
+        let Value::List(ids) = ids else {
+            panic!("expected id list");
+        };
+        assert_eq!(ids.len(), 1);
+        assert_eq!(*ids[0].borrow(), Value::Number(7.0));
+
+        // The BODY (below the title bar) still returns no action.
+        assert!(view.handle_double_click(16.0, 2.0).is_none());
     }
 
     #[test]

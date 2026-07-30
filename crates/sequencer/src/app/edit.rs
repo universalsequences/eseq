@@ -2,7 +2,7 @@ use crate::macro_engine::{Macro, MacroMapping};
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot, BUILTIN_SLOT_COUNT};
 use crate::plock_variants::PlockVariantRegistry;
 use crate::sequencer::{
-    BusId, StepCellSnapshot, TrackId, TrackParamsSnapshot, TrackPatternId, MAX_STEPS,
+    BusId, PatternId, StepCellSnapshot, TrackId, TrackParamsSnapshot, TrackPatternId, MAX_STEPS,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -2988,14 +2988,27 @@ impl StepGestureTransaction {
         steps: &[usize],
         label: &'static str,
     ) -> Result<Self, EditError> {
-        let track_id = app
-            .track_registry
-            .id_at(track)
-            .ok_or(EditError::TrackOutOfRange { track })?;
         let pattern_id = app
             .state
             .effective_track_pattern_id(track)
             .ok_or(EditError::MissingTrackPattern)?;
+        Self::begin_for(app, track, pattern_id, steps, label)
+    }
+
+    /// Begin against an explicit Track Pattern target (clip-edit-target spec
+    /// 3.4): `capture_pattern_step_cells` reads the live lanes when the target
+    /// is effective, else the pool, so one constructor covers both routes.
+    pub fn begin_for(
+        app: &App,
+        track: usize,
+        pattern_id: PatternId,
+        steps: &[usize],
+        label: &'static str,
+    ) -> Result<Self, EditError> {
+        let track_id = app
+            .track_registry
+            .id_at(track)
+            .ok_or(EditError::TrackOutOfRange { track })?;
         let steps = normalized_steps(steps);
         if steps.is_empty() {
             return Err(EditError::InvalidStepRange);
@@ -3029,6 +3042,18 @@ impl StepGestureTransaction {
         if app.state.effective_track_pattern_id(track) != Some(self.target.pattern) {
             return Err(EditError::MissingTrackPattern);
         }
+        self.capture_additional_steps_for_target(app, track, steps)
+    }
+
+    /// `capture_additional_steps` without the effective-pattern requirement:
+    /// pinned pool/take targets (clip-edit-target spec 3.4) stay valid while
+    /// not effective. Callers (`FocusStepGesture`) own the focus bail-out.
+    fn capture_additional_steps_for_target(
+        &mut self,
+        app: &App,
+        track: usize,
+        steps: &[usize],
+    ) -> Result<(), EditError> {
         let missing = normalized_steps(steps)
             .into_iter()
             .filter(|step| !self.before.contains_key(step))
@@ -3068,6 +3093,27 @@ impl StepGestureTransaction {
     }
 
     pub fn commit(self, app: &mut App) -> Result<EditOutcome, EditError> {
+        let label = self.label;
+        match self.build_patch(app)? {
+            None => Ok(EditOutcome::NoOp),
+            Some(patch) => {
+                let retained_bytes = patch.retained_bytes();
+                finish_active_gesture(app);
+                let history_move = app.history.commit(
+                    label,
+                    None,
+                    EditPatch::StepCells(patch),
+                    retained_bytes,
+                );
+                Ok(EditOutcome::Applied(history_move))
+            }
+        }
+    }
+
+    /// The capture-after/delta/normalize half of `commit`, without the
+    /// history entry: `FocusStepGesture` composes several per-pattern patches
+    /// into ONE undo entry (clip-edit-target spec 3.4, take chunks).
+    fn build_patch(self, app: &mut App) -> Result<Option<StepCellsPatch>, EditError> {
         let track = app
             .track_registry
             .index_of(self.target.track)
@@ -3102,7 +3148,7 @@ impl StepGestureTransaction {
             })
             .collect::<Vec<_>>();
         if cells.is_empty() {
-            return Ok(EditOutcome::NoOp);
+            return Ok(None);
         }
         app.state.reconcile_plock_variant_registry_for_track(track);
         let (_, variant_registry_after) = match app
@@ -3172,16 +3218,272 @@ impl StepGestureTransaction {
                 ))),
             };
         }
-        let retained_bytes = patch.retained_bytes();
+        Ok(Some(patch))
+    }
+}
+
+/// One editor gesture against the resolved focus (clip-edit-target spec 3.4):
+/// a set of per-pattern [`StepGestureTransaction`]s — one for a pattern
+/// target, one per touched chunk for a take — committed as a single history
+/// entry. Steps are addressed on the FOCUS axis (pattern steps, or the take's
+/// continuous step axis) and mapped onto chunk-local steps here.
+pub struct FocusStepGesture {
+    label: &'static str,
+    focus: crate::app::focus::EditFocus,
+    parts: Vec<StepGestureTransaction>,
+}
+
+/// Map focus-axis steps onto per-pattern (target, local steps) groups.
+///
+/// Take steps map through the same arithmetic as `TrackTake::chunk_step_at`
+/// (takes spec 6.1): at/past `total_len_steps` is the silent tail and is
+/// rejected — the editor must not write notes the take can never play.
+fn focus_step_targets(
+    app: &App,
+    focus: crate::app::focus::EditFocus,
+    steps: &[usize],
+) -> Result<Vec<(PatternId, Vec<usize>)>, EditError> {
+    use crate::app::focus::EditFocus;
+    match focus {
+        EditFocus::Live { track } => {
+            let pattern = app
+                .state
+                .effective_track_pattern_id(track)
+                .ok_or(EditError::MissingTrackPattern)?;
+            Ok(vec![(pattern, normalized_steps(steps))])
+        }
+        EditFocus::Pattern { pattern, .. } => Ok(vec![(pattern, normalized_steps(steps))]),
+        EditFocus::Take { track, take } => {
+            let take = app
+                .state
+                .with_project_scenes(|scenes| {
+                    scenes
+                        .take_pools
+                        .get(track)
+                        .and_then(|takes| takes.get(take))
+                        .cloned()
+                })
+                .ok_or(EditError::MissingTrackPattern)?;
+            // Take-axis steps legitimately exceed MAX_STEPS (the axis spans
+            // every chunk), so `normalized_steps`'s MAX_STEPS filter must not
+            // run here — `chunk_step_at` enforces the real bound.
+            let mut axis_steps = steps.to_vec();
+            axis_steps.sort_unstable();
+            axis_steps.dedup();
+            let mut groups: Vec<(PatternId, Vec<usize>)> = Vec::new();
+            for step in axis_steps {
+                let (chunk_idx, local) = take
+                    .chunk_step_at(step as f64)
+                    .ok_or(EditError::InvalidStepRange)?;
+                let chunk = *take
+                    .chunks
+                    .get(chunk_idx)
+                    .ok_or(EditError::InvalidStepRange)?;
+                let local = local as usize;
+                match groups.iter_mut().find(|(id, _)| *id == chunk) {
+                    Some((_, locals)) => locals.push(local),
+                    None => groups.push((chunk, vec![local])),
+                }
+            }
+            Ok(groups)
+        }
+    }
+}
+
+impl FocusStepGesture {
+    pub fn begin(
+        app: &mut App,
+        focus: crate::app::focus::EditFocus,
+        steps: &[usize],
+        label: &'static str,
+    ) -> Result<Self, EditError> {
+        let track = focus.track();
+        if focus.is_live() {
+            // A bare scene cell materializes its pattern on first edit
+            // (takes spec 11.1), exactly like the legacy live path.
+            ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?;
+        }
+        let parts = focus_step_targets(app, focus, steps)?
+            .into_iter()
+            .map(|(pattern, local_steps)| {
+                StepGestureTransaction::begin_for(app, track, pattern, &local_steps, label)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if parts.is_empty() {
+            return Err(EditError::InvalidStepRange);
+        }
+        Ok(Self { label, focus, parts })
+    }
+
+    pub fn focus(&self) -> crate::app::focus::EditFocus {
+        self.focus
+    }
+
+    /// Extend the gesture to more focus-axis steps, bailing out when the
+    /// RESOLVED focus moved under the drag (clip-edit-target spec 3.3.3) —
+    /// a scene launch in follow mode, or a re-bind/invalidation in song mode.
+    pub fn capture_additional_steps(
+        &mut self,
+        app: &mut App,
+        steps: &[usize],
+    ) -> Result<(), EditError> {
+        let track = self.focus.track();
+        if app.track_edit_focus(track) != self.focus {
+            return Err(EditError::MissingTrackPattern);
+        }
+        // Follow mode carries no pattern id in the focus itself, so the
+        // legacy bail must run HERE: a scene launch mid-drag re-resolves to
+        // a different effective pattern, and continuing (or growing a new
+        // part for it) would silently migrate the drag onto the launched
+        // scene's pattern (spec 3.3.3).
+        if let crate::app::focus::EditFocus::Live { .. } = self.focus {
+            let begun = self
+                .parts
+                .first()
+                .map(|part| part.target.pattern)
+                .ok_or(EditError::MissingTrackPattern)?;
+            if app.state.effective_track_pattern_id(track) != Some(begun) {
+                return Err(EditError::MissingTrackPattern);
+            }
+        }
+        for (pattern, local_steps) in focus_step_targets(app, self.focus, steps)? {
+            match self
+                .parts
+                .iter_mut()
+                .find(|part| part.target.pattern == pattern)
+            {
+                Some(part) => {
+                    part.capture_additional_steps_for_target(app, track, &local_steps)?
+                }
+                // Only a take gesture may legitimately grow new parts (the
+                // drag reached another chunk); pattern-focus gestures always
+                // resolve to the single part begun above.
+                None if matches!(self.focus, crate::app::focus::EditFocus::Take { .. }) => {
+                    self.parts.push(StepGestureTransaction::begin_for(
+                        app,
+                        track,
+                        pattern,
+                        &local_steps,
+                        self.label,
+                    )?)
+                }
+                None => return Err(EditError::MissingTrackPattern),
+            }
+        }
+        Ok(())
+    }
+
+    pub fn rollback(self, app: &mut App) -> Result<(), EditError> {
+        let mut first_error = None;
+        for part in self.parts {
+            if let Err(error) = part.rollback(app) {
+                first_error.get_or_insert(error);
+            }
+        }
+        match first_error {
+            None => Ok(()),
+            Some(error) => Err(error),
+        }
+    }
+
+    /// Commit every touched pattern as ONE history entry: a plain step-cells
+    /// patch for a single target, a composite for a multi-chunk take gesture.
+    pub fn commit(self, app: &mut App) -> Result<EditOutcome, EditError> {
+        let label = self.label;
+        let focus = self.focus;
+        let track = focus.track();
+        let mut patches = Vec::new();
+        let mut parts = self.parts.into_iter();
+        while let Some(part) = parts.next() {
+            match part.build_patch(app) {
+                Ok(Some(patch)) => patches.push(patch),
+                Ok(None) => {}
+                Err(error) => {
+                    // Best effort: unwind what this gesture already changed so
+                    // no history-less edits survive a failed commit.
+                    for patch in &patches {
+                        let before_cells = patch
+                            .cells
+                            .iter()
+                            .map(|cell| (cell.step, cell.before.clone()))
+                            .collect::<Vec<_>>();
+                        let _ = app.state.restore_pattern_step_cells_no_publish(
+                            track,
+                            patch.target.pattern,
+                            &before_cells,
+                            &patch.variant_registry_before,
+                        );
+                    }
+                    for part in parts {
+                        let _ = part.rollback(app);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        if patches.is_empty() {
+            return Ok(EditOutcome::NoOp);
+        }
+        let targets: Vec<PatternId> =
+            patches.iter().map(|patch| patch.target.pattern).collect();
+        let patch = if patches.len() == 1 {
+            EditPatch::StepCells(patches.pop().expect("one patch"))
+        } else {
+            EditPatch::Composite(patches.into_iter().map(EditPatch::StepCells).collect())
+        };
+        let retained_bytes = edit_patch_retained_bytes(&patch);
         finish_active_gesture(app);
-        let history_move = app.history.commit(
-            self.label,
-            None,
-            EditPatch::StepCells(patch),
-            retained_bytes,
-        );
+        let history_move = app.history.commit(label, None, patch, retained_bytes);
+        // A pinned pool/take target the playing song resolves needs the
+        // prebuilt row snapshots refreshed (they cloned the pattern at
+        // preflight). The LIVE publish deliberately does not live here:
+        // gesture finishes must not republish (drag frames already did —
+        // the coalescing contract), so `apply_recorded_focus_step_mutation`
+        // owns the legacy replay tail for one-shot edits.
+        if !focus.is_live() {
+            for pattern in targets {
+                invalidate_song_rows_for_edit(app, track, pattern);
+            }
+        }
         Ok(EditOutcome::Applied(history_move))
     }
+}
+
+/// [`apply_recorded_step_mutation`] against a resolved focus: pool-first
+/// writes with the effective-pattern mirror rule (clip-edit-target spec 3.4),
+/// steps on the focus axis, one undo entry.
+pub fn apply_recorded_focus_step_mutation(
+    app: &mut App,
+    focus: crate::app::focus::EditFocus,
+    steps: &[usize],
+    label: &'static str,
+    mutate: impl FnOnce(&mut App) -> Result<(), EditError>,
+) -> Result<EditOutcome, EditError> {
+    if steps.is_empty() {
+        return Ok(EditOutcome::NoOp);
+    }
+    let gesture = FocusStepGesture::begin(app, focus, steps, label)?;
+    if let Err(error) = mutate(app) {
+        return match gesture.rollback(app) {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(EditError::ReplayFailed(format!(
+                "{error:?}; rollback also failed: {rollback_error:?}"
+            ))),
+        };
+    }
+    let outcome = gesture.commit(app)?;
+    // The legacy `replay_step_patch(Redo)` tail for a one-shot live edit:
+    // the audio thread reads the PUBLISHED snapshot, so the effective
+    // target must publish, and playing song rows that resolve it must
+    // re-preflight. (Gesture drags publish per frame instead.)
+    if matches!(outcome, EditOutcome::Applied(_)) && focus.is_live() {
+        let track = focus.track();
+        app.state.publish_scheduler_track(track);
+        if let Some(pattern) = app.state.effective_track_pattern_id(track) {
+            invalidate_song_rows_for_edit(app, track, pattern);
+        }
+    }
+    Ok(outcome)
 }
 
 #[derive(Clone)]
@@ -5219,7 +5521,7 @@ fn rewind_fanned_out_chunks(
 /// audible row already heard a device value through the direct engine push —
 /// so while a gesture is open this defers to its end through
 /// `pending_song_row_invalidation` (flushed in `finish_active_gesture`).
-fn invalidate_song_rows_for_edit(
+pub(crate) fn invalidate_song_rows_for_edit(
     app: &mut App,
     track: usize,
     pattern: crate::sequencer::PatternId,
@@ -5687,6 +5989,18 @@ fn apply_live_track_param_effects(
     scheduler_track_params_changed(before, after) || base_note_before != base_note_after
 }
 
+/// The pool's stored track params, never the live mirror — the read half of
+/// editing a pattern whose lane is currently on loan to a sound binding.
+fn capture_pool_track_params(
+    app: &App,
+    track: usize,
+    pattern: crate::sequencer::PatternId,
+) -> Result<TrackParamsSnapshot, String> {
+    app.state
+        .with_pool_pattern(track, pattern, |data| data.track_params.clone())
+        .ok_or_else(|| "Track Pattern target no longer exists".to_string())
+}
+
 fn rollback_track_params_edit(
     app: &mut App,
     track: usize,
@@ -5922,7 +6236,7 @@ fn app_bus_effect_gesture_before(
 
 static NEXT_HISTORY_GESTURE_ID: AtomicU64 = AtomicU64::new(1);
 
-fn ensure_coalescing_gesture(app: &mut App, merge_key: &MergeKey) {
+pub(crate) fn ensure_coalescing_gesture(app: &mut App, merge_key: &MergeKey) {
     if app.history.active_gesture().map(|gesture| &gesture.merge_key) == Some(merge_key) {
         return;
     }
@@ -5943,10 +6257,42 @@ fn apply_recorded_track_params_command(
         .track_registry
         .id_at(track)
         .ok_or(EditError::TrackOutOfRange { track })?;
-    let pattern_id = app
+    // Mixer/track-param edits follow the sound binding exactly like device
+    // values (takes spec 16.4): with a take or pinned clip bound, the fader
+    // IS the bound source's stored sound, and writing the effective scene
+    // pattern instead both loses the edit on the next row push and leaks a
+    // take-intended tweak into the scene cell. Structural step-machine
+    // fields (timebase/swing) stay live/pattern-owned — the borrow never
+    // loads them from the bound source.
+    let effective_id = app.state.effective_track_pattern_id(track);
+    // What the live surface is a mirror OF right now. The loan is installed
+    // on the reactive tick, so the resolved binding and the mirror disagree
+    // for the rest of a drain whenever something released the lane (a scene
+    // launch / row save-back calls `release_bound_device_state`, "the App
+    // rebinds on its next tick"). Trusting the binding alone would take the
+    // scene pattern's sound off the released mirror and stamp it onto the
+    // take's chunks.
+    let mirror_pattern = app
         .state
-        .effective_track_pattern_id(track)
-        .ok_or(EditError::MissingTrackPattern)?;
+        .with_project_scenes(|scenes| app.state.mirror_device_pattern_id(track, scenes));
+    let bound_pattern = if track_params_command_is_structural(cmd) {
+        None
+    } else {
+        match app.bound_read_pattern(track) {
+            Some(pattern)
+                if !app.track_sound_binding(track).is_scene()
+                    && Some(pattern) != effective_id
+                    && mirror_pattern == Some(pattern) =>
+            {
+                Some(pattern)
+            }
+            _ => None,
+        }
+    };
+    let pattern_id = match bound_pattern {
+        Some(pattern) => pattern,
+        None => effective_id.ok_or(EditError::MissingTrackPattern)?,
+    };
     let target = TrackPatternId { track: track_id, pattern: pattern_id };
     let merge_key = merge_key.map(|_| {
         MergeKey::new(format!(
@@ -5961,10 +6307,20 @@ fn apply_recorded_track_params_command(
             finish_active_gesture(app);
         }
     }
-    let current_before = app
-        .state
-        .capture_pattern_track_params(track, pattern_id)
-        .map_err(EditError::ReplayFailed)?;
+    // `capture_pattern_track_params` hands back the LIVE surface whenever the
+    // target is the effective pattern — but while the lane is on loan that
+    // surface holds the BOUND source's sound, and only the four structural
+    // fields still belong to this pattern. Read the pool copy instead (the
+    // binding-aware rule its base-note twin already follows), or the
+    // whole-snapshot write below would stamp the loaned sound onto the scene
+    // pattern with no way back.
+    let mirror_holds_target = mirror_pattern == Some(pattern_id);
+    let current_before = if mirror_holds_target {
+        app.state.capture_pattern_track_params(track, pattern_id)
+    } else {
+        capture_pool_track_params(app, track, pattern_id)
+    }
+    .map_err(EditError::ReplayFailed)?;
     let current_base_before = app
         .state
         .capture_pattern_instrument_base_note_offset(track, pattern_id)
@@ -5983,17 +6339,100 @@ fn apply_recorded_track_params_command(
         .unwrap_or_else(|| (current_before.clone(), current_base_before));
 
     super::command::execute_command(app, cmd.clone());
-    let after = match app.state.capture_pattern_track_params(track, pattern_id) {
-        Ok(after) => after,
-        Err(error) => return Err(rollback_track_params_edit(
+    // The command executed against the LIVE surface. For the effective
+    // pattern the live surface IS the pattern; for a bound pool target the
+    // live surface is the borrowed mirror of that source, so merge the live
+    // values onto the pool snapshot — preserving the structural fields the
+    // borrow never loads (a take chunk must keep its MAX_STEPS width).
+    let after = if bound_pattern.is_some() {
+        match app.state.capture_live_track_params(track) {
+            Ok(live) => {
+                let mut merged = live;
+                merged.num_steps = current_before.num_steps;
+                merged.timebase = current_before.timebase.clone();
+                merged.swing = current_before.swing;
+                merged.swing_resolution = current_before.swing_resolution;
+                merged
+            }
+            Err(error) => return Err(rollback_track_params_edit(
+                app,
+                track,
+                pattern_id,
+                &current_before,
+                current_base_before,
+                EditError::ReplayFailed(error),
+            )),
+        }
+    } else if mirror_holds_target {
+        match app.state.capture_pattern_track_params(track, pattern_id) {
+            Ok(after) => after,
+            Err(error) => return Err(rollback_track_params_edit(
+                app,
+                track,
+                pattern_id,
+                &current_before,
+                current_base_before,
+                EditError::ReplayFailed(error),
+            )),
+        }
+    } else {
+        // Loaned lane: take only the structural fields off the live surface
+        // (they are the track's, not the bound source's) and leave the rest
+        // of the scene pattern's stored sound exactly as it was.
+        match app.state.capture_live_track_params(track) {
+            Ok(live) => {
+                let mut merged = current_before.clone();
+                merged.num_steps = live.num_steps;
+                merged.timebase = live.timebase.clone();
+                merged.swing = live.swing;
+                merged.swing_resolution = live.swing_resolution;
+                merged
+            }
+            Err(error) => return Err(rollback_track_params_edit(
+                app,
+                track,
+                pattern_id,
+                &current_before,
+                current_base_before,
+                EditError::ReplayFailed(error),
+            )),
+        }
+    };
+    // Same live-surface rule for the base-note offset: a bound edit executed
+    // against the live atomic, not the pool value.
+    if bound_pattern.is_some() {
+        let live_base = app
+            .state
+            .pattern
+            .instrument_base_note_offsets
+            .get(track)
+            .map(|bits| bits.load(std::sync::atomic::Ordering::Relaxed));
+        let Some(live_base) = live_base else {
+            return Err(rollback_track_params_edit(
+                app,
+                track,
+                pattern_id,
+                &current_before,
+                current_base_before,
+                EditError::TrackOutOfRange { track },
+            ));
+        };
+        return finish_track_params_edit(
             app,
+            cmd,
+            merge_key,
             track,
             pattern_id,
-            &current_before,
+            target,
+            current_before,
             current_base_before,
-            EditError::ReplayFailed(error),
-        )),
-    };
+            entry_before,
+            entry_base_before,
+            after,
+            live_base,
+            true,
+        );
+    }
     let base_after = match app
         .state
         .capture_pattern_instrument_base_note_offset(track, pattern_id)
@@ -6008,6 +6447,43 @@ fn apply_recorded_track_params_command(
             EditError::ReplayFailed(error),
         )),
     };
+    finish_track_params_edit(
+        app,
+        cmd,
+        merge_key,
+        track,
+        pattern_id,
+        target,
+        current_before,
+        current_base_before,
+        entry_before,
+        entry_base_before,
+        after,
+        base_after,
+        false,
+    )
+}
+
+/// Shared tail of a track-params edit: persist `after` to the target pattern
+/// (pool for a bound source, live-and-pool for the effective one), fan a
+/// bound take's write out to every chunk (takes spec 16.4), and commit or
+/// stage exactly one history entry.
+#[allow(clippy::too_many_arguments)]
+fn finish_track_params_edit(
+    app: &mut App,
+    cmd: &AppCommand,
+    merge_key: Option<MergeKey>,
+    track: usize,
+    pattern_id: crate::sequencer::PatternId,
+    target: TrackPatternId,
+    current_before: TrackParamsSnapshot,
+    current_base_before: u32,
+    entry_before: TrackParamsSnapshot,
+    entry_base_before: u32,
+    after: TrackParamsSnapshot,
+    base_after: u32,
+    bound: bool,
+) -> Result<EditOutcome, EditError> {
     if track_params_bit_exact_eq(&current_before, &after) && current_base_before == base_after {
         return Ok(EditOutcome::NoOp);
     }
@@ -6039,6 +6515,30 @@ fn apply_recorded_track_params_command(
             current_base_before,
             EditError::ReplayFailed(error),
         ));
+    }
+    if bound {
+        // A bound take's chunks must never diverge (takes spec 16.4): mirror
+        // the write onto every sibling chunk, preserving each chunk's own
+        // structural fields.
+        if let Err(error) = fan_out_track_params_to_take_chunks(
+            app,
+            track,
+            pattern_id,
+            &after,
+            f32::from_bits(base_after),
+        ) {
+            return Err(rollback_track_params_edit(
+                app,
+                track,
+                pattern_id,
+                &current_before,
+                current_base_before,
+                EditError::ReplayFailed(error),
+            ));
+        }
+        // Edit-through (16.7): a playing song's prebuilt rows cloned this
+        // pattern at preflight and would keep the pre-edit sound.
+        invalidate_song_rows_for_edit(app, track, pattern_id);
     }
     if merge_key.is_none()
         && (scheduler_track_params_changed(&current_before, &after)
@@ -6080,6 +6580,48 @@ fn apply_recorded_track_params_command(
         retained_bytes,
     );
     Ok(EditOutcome::Applied(move_result))
+}
+
+/// Mirror a track-params write onto the rest of the bound take's chunks
+/// (takes spec 16.4), preserving each chunk's structural fields. A no-op for
+/// pattern-clip targets (no siblings).
+fn fan_out_track_params_to_take_chunks(
+    app: &mut App,
+    track: usize,
+    pattern: crate::sequencer::PatternId,
+    after: &TrackParamsSnapshot,
+    base_after: f32,
+) -> Result<(), String> {
+    for chunk in app.take_sibling_chunks(track, pattern) {
+        let sibling_before = app.state.capture_pattern_track_params(track, chunk)?;
+        let mut sibling_after = after.clone();
+        sibling_after.num_steps = sibling_before.num_steps;
+        sibling_after.timebase = sibling_before.timebase.clone();
+        sibling_after.swing = sibling_before.swing;
+        sibling_after.swing_resolution = sibling_before.swing_resolution;
+        app.state
+            .restore_pattern_track_params_no_publish(track, chunk, &sibling_after)?;
+        app.state
+            .restore_pattern_instrument_base_note_offset_no_publish(track, chunk, base_after)?;
+    }
+    Ok(())
+}
+
+/// Track-param commands whose fields the sound-binding borrow never loads
+/// (`restore_device_state_to` keeps live num_steps/timebase/swing): these
+/// stay routed to the live/effective pattern even with a source bound.
+fn track_params_command_is_structural(cmd: &AppCommand) -> bool {
+    matches!(
+        cmd,
+        AppCommand::SetTrackSwing { .. }
+            | AppCommand::AdjustTrackSwing { .. }
+            | AppCommand::SetTrackSwingResolution { .. }
+            | AppCommand::NextTrackSwingResolution { .. }
+            | AppCommand::PrevTrackSwingResolution { .. }
+            | AppCommand::SetTrackTimebase { .. }
+            | AppCommand::NextTrackTimebase { .. }
+            | AppCommand::PrevTrackTimebase { .. }
+    )
 }
 
 pub fn apply_recorded_track_params_batch(
@@ -6859,6 +7401,37 @@ fn replay_track_params_patch(
         );
         if needs_publish && publish {
             app.state.publish_scheduler_snapshot();
+        }
+    } else {
+        // A pool target (the pinned loop-bar resize, clip-edit-target spec
+        // 5): a playing song whose rows cloned this pattern at preflight
+        // must re-preflight, exactly like the do-path.
+        invalidate_song_rows_for_edit(app, track, patch.target.pattern);
+        // A bound take's chunks must never diverge (takes spec 16.4): undo
+        // and redo mirror the restored params onto the sibling chunks too.
+        fan_out_track_params_to_take_chunks(
+            app,
+            track,
+            patch.target.pattern,
+            snapshot,
+            f32::from_bits(base_note_bits),
+        )
+        .map_err(EditError::ReplayFailed)?;
+        // The live mirror may be borrowing this pattern (a bound take or
+        // clip): drop the loan so the next binding sync re-borrows the
+        // restored values and re-pushes them where audible.
+        let borrowing = app
+            .loaded_sound_binding
+            .get(track)
+            .copied()
+            .flatten()
+            .is_some_and(|source| {
+                app.bound_source_patterns(source, track)
+                    .contains(&patch.target.pattern)
+            });
+        if borrowing {
+            app.loaded_sound_binding[track] = None;
+            app.state.release_bound_track_device_state(track);
         }
     }
     Ok(MutationEffects { publish_scheduler })

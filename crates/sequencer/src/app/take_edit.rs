@@ -244,6 +244,397 @@ mod tests {
         assert!(app.state.track_take(0, take_id).is_none());
     }
 
+    /// A track-0 clip note bit inside one of `take`'s chunks.
+    fn chunk_bit(app: &App, chunk: PatternId, step: usize) -> bool {
+        app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(chunk)
+                .map(|data| data.track_bits[step / 64] >> (step % 64) & 1 == 1)
+                .unwrap_or(false)
+        })
+    }
+
+    /// The clip-panel Length drag (clip-edit-target follow-up): frames
+    /// coalesce into ONE undo entry; growth mints silence chunks whose device
+    /// state matches, and undo/redo restore take and song together.
+    #[test]
+    fn take_set_length_coalesces_growth_into_one_undo_entry() {
+        let mut app = app_with_song();
+        let take_id = app
+            .song_region_to_take(0, 4.0, 12.0)
+            .expect("conversion succeeds");
+        let depth = app.history.undo_len();
+        let merge_key = crate::app::history::MergeKey::new("test-take-length".to_string());
+
+        // Two drag frames: 40, then 300 (crosses into a second chunk).
+        app.song_take_set_length_coalesced(0, take_id, 40.0, merge_key.clone())
+            .expect("frame 1");
+        app.song_take_set_length_coalesced(0, take_id, 300.0, merge_key.clone())
+            .expect("frame 2");
+        crate::app::edit::finish_active_gesture(&mut app);
+
+        let take = app.state.track_take(0, take_id).expect("take");
+        assert_eq!(take.total_len_steps, 300);
+        assert_eq!(take.chunks.len(), 2, "one silence chunk minted");
+        assert_eq!(app.history.undo_len(), depth + 1, "the whole drag is one entry");
+
+        undo(&mut app);
+        let take = app.state.track_take(0, take_id).expect("take");
+        assert_eq!(take.total_len_steps, 32);
+        assert_eq!(take.chunks.len(), 1);
+        redo(&mut app);
+        let take = app.state.track_take(0, take_id).expect("take");
+        assert_eq!(take.total_len_steps, 300);
+        assert_eq!(take.chunks.len(), 2);
+    }
+
+    /// A drag that returns to its starting length commits nothing: the
+    /// minted-then-unneeded silence chunk is garbage-collected on the way
+    /// back and the staged entry is discarded.
+    #[test]
+    fn take_set_length_round_trip_discards_the_entry() {
+        let mut app = app_with_song();
+        let take_id = app
+            .song_region_to_take(0, 4.0, 12.0)
+            .expect("conversion succeeds");
+        let depth = app.history.undo_len();
+        let merge_key = crate::app::history::MergeKey::new("test-take-length".to_string());
+
+        app.song_take_set_length_coalesced(0, take_id, 300.0, merge_key.clone())
+            .expect("out");
+        app.song_take_set_length_coalesced(0, take_id, 32.0, merge_key.clone())
+            .expect("and back");
+        crate::app::edit::finish_active_gesture(&mut app);
+
+        let take = app.state.track_take(0, take_id).expect("take");
+        assert_eq!(take.total_len_steps, 32);
+        assert_eq!(take.chunks.len(), 1, "the minted chunk was collected");
+        assert_eq!(app.history.undo_len(), depth, "no undo entry for a no-op drag");
+    }
+
+    /// Shrinking keeps chunks that still hold notes (re-growing restores
+    /// them); the length clamps so no clip's offset can fall outside the take.
+    #[test]
+    fn take_set_length_shrink_keeps_noted_chunks_and_clamps_to_clip_offsets() {
+        let mut app = app_with_song();
+        let take_id = app
+            .song_region_to_take(0, 4.0, 12.0)
+            .expect("conversion succeeds");
+        let merge_key = crate::app::history::MergeKey::new("test-take-length".to_string());
+        app.song_take_set_length_coalesced(0, take_id, 300.0, merge_key.clone())
+            .expect("grow");
+        crate::app::edit::finish_active_gesture(&mut app);
+        // A note in the second chunk (take step 260 → chunk 1, local 4).
+        let chunk1 = app.state.track_take(0, take_id).expect("take").chunks[1];
+        app.state.with_scenes_mut(|scenes| {
+            let data = scenes.track_pools[0].get_mut(chunk1).expect("chunk 1");
+            data.track_bits[0] |= 1 << 4;
+        });
+
+        // Split the take clip at beat 8 so a clip anchored at source step 16
+        // exists: the shrink clamp must keep every clip offset inside the
+        // take (`validate` rejects offset ≥ length).
+        let clip_id = app
+            .state
+            .committed_arrangement()
+            .expect("arrangement")
+            .track_lanes[0]
+            .iter()
+            .find(|clip| clip.take_id == Some(take_id.0))
+            .expect("take clip painted")
+            .id;
+        app.arr_clip_split(clip_id, 8.0).expect("split");
+
+        // Shrink to 1: clamps to the largest clip offset + 1, and the noted
+        // chunk stays claimed.
+        app.song_take_set_length_coalesced(0, take_id, 1.0, merge_key.clone())
+            .expect("shrink");
+        crate::app::edit::finish_active_gesture(&mut app);
+        let take = app.state.track_take(0, take_id).expect("take");
+        assert_eq!(take.total_len_steps, 17, "clamped to max clip offset + 1");
+        assert_eq!(take.chunks.len(), 2, "the noted chunk survives the shrink");
+        assert!(chunk_bit(&app, chunk1, 4));
+
+        // Re-growing needs no new mint and the note is still there.
+        app.song_take_set_length_coalesced(0, take_id, 300.0, merge_key)
+            .expect("re-grow");
+        crate::app::edit::finish_active_gesture(&mut app);
+        let take = app.state.track_take(0, take_id).expect("take");
+        assert_eq!(take.total_len_steps, 300);
+        assert_eq!(take.chunks.len(), 2);
+        assert!(chunk_bit(&app, chunk1, 4));
+    }
+
+    /// Dragging a take clip's right edge past its playable end grows the
+    /// take (the drag asks for more length): take + clip resize in ONE
+    /// composite undo entry.
+    #[test]
+    fn resizing_a_take_clip_past_its_end_grows_the_take_in_one_entry() {
+        let mut app = app_with_song();
+        let take_id = app
+            .song_region_to_take(0, 4.0, 12.0)
+            .expect("conversion succeeds");
+        let clip_id = app
+            .state
+            .committed_arrangement()
+            .expect("arrangement")
+            .track_lanes[0]
+            .iter()
+            .find(|clip| clip.take_id == Some(take_id.0))
+            .expect("take clip painted")
+            .id;
+        let depth = app.history.undo_len();
+
+        // Playable end is beat 12 (32 steps at 4/beat from beat 4); drag the
+        // right edge to beat 20 → the take must grow to 64 steps.
+        app.arr_clip_resize(clip_id, 4.0, 20.0).expect("resize grows");
+        let take = app.state.track_take(0, take_id).expect("take");
+        assert_eq!(take.total_len_steps, 64);
+        let (_, clip) = app
+            .state
+            .committed_arrangement()
+            .expect("arrangement")
+            .find_clip(clip_id)
+            .map(|(track, clip)| (track, *clip))
+            .expect("clip survives");
+        assert_eq!((clip.start_beat, clip.end_beat), (4.0, 20.0));
+        assert_eq!(app.history.undo_len(), depth + 1, "one composite entry");
+
+        undo(&mut app);
+        let take = app.state.track_take(0, take_id).expect("take");
+        assert_eq!(take.total_len_steps, 32);
+        let (_, clip) = app
+            .state
+            .committed_arrangement()
+            .expect("arrangement")
+            .find_clip(clip_id)
+            .map(|(track, clip)| (track, *clip))
+            .expect("clip restored");
+        assert_eq!((clip.start_beat, clip.end_beat), (4.0, 12.0));
+
+        redo(&mut app);
+        let take = app.state.track_take(0, take_id).expect("take");
+        assert_eq!(take.total_len_steps, 64);
+
+        // The coalesced picker path still clamps rather than growing.
+        let merge_key = crate::app::history::MergeKey::new("test-clip-resize".to_string());
+        app.arr_clip_resize_coalesced(clip_id, 4.0, 64.0, merge_key)
+            .expect("coalesced resize clamps");
+        crate::app::edit::finish_active_gesture(&mut app);
+        let (_, clip) = app
+            .state
+            .committed_arrangement()
+            .expect("arrangement")
+            .find_clip(clip_id)
+            .map(|(track, clip)| (track, *clip))
+            .expect("clip");
+        assert_eq!(clip.end_beat, 20.0, "clamped to the playable end, no growth");
+        let take = app.state.track_take(0, take_id).expect("take");
+        assert_eq!(take.total_len_steps, 64);
+    }
+
+    /// Mixer/track-param edits follow the sound binding (takes spec 16.4):
+    /// with a take clip bound, the fader writes the take's chunks — NOT the
+    /// hidden effective scene pattern, which both loses the edit at the next
+    /// row push and leaks a take-intended tweak into the scene cell.
+    #[test]
+    fn mixer_volume_with_a_bound_take_writes_the_take_not_the_scene_cell() {
+        use crate::app::sound_binding::{BoundSource, SongClipSelection};
+        use crate::app::AppCommand;
+
+        let mut app = app_with_song();
+        let take_id = app
+            .song_region_to_take(0, 4.0, 12.0)
+            .expect("conversion succeeds");
+        let chunk0 = app.state.track_take(0, take_id).expect("take").chunks[0];
+        app.state.with_scenes_mut(|scenes| {
+            scenes.track_pools[0]
+                .get_mut(chunk0)
+                .expect("chunk pattern")
+                .track_params
+                .volume = 0.9;
+        });
+        let scene_pattern = app
+            .state
+            .effective_track_pattern_id(0)
+            .expect("effective pattern");
+        let scene_volume_before = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(scene_pattern)
+                .expect("scene pattern")
+                .track_params
+                .volume
+        });
+
+        let clip_id = app
+            .state
+            .committed_arrangement()
+            .expect("arrangement")
+            .track_lanes[0]
+            .iter()
+            .find(|clip| clip.take_id == Some(take_id.0))
+            .expect("take clip painted")
+            .id;
+        app.set_arrangement_view_visible(true);
+        app.set_song_clip_selection(Some(SongClipSelection {
+            track: 0,
+            clip_id,
+            source: BoundSource::Take(take_id),
+        }));
+        app.sync_track_sound_bindings();
+        assert_eq!(app.state.pattern.track_params[0].get_volume(), 0.9);
+
+        crate::app::edit::try_apply_command(
+            &mut app,
+            AppCommand::SetTrackVolume { track: 0, value: 0.3 },
+        )
+        .expect("volume edit applies");
+        crate::app::edit::finish_active_gesture(&mut app);
+
+        let chunk_volume = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(chunk0)
+                .expect("chunk pattern")
+                .track_params
+                .volume
+        });
+        assert_eq!(chunk_volume, 0.3, "the bound take owns the fader value");
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume(),
+            0.3,
+            "the live mirror (what the user hears while bound) moved too"
+        );
+        let scene_volume_after = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(scene_pattern)
+                .expect("scene pattern")
+                .track_params
+                .volume
+        });
+        assert_eq!(
+            scene_volume_after, scene_volume_before,
+            "no dual-write: the scene cell must not absorb a take-bound edit"
+        );
+        // The chunk keeps its full step width — a fader move must never
+        // resize a take chunk.
+        let chunk_steps = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(chunk0)
+                .expect("chunk pattern")
+                .track_params
+                .num_steps
+        });
+        assert_eq!(chunk_steps, MAX_STEPS);
+
+        // Undo restores the chunk; the next binding sync re-borrows the
+        // restored value into the live mirror.
+        undo(&mut app);
+        let chunk_volume = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(chunk0)
+                .expect("chunk pattern")
+                .track_params
+                .volume
+        });
+        assert_eq!(chunk_volume, 0.9);
+        app.sync_track_sound_bindings();
+        assert_eq!(app.state.pattern.track_params[0].get_volume(), 0.9);
+    }
+
+    /// Playback of a take lane must SOUND the take's device state (takes
+    /// spec 16.2/16.7), not the scene cell's: after every row transition
+    /// stomps the live mirror with the scene pattern, the next tick's
+    /// binding sync must re-borrow the chunk's devices and re-push them.
+    #[test]
+    fn row_transitions_rebind_and_repush_the_audible_takes_device_state() {
+        use crate::app::sound_binding::{BoundSource, SongClipSelection};
+
+        let mut app = app_with_song();
+        let take_id = app
+            .song_region_to_take(0, 4.0, 12.0)
+            .expect("conversion succeeds");
+        let chunk0 = app.state.track_take(0, take_id).expect("take").chunks[0];
+        // The take's device snapshot diverges from the scene cells: a
+        // distinctive volume on the chunk (the scene patterns keep default).
+        app.state.with_scenes_mut(|scenes| {
+            scenes.track_pools[0]
+                .get_mut(chunk0)
+                .expect("chunk pattern")
+                .track_params
+                .volume = 0.25;
+        });
+        let scene_volume = app.state.pattern.track_params[0].get_volume();
+        assert!((scene_volume - 0.25).abs() > 1e-3, "fixture needs divergence");
+
+        // Select the take clip (rule 1) with the arrangement on screen.
+        let clip_id = app
+            .state
+            .committed_arrangement()
+            .expect("arrangement")
+            .track_lanes[0]
+            .iter()
+            .find(|clip| clip.take_id == Some(take_id.0))
+            .expect("take clip painted")
+            .id;
+        app.set_arrangement_view_visible(true);
+        app.set_song_clip_selection(Some(SongClipSelection {
+            track: 0,
+            clip_id,
+            source: BoundSource::Take(take_id),
+        }));
+        app.sync_track_sound_bindings();
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume(),
+            0.25,
+            "stopped, the bound take's devices are the live mirror (16.2)"
+        );
+
+        // Play the song from beat 0 (row 0 plays the scene's pattern clip;
+        // the take starts at beat 4).
+        app.set_use_arrangement(true).expect("arrangement mode");
+        app.song_transport_play(false).expect("song playback");
+        let song = app.active_runtime_song.clone().expect("active song");
+        app.sync_track_sound_bindings();
+
+        // Reach the row where the take is audible.
+        let take_row = song
+            .rows
+            .iter()
+            .position(|row| {
+                row.resolved_sources.first().copied()
+                    == Some(crate::sequencer::LaneSource::Take(take_id))
+            })
+            .expect("a row plays the take");
+        app.mirror_song_row_applied(&crate::sequencer::AudibleSongRowApplied {
+            row_id: song.rows[take_row].id,
+            row_ordinal: take_row,
+            effective_beat: song.rows[take_row].start_beat,
+            effective_sample: 0,
+            wrapped: false,
+        })
+        .expect("mirror succeeds");
+        // The row apply released the borrow and restored the scene pattern;
+        // the reactive tick's sync must now re-borrow AND re-push.
+        app.sync_track_sound_bindings();
+        assert_eq!(
+            app.loaded_sound_binding[0],
+            Some(BoundSource::Take(take_id)),
+            "the tick re-binds the audible take (rule 2/1)"
+        );
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume(),
+            0.25,
+            "the live mirror shows the take's devices again"
+        );
+        assert!(
+            app.sound_binding_monitored[0],
+            "the audible take's sound was re-pushed to the engine after the \
+             row apply stomped it (16.7: what is audible IS the mirror)"
+        );
+        assert!(!app.sound_binding_is_silent(0));
+        app.song_transport_stop().expect("stop");
+    }
+
     #[test]
     fn region_to_take_rejects_empty_regions() {
         let mut app = app_with_song();
@@ -270,7 +661,149 @@ mod tests {
     }
 }
 
+/// Ceiling on a take's playable length in steps (16 chunks). Keeps a runaway
+/// panel drag or clip resize from minting an unbounded chunk list.
+pub(crate) const TAKE_MAX_LEN_STEPS: u32 = 4096;
+
 impl App {
+    /// The smallest length `take_id` can shrink to without invalidating the
+    /// committed arrangement: every clip playing the take must keep its
+    /// offset strictly inside the take (`validate` rejects offset ≥ length).
+    pub(crate) fn take_min_len_from_clips(&self, track: usize, take_id: TakeId) -> u32 {
+        self.state
+            .committed_arrangement()
+            .and_then(|arrangement| {
+                arrangement.track_lanes.get(track).map(|lane| {
+                    lane.iter()
+                        .filter(|clip| clip.take_id == Some(take_id.0))
+                        .map(|clip| clip.offset_steps.floor().max(0.0) as u32 + 1)
+                        .max()
+                        .unwrap_or(1)
+                })
+            })
+            .unwrap_or(1)
+    }
+
+    /// Set a take's playable length (the clip panel's Length field). Applied
+    /// per picker drag frame; frames sharing `merge_key` coalesce into ONE
+    /// staged undo entry — a composite of the scenes mutation (chunk list +
+    /// `total_len_steps`) and an arrangement reinstall, so undo/redo restore
+    /// and recompile both sides together. Clamped to `[max clip offset + 1,
+    /// TAKE_MAX_LEN_STEPS]`; a drag that returns to its start discards the
+    /// entry (empty minted chunks are garbage-collected on the way back).
+    pub(crate) fn song_take_set_length_coalesced(
+        &mut self,
+        track: usize,
+        take_id: TakeId,
+        len_steps: f64,
+        merge_key: crate::app::history::MergeKey,
+    ) -> Result<(), String> {
+        if self.song_edits_locked() {
+            return Err(super::song_edit::SONG_EDITS_LOCKED_ERROR.to_string());
+        }
+        if !len_steps.is_finite() {
+            return Err("Take length must be finite".to_string());
+        }
+        let take = self
+            .state
+            .track_take(track, take_id)
+            .ok_or_else(|| format!("take {} does not exist on track {}", take_id.0, track + 1))?;
+        let min_len = self.take_min_len_from_clips(track, take_id);
+        // A take recorded past the ceiling (or a clip anchored past it) must
+        // still be editable: raise the cap to whatever the take already needs
+        // so the clamp bounds can never cross (`clamp` panics on min > max).
+        let max_len = TAKE_MAX_LEN_STEPS.max(min_len).max(take.total_len_steps);
+        let len = (len_steps.round() as i64).clamp(min_len as i64, max_len as i64) as u32;
+        let continuing = self
+            .history
+            .active_gesture()
+            .map(|gesture| &gesture.merge_key)
+            == Some(&merge_key);
+        if take.total_len_steps == len && !continuing {
+            return Ok(());
+        }
+        // The first frame captures a synchronized before-state (sealing any
+        // other gesture); continuation frames must NOT — the seal would
+        // commit the very entry being coalesced.
+        let scenes_current = if continuing {
+            self.state.capture_project_scenes()
+        } else {
+            self.capture_synchronized_scene_structure_state()?
+        };
+        let arrangement_current = self.state.committed_arrangement();
+        if take.total_len_steps != len {
+            self.state.resize_track_take(track, take_id, len)?;
+            // Reinstall to revalidate and recompile the song against the new
+            // take shape (and bump the revision the lanes redraw on).
+            if let Some(arrangement) = arrangement_current.clone() {
+                if let Err(error) = self.state.set_committed_arrangement(Some(arrangement)) {
+                    self.restore_scene_structure_state(&scenes_current)?;
+                    return Err(format!(
+                        "resizing the take left an invalid song and was rolled back: {error}"
+                    ));
+                }
+            }
+        }
+        let scenes_after = self.state.capture_project_scenes();
+        let (scenes_before, arrangement_before) = self
+            .history
+            .active_gesture_patch(&merge_key)
+            .and_then(|patch| match patch {
+                EditPatch::Composite(parts) => match (parts.first(), parts.get(1)) {
+                    (
+                        Some(EditPatch::Arrangement(arrangement)),
+                        Some(EditPatch::SceneStructure(scenes)),
+                    ) => Some((scenes.before.clone(), arrangement.before.clone())),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap_or((scenes_current, arrangement_current.clone()));
+        // `ProjectScenes` has no equality; the take entity (chunk list +
+        // length) is what this edit changes, so it decides the round-trip
+        // discard. (A grow-then-shrink drag leaves only the pool's id
+        // allocator bumped — not worth an undo entry.)
+        let take_before = scenes_before
+            .take_pools
+            .get(track)
+            .and_then(|takes| takes.get(take_id))
+            .cloned();
+        let take_after = self.state.track_take(track, take_id);
+        if take_before == take_after && arrangement_before == arrangement_current {
+            self.history.discard_active_gesture_entry(&merge_key);
+        } else {
+            let scene_patch = SceneStructurePatch {
+                before: scenes_before,
+                after: scenes_after,
+            };
+            let arrangement_patch = ArrangementStructurePatch {
+                before: arrangement_before,
+                after: arrangement_current,
+            };
+            let retained_bytes = scene_patch.retained_bytes()
+                + arrangement_patch.retained_bytes() * 2;
+            crate::app::edit::ensure_coalescing_gesture(self, &merge_key);
+            // Only the arrangement patch recompiles the song; restoring the
+            // scenes (the take's chunk list + length) does not. Composites
+            // replay forward on redo and in REVERSE on undo, so the
+            // arrangement is staged on BOTH sides of the scenes: whichever
+            // direction runs, the last patch applied is an arrangement
+            // reinstall that recompiles against the restored take geometry.
+            self.history.stage_active_gesture(
+                "Resize take",
+                &merge_key,
+                EditPatch::Composite(vec![
+                    EditPatch::Arrangement(arrangement_patch.clone()),
+                    EditPatch::SceneStructure(scene_patch),
+                    EditPatch::Arrangement(arrangement_patch),
+                ]),
+                retained_bytes,
+            );
+        }
+        self.rebuild_active_song_after_arrangement_edit();
+        Ok(())
+    }
+
     /// Delete a take (takes spec 6.4): its chunk patterns leave the pattern
     /// pool and every arrangement clip playing it is removed, so those spans
     /// go silent. One undo entry restores both.

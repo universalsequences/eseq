@@ -409,7 +409,7 @@ impl ProjectArrangement {
 
 /// Everything compile needs beyond `SongProjectContext`'s existence checks:
 /// the scene cells it resolves the backdrop from, and the `steps()` mapping it
-/// stamps offsets with. Mirrors `SongApp::pattern_step_mapping` /
+/// stamps offsets with. Mirrors `SongApp::pattern_geometry` /
 /// `take_step_mapping` and the scene-cell lookup the retired row-split helper
 /// did.
 ///
@@ -423,14 +423,15 @@ pub trait SongCompileContext {
         None
     }
 
-    /// `(steps_per_beat, num_steps)` for `pattern_id` in `track`'s pool under
-    /// the pattern's base timebase (takes spec 7.2/7.4). Per-step timebase
-    /// plocks deliberately do not participate in stamping.
-    fn song_track_pattern_step_mapping(
+    /// The real beat↔step geometry of `pattern_id` in `track`'s pool (takes
+    /// spec 7.1/7.2/7.4) — per-step timebase and sync plocks included, so
+    /// stamped offsets invert the exact boundaries the runtime resolves them
+    /// through.
+    fn song_track_pattern_geometry(
         &self,
         _track: usize,
         _pattern_id: u64,
-    ) -> Option<(f64, f64)> {
+    ) -> Option<PatternStepGeometry> {
         None
     }
 
@@ -453,11 +454,13 @@ impl SongCompileContext for ProjectScenes {
             .map(|pattern| pattern.0)
     }
 
-    fn song_track_pattern_step_mapping(&self, track: usize, pattern_id: u64) -> Option<(f64, f64)> {
+    fn song_track_pattern_geometry(
+        &self,
+        track: usize,
+        pattern_id: u64,
+    ) -> Option<PatternStepGeometry> {
         let data = self.track_pools.get(track)?.get(PatternId(pattern_id))?;
-        let num_steps = data.track_params.num_steps.max(1);
-        let step_beats = data.track_params.timebase.step_beats(num_steps);
-        (step_beats > 0.0).then(|| (1.0 / step_beats, num_steps as f64))
+        Some(data.step_geometry())
     }
 
     fn song_track_take_step_mapping(&self, track: usize, take_id: u64) -> Option<(f64, f64)> {
@@ -477,10 +480,31 @@ pub trait ArrangementContext: SongProjectContext + SongCompileContext {}
 
 impl<T: SongProjectContext + SongCompileContext> ArrangementContext for T {}
 
-/// Advance a pattern lane's `offset_steps` by `delta_beats` of playback,
-/// normalized into `[0, num_steps)`. Byte-for-byte the rule in
-/// `SongApp::advanced_offset`, including the boundary-epsilon collapse to 0 so
-/// a clip landing on a pattern boundary stamps an implicit zero offset.
+/// The one place pattern playback position wraps (clip-edit-target spec 5.1).
+///
+/// `offset_steps` is the phase *within the clip's loop window* and
+/// `delta_steps` an advance along it; the result is the absolute source step
+/// `window_start + (offset + delta) mod window_len`. Today every window is
+/// `(0, num_steps)`, hardcoded at the call sites — when sub-pattern loop
+/// windows land, they land here, not in a three-site semantics hunt. The
+/// three historical `rem_euclid` sites all funnel through this helper:
+/// `advanced_pattern_offset` below, the runtime advance in
+/// `song_playback.rs`, and `restamped_clip` (via `stamped_clip_override` →
+/// `advanced_pattern_offset`).
+pub fn pattern_play_step(offset_steps: f64, delta_steps: f64, window: (f64, f64)) -> f64 {
+    let (window_start, window_len) = window;
+    if window_len <= 0.0 {
+        return window_start;
+    }
+    window_start + (offset_steps + delta_steps).rem_euclid(window_len)
+}
+
+/// Advance a pattern lane's `offset_steps` by `delta_beats` of playback in the
+/// pattern's REAL step geometry (per-step timebase/sync plocks included),
+/// normalized into `[0, num_steps)` through the shared window helper.
+/// Byte-for-byte the rule in `SongApp::advanced_offset`, including the
+/// boundary-epsilon collapse to 0 so a clip landing on a pattern boundary
+/// stamps an implicit zero offset.
 fn advanced_pattern_offset(
     ctx: &dyn SongCompileContext,
     track: usize,
@@ -488,11 +512,18 @@ fn advanced_pattern_offset(
     offset_steps: f64,
     delta_beats: f64,
 ) -> f64 {
-    let Some((steps_per_beat, num_steps)) = ctx.song_track_pattern_step_mapping(track, pattern_id)
-    else {
+    let Some(geometry) = ctx.song_track_pattern_geometry(track, pattern_id) else {
         return offset_steps;
     };
-    let advanced = (offset_steps + delta_beats * steps_per_beat).rem_euclid(num_steps);
+    let num_steps = geometry.num_steps() as f64;
+    // The beat->step advance happens in the real geometry (already wrapped
+    // to the pattern); the window helper re-states the wrap so loop windows
+    // have one seam to land in (clip-edit-target spec 5.1).
+    let advanced = pattern_play_step(
+        geometry.advance(offset_steps, delta_beats),
+        0.0,
+        (0.0, num_steps),
+    );
     if advanced < 1e-9 || advanced > num_steps - 1e-9 {
         0.0
     } else {
@@ -1242,6 +1273,24 @@ pub fn arrangement_for_serialization(
 mod tests {
     use super::*;
 
+    /// The shared window helper (clip-edit-target spec 5.1): today's windows
+    /// are always `(0, num_steps)`, so it must be byte-for-byte the old
+    /// `rem_euclid` rule — including backwards wrap — and window-relative
+    /// when a real window start arrives.
+    #[test]
+    fn pattern_play_step_matches_the_rem_euclid_rule_and_honours_windows() {
+        assert_eq!(pattern_play_step(0.0, 4.0, (0.0, 16.0)), 4.0);
+        assert_eq!(pattern_play_step(12.0, 8.0, (0.0, 16.0)), 4.0);
+        // Backwards wrap (a left-edge grow re-stamps through the same rule).
+        assert_eq!(pattern_play_step(4.0, -12.0, (0.0, 16.0)), 8.0);
+        // Exact boundary lands on 0, not num_steps.
+        assert_eq!(pattern_play_step(0.0, 16.0, (0.0, 16.0)), 0.0);
+        // A degenerate window collapses to its start instead of NaN.
+        assert_eq!(pattern_play_step(3.0, 5.0, (0.0, 0.0)), 0.0);
+        // Window-relative: the phase wraps INSIDE the window.
+        assert_eq!(pattern_play_step(2.0, 5.0, (8.0, 4.0)), 8.0 + 3.0);
+    }
+
     // --- fixtures (song.rs test vocabulary) -----------------------------
 
     fn clip(id: u64, start: f64, end: f64, pattern_id: u64) -> ArrClip {
@@ -1365,11 +1414,17 @@ mod tests {
     #[test]
     fn test_patterns_are_four_steps_per_beat() {
         let scenes = test_scenes();
+        let geometry = scenes
+            .song_track_pattern_geometry(0, 1)
+            .expect("fixture pattern resolves");
+        assert_eq!(geometry.num_steps(), 16, "fixtures assume 16 steps");
         assert_eq!(
-            scenes.song_track_pattern_step_mapping(0, 1),
-            Some((4.0, 16.0)),
-            "fixtures assume 16 sixteenth-note steps"
+            geometry.cycle_beats(),
+            4.0,
+            "fixtures assume sixteenth-note steps (4 steps per beat)"
         );
+        assert_eq!(geometry.steps_at_beats(1.5), 6.0);
+        assert_eq!(geometry.beats_at_steps(6.0), 1.5);
         let (scenes, take) = scenes_with_take();
         assert_eq!(
             scenes.song_track_take_step_mapping(0, take.0),

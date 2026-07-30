@@ -64,6 +64,106 @@
         )
     }
 
+    /// Clip-edit-target spec 3.4 end to end through the host-command seam: a
+    /// pinned NON-effective pattern gets pool writes — the live mirror stays
+    /// untouched — and undo restores the pool copy.
+    #[test]
+    fn metal_piano_roll_edit_against_a_pinned_clip_writes_the_pool() {
+        let (state, mut app) = history_test_app();
+        // Two scenes: scene 0's pattern is effective, scene 1's pattern sits
+        // in the pool un-effective — the pinnable "other clip" material.
+        state.replace_pattern_repository(
+            vec![
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        state
+            .restore_current_pattern_from_repository()
+            .expect("scene restores");
+        assert!(state.save_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[sequencer::sequencer::InstrumentType::Sampler],
+        ));
+        let (scene_pattern, other) = state.with_project_scenes(|scenes| {
+            (
+                scenes.scenes[0].cells[0].expect("scene 0 pattern"),
+                scenes.scenes[1].cells[0].expect("scene 1 pattern"),
+            )
+        });
+        assert_ne!(scene_pattern, other);
+        let mut arrangement = sequencer::sequencer::ProjectArrangement::new(1, 16.0);
+        arrangement.track_lanes[0].push(sequencer::sequencer::ArrClip::new(
+            sequencer::sequencer::ClipId(0),
+            0.0,
+            16.0,
+            Some(other.0),
+        ));
+        arrangement.next_clip_id = 1;
+        state
+            .set_committed_arrangement(Some(arrangement))
+            .expect("arrangement installs");
+        app.set_arrangement_view_visible(true);
+        app.select_song_clip(0, sequencer::sequencer::ClipId(0))
+            .expect("clip selects");
+        assert!(matches!(
+            app.track_edit_focus(0),
+            sequencer::app::focus::EditFocus::Pattern { .. }
+        ));
+
+        let selection = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashSet::new(),
+        ));
+        let move_state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let clipboard = super::new_piano_roll_clipboard();
+        let create_action = history_value_map([
+            ("type", Value::Keyword("finish-create-item".to_string())),
+            ("start", Value::Number(2.0)),
+            ("end", Value::Number(3.0)),
+            ("lane", Value::Number(48.0)),
+        ]);
+        let payload = history_value_map([
+            ("track", Value::Number(0.0)),
+            ("action", create_action),
+        ]);
+        let (outcome, _, _) = apply_piano_roll_history_host_command(
+            &mut app,
+            &selection,
+            &move_state,
+            &clipboard,
+            &payload,
+        )
+        .expect("create note against the pinned clip");
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
+
+        let pool_active = |pattern| {
+            state
+                .with_pool_pattern(0, pattern, |data| {
+                    data.track_bits[0] >> 2 & 1 == 1
+                })
+                .expect("pattern in pool")
+        };
+        assert!(pool_active(other), "the pinned pool pattern got the note");
+        assert!(
+            !state.pattern.patterns[0].is_active(2),
+            "the live mirror is untouched by a pool-target write"
+        );
+        assert!(
+            !pool_active(scene_pattern),
+            "the scene pattern is not dual-written"
+        );
+
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(!pool_active(other), "undo restores the pool copy");
+    }
+
     #[test]
     fn slice3_mixer_drag_ops_route_to_targeted_track_mixer_invalidation() {
         let volume = history_value_map([("op", Value::Keyword("volume".to_string()))]);
@@ -623,8 +723,7 @@
             ("ids", piano_roll_id_list([id])),
         ]);
         super::apply_piano_roll_action_with_clipboard(
-            &state,
-            0,
+            &super::PianoRollLanes::live(&state, 0),
             &selection,
             &move_state,
             &clipboard,
@@ -1509,6 +1608,7 @@
             selected_steps.clone(),
             piano_roll_selection.clone(),
             piano_roll_move_state,
+            super::new_shared_piano_roll_focus(),
             recording.clone(),
             master_recording.clone(),
             master_recorder.clone(),
@@ -2026,6 +2126,7 @@
             selected_steps.clone(),
             piano_roll_selection.clone(),
             piano_roll_move_state,
+            super::new_shared_piano_roll_focus(),
             recording.clone(),
             master_recording.clone(),
             master_recorder.clone(),
@@ -4605,6 +4706,7 @@
             selected_steps.clone(),
             piano_roll_selection.clone(),
             piano_roll_move_state,
+            super::new_shared_piano_roll_focus(),
             recording.clone(),
             master_recording.clone(),
             master_recorder.clone(),

@@ -1,6 +1,40 @@
 # Clip Edit Target — Unified Focus, Double-Click-to-Piano-Roll, Clip Panel
 
-Status: rev 1, 2026-07-28 — design, nothing built.
+Status: rev 2, 2026-07-29 — **all four slices shipped** on branch
+`clip-edit-target` (unmerged), each through a multi-agent review gate with
+fixes applied. Slice A: `app/focus.rs` (EditFocus over the sound binding),
+`FocusStepGesture`/`begin_for` in `app/edit.rs` (pool-first, take chunks as
+one Composite undo entry), `PianoRollLanes` in `ui/piano_roll.rs` (the one
+note reader/writer over live/pool/take storage), `pattern_play_step` in
+`state/arrangement.rs`, `SEQ.focus-num-steps`/`focus-label`/
+`piano-roll-playhead`. Slice B: `handle_double_click` `ItemTitleBar` arm
+(opt-in `:double-click-items`, track lanes only), `:double-click-item` →
+`seq-open-piano-roll-bottom-for-track`, focus header row. Slice C:
+`set_pinned_pattern_num_steps` (pattern-addressed `TrackParamsPatch`,
+merge-key coalesced), `arr_clip_slide_offset` band slide, window overlay
+(`:window-marker`/`:window-span`/`:window-repeat`). Slice D: clip panel
+column inside the `*piano-roll*` buffer (`focus_clip_fields`,
+`arr_clip_set_offset`, `focus-clip-resize`/`focus-set-offset`).
+
+Implementation notes vs rev 1 (code won where they differed):
+
+- §3.1's two-arm resolution is implemented as the FULL 16.3 binding
+  (including rule 2, playback) — locked decision 1 ("the edit target IS the
+  sound binding, no parallel state") takes precedence, so in follow mode
+  during song playback the editors track what the row is sounding, like the
+  device panel.
+- The clip-shaped surfaces (window overlay, clip panel fields, band slide)
+  key off the ACTIVE clip selection, not the resolved focus: a pinned clip
+  whose pattern happens to be the effective one resolves `Live` for the
+  WRITE path (capture rule) but is still a pinned clip for display. A new
+  `SEQ.focus-clip-kind` gates those; `SEQ.focus-kind` routes writes.
+- §4.1's widget action is emitted only when the instance opts in
+  (`:double-click-items`), because the scene lane also has a title bar and
+  an unconditional emission consumed its double-click-then-drag gesture.
+- Band-slide is hit-tested against the drawn loop-band rows (spec 5.1
+  "band-body"), not the whole header — the ruler keeps scrubbing.
+- The pinned loop-bar resize re-preflights a playing song once per drag
+  (at the gesture seal), not per frame.
 
 Related: `docs/takes-and-additive-arrangement-recording-spec.md` (§16 sound
 binding — this spec **extends** it), `docs/arrangement-lane-model-spec.md`

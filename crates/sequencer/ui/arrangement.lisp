@@ -1191,43 +1191,59 @@
             (arrangement-clip-edit i clip (dict :type :clip-delete)))))
       ids)))
 
+;; The single-click select body, shared with :double-click-item (clip-edit
+;; target spec 4.2: a double-click is "bind + ensure the editor is open", so
+;; it must run the exact same bind/region/track-select path first).
+(def arrangement-track-select (i event)
+  ;; Only ids that name a stored clip survive: a provisional recording
+  ;; item has none, so clicking one selects nothing (realtime feedback
+  ;; spec 3.4).
+  (let ((ids (arrangement-real-clip-ids i (get event :ids))))
+    (let ((clip (if (= (len ids) 0)
+                  nil
+                  (arrangement-find-track-clip i (nth ids 0)))))
+      (do
+        (seqv-select-track-for-edit i)
+        (set! arrangement-selection '())
+        (set! arrangement-selection-rect nil)
+        ;; A clip and a region are mutually exclusive (region spec 4.1);
+        ;; the Rust side drops the region too, this clears the in-flight
+        ;; ghost.
+        (set! arrangement-region-ghost nil)
+        (arrangement-clear-region-ghost)
+        (set! arrangement-selected-track i)
+        (set! arrangement-track-selection ids)
+        (arrangement-publish-selection i
+          (if (= (len ids) 0) -1 (nth ids 0)))
+        ;; Selecting a clip is the explicit sound-binding gesture (takes
+        ;; spec 16.2/16.6): it re-binds this track's device panel, monitor
+        ;; sound and take punch-in template. The binding lives in Rust so
+        ;; it survives view switches and transport.
+        (if (= clip nil)
+          (do (seq-song-deselect-clip) (seq-song-clear-region))
+          (arrangement-select-clip i (nth ids 0)))
+        ;; A clip click also parks the transport start at the clip's
+        ;; beginning, independent of where in its title bar was hit.
+        (set-arrangement-cursor
+          (if (= clip nil) (get event :time) (get clip :start-beat))
+          i)
+        clip))))
+
 (def arrangement-track-action (i event)
   (if (arrangement-view-action? event)
     (arrangement-view-action event)
     (match event.type
       :select
-      ;; Only ids that name a stored clip survive: a provisional recording
-      ;; item has none, so clicking one selects nothing (realtime feedback
-      ;; spec 3.4).
-      (let ((ids (arrangement-real-clip-ids i (get event :ids))))
-        (let ((clip (if (= (len ids) 0)
-                      nil
-                      (arrangement-find-track-clip i (nth ids 0)))))
-          (do
-            (seqv-select-track-for-edit i)
-            (set! arrangement-selection '())
-            (set! arrangement-selection-rect nil)
-            ;; A clip and a region are mutually exclusive (region spec 4.1);
-            ;; the Rust side drops the region too, this clears the in-flight
-            ;; ghost.
-            (set! arrangement-region-ghost nil)
-            (arrangement-clear-region-ghost)
-            (set! arrangement-selected-track i)
-            (set! arrangement-track-selection ids)
-            (arrangement-publish-selection i
-              (if (= (len ids) 0) -1 (nth ids 0)))
-            ;; Selecting a clip is the explicit sound-binding gesture (takes
-            ;; spec 16.2/16.6): it re-binds this track's device panel, monitor
-            ;; sound and take punch-in template. The binding lives in Rust so
-            ;; it survives view switches and transport.
-            (if (= clip nil)
-              (do (seq-song-deselect-clip) (seq-song-clear-region))
-              (arrangement-select-clip i (nth ids 0)))
-            ;; A clip click also parks the transport start at the clip's
-            ;; beginning, independent of where in its title bar was hit.
-            (set-arrangement-cursor
-              (if (= clip nil) (get event :time) (get clip :start-beat))
-              i))))
+      (arrangement-track-select i event)
+      ;; Title-bar double-click (clip-edit-target spec 4): bind exactly like a
+      ;; single click, then open the piano roll on the bound source. The
+      ;; piano-roll targeting comes from the binding itself, so the open call
+      ;; stays track-shaped.
+      :double-click-item
+      (let ((clip (arrangement-track-select i event)))
+        (if (= clip nil)
+          nil
+          (seq-open-piano-roll-bottom-for-track i)))
       ;; Degenerate zero-movement release, or a click on empty lane space:
       ;; drop the region and park the edit cursor here, Ableton-style
       ;; (region spec 4.4).
@@ -1384,6 +1400,9 @@
     :scroll-passthrough :vertical
     :background-color arrangement-timeline-background-color
     :title-bar-height arrangement-clip-title-bar-height
+    ;; Title-bar double-click opens the clip editor (clip-edit-target spec
+    ;; 4); the scene lane deliberately does NOT opt in.
+    :double-click-items true
     :item-label-font-size arrangement-clip-label-font-size
     :item-label-color arrangement-clip-label-color
     :item-corner-radius arrangement-clip-corner-radius

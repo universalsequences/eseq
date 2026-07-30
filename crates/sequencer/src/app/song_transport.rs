@@ -123,7 +123,7 @@ impl App {
         if !self.song_playback_authority_active() {
             return Err("Back to Song is only available during song playback".to_string());
         }
-        if self.state.song_manual_latch_mask() == 0 {
+        if self.state.song_manual_latch_mask() == 0 && !self.state.song_scene_latch() {
             return Ok("No manual overrides are latched".to_string());
         }
         // Pending quantized manual launches must not fire after the return.
@@ -140,6 +140,10 @@ impl App {
                 self.apply_song_row_control(row.scene, &row.overrides, false)?;
                 self.song_mirrored_row = Some(ordinal);
                 self.song_row_mirror_epoch += 1;
+                // The row apply released any bound device loan and pushed the
+                // row's scene-cell devices; re-resolve the bindings in the same
+                // step so no lane keeps a stale loaded snapshot for a tick.
+                self.sync_track_sound_bindings();
             }
         }
         Ok("Back to song: manual overrides cleared".to_string())
@@ -170,6 +174,9 @@ impl App {
                 self.apply_song_row_control(row.scene, &row.overrides, false)?;
                 self.song_mirrored_row = Some(ordinal);
                 self.song_row_mirror_epoch += 1;
+                // Same as `back_to_song`: the row apply dropped the loan and
+                // pushed the row's devices, so re-resolve the bindings now.
+                self.sync_track_sound_bindings();
             }
         }
         Ok(format!("Track {}: back to song", track + 1))
@@ -302,6 +309,12 @@ impl App {
         self.song_mirrored_row = Some(row_ordinal);
         self.state.start_playback();
         self.set_song_transport_mode(SongTransportMode::SongPlayback);
+        // The row apply above pushed the row's launch state over the engine.
+        // Re-resolve the sound bindings NOW (takes spec 16.2/16.7) instead of
+        // waiting for the next reactive tick: an audible bound take must
+        // sound its own device snapshot from the first sample, not one frame
+        // late — and a non-audible selection stays display-only.
+        self.sync_track_sound_bindings();
         Ok(())
     }
 
@@ -365,12 +378,17 @@ impl App {
                 } else {
                     None
                 };
-                self.state.clear_song_manual_latch();
                 self.state.stop_playback();
                 // Unlock the song editing primitives before committing: the
                 // commit itself goes through `song_replace`.
                 self.set_song_transport_mode(SongTransportMode::Stopped);
                 let result = self.finish_song_capture_take(end_raw_beats).map(Some);
+                // The latch clears only AFTER the commit: the commit's
+                // scene-sync snapshot must still see latched lanes as stale
+                // (their live grid holds the performer's launch, not the
+                // current scene's pattern) or it writes that content over
+                // the scene cell's real pattern.
+                self.state.clear_song_manual_latch();
                 // Capture ran on top of song playback, so the same row-owned
                 // lane state has to be handed back to the scene.
                 if playback_teardown.is_some() {
@@ -450,6 +468,12 @@ impl App {
         self.apply_song_row_control(row.scene, &row.overrides, false)?;
         self.song_mirrored_row = Some(notice.row_ordinal);
         self.song_row_mirror_epoch += 1;
+        // The row apply released any bound device loan and pushed the row's
+        // launch state (a take lane's SCENE-CELL devices — the row snapshot
+        // plays the take's notes, but defaults are pushed control-side).
+        // Re-resolve the bindings synchronously so an audible take re-borrows
+        // its own device snapshot and re-pushes it in the same mirror step.
+        self.sync_track_sound_bindings();
         Ok(())
     }
 
@@ -488,7 +512,12 @@ impl App {
         // must neither restore their live state nor clear their session
         // override slot.
         let latched_mask = self.state.song_manual_latch_mask();
-        if scene != self.state.current_scene_index() {
+        // A manual SCENE launch latched the scene identity too: the row's
+        // scene must not recall its bus/group fx or move the current scene
+        // (scene-keyed reactive bindings audibly follow it) while the
+        // performer holds the launch.
+        let scene_latched = self.state.song_scene_latch();
+        if !scene_latched && scene != self.state.current_scene_index() {
             self.switch_bus_pattern(scene);
         }
         let sample_ids = self.state.apply_song_row_latched(
@@ -501,6 +530,7 @@ impl App {
             &self.graph.track_instrument_types,
             bump_pattern_epoch,
             latched_mask,
+            scene_latched,
         )?;
         self.graph_controller().apply_sample_ids(&sample_ids);
         let _ = self
@@ -897,6 +927,133 @@ mod tests {
         assert!(app.manual_launch_rejection().is_none());
         app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
             .expect("manual launch works after stop");
+    }
+
+    /// Clobber regression (variant: latched scene launch): a manual scene
+    /// launch during song playback wipes the lane's override pointer, so the
+    /// live grid holds the performer's pattern while `current_scene` keeps
+    /// advancing with the row mirror. The mirror's save-back must skip that
+    /// lane — an unmasked save writes the performer's pattern data over
+    /// whatever scene cell the previous row left current.
+    #[test]
+    fn latched_scene_launch_never_clobbers_other_scene_patterns() {
+        use crate::sequencer::{PatternId, PatternSnapshot};
+        let mut app = app_with_song();
+        let mut snapshots = vec![
+            PatternSnapshot::new_default(1, &[]),
+            PatternSnapshot::new_default(1, &[]),
+            PatternSnapshot::new_default(1, &[]),
+        ];
+        snapshots[0].track_bits[0][0] = 0b1;
+        snapshots[1].track_bits[0][0] = 0b11;
+        snapshots[2].track_bits[0][0] = 0b111;
+        app.state.replace_pattern_repository(snapshots, 0);
+        app.state.resync_live_grid_to_current_scene();
+        app.set_use_arrangement(true).unwrap();
+        app.song_transport_play(false).expect("song playback");
+        let song = app.active_runtime_song.clone().expect("active song");
+
+        // Performer launches scene 3 (pattern 3) — the lane latches and its
+        // live grid now holds pattern 3's content with no override pinned.
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 2 })
+            .expect("scene launch latches");
+        assert_eq!(app.state.song_manual_latch_mask(), 1);
+
+        // Two row transitions: the first save-back targets the launched
+        // scene (self-write), the second targets row 1's scene — the one an
+        // unmasked save clobbers with pattern 3's data.
+        for (ordinal, beat) in [(1usize, 4.0f64), (2, 8.0)] {
+            app.mirror_song_row_applied(&AudibleSongRowApplied {
+                row_id: song.rows[ordinal].id,
+                row_ordinal: ordinal,
+                effective_beat: beat,
+                effective_sample: (beat * 44_100.0) as u64,
+                wrapped: false,
+            })
+            .expect("row mirror");
+        }
+
+        app.state.with_project_scenes(|scenes| {
+            assert_eq!(
+                scenes.track_pools[0].get(PatternId(1)).unwrap().track_bits[0],
+                0b1,
+                "pattern 1 must keep its own steps"
+            );
+            assert_eq!(
+                scenes.track_pools[0].get(PatternId(2)).unwrap().track_bits[0],
+                0b11,
+                "pattern 2 must keep its own steps"
+            );
+        });
+        app.song_transport_stop().unwrap();
+    }
+
+    /// Clobber regression (variant: gap lanes, no performer gesture): an
+    /// explicit-empty row override silences the lane but deliberately keeps
+    /// the previous content in the live grid. Two rows later that stale
+    /// content sits under a different `current_scene`; the mirror's
+    /// save-back must skip silenced lanes or it writes the stale pattern
+    /// over that scene's real cell.
+    #[test]
+    fn gap_silenced_lane_never_saves_stale_content_over_other_scenes() {
+        use crate::sequencer::{PatternId, PatternSnapshot, ProjectSongTrackOverride};
+        let mut app = test_app();
+        let mut snapshots = vec![
+            PatternSnapshot::new_default(1, &[]),
+            PatternSnapshot::new_default(1, &[]),
+            PatternSnapshot::new_default(1, &[]),
+        ];
+        snapshots[0].track_bits[0][0] = 0b1;
+        snapshots[1].track_bits[0][0] = 0b11;
+        snapshots[2].track_bits[0][0] = 0b111;
+        app.state.replace_pattern_repository(snapshots, 0);
+        app.state.resync_live_grid_to_current_scene();
+        let gap = |start_beat: f64, scene: usize| SongRowSpec {
+            start_beat,
+            scene,
+            overrides: vec![ProjectSongTrackOverride::new(0, None)],
+        };
+        app.arr_replace_rows(
+            vec![
+                gap(0.0, 0),
+                gap(4.0, 1),
+                SongRowSpec {
+                    start_beat: 8.0,
+                    scene: 2,
+                    overrides: Vec::new(),
+                },
+            ],
+            16.0,
+            false,
+        )
+        .expect("song committed");
+        app.set_use_arrangement(true).unwrap();
+        app.song_transport_play(false).expect("song playback");
+        let song = app.active_runtime_song.clone().expect("active song");
+
+        // Row 0 (gap over scene 1's cell) applied at start; the lane is
+        // silenced with pattern 1's content left live. Rows 1 and 2 then
+        // advance current_scene under that stale content.
+        assert!(app.state.is_scene_silenced(0), "gap row silences the lane");
+        for (ordinal, beat) in [(1usize, 4.0f64), (2, 8.0)] {
+            app.mirror_song_row_applied(&AudibleSongRowApplied {
+                row_id: song.rows[ordinal].id,
+                row_ordinal: ordinal,
+                effective_beat: beat,
+                effective_sample: (beat * 44_100.0) as u64,
+                wrapped: false,
+            })
+            .expect("row mirror");
+        }
+
+        app.state.with_project_scenes(|scenes| {
+            assert_eq!(
+                scenes.track_pools[0].get(PatternId(2)).unwrap().track_bits[0],
+                0b11,
+                "scene 2's pattern must keep its own steps"
+            );
+        });
+        app.song_transport_stop().unwrap();
     }
 
     #[test]
@@ -1934,6 +2091,191 @@ mod tests {
         app.state.set_scheduler_rendered_beats(0.0);
     }
 
+    /// End-to-end reproduction of the "sync/timebase p-locks out of time
+    /// after arrangement capture" bug: arrangement-record from session,
+    /// launch a scene with a p-locked pattern at an unquantized beat, and
+    /// follow the free-run phase stamp through EVERY layer the audio path
+    /// consumes — the captured clip, the compiled row override, and the
+    /// preflighted runtime row's `lane_offsets` (what the scheduler anchors
+    /// the clock with). Each must carry the REAL-geometry free-run phase.
+    #[test]
+    fn capture_of_plocked_pattern_stamps_real_geometry_phase_end_to_end() {
+        use crate::sequencer::{PatternId, PatternSnapshot, StepParam, Timebase};
+        let mut app = test_app_two_tracks();
+        // Scene 1's cell for track 0 is pool pattern 2. Give it the p-locked
+        // shape: step 0 is a half-beat step synced to the 1-beat grid
+        // (padding the cycle to 5.0 beats), step 5 synced to the same grid
+        // (a mid-pattern wait). A uniform 16th-note ruler would call this
+        // pattern 4.0 beats long; the real cycle is 5.0.
+        let mut snapshots = vec![
+            PatternSnapshot::new_default(2, &[]),
+            PatternSnapshot::new_default(2, &[]),
+            PatternSnapshot::new_default(2, &[]),
+        ];
+        snapshots[1].timebase_plock_snapshots[0][0] = Some(Timebase::Eighth as u32);
+        snapshots[1].step_data[0][0][StepParam::Sync.index()] = 3.0;
+        snapshots[1].step_data[0][5][StepParam::Sync.index()] = 3.0;
+        app.state.replace_pattern_repository(snapshots, 0);
+
+        // The performance: record from session, free-run to beat 5.3, launch
+        // scene 1 unquantized, stop at beat 12.
+        start_capture(&mut app);
+        app.state.set_scheduler_rendered_beats(5.3);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("scene launch");
+        app.state.set_scheduler_rendered_beats(12.0);
+        app.song_transport_stop().expect("stop commits");
+
+        // What session free-run audibly played at 5.3: 5.3 mod the real
+        // 5.0-beat cycle = 0.3 beats = 60% through the half-beat step 0.
+        let geometry = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(PatternId(2))
+                .expect("scene 1's cell pattern")
+                .step_geometry()
+        });
+        assert!(
+            (geometry.cycle_beats() - 5.0).abs() < 1e-9,
+            "fixture cycle: {}",
+            geometry.cycle_beats()
+        );
+        let expected = geometry.steps_at_beats(5.3);
+        assert!((expected - 0.6).abs() < 1e-9, "free-run phase: {expected}");
+
+        // Layer 1: the captured clip.
+        let arrangement = app
+            .state
+            .committed_arrangement()
+            .expect("capture commits an arrangement");
+        let clip = arrangement.track_lanes[0]
+            .iter()
+            .find(|clip| (clip.start_beat - 5.3).abs() < 1e-9)
+            .expect("the launch opens a clip at the punch-in");
+        assert_eq!(clip.pattern_id, Some(2), "scene 1's cell for track 0");
+        assert!(
+            (clip.offset_steps - expected).abs() < 1e-6,
+            "clip stamped {} but free-run played {}",
+            clip.offset_steps,
+            expected
+        );
+
+        // Layer 2: the compiled row override.
+        let song = committed(&app);
+        let row = song
+            .rows
+            .iter()
+            .find(|row| (row.start_beat - 5.3).abs() < 1e-9)
+            .expect("a row at the launch beat");
+        let over = row
+            .overrides
+            .iter()
+            .find(|over| over.track == 0)
+            .expect("launched lane override");
+        assert!(
+            (over.offset_steps - expected).abs() < 1e-6,
+            "row stamped {} but free-run played {}",
+            over.offset_steps,
+            expected
+        );
+
+        // Layer 3: the preflighted runtime row the scheduler anchors with.
+        let runtime = app
+            .state
+            .preflight_runtime_song()
+            .expect("preflight succeeds");
+        let runtime_row = runtime
+            .rows
+            .iter()
+            .find(|row| (row.start_beat - 5.3).abs() < 1e-9)
+            .expect("a runtime row at the launch beat");
+        assert!(
+            (runtime_row.lane_offsets[0] - expected).abs() < 1e-6,
+            "runtime lane offset {} but free-run played {}",
+            runtime_row.lane_offsets[0],
+            expected
+        );
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    /// The user-reported repro: a committed song, arrangement-record started
+    /// AT THE CURSOR (record-clock zero = cursor beat), and an unquantized
+    /// scene launch of a p-locked pattern. The launched lane audibly
+    /// free-runs against the RECORD clock, so the stamp must be
+    /// `steps(beat - cursor)`, not `steps(timeline_beat)` — on a pattern
+    /// whose real cycle (5.0 here) doesn't divide the cursor position, the
+    /// two differ and the timeline-domain stamp plays back rotated and off
+    /// the sync grid.
+    #[test]
+    fn capture_from_cursor_stamps_record_clock_phase_for_plocked_pattern() {
+        use crate::sequencer::{PatternId, PatternSnapshot, StepParam, Timebase};
+        let mut app = test_app_two_tracks();
+        let mut snapshots = vec![
+            PatternSnapshot::new_default(2, &[]),
+            PatternSnapshot::new_default(2, &[]),
+            PatternSnapshot::new_default(2, &[]),
+        ];
+        // Same p-locked shape as the end-to-end test: real cycle 5.0 beats.
+        snapshots[1].timebase_plock_snapshots[0][0] = Some(Timebase::Eighth as u32);
+        snapshots[1].step_data[0][0][StepParam::Sync.index()] = 3.0;
+        snapshots[1].step_data[0][5][StepParam::Sync.index()] = 3.0;
+        app.state.replace_pattern_repository(snapshots, 0);
+        app.arr_replace_rows(
+            vec![SongRowSpec {
+                start_beat: 0.0,
+                scene: 0,
+                overrides: Vec::new(),
+            }],
+            16.0,
+            false,
+        )
+        .expect("song committed");
+
+        // Record from bar 2: cursor at beat 4.0. The record clock's zero is
+        // the cursor, so a launch at raw beat 1.3 is timeline beat 5.3.
+        app.arrangement_cursor_beat = 4.0;
+        app.set_use_arrangement(true).expect("toggle while stopped");
+        app.state.set_scheduler_rendered_beats(0.0);
+        let mode = app.song_transport_play(true).expect("capture starts");
+        assert_eq!(mode, SongTransportMode::ArrangementCapture);
+        app.state.set_scheduler_rendered_beats(1.3);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("scene launch");
+        app.state.set_scheduler_rendered_beats(8.0);
+        app.song_transport_stop().expect("stop commits");
+
+        let geometry = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(PatternId(2))
+                .expect("scene 1's cell pattern")
+                .step_geometry()
+        });
+        // What the performer heard: free-run 1.3 beats into the record
+        // clock. What the timeline-domain stamp would wrongly claim: 5.3.
+        let heard = geometry.steps_at_beats(1.3);
+        let timeline_stamp = geometry.steps_at_beats(5.3);
+        assert!(
+            (heard - timeline_stamp).abs() > 0.5,
+            "fixture must discriminate the two domains: {heard} vs {timeline_stamp}"
+        );
+
+        let arrangement = app
+            .state
+            .committed_arrangement()
+            .expect("capture commits an arrangement");
+        let clip = arrangement.track_lanes[0]
+            .iter()
+            .find(|clip| (clip.start_beat - 5.3).abs() < 1e-9)
+            .expect("the launch opens a clip at the punch-in");
+        assert_eq!(clip.pattern_id, Some(2));
+        assert!(
+            (clip.offset_steps - heard).abs() < 1e-6,
+            "clip stamped {} but the performer heard record-clock phase {}",
+            clip.offset_steps,
+            heard
+        );
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
     #[test]
     fn capture_scene_launch_preserves_take_lanes() {
         // Takes spec 10 refined: a scene launch during arrangement capture
@@ -2062,6 +2404,70 @@ mod tests {
             .find(|over| over.track == 0)
             .expect("clip override on the launched lane");
         assert_eq!(over.pattern_id, Some(2));
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn scene_launch_latches_scene_identity_against_row_mirrors() {
+        // Takes spec 10: a manual scene launch latches GLOBALLY — including
+        // the scene identity. A later recorded/committed row passing through
+        // must not recall its scene's bus pattern, move the current scene,
+        // or flip the `current_pattern` atomic (scene-keyed reactive
+        // instrument bindings and bus/group fx recall audibly follow them),
+        // even though the row's step content is already latch-protected.
+        let mut app = app_with_song();
+        start_capture(&mut app);
+        assert_eq!(app.state.current_scene_index(), 0, "row zero applied");
+
+        app.state.set_scheduler_rendered_beats(2.0);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("scene launch");
+        assert_eq!(app.state.current_scene_index(), 1);
+        assert!(app.state.song_scene_latch(), "scene launch latches the scene identity");
+
+        // The committed song's later scene-2 row passes through underneath.
+        let song = app.active_runtime_song.clone().expect("active song");
+        app.mirror_song_row_applied(&AudibleSongRowApplied {
+            row_id: song.rows[2].id,
+            row_ordinal: 2,
+            effective_beat: 8.0,
+            effective_sample: 88_200,
+            wrapped: false,
+        })
+        .expect("mirror succeeds");
+
+        assert_eq!(
+            app.state.current_scene_index(),
+            1,
+            "the row mirror must not steal the performer's current scene"
+        );
+        assert_eq!(
+            app.state.current_pattern_index(),
+            1,
+            "the `current_pattern` atomic stays the performer's scene"
+        );
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            1,
+            "the track latch survives the mirror"
+        );
+
+        // Per-track Back to Song frees the lane but the scene identity is
+        // still the performer's until a full Back to Song / punch-out.
+        app.back_to_song_track(0).expect("per-track back to song");
+        assert!(
+            app.state.song_scene_latch(),
+            "per-track Back to Song leaves the scene latch"
+        );
+
+        // Full Back to Song returns the scene identity to the song's row.
+        app.back_to_song().expect("back to song");
+        assert!(!app.state.song_scene_latch());
+        assert_eq!(
+            app.state.current_scene_index(),
+            0,
+            "back to song re-applies the governing row's scene"
+        );
         app.state.set_scheduler_rendered_beats(0.0);
     }
 

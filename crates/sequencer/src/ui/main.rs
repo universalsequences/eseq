@@ -146,6 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(Mutex::new(BTreeSet::new()));
     let piano_roll_selection: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
     let piano_roll_move_state: Arc<Mutex<Option<PianoRollMoveState>>> = Arc::new(Mutex::new(None));
+    let piano_roll_focus = new_shared_piano_roll_focus();
     let step_clipboard: Arc<
         Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>,
     > = Arc::new(Mutex::new(None));
@@ -193,6 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         selected_steps.clone(),
         piano_roll_selection.clone(),
         piano_roll_move_state.clone(),
+        piano_roll_focus.clone(),
         recording.clone(),
         master_recording.clone(),
         master_recorder.clone(),
@@ -221,6 +223,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         selected_neural_neurons: selected_neural_neurons.clone(),
         piano_roll_selection: piano_roll_selection.clone(),
         piano_roll_move_state: piano_roll_move_state.clone(),
+        piano_roll_focus: piano_roll_focus.clone(),
         step_clipboard: step_clipboard.clone(),
         ui_epoch: ui_epoch.clone(),
         fx_epoch: fx_epoch.clone(),
