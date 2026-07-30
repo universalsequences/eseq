@@ -552,12 +552,27 @@ impl SequencerState {
     /// Latch every track (a manual scene launch latches globally, spec 10).
     pub fn latch_song_manual_override_all(&self, track_count: usize) {
         self.latch_song_manual_override(0..track_count.min(64));
+        self.latch_song_scene_override();
+    }
+
+    /// Scene-scoped latch (spec 10): a manual SCENE launch suspends the
+    /// song's scene-level authority too — the row mirror must leave the
+    /// current scene, the `current_pattern` atomic, and the bus pattern with
+    /// the performer (scene-keyed reactive bindings and bus/group fx recall
+    /// hang off them and would audibly re-apply the row's scene).
+    pub fn latch_song_scene_override(&self) {
+        self.song_scene_latch.store(true, Ordering::Release);
+    }
+
+    pub fn song_scene_latch(&self) -> bool {
+        self.song_scene_latch.load(Ordering::Acquire)
     }
 
     /// Back to Song / punch-out: the song resumes launch authority for
     /// every lane (takes spec 10). Transient state; never serialized.
     pub fn clear_song_manual_latch(&self) {
         self.song_manual_latch.store(0, Ordering::Release);
+        self.song_scene_latch.store(false, Ordering::Release);
         // Every caller is a transport boundary (stop, cancel, punch-out) or
         // Back to Song, which re-applies the current row immediately after
         // (recomputing the mask) — so the take-lane bits reset here too.

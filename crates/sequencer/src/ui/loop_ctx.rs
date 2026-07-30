@@ -75,6 +75,12 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_ui_epoch: usize,
     pub(crate) prev_fx_epoch: usize,
     pub(crate) prev_sound_binding_epoch: usize,
+    /// Identity of the CLIP-derived piano-roll surfaces (clip panel, window
+    /// overlay, clip kind): `(selected (track, clip id), clip source kind,
+    /// committed-song revision)`. They are keyed off the clip SELECTION,
+    /// which can move while the resolved write focus stays put, so the focus
+    /// spec alone is not enough to decide whether they need republishing.
+    pub(crate) prev_focus_clip_surface: (Option<(usize, u64)>, Option<&'static str>, u64),
     pub(crate) prev_instrument_active_notes: Vec<u8>,
     pub(crate) prev_active_buffer_name: String,
     pub(crate) prev_selected_neural_neurons:

@@ -545,6 +545,7 @@ impl SequencerState {
             instrument_types,
             bump_pattern_epoch,
             0,
+            false,
         )
     }
 
@@ -552,6 +553,14 @@ impl SequencerState {
     /// latched tracks keep their live state, their session override slot,
     /// and their silencing untouched — the song's mirror leaves them to the
     /// performer until Back to Song clears the latch.
+    ///
+    /// `scene_latched` marks a manual SCENE launch holding the scene-level
+    /// authority too: the session's current scene, the `current_pattern`
+    /// atomic, and the row save-back all stay the performer's — only the
+    /// per-lane restores for non-latched lanes (take lanes, per-track Back
+    /// to Song) still follow the row. Moving the scene identity here would
+    /// audibly re-key every scene-indexed reactive binding and misfile the
+    /// next save-back into the row's scene.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_song_row_latched(
         &self,
@@ -564,18 +573,27 @@ impl SequencerState {
         instrument_types: &[InstrumentType],
         bump_pattern_epoch: bool,
         latched_mask: u64,
+        scene_latched: bool,
     ) -> Result<Vec<(i32, String, u32)>, String> {
         let latched = |track: usize| track < 64 && latched_mask >> track & 1 == 1;
         if overrides.iter().any(|(track, _)| *track >= num_tracks) {
             return Err("Song row override targets a track that does not exist".to_string());
         }
-        let current_snapshot = self.capture_current_pattern_snapshot(
-            num_tracks,
-            buffer_ids,
-            sample_rates,
-            names,
-            instrument_types,
-        );
+        let current_snapshot = (!scene_latched).then(|| {
+            self.capture_current_pattern_snapshot(
+                num_tracks,
+                buffer_ids,
+                sample_rates,
+                names,
+                instrument_types,
+            )
+        });
+        if scene_latched {
+            // The capture above normally releases device loans before the
+            // per-lane restores below overwrite the mirror; keep that when
+            // the save-back is skipped.
+            self.release_bound_device_state();
+        }
         let launched = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             if scene >= scenes.scene_count() {
@@ -642,11 +660,13 @@ impl SequencerState {
                 };
                 resolved.push((track, override_id, data, take_lane));
             }
-            let current_scene = self.current_scene_index();
-            if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask()) {
-                return Err("Could not save the outgoing session state".to_string());
+            if let Some(current_snapshot) = current_snapshot {
+                let current_scene = self.current_scene_index();
+                if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask()) {
+                    return Err("Could not save the outgoing session state".to_string());
+                }
+                scenes.current_scene = scene;
             }
-            scenes.current_scene = scene;
             for (track, slot) in scenes.track_overrides.iter_mut().enumerate() {
                 if !latched(track) {
                     *slot = None;
@@ -724,9 +744,11 @@ impl SequencerState {
                 None => self.set_scene_silenced(track, true),
             }
         }
-        self.pattern
-            .current_pattern
-            .store(scene as u32, Ordering::Relaxed);
+        if !scene_latched {
+            self.pattern
+                .current_pattern
+                .store(scene as u32, Ordering::Relaxed);
+        }
         if bump_pattern_epoch {
             self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         }

@@ -15,10 +15,6 @@
 
 (def piano-roll-timeline-height 35)
 (def piano-roll-header-height 2)
-;; The focus header row above the timeline (clip-edit-target spec 4.4). Its
-;; height participates in every visible-lane computation below — the lane
-;; clamps and the vertical fit model the area the timeline ACTUALLY gets.
-(def piano-roll-focus-header-height 1)
 (def piano-roll-default-pane-height 11.5)
 (def piano-roll-view-padding 1)
 (def piano-roll-min-view-duration 4)
@@ -51,7 +47,6 @@
 (def piano-roll-content-height ()
   (max 1
     (- piano-roll-default-pane-height
-      piano-roll-focus-header-height
       piano-roll-header-height)))
 
 (def piano-roll-visible-lane-count ()
@@ -270,19 +265,6 @@
       (set! piano-roll-status (seq-piano-roll-action event))
       (set! piano-roll-status "piano roll"))))
 
-;; Focus header (clip-edit-target spec 4.4): the pinned state must be
-;; visible, not inferred — "Pattern 3 — 4 clips" / "Take 2" / "Pattern 5
-;; (scene)" in the source's track color.
-(def piano-roll-focus-header ()
-  (let ((color (piano-roll-current-track-color)))
-    (box :width :fill :height piano-roll-focus-header-height :padding 0.1
-      :background-color (rgba 0.09 0.10 0.12 1.0)
-      (label (str "  " SEQ.focus-label)
-        :key "piano-roll-focus-label"
-        :font-size 10
-        :color (rgba (nth color 0) (nth color 1) (nth color 2) 1.0)
-        :bg :transparent))))
-
 (def piano-roll-timeline ()
   (box :height :fill :flex 1 :width 0
     ;; Flex child of the panel row (the arrangement-lane idiom): the timeline
@@ -320,7 +302,7 @@
       :window-repeat SEQ.focus-window-repeat
       :lane-scroll piano-roll-lane-scroll
       :lane-height (piano-roll-lane-height-value)
-      :scroll-viewport-height (- piano-roll-default-pane-height piano-roll-focus-header-height)
+      :scroll-viewport-height piano-roll-default-pane-height
       :snap 1
       :min-duration 0.03125
       :create-duration piano-roll-create-duration

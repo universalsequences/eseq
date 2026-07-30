@@ -264,6 +264,7 @@ impl SequencerState {
             quantized_launches: crate::quantized_launch::QuantizedLaunchMailbox::default(),
             song_playback: SongPlaybackMailbox::default(),
             song_manual_latch: AtomicU64::new(0),
+            song_scene_latch: AtomicBool::new(false),
             song_take_lane_mask: AtomicU64::new(0),
             sound_binding_borrowed: AtomicU64::new(0),
             sound_binding_patterns: Mutex::new(HashMap::new()),
@@ -692,6 +693,16 @@ impl SequencerState {
         self.pattern.arrangement.lock().unwrap().clone()
     }
 
+    /// Borrow the committed arrangement in place. Per-frame readers (the
+    /// piano-roll focus playhead) must use this instead of
+    /// `committed_arrangement`, which deep-clones every lane on every call.
+    pub fn with_committed_arrangement<R>(
+        &self,
+        f: impl FnOnce(Option<&ProjectArrangement>) -> R,
+    ) -> R {
+        f(self.pattern.arrangement.lock().unwrap().as_ref())
+    }
+
     /// Clear the authored arrangement and its compiled song together.
     ///
     /// Project topology teardown must use this before removing tracks. An
@@ -1031,8 +1042,51 @@ impl SequencerState {
             .save_scene_snapshot_masked(current_pattern, snapshot, self.stale_live_lane_mask())
     }
 
+    /// Write one lane out of a scene-derived snapshot into the pattern that
+    /// lane currently resolves to (track override first, then the scene
+    /// cell). The per-track save-back sites below build their snapshot from
+    /// `scene_snapshot`, so every OTHER lane in it carries that scene's CELL
+    /// content; pushing the whole grid through `save_scene_snapshot_masked`
+    /// would write that cell content over any lane that has a track override
+    /// (a launched clip), destroying the pattern being played. A stale lane
+    /// with no override is skipped for the same reason the masked full-grid
+    /// save skips it.
+    fn save_scene_track_lane(
+        scenes: &mut ProjectScenes,
+        scene_idx: usize,
+        track: usize,
+        snapshot: &PatternSnapshot,
+        stale_mask: u64,
+    ) -> bool {
+        let Some(data) = snapshot.track_pattern_data(track) else {
+            return false;
+        };
+        let override_id = scenes.track_overrides.get(track).copied().flatten();
+        if track < 64 && stale_mask >> track & 1 == 1 && override_id.is_none() {
+            return false;
+        }
+        let Some(id) = override_id.or_else(|| {
+            scenes
+                .scenes
+                .get(scene_idx)
+                .and_then(|scene| scene.cells.get(track).copied().flatten())
+        }) else {
+            return false;
+        };
+        let Some(slot) = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.get_mut(id))
+        else {
+            return false;
+        };
+        *slot = data;
+        true
+    }
+
     pub fn save_current_track_midi_fx_snapshot(&self, track: usize) -> bool {
         let current_pattern = self.current_pattern_index();
+        let stale_mask = self.stale_live_lane_mask();
         let mut scenes = self.pattern.scenes.lock().unwrap();
         let Some(mut snapshot) = scenes.scene_snapshot(current_pattern) else {
             return false;
@@ -1051,11 +1105,12 @@ impl SequencerState {
             .iter()
             .map(EffectSlotSnapshot::capture)
             .collect();
-        scenes.save_scene_snapshot(current_pattern, snapshot)
+        Self::save_scene_track_lane(&mut scenes, current_pattern, track, &snapshot, stale_mask)
     }
 
     pub fn save_current_track_effect_snapshot(&self, track: usize) -> bool {
         let current_pattern = self.current_pattern_index();
+        let stale_mask = self.stale_live_lane_mask();
         let mut scenes = self.pattern.scenes.lock().unwrap();
         let Some(mut snapshot) = scenes.scene_snapshot(current_pattern) else {
             return false;
@@ -1071,7 +1126,7 @@ impl SequencerState {
         let effect_descriptors = self.scratch_effect_descriptors.lock().unwrap().clone();
         let instrument_descriptors = self.scratch_instrument_descriptors.lock().unwrap().clone();
         snapshot.refresh_process_binding_param_ids(&effect_descriptors, &instrument_descriptors);
-        scenes.save_scene_snapshot(current_pattern, snapshot)
+        Self::save_scene_track_lane(&mut scenes, current_pattern, track, &snapshot, stale_mask)
     }
 
     pub fn copy_current_effect_values_to_all_track_patterns(

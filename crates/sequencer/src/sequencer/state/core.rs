@@ -278,6 +278,16 @@ pub struct SequencerState {
     /// row mirror leaves the lane alone. Transient transport state; never
     /// serialized. Bit `t` = track `t` (`MAX_TRACKS <= 64`).
     pub(super) song_manual_latch: AtomicU64,
+    /// Scene-scoped manual-override latch (takes spec 10): set by a manual
+    /// SCENE launch during song playback/capture. While set, the song's
+    /// SCENE-LEVEL authority is suspended too — the control-side row mirror
+    /// must not move the session's current scene, the `current_pattern`
+    /// atomic, or the bus pattern (scene-keyed reactive bindings and bus/
+    /// group fx recall would audibly re-apply the row's scene over the
+    /// performer's launch). Cleared with the track latch (Back to Song,
+    /// transport stop, punch-out); per-track Back to Song leaves it.
+    /// Transient transport state; never serialized.
+    pub(super) song_scene_latch: AtomicBool,
     /// Which lanes the CURRENTLY MIRRORED song row resolves to a take chunk
     /// (takes spec 11.2 UX). Written by the control-side row mirror; read by
     /// `track_pattern_cells` so the mixer clip grid never marks a scene clip

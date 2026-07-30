@@ -709,8 +709,11 @@ impl App {
             .track_take(track, take_id)
             .ok_or_else(|| format!("take {} does not exist on track {}", take_id.0, track + 1))?;
         let min_len = self.take_min_len_from_clips(track, take_id);
-        let len = (len_steps.round() as i64)
-            .clamp(min_len as i64, TAKE_MAX_LEN_STEPS as i64) as u32;
+        // A take recorded past the ceiling (or a clip anchored past it) must
+        // still be editable: raise the cap to whatever the take already needs
+        // so the clamp bounds can never cross (`clamp` panics on min > max).
+        let max_len = TAKE_MAX_LEN_STEPS.max(min_len).max(take.total_len_steps);
+        let len = (len_steps.round() as i64).clamp(min_len as i64, max_len as i64) as u32;
         let continuing = self
             .history
             .active_gesture()
@@ -748,8 +751,8 @@ impl App {
             .and_then(|patch| match patch {
                 EditPatch::Composite(parts) => match (parts.first(), parts.get(1)) {
                     (
-                        Some(EditPatch::SceneStructure(scenes)),
                         Some(EditPatch::Arrangement(arrangement)),
+                        Some(EditPatch::SceneStructure(scenes)),
                     ) => Some((scenes.before.clone(), arrangement.before.clone())),
                     _ => None,
                 },
@@ -777,15 +780,20 @@ impl App {
                 before: arrangement_before,
                 after: arrangement_current,
             };
-            let retained_bytes =
-                scene_patch.retained_bytes() + arrangement_patch.retained_bytes();
+            let retained_bytes = scene_patch.retained_bytes()
+                + arrangement_patch.retained_bytes() * 2;
             crate::app::edit::ensure_coalescing_gesture(self, &merge_key);
-            // Scenes first: redo restores the resized take before the
-            // arrangement that references it; undo reverses.
+            // Only the arrangement patch recompiles the song; restoring the
+            // scenes (the take's chunk list + length) does not. Composites
+            // replay forward on redo and in REVERSE on undo, so the
+            // arrangement is staged on BOTH sides of the scenes: whichever
+            // direction runs, the last patch applied is an arrangement
+            // reinstall that recompiles against the restored take geometry.
             self.history.stage_active_gesture(
                 "Resize take",
                 &merge_key,
                 EditPatch::Composite(vec![
+                    EditPatch::Arrangement(arrangement_patch.clone()),
                     EditPatch::SceneStructure(scene_patch),
                     EditPatch::Arrangement(arrangement_patch),
                 ]),

@@ -141,31 +141,38 @@ impl App {
             return None;
         }
         let pos = self.state.song_position_beats()?;
-        let arrangement = self.state.committed_arrangement()?;
-        // Prefer the selected clip (the pinned intent); otherwise any clip of
-        // this source under the playhead (rule-2 audible focus).
-        let lane = arrangement.track_lanes.get(track)?;
-        let matches_focus = |clip: &crate::sequencer::ArrClip| match focus {
-            EditFocus::Pattern { pattern, .. } => clip.pattern_id == Some(pattern.0),
-            EditFocus::Take { take, .. } => clip.take_id == Some(take.0),
-            EditFocus::Live { .. } => false,
-        };
-        let selected = self
-            .song_clip_selection
-            .filter(|selection| selection.track == track)
-            .and_then(|selection| arrangement.find_clip(selection.clip_id))
-            .map(|(_, clip)| clip)
-            .filter(|clip| matches_focus(clip));
-        let clip = match selected {
-            Some(clip) => clip,
-            None => lane
-                .iter()
-                .find(|clip| matches_focus(clip) && pos >= clip.start_beat && pos < clip.end_beat)?,
-        };
-        if pos < clip.start_beat || pos >= clip.end_beat {
+        // Borrowed, never cloned: this runs once per rendered frame while the
+        // song plays, and `committed_arrangement` deep-clones every lane.
+        let (clip_start_beat, clip_end_beat, clip_offset_steps) =
+            self.state.with_committed_arrangement(|arrangement| {
+                let arrangement = arrangement?;
+                // Prefer the selected clip (the pinned intent); otherwise any
+                // clip of this source under the playhead (rule-2 audible
+                // focus).
+                let lane = arrangement.track_lanes.get(track)?;
+                let matches_focus = |clip: &crate::sequencer::ArrClip| match focus {
+                    EditFocus::Pattern { pattern, .. } => clip.pattern_id == Some(pattern.0),
+                    EditFocus::Take { take, .. } => clip.take_id == Some(take.0),
+                    EditFocus::Live { .. } => false,
+                };
+                let selected = self
+                    .song_clip_selection
+                    .filter(|selection| selection.track == track)
+                    .and_then(|selection| arrangement.find_clip(selection.clip_id))
+                    .map(|(_, clip)| clip)
+                    .filter(|clip| matches_focus(clip));
+                let clip = match selected {
+                    Some(clip) => clip,
+                    None => lane.iter().find(|clip| {
+                        matches_focus(clip) && pos >= clip.start_beat && pos < clip.end_beat
+                    })?,
+                };
+                Some((clip.start_beat, clip.end_beat, clip.offset_steps))
+            })?;
+        if pos < clip_start_beat || pos >= clip_end_beat {
             return None;
         }
-        let delta_beats = pos - clip.start_beat;
+        let delta_beats = pos - clip_start_beat;
         self.state.with_project_scenes(|scenes| {
             use crate::sequencer::SongCompileContext;
             match focus {
@@ -175,7 +182,7 @@ impl App {
                     // what the runtime clock plays at `pos`.
                     let geometry = scenes.song_track_pattern_geometry(track, pattern.0)?;
                     Some(crate::sequencer::pattern_play_step(
-                        geometry.advance(clip.offset_steps, delta_beats),
+                        geometry.advance(clip_offset_steps, delta_beats),
                         0.0,
                         (0.0, geometry.num_steps() as f64),
                     ))
@@ -183,7 +190,7 @@ impl App {
                 EditFocus::Take { take, .. } => {
                     let (steps_per_beat, total_len) =
                         scenes.song_track_take_step_mapping(track, take.0)?;
-                    let p = clip.offset_steps + delta_beats * steps_per_beat;
+                    let p = clip_offset_steps + delta_beats * steps_per_beat;
                     (p < total_len).then_some(p)
                 }
                 EditFocus::Live { .. } => None,

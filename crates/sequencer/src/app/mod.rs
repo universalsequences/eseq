@@ -1652,6 +1652,13 @@ impl App {
                         (0..num_tracks.min(64))
                             .filter(|track| take_lanes >> *track & 1 == 0),
                     );
+                    // The scene identity (current scene, `current_pattern`
+                    // atomic, bus pattern) is the performer's too: a later
+                    // row mirror re-applying the row's scene there would
+                    // audibly recall the row's bus/group fx and re-key every
+                    // scene-indexed reactive binding while the latched lanes
+                    // keep playing the performer's patterns.
+                    self.state.latch_song_scene_override();
                 }
                 PatternLaunchTarget::SceneTracks { tracks, .. } => {
                     self.state.latch_song_manual_override(tracks.iter().copied());

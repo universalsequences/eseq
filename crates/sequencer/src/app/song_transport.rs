@@ -123,7 +123,7 @@ impl App {
         if !self.song_playback_authority_active() {
             return Err("Back to Song is only available during song playback".to_string());
         }
-        if self.state.song_manual_latch_mask() == 0 {
+        if self.state.song_manual_latch_mask() == 0 && !self.state.song_scene_latch() {
             return Ok("No manual overrides are latched".to_string());
         }
         // Pending quantized manual launches must not fire after the return.
@@ -140,6 +140,10 @@ impl App {
                 self.apply_song_row_control(row.scene, &row.overrides, false)?;
                 self.song_mirrored_row = Some(ordinal);
                 self.song_row_mirror_epoch += 1;
+                // The row apply released any bound device loan and pushed the
+                // row's scene-cell devices; re-resolve the bindings in the same
+                // step so no lane keeps a stale loaded snapshot for a tick.
+                self.sync_track_sound_bindings();
             }
         }
         Ok("Back to song: manual overrides cleared".to_string())
@@ -170,6 +174,9 @@ impl App {
                 self.apply_song_row_control(row.scene, &row.overrides, false)?;
                 self.song_mirrored_row = Some(ordinal);
                 self.song_row_mirror_epoch += 1;
+                // Same as `back_to_song`: the row apply dropped the loan and
+                // pushed the row's devices, so re-resolve the bindings now.
+                self.sync_track_sound_bindings();
             }
         }
         Ok(format!("Track {}: back to song", track + 1))
@@ -505,7 +512,12 @@ impl App {
         // must neither restore their live state nor clear their session
         // override slot.
         let latched_mask = self.state.song_manual_latch_mask();
-        if scene != self.state.current_scene_index() {
+        // A manual SCENE launch latched the scene identity too: the row's
+        // scene must not recall its bus/group fx or move the current scene
+        // (scene-keyed reactive bindings audibly follow it) while the
+        // performer holds the launch.
+        let scene_latched = self.state.song_scene_latch();
+        if !scene_latched && scene != self.state.current_scene_index() {
             self.switch_bus_pattern(scene);
         }
         let sample_ids = self.state.apply_song_row_latched(
@@ -518,6 +530,7 @@ impl App {
             &self.graph.track_instrument_types,
             bump_pattern_epoch,
             latched_mask,
+            scene_latched,
         )?;
         self.graph_controller().apply_sample_ids(&sample_ids);
         let _ = self
@@ -2391,6 +2404,70 @@ mod tests {
             .find(|over| over.track == 0)
             .expect("clip override on the launched lane");
         assert_eq!(over.pattern_id, Some(2));
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn scene_launch_latches_scene_identity_against_row_mirrors() {
+        // Takes spec 10: a manual scene launch latches GLOBALLY — including
+        // the scene identity. A later recorded/committed row passing through
+        // must not recall its scene's bus pattern, move the current scene,
+        // or flip the `current_pattern` atomic (scene-keyed reactive
+        // instrument bindings and bus/group fx recall audibly follow them),
+        // even though the row's step content is already latch-protected.
+        let mut app = app_with_song();
+        start_capture(&mut app);
+        assert_eq!(app.state.current_scene_index(), 0, "row zero applied");
+
+        app.state.set_scheduler_rendered_beats(2.0);
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("scene launch");
+        assert_eq!(app.state.current_scene_index(), 1);
+        assert!(app.state.song_scene_latch(), "scene launch latches the scene identity");
+
+        // The committed song's later scene-2 row passes through underneath.
+        let song = app.active_runtime_song.clone().expect("active song");
+        app.mirror_song_row_applied(&AudibleSongRowApplied {
+            row_id: song.rows[2].id,
+            row_ordinal: 2,
+            effective_beat: 8.0,
+            effective_sample: 88_200,
+            wrapped: false,
+        })
+        .expect("mirror succeeds");
+
+        assert_eq!(
+            app.state.current_scene_index(),
+            1,
+            "the row mirror must not steal the performer's current scene"
+        );
+        assert_eq!(
+            app.state.current_pattern_index(),
+            1,
+            "the `current_pattern` atomic stays the performer's scene"
+        );
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            1,
+            "the track latch survives the mirror"
+        );
+
+        // Per-track Back to Song frees the lane but the scene identity is
+        // still the performer's until a full Back to Song / punch-out.
+        app.back_to_song_track(0).expect("per-track back to song");
+        assert!(
+            app.state.song_scene_latch(),
+            "per-track Back to Song leaves the scene latch"
+        );
+
+        // Full Back to Song returns the scene identity to the song's row.
+        app.back_to_song().expect("back to song");
+        assert!(!app.state.song_scene_latch());
+        assert_eq!(
+            app.state.current_scene_index(),
+            0,
+            "back to song re-applies the governing row's scene"
+        );
         app.state.set_scheduler_rendered_beats(0.0);
     }
 

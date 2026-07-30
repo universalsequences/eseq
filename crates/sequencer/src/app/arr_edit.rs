@@ -333,8 +333,12 @@ impl App {
                         // for more length, so the linear axis extends with
                         // silence). One-shot commits only — the coalesced
                         // panel pickers stay clamped and route length changes
-                        // through the Length field instead.
+                        // through the Length field instead. Only the RIGHT
+                        // edge is a length ask: a left-edge drag that lowers
+                        // the playable end (offset already floored at 0) is
+                        // phase, and must never mint silence.
                         if merge_key.is_none()
+                            && (new_start_beat - clip.start_beat).abs() < 1e-9
                             && new_end_beat > limit + 1e-9
                             && limit > new_start_beat
                         {
@@ -416,8 +420,12 @@ impl App {
         }
         let needed =
             restamped.offset_steps + (new_end_beat - new_start_beat) * steps_per_beat;
-        let len = ((needed - 1e-6).ceil().max(1.0) as u32)
-            .clamp(current_len.ceil() as u32, TAKE_MAX_LEN_STEPS);
+        // A take recorded past the cap is never shortened by a resize, so the
+        // ceiling floats up to whatever it already is: `clamp` panics outright
+        // when its min exceeds its max.
+        let min_len = current_len.ceil().max(1.0) as u32;
+        let max_len = TAKE_MAX_LEN_STEPS.max(min_len);
+        let len = ((needed - 1e-6).ceil().max(1.0) as u32).clamp(min_len, max_len);
         // If the length cap bites, the clip end clamps to the capped
         // playable end instead of overhanging silence-past-the-take.
         let end_beat = new_end_beat.min(
@@ -548,14 +556,37 @@ impl App {
         let take_end_limit = {
             let arrangement = self.require_arrangement()?;
             let (track, clip) = Self::locate_clip(&arrangement, clip_id)?;
-            if clip.take_id.is_some() {
-                let mut probed = clip;
-                probed.offset_steps = offset_steps.max(0.0);
-                self.take_clip_playable_end(track, &probed)
-            } else {
-                None
+            match clip.take_id {
+                Some(take_id) => {
+                    let total_len = self
+                        .state
+                        .with_project_scenes(|scenes| {
+                            scenes.song_track_take_step_mapping(track, take_id)
+                        })
+                        .map(|(_, total_len)| total_len);
+                    total_len.and_then(|total_len| {
+                        let mut probed = clip;
+                        // Probe with the offset the edit will actually store,
+                        // or an out-of-range entry yields a limit that never
+                        // corresponds to any stored state.
+                        probed.offset_steps = offset_steps.clamp(0.0, (total_len - 1.0).max(0.0));
+                        self.take_clip_playable_end(track, &probed)
+                    })
+                }
+                None => None,
             }
         };
+        // The end re-clamp is measured from the end the clip had when the
+        // gesture STARTED, not the running (already shortened) one: a
+        // coalesced Offset drag out and back must be lossless.
+        let gesture_end_beat = merge_key
+            .as_ref()
+            .and_then(|merge_key| self.history.active_gesture_patch(merge_key))
+            .and_then(|patch| match patch {
+                EditPatch::Arrangement(patch) => patch.before.clone(),
+                _ => None,
+            })
+            .and_then(|before| before.find_clip(clip_id).map(|(_, clip)| clip.end_beat));
         let set_offset = move |arrangement: &mut ProjectArrangement,
                                scenes: &ProjectScenes|
               -> Result<(), String> {
@@ -582,7 +613,7 @@ impl App {
                 .find(|candidate| candidate.id == clip_id)
                 .expect("located above");
             edited.offset_steps = next;
-            edited.end_beat = edited.end_beat.min(end_limit);
+            edited.end_beat = gesture_end_beat.unwrap_or(edited.end_beat).min(end_limit);
             Ok(())
         };
         match merge_key {

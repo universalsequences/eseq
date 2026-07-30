@@ -5989,6 +5989,18 @@ fn apply_live_track_param_effects(
     scheduler_track_params_changed(before, after) || base_note_before != base_note_after
 }
 
+/// The pool's stored track params, never the live mirror — the read half of
+/// editing a pattern whose lane is currently on loan to a sound binding.
+fn capture_pool_track_params(
+    app: &App,
+    track: usize,
+    pattern: crate::sequencer::PatternId,
+) -> Result<TrackParamsSnapshot, String> {
+    app.state
+        .with_pool_pattern(track, pattern, |data| data.track_params.clone())
+        .ok_or_else(|| "Track Pattern target no longer exists".to_string())
+}
+
 fn rollback_track_params_edit(
     app: &mut App,
     track: usize,
@@ -6253,13 +6265,24 @@ fn apply_recorded_track_params_command(
     // fields (timebase/swing) stay live/pattern-owned — the borrow never
     // loads them from the bound source.
     let effective_id = app.state.effective_track_pattern_id(track);
+    // What the live surface is a mirror OF right now. The loan is installed
+    // on the reactive tick, so the resolved binding and the mirror disagree
+    // for the rest of a drain whenever something released the lane (a scene
+    // launch / row save-back calls `release_bound_device_state`, "the App
+    // rebinds on its next tick"). Trusting the binding alone would take the
+    // scene pattern's sound off the released mirror and stamp it onto the
+    // take's chunks.
+    let mirror_pattern = app
+        .state
+        .with_project_scenes(|scenes| app.state.mirror_device_pattern_id(track, scenes));
     let bound_pattern = if track_params_command_is_structural(cmd) {
         None
     } else {
         match app.bound_read_pattern(track) {
             Some(pattern)
                 if !app.track_sound_binding(track).is_scene()
-                    && Some(pattern) != effective_id =>
+                    && Some(pattern) != effective_id
+                    && mirror_pattern == Some(pattern) =>
             {
                 Some(pattern)
             }
@@ -6284,10 +6307,20 @@ fn apply_recorded_track_params_command(
             finish_active_gesture(app);
         }
     }
-    let current_before = app
-        .state
-        .capture_pattern_track_params(track, pattern_id)
-        .map_err(EditError::ReplayFailed)?;
+    // `capture_pattern_track_params` hands back the LIVE surface whenever the
+    // target is the effective pattern — but while the lane is on loan that
+    // surface holds the BOUND source's sound, and only the four structural
+    // fields still belong to this pattern. Read the pool copy instead (the
+    // binding-aware rule its base-note twin already follows), or the
+    // whole-snapshot write below would stamp the loaned sound onto the scene
+    // pattern with no way back.
+    let mirror_holds_target = mirror_pattern == Some(pattern_id);
+    let current_before = if mirror_holds_target {
+        app.state.capture_pattern_track_params(track, pattern_id)
+    } else {
+        capture_pool_track_params(app, track, pattern_id)
+    }
+    .map_err(EditError::ReplayFailed)?;
     let current_base_before = app
         .state
         .capture_pattern_instrument_base_note_offset(track, pattern_id)
@@ -6330,9 +6363,31 @@ fn apply_recorded_track_params_command(
                 EditError::ReplayFailed(error),
             )),
         }
-    } else {
+    } else if mirror_holds_target {
         match app.state.capture_pattern_track_params(track, pattern_id) {
             Ok(after) => after,
+            Err(error) => return Err(rollback_track_params_edit(
+                app,
+                track,
+                pattern_id,
+                &current_before,
+                current_base_before,
+                EditError::ReplayFailed(error),
+            )),
+        }
+    } else {
+        // Loaned lane: take only the structural fields off the live surface
+        // (they are the track's, not the bound source's) and leave the rest
+        // of the scene pattern's stored sound exactly as it was.
+        match app.state.capture_live_track_params(track) {
+            Ok(live) => {
+                let mut merged = current_before.clone();
+                merged.num_steps = live.num_steps;
+                merged.timebase = live.timebase.clone();
+                merged.swing = live.swing;
+                merged.swing_resolution = live.swing_resolution;
+                merged
+            }
             Err(error) => return Err(rollback_track_params_edit(
                 app,
                 track,

@@ -297,20 +297,27 @@ impl ProjectScenes {
             let Some(data) = snapshot.track_pattern_data(track) else {
                 continue;
             };
-            if track < 64
-                && stale_mask >> track & 1 == 1
-                && self.track_overrides.get(track).copied().flatten().is_none()
-            {
-                continue;
-            }
-            let Some(id) = self
+            let resolved = self
                 .track_overrides
                 .get(track)
                 .copied()
                 .flatten()
                 .or_else(|| scene.cells.get(track).copied().flatten())
-                .filter(|id| self.track_pools[track].contains(*id))
-            else {
+                .filter(|id| self.track_pools[track].contains(*id));
+            // A stale lane holds foreign content: skip it so the save-back
+            // never clones it over the pattern the cell really points at. A
+            // track override pins the lane's own pattern id, so that write is
+            // a self-write and stays allowed. A lane that resolves to nothing
+            // has no pattern to clobber, so it still falls through to the
+            // lazy bare-track materialization below.
+            if track < 64
+                && stale_mask >> track & 1 == 1
+                && self.track_overrides.get(track).copied().flatten().is_none()
+                && resolved.is_some()
+            {
+                continue;
+            }
+            let Some(id) = resolved else {
                 // Bare track (takes spec 11.1): no pattern exists anywhere
                 // for this lane — the pool is EMPTY, which distinguishes a
                 // bare track from a deliberately cleared cell (cleared
