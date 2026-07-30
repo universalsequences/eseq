@@ -419,7 +419,7 @@
               :start-note 12
               :key-count 80
               :width 84
-              :height 4.5)))))))
+              :height 3.5)))))))
 
 (effect-buffer "*8x8*" (g8-panel SEQ.current-pattern SEQ.graph-visualizations SEQ.track-events SEQ.track-event-current-beat SEQ.track-colors SEQ.track-active-notes))
 (seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

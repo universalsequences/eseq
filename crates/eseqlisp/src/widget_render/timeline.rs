@@ -3183,9 +3183,14 @@ impl TimelineView {
                 // bar selects). It behaves like pressing empty lane space:
                 // drop the current selection and park the edit cursor, which
                 // is also where the region drag about to start begins.
-                HitRegion::ItemBody { .. } if self.has_title_bar() => {
+                HitRegion::ItemBody { item } if self.has_title_bar() => {
                     Some(action_map(vec![
                         ("type", keyword(":clear-selection")),
+                        // Preserve which clip body was pressed so hosts with
+                        // an explicit clip-editor mode can promote the same
+                        // press to clip selection. Hosts that treat bodies as
+                        // region surfaces keep the clear-selection semantics.
+                        ("ids", list_value(vec![item.id])),
                         (
                             "time",
                             Value::Number(self.cursor_snap_time(self.time_at_col(local_col))),
@@ -8416,7 +8421,8 @@ mod tests {
     /// clip. Pressing the body starts a region instead, so it must behave
     /// like pressing empty lane space — clear the selection and park the edit
     /// cursor — rather than selecting the whole clip out from under the drag
-    /// that is about to start (region spec 3.1/4.4).
+    /// that is about to start (region spec 3.1/4.4). The action still names
+    /// the body clip so a host's explicit clip-editor mode can select it.
     #[test]
     fn title_bar_selects_the_clip_but_the_body_clears_and_places_the_cursor() {
         let action_type = |value: &Value| {
@@ -8446,6 +8452,19 @@ mod tests {
         assert!(
             map.contains_key("time"),
             "the body press still carries a time so the host can park the cursor"
+        );
+        let Value::List(ids) = map
+            .get("ids")
+            .expect("body clip ids")
+            .borrow()
+            .clone()
+        else {
+            panic!("body clip ids must be a list");
+        };
+        assert_eq!(
+            ids.first().map(|id| id.borrow().clone()),
+            Some(Value::Number(1.0)),
+            "the host can promote a body press to clip selection in clip-editor mode"
         );
 
         // Without a title bar (piano roll) a body press selects, as always.

@@ -754,7 +754,7 @@
         (set-window-buffer-for "*piano-roll*" "*fx*"))
       (seq-apply-fx-layout))))
 
-(def seq-open-piano-roll-bottom-for-track (track)
+(def seq-open-piano-roll-bottom-for-track-core (track)
   (do
     (set! lower-panel-visible true)
     (if (= step-panel-buffer "*piano-roll*")
@@ -765,6 +765,16 @@
       (set-window-buffer-for "*fx*" "*piano-roll*"))
     (piano-roll-request-fit-for-track track)
     (seq-apply-piano-roll-layout)))
+
+(def seq-open-piano-roll-bottom-for-track (track)
+  (do
+    (reactive-set "SEQV" "piano-roll-arrangement-mode" 0)
+    (seq-open-piano-roll-bottom-for-track-core track)))
+
+(def seq-open-arrangement-piano-roll-bottom-for-track (track)
+  (do
+    (reactive-set "SEQV" "piano-roll-arrangement-mode" 1)
+    (seq-open-piano-roll-bottom-for-track-core track)))
 
 (def seq-open-piano-roll-bottom ()
   (seq-open-piano-roll-bottom-for-track SEQ.current-track))
@@ -794,6 +804,7 @@
 
 (def seq-show-sequencer-main ()
   (do
+    (reactive-set "SEQV" "piano-roll-arrangement-mode" 0)
     (set! remembered-step-panel-buffer "*sequencer*")
     (set! step-panel-buffer "*sequencer*")
     (seq-switch-main-view :session)))
@@ -859,16 +870,20 @@
       (seq-open-piano-roll-bottom))))
 
 (def seq-show-fx-lower-panel ()
-  (if (or (not lower-panel-visible) (= lower-panel-buffer "*piano-roll*"))
-    (do
-      (set! lower-panel-visible true)
-      (if (= lower-panel-buffer "*piano-roll*")
-        (if (= (current-buffer-name) "*piano-roll*")
-          (set-window-buffer "*fx*")
-          (set-window-buffer-for "*piano-roll*" "*fx*"))
-        nil)
-      (seq-apply-fx-layout))
-    nil))
+  (do
+    ;; This is an explicit mode transition even when the FX buffer is already
+    ;; visible; do not leave a stale arrangement-editor mode behind.
+    (reactive-set "SEQV" "piano-roll-arrangement-mode" 0)
+    (if (or (not lower-panel-visible) (= lower-panel-buffer "*piano-roll*"))
+      (do
+        (set! lower-panel-visible true)
+        (if (= lower-panel-buffer "*piano-roll*")
+          (if (= (current-buffer-name) "*piano-roll*")
+            (set-window-buffer "*fx*")
+            (set-window-buffer-for "*piano-roll*" "*fx*"))
+          nil)
+        (seq-apply-fx-layout))
+      nil)))
 
 (def seq-toggle-current-track-mods-view ()
   (do

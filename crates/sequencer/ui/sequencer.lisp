@@ -145,16 +145,27 @@
     (lambda (track) (seqv-sync-track-cursor-to-global track))
     (range 0 (len SEQ.track-ids))))
 
-(def seqv-select-track-for-edit (track)
+(def seqv-select-track-for-edit-with-panel-policy (track show-fx-on-change)
   (do
     (set! selected-bus -1)
     (if (= SEQ.current-track track)
       nil
       (do
         (seq-clear-selection)
-        (seq-show-fx-lower-panel)))
+        (if show-fx-on-change
+          (seq-show-fx-lower-panel)
+          nil)))
     (seq-set-track track)
     (seqv-sync-track-cursor-to-global track)))
+
+(def seqv-select-track-for-edit (track)
+  (seqv-select-track-for-edit-with-panel-policy track true))
+
+;; Arrangement clip/background gestures change the current track without
+;; changing the lower-panel mode. In arrangement, entering FX is reserved for
+;; the explicit track-header double-click.
+(def seqv-select-track-for-edit-preserving-lower-panel (track)
+  (seqv-select-track-for-edit-with-panel-policy track false))
 
 (def seqv-activate-track-for-edit (track)
   (seqv-select-track-for-edit track))
@@ -165,6 +176,11 @@
     (do
       (seqv-activate-track-for-edit track)
       (seq-open-piano-roll-bottom-for-track track))))
+
+(def seqv-show-fx-for-track (track)
+  (do
+    (seqv-select-track-for-edit-preserving-lower-panel track)
+    (seq-show-fx-lower-panel)))
 
 (def seqv-track-expanded? (track-id)
   (reactive-get "SEQV" (seqv-expanded-track-field track-id)))
@@ -755,7 +771,9 @@
           :key (str "seqv-select-" i)
           :background-color :transparent
           :on-click |x y r| (seqv-select-track-for-edit i)
-          :on-double-click (lambda (evt) (seqv-open-piano-roll-for-track i))
+          ;; Arrangement/step track headers are device-view gestures:
+          ;; double-click always enters FX mode rather than toggling.
+          :on-double-click (lambda (evt) (seqv-show-fx-for-track i))
           (badge (seqv-track-name-display name)
             :key (str "seqv-track-name-label-" i)
             :icon (seq-track-type-icon i)

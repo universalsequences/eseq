@@ -20,6 +20,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "arrangement-scene-set",
     "arrangement-scene-remove",
     "arrangement-clip-create",
+    "arrangement-empty-take-create",
     "arrangement-clip-delete",
     "arrangement-clip-move",
     "arrangement-clip-resize",
@@ -340,6 +341,18 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
             app.arr_clip_create(track, start_beat, end_beat, source, offset_steps)?;
             Ok(format!(
                 "Created a clip on track {} over beats {start_beat}-{end_beat}",
+                track + 1
+            ))
+        }
+        "arrangement-empty-take-create" => {
+            let map = payload_map(payload)?;
+            let track = require_track(map)?;
+            let start_beat = require_number(map, "start-beat")?;
+            let end_beat = require_number(map, "end-beat")?;
+            app.arr_empty_take_clip_create(track, start_beat, end_beat)?;
+            Ok(format!(
+                "Created an empty take clip on track {} over beats \
+                 {start_beat}-{end_beat}",
                 track + 1
             ))
         }

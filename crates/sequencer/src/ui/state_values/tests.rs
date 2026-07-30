@@ -661,6 +661,7 @@
             "ui/themes/mac-osx-graphite.lisp",
             "ui/themes/mac-osx-haze.lisp",
             "ui/themes/mac-osx-midnight.lisp",
+            "ui/themes/mac-osx-midnight-50.lisp",
             "ui/themes/black-ir-theme.lisp",
             "ui/themes/mac-osx-ember.lisp",
             "ui/themes/mac-osx-violet.lisp",
@@ -725,33 +726,39 @@
     }
 
     #[test]
-    fn mac_osx_light_theme_defines_every_registered_theme_slot_once() {
-        let src = std::fs::read_to_string("ui/themes/mac-osx-light-theme.lisp")
-            .expect("read ui/themes/mac-osx-light-theme.lisp");
-        let keys = src
-            .lines()
-            .filter_map(|line| {
-                line.trim_start()
-                    .strip_prefix(':')
-                    .and_then(|rest| rest.split_ascii_whitespace().next())
-                    .map(|key| key.replace('-', "_"))
-            })
-            .collect::<Vec<_>>();
-        let unique_keys = keys.iter().cloned().collect::<HashSet<_>>();
+    fn complete_themes_define_every_registered_theme_slot_once() {
         let registered_keys = eseqlisp::theme::reactive_fields()
             .into_iter()
             .map(|(key, _)| key.to_string())
             .collect::<HashSet<_>>();
 
-        assert_eq!(
-            keys.len(),
-            unique_keys.len(),
-            "light theme must not define a theme slot more than once"
-        );
-        assert_eq!(
-            unique_keys, registered_keys,
-            "light theme must explicitly define the complete registered palette"
-        );
+        for (path, theme_name) in [
+            ("ui/themes/mac-osx-light-theme.lisp", "light"),
+            ("ui/themes/mac-osx-midnight-50.lisp", "Midnight 50"),
+        ] {
+            let src = std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("read {path}: {error}"));
+            let keys = src
+                .lines()
+                .filter_map(|line| {
+                    line.trim_start()
+                        .strip_prefix(':')
+                        .and_then(|rest| rest.split_ascii_whitespace().next())
+                        .map(|key| key.replace('-', "_"))
+                })
+                .collect::<Vec<_>>();
+            let unique_keys = keys.iter().cloned().collect::<HashSet<_>>();
+
+            assert_eq!(
+                keys.len(),
+                unique_keys.len(),
+                "{theme_name} theme must not define a theme slot more than once"
+            );
+            assert_eq!(
+                unique_keys, registered_keys,
+                "{theme_name} theme must explicitly define the complete registered palette"
+            );
+        }
     }
 
     #[test]
@@ -775,6 +782,44 @@
                 .expect("read current theme state"),
             Some(Value::Bool(true))
         );
+    }
+
+    #[test]
+    fn mac_osx_midnight_50_theme_applies_through_the_theme_registry() {
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                  (load "ui/themes.lisp")
+                  (seq-theme-mac-osx-midnight-50)
+                "#,
+            )
+            .expect("apply Midnight 50 theme through its public command");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(= seq-current-theme \"mac-osx-midnight-50\")")
+                .expect("read current theme state"),
+            Some(Value::Bool(true))
+        );
+        for (field, expected) in [
+            ("bg", "'(0.0275 0.035 0.045)"),
+            ("buffer_bg", "'(0.035 0.045 0.0575)"),
+            ("fx_panel_bg", "'(0.0475 0.06 0.075)"),
+            ("widget_knob_track", "'(0.14 0.18 0.23)"),
+        ] {
+            assert_eq!(
+                editor
+                    .runtime_mut()
+                    .eval_str(&format!("(= THEME.{field} {expected})"))
+                    .unwrap_or_else(|error| panic!("read Midnight 50 {field}: {error:?}")),
+                Some(Value::Bool(true)),
+                "Midnight 50 {field} must match its designed palette value"
+            );
+        }
     }
 
     fn load_step_gesture_source(runtime: &mut Runtime) {
@@ -23162,6 +23207,228 @@
         );
     }
 
+    #[test]
+    fn metal_seq_arrangement_empty_space_double_click_creates_take_and_opens_piano_roll() {
+        let mut editor = arrangement_region_editor(2, &[]);
+        let layout = editor.widget_layout().expect("arrangement layout");
+        let lane = find_layout_node_by_widget_type(
+            find_layout_node_by_stable_key(&layout, "arrangement-track-lane-1")
+                .expect("empty track lane"),
+            "timeline",
+        )
+        .expect("empty track timeline");
+        assert_eq!(
+            layout_prop_number(lane, "create-duration"),
+            Some(4.0),
+            "an empty-space double-click must create at least one bar by default"
+        );
+
+        let creates: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = creates.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-arrangement-empty-take-create", move |args, _ctx| {
+                sink.lock().unwrap().push(test_list(args));
+                Ok(Value::Bool(true))
+            });
+        let _ = editor.drain_host_commands();
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(arrangement-track-action 1 \
+                   (dict :type :finish-create-item :start 20 :end 24))",
+            )
+            .expect("double-click empty arrangement space");
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(
+            creates.lock().unwrap().as_slice(),
+            &[test_number_list(&[1.0, 20.0, 24.0])],
+            "empty-space double-click must request a take on the clicked track and span"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("lower-panel-buffer")
+                .unwrap(),
+            Some(Value::String("*piano-roll*".to_string())),
+            "the newly queued take opens in the lower piano roll"
+        );
+    }
+
+    #[test]
+    fn metal_seq_arrangement_clip_selection_follows_explicit_lower_panel_mode() {
+        // Tracks 0 and 1 have clips; track 2 is intentionally empty.
+        let mut editor = arrangement_region_editor(3, &[]);
+        let selected: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
+        let selected_sink = selected.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-song-select-clip", move |args, _ctx| {
+                selected_sink.lock().unwrap().push(args);
+                Ok(Value::Bool(true))
+            });
+        let deselected = Arc::new(Mutex::new(0usize));
+        let deselected_sink = deselected.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-song-deselect-clip", move |_args, _ctx| {
+                *deselected_sink.lock().unwrap() += 1;
+                Ok(Value::Bool(true))
+            });
+
+        // In FX mode a clip-body press remains a cursor/region gesture.
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(arrangement-track-action 0 \
+                   (dict :type :clear-selection :ids (list 0) :time 3))",
+            )
+            .expect("press clip body in FX mode");
+        assert!(selected.lock().unwrap().is_empty());
+        assert!(*deselected.lock().unwrap() > 0);
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*fx*".to_string()))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(
+                    "(do \
+                       (seq-open-arrangement-piano-roll-bottom-for-track 0) \
+                       (piano-roll-arrangement-mode?))",
+                )
+                .expect("open explicit arrangement piano-roll mode"),
+            Some(Value::Bool(true))
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(seq-show-fx-lower-panel)")
+            .expect("restore FX mode");
+
+        // A title-bar double-click is the explicit transition into the
+        // arrangement piano roll and binds that clip.
+        let mode_after_open = editor
+            .runtime_mut()
+            .eval_str(
+                "(do \
+                   (arrangement-track-action 0 \
+                     (dict :type :double-click-item :ids (list 0) :time 3)) \
+                   (piano-roll-arrangement-mode?))",
+            )
+            .expect("double-click clip title bar");
+        assert_eq!(mode_after_open, Some(Value::Bool(true)));
+        editor.refresh_runtime_side_effects();
+        assert_eq!(selected.lock().unwrap().len(), 1);
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*piano-roll*".to_string()))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(piano-roll-arrangement-mode?)")
+                .unwrap(),
+            Some(Value::Bool(true))
+        );
+
+        // Once in piano-roll mode, the SAME body event retargets the clip.
+        selected.lock().unwrap().clear();
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(arrangement-track-action 0 \
+                   (dict :type :clear-selection :ids (list 0) :time 6))",
+            )
+            .expect("press clip body in piano-roll mode");
+        assert_eq!(
+            selected.lock().unwrap().len(),
+            1,
+            "clip bodies select only while the arrangement piano roll is open"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len arrangement-track-selection)")
+                .unwrap(),
+            Some(Value::Number(1.0))
+        );
+
+        // A title-bar single click on another track changes the piano-roll
+        // target without implicitly returning to FX. Only the track-header
+        // double-click owns that mode transition.
+        selected.lock().unwrap().clear();
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(arrangement-track-action 1 \
+                   (dict :type :select :ids (list 0) :time 6))",
+            )
+            .expect("press another track's clip title in piano-roll mode");
+        assert_eq!(
+            selected.lock().unwrap().last().and_then(|args| args.first()),
+            Some(&Value::Number(1.0)),
+            "the newly clicked track's clip becomes the piano-roll target"
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*piano-roll*".to_string())),
+            "cross-track clip selection must preserve the piano-roll panel"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(piano-roll-arrangement-mode?)")
+                .unwrap(),
+            Some(Value::Bool(true)),
+            "cross-track clip selection must preserve arrangement piano-roll mode"
+        );
+
+        // A true background press has no clip id: keep piano-roll mode but
+        // clear its target so the lower panel renders the empty state. Use the
+        // third track to cover a cross-track empty-space click too.
+        let deselect_before = *deselected.lock().unwrap();
+        editor
+            .runtime_mut()
+            .eval_str("(arrangement-track-action 2 (dict :type :clear-selection :time 20))")
+            .expect("press empty lane space in piano-roll mode");
+        editor.refresh_runtime_side_effects();
+        assert!(*deselected.lock().unwrap() > deselect_before);
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len arrangement-track-selection)")
+                .unwrap(),
+            Some(Value::Number(0.0))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*piano-roll*".to_string())),
+            "empty space clears the clip without switching panel mode"
+        );
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "focus-clip-start", Value::Nil);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        assert!(
+            editor.switch_active_tile_to_buffer_named("*piano-roll*"),
+            "piano roll should occupy the lower tile"
+        );
+        editor.set_layout_viewport(96, 20);
+        let layout = editor.widget_layout().expect("empty piano-roll layout");
+        let empty = find_layout_node_by_stable_key(&layout, "piano-roll-no-clip-selected")
+            .expect("piano roll no-clip state");
+        assert_finite_nonzero_rect(empty, "piano roll no-clip state");
+        let label =
+            find_layout_node_by_stable_key(empty, "piano-roll-no-clip-selected-label")
+                .expect("piano roll no-clip label");
+        assert_finite_nonzero_rect(label, "piano roll no-clip label");
+    }
+
     /// The `arrangement-track-row-pitch` constant the region drag divides by
     /// (docs/arrangement-region-editing-spec.md 4.2) must equal the ACTUAL
     /// vertical distance between two rendered track rows. If the lane height
@@ -24178,7 +24445,7 @@
     }
 
     #[test]
-    fn metal_seq_track_name_double_click_opens_lower_piano_roll_only() {
+    fn metal_seq_track_name_double_click_always_shows_lower_fx_mode() {
         let mut editor = full_grid_editor_for_scroll_tests();
         let sequencer_id = editor
             .buffers
@@ -24194,11 +24461,11 @@
 
         let track_name_hit = find_layout_node_by_stable_key(&layout, "seqv-select-0")
             .expect("track name hit target should exist");
-        let open_piano_roll = track_name_hit
+        let show_fx = track_name_hit
             .props
             .get("on-double-click")
             .cloned()
-            .expect("track name hit target should expose piano-roll double-click");
+            .expect("track name hit target should expose FX-mode double-click");
 
         for key in [
             "sequencer-track-0",
@@ -24243,8 +24510,12 @@
 
         editor
             .runtime_mut()
+            .eval_str("(reactive-set \"SEQV\" \"piano-roll-arrangement-mode\" 1)")
+            .expect("simulate a stale arrangement piano-roll mode");
+        editor
+            .runtime_mut()
             .invoke(
-                open_piano_roll.clone(),
+                show_fx.clone(),
                 vec![map_value([(
                     "phase",
                     Value::String("double-click".to_string()),
@@ -24260,20 +24531,38 @@
         );
         assert_eq!(
             editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
-            Some(Value::String("*piano-roll*".to_string())),
-            "track-name double-click should swap the FX lower pane to piano roll"
+            Some(Value::String("*fx*".to_string())),
+            "track-name double-click in FX mode must remain in FX mode"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(piano-roll-arrangement-mode?)")
+                .unwrap(),
+            Some(Value::Bool(false)),
+            "track-name double-click is an explicit FX transition even when FX is already visible"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-open-piano-roll-bottom-for-track 0)")
+            .expect("put the lower panel in piano-roll mode");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*piano-roll*".to_string()))
         );
 
         editor
             .runtime_mut()
             .invoke(
-                open_piano_roll,
+                show_fx,
                 vec![map_value([(
                     "phase",
                     Value::String("double-click".to_string()),
                 )])],
             )
-            .expect("invoke track name double-click while piano roll is open");
+            .expect("invoke track name double-click from piano-roll mode");
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
@@ -24284,7 +24573,7 @@
         assert_eq!(
             editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
             Some(Value::String("*fx*".to_string())),
-            "second track-name double-click on the current track should restore FX"
+            "track-name double-click from piano-roll mode must enter FX mode"
         );
     }
 

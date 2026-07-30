@@ -13,6 +13,13 @@
 (def piano-roll-fit-pending false)
 (def piano-roll-fit-track -1)
 
+;; True only when the lower piano roll was entered from arrangement clip
+;; gestures. Kept in a reactive channel rather than a source defstate because
+;; activating the effect buffer evaluates its source; the entry mode must
+;; survive that activation. Missing/unseeded reads are ordinary session mode.
+(def piano-roll-arrangement-mode? ()
+  (= (reactive-get "SEQV" "piano-roll-arrangement-mode") 1))
+
 (def piano-roll-timeline-height 35)
 (def piano-roll-header-height 2)
 (def piano-roll-default-pane-height 11.5)
@@ -451,8 +458,19 @@
               (if (= SEQ.focus-kind :take) "off" "on")
               "piano-roll-panel-loop")))))))
 
-(effect-buffer "*piano-roll*"
-  (box :width :fill :height :fill 
+(def piano-roll-buffer-content ()
+  (if (and (piano-roll-arrangement-mode?) (= SEQ.focus-clip-start nil))
+    (box
+      :key "piano-roll-no-clip-selected"
+      :width :fill :height :fill
+      :h-align :center :v-align :center
+      (label "No clip selected"
+        :key "piano-roll-no-clip-selected-label"
+        :font-size 11 :color :dim :bg :transparent))
     (h-stack :width :fill :gap 0.0 :height :fill
       (piano-roll-clip-panel)
       (piano-roll-timeline))))
+
+(effect-buffer "*piano-roll*"
+  (box :width :fill :height :fill
+    (piano-roll-buffer-content)))

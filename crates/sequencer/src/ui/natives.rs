@@ -978,6 +978,33 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "seq-arrangement-empty-take-create",
+        "(seq-arrangement-empty-take-create track start-beat end-beat)",
+        "Create a silent take-backed clip on an arrangement track, selecting \
+         it as the edit focus. The take, clip, and any song-end extension are \
+         committed as one undo entry.",
+        move |args, ctx| {
+            let track =
+                song_track_arg("seq-arrangement-empty-take-create: track", args.first())?;
+            let start_beat = song_beat_arg(
+                "seq-arrangement-empty-take-create: start-beat",
+                args.get(1),
+            )?;
+            let end_beat =
+                song_beat_arg("seq-arrangement-empty-take-create: end-beat", args.get(2))?;
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "arrangement-empty-take-create".to_string(),
+                payload: song_payload(vec![
+                    ("track", Value::Number(track as f64)),
+                    ("start-beat", Value::Number(start_beat)),
+                    ("end-beat", Value::Number(end_beat)),
+                ]),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "seq-arrangement-clip-delete",
         "(seq-arrangement-clip-delete clip-id)",
         "Delete a clip by stable id. Nothing plays over its span afterwards: \

@@ -11,8 +11,8 @@
 //! that references it (undo replays a composite in reverse).
 
 use crate::sequencer::{
-    insert_clip_sorted, occlude_span, ArrClip, LaneSource, ProjectArrangement, ProjectScenes,
-    ProjectSong, TakeId, TrackPatternData, MAX_STEPS,
+    insert_clip_sorted, occlude_span, ArrClip, ClipId, LaneSource, PatternSnapshot,
+    ProjectArrangement, ProjectScenes, ProjectSong, TakeId, TrackPatternData, MAX_STEPS,
 };
 
 use super::edit::finish_active_gesture;
@@ -202,6 +202,66 @@ mod tests {
         assert!(app.state.track_take(0, take_id).is_some());
         let song = app.state.committed_song().expect("song");
         assert_eq!(take_lane_overrides(&song, 0).len(), 2);
+    }
+
+    #[test]
+    fn empty_take_clip_create_is_silent_selected_and_one_undo_entry() {
+        let mut app = app_with_song();
+        let depth = app.history.undo_len();
+
+        let (take_id, clip_id) = app
+            .arr_empty_take_clip_create(0, 12.0, 20.0)
+            .expect("empty take clip creates");
+
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        assert_eq!(arrangement.end_beat, 20.0, "the clip extends the song");
+        let clip = arrangement
+            .track_lanes[0]
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .expect("created clip");
+        assert_eq!((clip.start_beat, clip.end_beat), (12.0, 20.0));
+        assert_eq!(clip.source(), LaneSource::Take(take_id));
+
+        let take = app.state.track_take(0, take_id).expect("created take");
+        assert_eq!(take.total_len_steps, 32);
+        assert_eq!(take.chunks.len(), 1);
+        let chunk = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .get(take.chunks[0])
+                .cloned()
+                .expect("take chunk")
+        });
+        assert!(
+            chunk.track_bits.iter().all(|word| *word == 0),
+            "the new take must contain no triggers"
+        );
+        assert!(
+            chunk.chord_snapshot.steps.iter().all(Vec::is_empty),
+            "the new take must contain no chord notes"
+        );
+        assert_eq!(
+            app.song_clip_selection.map(|selection| selection.clip_id),
+            Some(clip_id),
+            "the piano-roll focus follows the created clip"
+        );
+        assert_eq!(
+            app.song_region_selection.map(|region| {
+                (region.track_a, region.track_b, region.start_beat, region.end_beat)
+            }),
+            Some((0, 0, 12.0, 20.0)),
+            "the created clip receives the normal one-clip selection"
+        );
+        assert_eq!(app.history.undo_len(), depth + 1, "one gesture, one entry");
+
+        undo(&mut app);
+        assert!(app.state.track_take(0, take_id).is_none());
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        assert_eq!(arrangement.end_beat, 16.0);
+        assert!(
+            arrangement.find_clip(clip_id).is_none(),
+            "undo removes the clip together with its take"
+        );
     }
 
     #[test]
@@ -861,6 +921,131 @@ impl App {
         Ok(())
     }
 
+    /// Mint a silent take over `[start_beat, end_beat)`, paint one take-backed
+    /// arrangement clip, and select it as the edit focus. This is the
+    /// arrangement background double-click primitive: the take owns real
+    /// chunk storage from the start, so the piano roll can write into it
+    /// without inventing a sourceless "empty clip".
+    ///
+    /// The take pool, chunk patterns, clip, and any song-end extension are one
+    /// composite history entry. The template follows take recording's rule:
+    /// clone the track's bound/effective sound state, then clear every
+    /// step-owned lane.
+    pub fn arr_empty_take_clip_create(
+        &mut self,
+        track: usize,
+        start_beat: f64,
+        end_beat: f64,
+    ) -> Result<(TakeId, ClipId), String> {
+        if self.song_edits_locked() {
+            return Err(super::song_edit::SONG_EDITS_LOCKED_ERROR.to_string());
+        }
+        if !start_beat.is_finite()
+            || !end_beat.is_finite()
+            || start_beat < 0.0
+            || end_beat <= start_beat
+        {
+            return Err(format!(
+                "An empty take clip needs a finite, positive span (got \
+                 [{start_beat}, {end_beat}))"
+            ));
+        }
+        let arrangement_before = self
+            .state
+            .committed_arrangement()
+            .ok_or_else(|| "The project has no song".to_string())?;
+        if track >= arrangement_before.track_lanes.len() {
+            return Err(format!("Track {} has no arrangement lane", track + 1));
+        }
+
+        let bound = self.bound_read_pattern(track);
+        let scenes_before = self.capture_synchronized_scene_structure_state()?;
+        let mut template = scenes_before
+            .track_pools
+            .get(track)
+            .and_then(|pool| bound.and_then(|id| pool.get(id)))
+            .or_else(|| scenes_before.effective_track_pattern(track))
+            .cloned()
+            .or_else(|| PatternSnapshot::new_default(1, &[]).track_pattern_data(0))
+            .ok_or_else(|| format!("Could not build an empty take for track {}", track + 1))?;
+        template.track_params.num_steps = MAX_STEPS;
+        template.clear_step_content();
+        let step_beats = template.track_params.timebase.step_beats(MAX_STEPS);
+        if !(step_beats > 0.0) {
+            return Err("The track's take template has a degenerate timebase".to_string());
+        }
+        let total_len_steps =
+            ((end_beat - start_beat) / step_beats - 1e-6).ceil().max(1.0) as u32;
+        let chunk_count = (total_len_steps as usize).div_ceil(MAX_STEPS);
+        let chunks = vec![template; chunk_count];
+
+        let take_id = self
+            .state
+            .register_track_take(track, None, chunks, total_len_steps)?;
+        let mut arrangement_after = arrangement_before.clone();
+        arrangement_after.end_beat = arrangement_after.end_beat.max(end_beat);
+        let scenes = self.state.capture_project_scenes();
+        let clip_id = match self.paint_take_clip(
+            &mut arrangement_after,
+            &scenes,
+            track,
+            start_beat,
+            end_beat,
+            take_id,
+        ) {
+            Ok(clip_id) => clip_id,
+            Err(error) => {
+                self.state.remove_track_take(track, take_id)?;
+                self.restore_scene_structure_state(&scenes_before)?;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self
+            .state
+            .set_committed_arrangement(Some(arrangement_after.clone()))
+        {
+            self.state.remove_track_take(track, take_id)?;
+            self.restore_scene_structure_state(&scenes_before)?;
+            return Err(format!(
+                "empty take creation produced an invalid song and was rolled back: {error}"
+            ));
+        }
+
+        let scenes_after = self.state.capture_project_scenes();
+        finish_active_gesture(self);
+        let scene_patch = SceneStructurePatch {
+            before: scenes_before,
+            after: scenes_after,
+        };
+        let arrangement_patch = ArrangementStructurePatch {
+            before: Some(arrangement_before),
+            after: Some(arrangement_after),
+        };
+        let retained_bytes = scene_patch.retained_bytes() + arrangement_patch.retained_bytes();
+        self.history.commit(
+            "Create take clip",
+            None,
+            EditPatch::Composite(vec![
+                EditPatch::SceneStructure(scene_patch),
+                EditPatch::Arrangement(arrangement_patch),
+            ]),
+            retained_bytes,
+        );
+        self.rebuild_active_song_after_arrangement_edit();
+
+        // Selection is intentionally outside history, like every other clip
+        // click. The take id is fresh, so its newly committed clip is the
+        // unambiguous focus target.
+        self.select_committed_take(track, take_id);
+        self.set_song_region_for_clip(super::song_region::SongRegionSelection::new(
+            track,
+            track,
+            start_beat,
+            end_beat,
+        ));
+        Ok((take_id, clip_id))
+    }
+
     /// Convert one track's resolved arrangement content over
     /// `[start_beat, end_beat)` into a take and point the region's lane at
     /// it (takes spec 13 Phase C — the dev validation harness for take
@@ -1092,7 +1277,7 @@ impl App {
         start_beat: f64,
         end_beat: f64,
         take_id: TakeId,
-    ) -> Result<(), String> {
+    ) -> Result<ClipId, String> {
         if track >= arrangement.track_lanes.len() {
             return Err(format!("Track {} has no arrangement lane", track + 1));
         }
@@ -1108,6 +1293,6 @@ impl App {
             track,
             ArrClip::new_take(id, start_beat, end_beat, take_id.0, 0.0),
         );
-        Ok(())
+        Ok(id)
     }
 }

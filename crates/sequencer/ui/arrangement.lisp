@@ -1203,7 +1203,7 @@
                   nil
                   (arrangement-find-track-clip i (nth ids 0)))))
       (do
-        (seqv-select-track-for-edit i)
+        (seqv-select-track-for-edit-preserving-lower-panel i)
         (set! arrangement-selection '())
         (set! arrangement-selection-rect nil)
         ;; A clip and a region are mutually exclusive (region spec 4.1);
@@ -1229,6 +1229,15 @@
           i)
         clip))))
 
+(def arrangement-track-clear-selection (i event)
+  (do
+    (seqv-select-track-for-edit-preserving-lower-panel i)
+    (set! arrangement-track-selection '())
+    (arrangement-publish-selection -1 -1)
+    (arrangement-region-clear)
+    (seq-song-deselect-clip)
+    (set-arrangement-cursor (get event :time) i)))
+
 (def arrangement-track-action (i event)
   (if (arrangement-view-action? event)
     (arrangement-view-action event)
@@ -1243,21 +1252,34 @@
       (let ((clip (arrangement-track-select i event)))
         (if (= clip nil)
           nil
-          (seq-open-piano-roll-bottom-for-track i)))
+          (seq-open-arrangement-piano-roll-bottom-for-track i)))
+      ;; Background double-click: follow the same empty-space selection path
+      ;; as the first click, then atomically mint a real silent take + clip.
+      ;; The host command selects the new clip when it commits, so the
+      ;; track-shaped open call resolves onto that take on the next UI tick.
+      :finish-create-item
+      (let ((start (get event :start))
+            (end (get event :end)))
+        (do
+          (arrangement-track-select i (dict :ids '() :time start))
+          (seq-arrangement-empty-take-create i start end)
+          (seq-open-arrangement-piano-roll-bottom-for-track i)))
       ;; Degenerate zero-movement release, or a click on empty lane space:
-      ;; drop the region and park the edit cursor here, Ableton-style
-      ;; (region spec 4.4).
+      ;; in FX mode a clip BODY remains a region/cursor surface. In the
+      ;; arrangement piano-roll mode the widget includes the body clip id,
+      ;; and the same press retargets the editor instead. A true background
+      ;; click carries no real id, so it clears focus and the piano roll shows
+      ;; "No clip selected".
       :clear-selection
-      (do
-        (seqv-select-track-for-edit i)
-        (set! arrangement-track-selection '())
-        (arrangement-publish-selection -1 -1)
-        (arrangement-region-clear)
-        (seq-song-deselect-clip)
-        (set-arrangement-cursor (get event :time) i))
+      (let ((ids (arrangement-real-clip-ids i (or (get event :ids) '()))))
+        (if (and (piano-roll-arrangement-mode?)
+              (= lower-panel-buffer "*piano-roll*")
+              (> (len ids) 0))
+          (arrangement-track-select i event)
+          (arrangement-track-clear-selection i event)))
       :set-cursor
       (do
-        (seqv-select-track-for-edit i)
+        (seqv-select-track-for-edit-preserving-lower-panel i)
         (set-arrangement-cursor (get event :time) i))
       ;; Cross-track region sweep (region spec 4.2/4.4): live frames update
       ;; the ghost only; the release commits the Rust-owned region.
@@ -1400,8 +1422,10 @@
     :scroll-passthrough :vertical
     :background-color arrangement-timeline-background-color
     :title-bar-height arrangement-clip-title-bar-height
-    ;; Title-bar double-click opens the clip editor (clip-edit-target spec
-    ;; 4); the scene lane deliberately does NOT opt in.
+    ;; Title-bar double-click opens an existing clip; background double-click
+    ;; uses the timeline's standard :finish-create-item action to create an
+    ;; empty take clip. The scene lane deliberately does NOT opt into item
+    ;; double-clicks.
     :double-click-items true
     :item-label-font-size arrangement-clip-label-font-size
     :item-label-color arrangement-clip-label-color
@@ -1452,6 +1476,10 @@
     :lane-scroll 0
     :snap arrangement-snap
     :min-duration 1
+    ;; A background double-click creates an editable take clip. Give that
+    ;; discrete gesture a musically useful span instead of falling back to
+    ;; the timeline's one-beat resize minimum.
+    :create-duration arrangement-beats-per-bar
     :resize-snap :grid
     :marquee-snap :grid
     :snap-mode :floor
