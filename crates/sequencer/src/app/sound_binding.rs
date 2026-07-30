@@ -586,11 +586,13 @@ impl App {
     /// **Apply to all takes on track** (16.5, S2 semantics): re-link every
     /// take on the track (take + chunks) to the bound source's refs. With
     /// takes sharing by default this is a repair/convergence tool for
-    /// deliberately forked or legacy-imported takes.
+    /// deliberately forked or legacy-imported takes. With no explicit
+    /// binding the scene-effective refs are the source (rule 3, matching the
+    /// §16.5 behavior): the gesture converges every take to the scene sound.
     pub fn apply_bound_sound_to_all_takes(&mut self, track: usize) -> Result<String, String> {
         let refs = self
             .bound_sound_refs(track)
-            .ok_or_else(|| "The track has no bound sound".to_string())?;
+            .ok_or_else(|| format!("Track {} does not exist", track + 1))?;
         let takes: Vec<TakeId> = self.state.with_project_scenes(|scenes| {
             scenes
                 .take_pools

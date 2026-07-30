@@ -482,6 +482,13 @@ impl SequencerState {
         let (chunk_ids, take_sound) = {
             let pool = &mut scenes.track_pools[track];
             let shared = sound.filter(|refs| pool.sounds.resolves(*refs));
+            debug_assert!(
+                sound.is_none() || shared.is_some(),
+                "register_track_take on track {} was passed sound refs that do \
+                 not resolve — a caller read stale refs; falling back to a \
+                 private mint forks the sound",
+                track + 1
+            );
             let mut chunks = chunks.into_iter();
             let first = chunks.next().expect("checked non-empty above");
             let mut ids = Vec::with_capacity(chunks.len() + 1);
@@ -1089,7 +1096,9 @@ impl SequencerState {
     /// (§17.3 re-link — the S2 successor of the §16.5 device copy: reference
     /// semantics, not a value copy). Scene cells whose cell is a re-linked
     /// pattern follow it, keeping cell and pattern naming the same entities.
-    /// Returns how many referents actually moved.
+    /// All-or-nothing: every target is validated before anything moves.
+    /// Returns how many of the named referents (patterns + takes) moved;
+    /// cell follow-ups ride along uncounted.
     pub(crate) fn relink_track_sound_refs(
         &self,
         track: usize,
@@ -1111,6 +1120,23 @@ impl SequencerState {
                 track + 1
             ));
         }
+        // Erroring below this point would leave earlier re-links applied with
+        // no history entry recording them (the caller only commits a patch on
+        // Ok), so every take must resolve before anything moves.
+        for take_id in takes {
+            if scenes
+                .take_pools
+                .get(track)
+                .and_then(|takes| takes.get(*take_id))
+                .is_none()
+            {
+                return Err(format!(
+                    "Take {} does not exist on track {}",
+                    take_id.0,
+                    track + 1
+                ));
+            }
+        }
         let mut changed = 0;
         let mut moved_patterns: Vec<PatternId> = Vec::new();
         for pattern in patterns {
@@ -1120,40 +1146,37 @@ impl SequencerState {
             }
         }
         for take_id in takes {
-            let Some(chunks) = scenes
+            let mut moved = false;
+            let chunks = scenes
                 .take_pools
                 .get_mut(track)
                 .and_then(|takes| takes.get_mut(*take_id))
                 .map(|take| {
                     if take.sound != refs {
                         take.sound = refs;
-                        changed += 1;
+                        moved = true;
                     }
                     take.chunks.clone()
                 })
-            else {
-                return Err(format!(
-                    "Take {} does not exist on track {}",
-                    take_id.0,
-                    track + 1
-                ));
-            };
+                .expect("validated above under the same lock");
             for chunk in chunks {
                 if pool.relink_sound(chunk, refs) {
-                    changed += 1;
+                    moved = true;
                 }
+            }
+            if moved {
+                changed += 1;
             }
         }
         // Cells follow their pattern (§17.3: after any launch/assignment,
         // cell and pattern name the same entities — a re-link included).
+        // Uncounted: a cell can only move when its pattern just did, so
+        // `changed` already reflects it.
         for scene in &mut scenes.scenes {
             if let Some(Some(cell)) = scene.cells.get(track) {
                 if moved_patterns.contains(cell) {
                     if let Some(slot) = scene.cell_sounds.get_mut(track) {
-                        if *slot != refs {
-                            *slot = refs;
-                            changed += 1;
-                        }
+                        *slot = refs;
                     }
                 }
             }
