@@ -1489,21 +1489,25 @@ fn build_metal_primitives(
         // intrinsic width constraint, and a short clip must never paint its
         // label over the next clip or an empty part of the lane.
         let label_height = title_bar_height.unwrap_or(height);
-        // Sound-divergence dot (takes spec §17.6): a small swatch at the
-        // title bar's left edge, same visual language as the p-lock variant
-        // chips. The label shifts right to make room.
+        // Sound-identity square (takes spec §17.6): a letter-sized colored
+        // square at the title bar's left edge — deliberately large enough to
+        // read as a click target (a future palette-overlay trigger). Sized
+        // in PIXELS so it is visually square regardless of the cell aspect,
+        // roughly the label's letter height. The label shifts right.
         let mut label_col = x + 0.34;
         if let Some(dot) = item.sound_dot {
             if width >= 1.2 && label_height >= 0.85 {
-                let dot_height = 0.42;
+                let side_px = (view.item_label_font_size * 0.9).max(5.0);
+                let side_rows = (side_px / viewport.cell_h).min(label_height * 0.8);
+                let side_cols = side_rows * viewport.cell_h / viewport.cell_w;
                 primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
                     x: x + 0.30,
-                    y: y + ((label_height - dot_height).max(0.0) * 0.5),
-                    width: 0.28,
-                    height: dot_height,
+                    y: y + ((label_height - side_rows).max(0.0) * 0.5),
+                    width: side_cols,
+                    height: side_rows,
                     color: dot,
                 }));
-                label_col = x + 0.78;
+                label_col = x + 0.30 + side_cols + 0.28;
             }
         }
         if let Some(label) = &item.label {
