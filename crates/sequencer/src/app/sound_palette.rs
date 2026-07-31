@@ -6,8 +6,6 @@
 //! silently kills p-locks/key locks and engaged macro overrides. Each
 //! gesture is one undo entry (§17.4).
 
-use std::collections::HashSet;
-
 use crate::sequencer::{MixId, PatchId, PatternId, SoundRefs, TakeId, SOUND_COLOR_SET};
 
 use super::sound_binding::BoundSource;
@@ -384,11 +382,14 @@ impl App {
     /// Clip-dot join (§17.6, amended): per track, each stored clip's dot
     /// visibility and color — `(clip_id, dot, color)`. The dot is **patch
     /// identity**, not divergence from the live effective refs: every clip
-    /// shows its patch's color (§17.11: a color identifies exactly one Patch
-    /// on the track), suppressed only when the whole lane uses a single
-    /// patch. Comparing against the scene-effective refs was rejected — the
-    /// baseline follows the playhead under song playback, so the dots
-    /// flickered from clip to clip as rows repointed the cell refs.
+    /// with a resolvable sound shows its patch's color (§17.11: a color
+    /// identifies exactly one Patch on the track), unconditionally. Two
+    /// rejected variants, both of which made the dots appear/disappear for
+    /// reasons invisible to the user: comparing against the scene-effective
+    /// refs (the baseline follows the playhead under song playback), and
+    /// suppressing single-patch lanes (a take splice can collapse a lane to
+    /// one patch and the next punch-in re-cross the threshold, toggling
+    /// every dot on the lane at once).
     pub fn song_clip_sounds(&self) -> Vec<Vec<(u64, bool, Option<u8>)>> {
         // Two sequential lock scopes, never nested (arrangement and scenes
         // have no established lock order): first the minimal clip tuples,
@@ -432,14 +433,6 @@ impl App {
                             None
                         }
                     };
-                    // A lane whose clips all share one patch has nothing to
-                    // distinguish; dots appear only once a second sound
-                    // exists on the lane.
-                    let distinct: HashSet<PatchId> = clips
-                        .iter()
-                        .filter_map(|(_, take_id, pattern_id)| clip_patch(*take_id, *pattern_id))
-                        .collect();
-                    let multi = distinct.len() > 1;
                     clips
                         .into_iter()
                         .map(|(clip_id, take_id, pattern_id)| {
@@ -448,7 +441,7 @@ impl App {
                                 pool.and_then(|pool| pool.sounds.patch_meta.get(&patch))
                                     .and_then(|meta| meta.color)
                             });
-                            (clip_id, multi && patch.is_some(), color)
+                            (clip_id, patch.is_some(), color)
                         })
                         .collect()
                 })
@@ -727,20 +720,20 @@ mod tests {
     }
 
     /// Clip dots are patch IDENTITY, not divergence from the (playhead-
-    /// following) effective refs: a single-patch lane shows no dots; once a
-    /// second patch appears, EVERY clip is dotted with its own color — and
-    /// nothing here reads the current scene, so playback row transitions
-    /// cannot move the dots.
+    /// following) effective refs: EVERY clip with a resolvable sound is
+    /// dotted with its own patch color, unconditionally — nothing here
+    /// reads the current scene or thresholds on the lane's patch count, so
+    /// neither playback row transitions nor take splices can toggle dots.
     #[test]
     fn clip_dots_mark_patch_identity_and_ignore_the_effective_refs() {
         let (mut app, take, _scene_pattern, _chunks) = app_with_take();
         let lanes = app.song_clip_sounds();
         assert!(
-            lanes[0].iter().all(|(_, dot, _)| !dot),
-            "a single-patch lane shows no dots: {lanes:?}"
+            lanes[0].iter().all(|(_, dot, _)| *dot),
+            "a single-patch lane still dots its clips: {lanes:?}"
         );
 
-        // A second clip with a different patch: both clips now show dots.
+        // A second clip with a different patch: both clips show dots.
         let (donor, donor_refs) = distinctive_pattern(&app);
         let mut arrangement = crate::sequencer::ProjectArrangement::new(1, 32.0);
         arrangement.track_lanes[0].push(crate::sequencer::ArrClip::new_take(

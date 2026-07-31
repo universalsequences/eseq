@@ -571,11 +571,12 @@
 
 ;; Sound identity dot (takes spec 17.6, amended): SEQ.song-clip-sounds joins
 ;; each clip to its Patch's palette color. The dot marks patch IDENTITY —
-;; same color = same sound — and is shown on every clip once the lane uses
-;; more than one patch (Rust suppresses single-patch lanes). Divergence from
-;; the live effective refs was rejected: that baseline follows the playhead
-;; under song playback, so the dots hopped between clips. A colored patch
-;; passes (r g b); a name-only patch passes true (gray fallback, 17.11).
+;; same color = same sound — on every clip with a resolvable sound,
+;; unconditionally. Divergence-vs-effective-refs and single-patch-lane
+;; suppression were both rejected: each made dots appear/disappear for
+;; reasons invisible to the user (the playhead moving; a take splice
+;; crossing the patch-count threshold). A colored patch passes (r g b); a
+;; name-only patch passes true (gray fallback, 17.11).
 (def arrangement-clip-sound-dot (i clip-id)
   (if (>= i (len SEQ.song-clip-sounds))
     nil
