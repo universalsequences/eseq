@@ -8,10 +8,15 @@
 ;; language as the p-lock variant chips in track-panels.lisp.
 ;;
 ;; Rows render with `each`, never `map` (repo UI rule: map renders broken
-;; live while layout tests pass). Local UI state is one defstate: which
-;; entry is being renamed inline (17.11: rename lives in the overlay only).
+;; live while layout tests pass). Local UI state: which entry is being
+;; renamed inline (17.11: rename lives in the overlay only) plus the rename
+;; draft. text-input :on-change fires per keystroke, so the draft buffers
+;; edits and only the explicit "ok" button commits — :on-enter is not an
+;; option here because click-to-focus dispatches it, which would commit on
+;; a cursor-positioning click.
 
 (defstate sound-palette-renaming -1)
+(defstate sound-palette-rename-draft "")
 
 (def sound-palette-open? ()
   (not (= SEQ.sound-palette nil)))
@@ -48,6 +53,7 @@
 (def sound-palette-close ()
   (do
     (set! sound-palette-renaming -1)
+    (set! sound-palette-rename-draft "")
     (seq-sound-palette-close)))
 
 (def sound-palette-apply (entry)
@@ -62,10 +68,17 @@
 (def sound-palette-fork ()
   (seq-sound-fork (sound-palette-track)))
 
-(def sound-palette-commit-rename (entry name)
+(def sound-palette-begin-rename (entry)
   (do
-    (seq-sound-rename (sound-palette-track) "patch" (get entry :patch-id) name)
-    (set! sound-palette-renaming -1)))
+    (set! sound-palette-renaming (get entry :patch-id))
+    (set! sound-palette-rename-draft (get entry :name))))
+
+(def sound-palette-commit-rename (entry)
+  (do
+    (seq-sound-rename (sound-palette-track) "patch" (get entry :patch-id)
+      sound-palette-rename-draft)
+    (set! sound-palette-renaming -1)
+    (set! sound-palette-rename-draft "")))
 
 (def sound-palette-action-button (key-suffix entry text on-press)
   (button text
@@ -101,12 +114,18 @@
             :border-width (if base 1 0)
             :border-color c)
           (if (= sound-palette-renaming (get entry :patch-id))
-            (text-input :key (str "sound-palette-rename-" (get entry :patch-id))
-              :width 7.5 :height 0.9 :font-size 8.5 :value (get entry :name)
-              :on-change |name| (sound-palette-commit-rename entry name))
+            ;; Draft-buffered rename: :on-change only edits the draft (it
+            ;; fires per keystroke); the "ok" button commits.
+            (h-stack :gap 0.2 :align :center
+              (text-input :key (str "sound-palette-rename-" (get entry :patch-id))
+                :width 6.0 :height 0.9 :font-size 8.5
+                :value sound-palette-rename-draft
+                :on-change |name| (set! sound-palette-rename-draft name))
+              (sound-palette-action-button "rename-ok" entry "ok"
+                (lambda (entry) (sound-palette-commit-rename entry))))
             (box :key (str "sound-palette-name-" (get entry :patch-id))
               :bg :transparent
-              :on-click |x y r| (set! sound-palette-renaming (get entry :patch-id))
+              :on-click |x y r| (sound-palette-begin-rename entry)
               (label (str (substring (get entry :name) 0 9) (if base " (scene)" ""))
                 :font-size 9 :color (if current :white :dim) :bg :transparent)))
           (box :flex 1 :bg :transparent)

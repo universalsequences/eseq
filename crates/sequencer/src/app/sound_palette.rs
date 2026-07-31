@@ -232,8 +232,31 @@ impl App {
         mix: Option<MixId>,
         name: &str,
     ) -> Result<String, String> {
-        if name.trim().is_empty() {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
             return Err("A sound name cannot be empty".to_string());
+        }
+        // A same-name commit would burn an undo entry on a no-op.
+        let unchanged = self.state.with_project_scenes(|scenes| {
+            scenes
+                .track_pools
+                .get(track)
+                .is_some_and(|pool| match (patch, mix) {
+                    (Some(id), None) => pool
+                        .sounds
+                        .patch_meta
+                        .get(&id)
+                        .is_some_and(|meta| meta.name == trimmed),
+                    (None, Some(id)) => pool
+                        .sounds
+                        .mix_meta
+                        .get(&id)
+                        .is_some_and(|meta| meta.name == trimmed),
+                    _ => false,
+                })
+        });
+        if unchanged {
+            return Ok(format!("Already named {trimmed}"));
         }
         let before = self.capture_synchronized_scene_structure_state()?;
         self.state
@@ -248,7 +271,7 @@ impl App {
             crate::app::history::EditPatch::SceneStructure(patch),
             retained_bytes,
         );
-        Ok(format!("Renamed to {}", name.trim()))
+        Ok(format!("Renamed to {trimmed}"))
     }
 
     /// **Clean up unused** (§17.4): the interactive version of the
@@ -694,6 +717,15 @@ mod tests {
             .with_project_scenes(|scenes| scenes.take_pools[0].get(take).expect("take").sound);
         app.palette_rename(0, Some(refs.patch), None, "Warm Keys")
             .expect("rename succeeds");
+        // A same-name rename (whitespace included) is a no-op: no undo entry.
+        let depth = app.history.undo_len();
+        app.palette_rename(0, Some(refs.patch), None, "  Warm Keys ")
+            .expect("no-op rename succeeds");
+        assert_eq!(
+            app.history.undo_len(),
+            depth,
+            "a same-name rename commits no undo entry"
+        );
         let entries = app.sound_palette_entries(0, PaletteTarget::Take(take));
         let entry = entries
             .iter()
