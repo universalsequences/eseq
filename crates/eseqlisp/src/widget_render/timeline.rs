@@ -5407,6 +5407,7 @@ mod tests {
                 props: props(style),
                 children: Vec::new(),
                 focusable: false,
+                animation: Default::default(),
             };
             build_metal_primitives(&node, viewport)
         };
@@ -5569,6 +5570,7 @@ mod tests {
             props: props.clone(),
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         };
 
         let view = TimelineView::from_props(&node.props, rect);
@@ -5674,6 +5676,7 @@ mod tests {
             props,
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         };
 
         let primitives = build_metal_primitives(&node, viewport);
@@ -5828,6 +5831,7 @@ mod tests {
             props,
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         };
 
         let primitives = build_metal_primitives(&node, viewport);
@@ -5914,6 +5918,7 @@ mod tests {
             props,
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         };
         let viewport = WidgetViewport {
             cell_w: 10.0,
@@ -6007,6 +6012,7 @@ mod tests {
             props,
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         };
         let viewport = WidgetViewport {
             cell_w: 10.0,
@@ -6085,6 +6091,7 @@ mod tests {
             props,
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         };
 
         let primitives = build_metal_primitives(&node, viewport);
@@ -6161,6 +6168,7 @@ mod tests {
             props,
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         };
 
         let marker_only = build_metal_primitives(&node, viewport);

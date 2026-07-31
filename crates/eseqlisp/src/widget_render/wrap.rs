@@ -308,6 +308,7 @@ mod tests {
                     props: HashMap::new(),
                     children: Vec::new(),
                     focusable: false,
+                    animation: Default::default(),
                 }
             },
         );

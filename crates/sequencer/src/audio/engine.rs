@@ -339,7 +339,7 @@ fn init_engine_parts(
             }),
         });
     }
-    let bus_gate_runtime = Arc::new(Mutex::new(
+    let bus_gate_runtime = Arc::new(Mutex::new(Arc::new(
         default_bus_nodes
             .iter()
             .map(|nodes| BusGateRuntimeState {
@@ -349,7 +349,7 @@ fn init_engine_parts(
                 effect_slots: crate::app::BusChannelState::default_effect_slots(),
             })
             .collect(),
-    ));
+    )));
     let bus_gate_playheads = Arc::new(Mutex::new(
         default_bus_nodes
             .iter()

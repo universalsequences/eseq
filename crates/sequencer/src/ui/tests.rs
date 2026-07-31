@@ -5,14 +5,15 @@
         apply_selected_steps_delete, apply_slice3_history_host_command,
         apply_toggle_step_host_command, bus_mixer_targeted_invalidation,
         slice3_track_mixer_invalidation, BusMixerInvalidation, TrackMixerInvalidation,
-        build_custom_instrument_ui_source_with_overlay, effect_patcher_buffer_source,
+        build_custom_instrument_ui_source_with_overlay, claim_param_sync_revision,
+        effect_patcher_buffer_source,
         escape_lisp_string, finish_piano_roll_gesture, instrument_patcher_buffer_source,
         key_should_reveal_sequencer_track, patcher_layout_sidecar_path_for_dsp,
-        reconciled_track_index,
+        pull_shared_bus_state, reconciled_track_index,
         restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
         show_instrument_patcher_layout_source, show_instrument_patcher_source_layout_source,
         track_meter_bindings_visible, ActiveDeleteTarget, ExpandedStepProjectionRegistry,
-        FxDeleteChain, Runtime, StepParam, Value, AGENT_INSTRUMENT_STUB_UI,
+        FxDeleteChain, ParamSyncRevision, Runtime, StepParam, Value, AGENT_INSTRUMENT_STUB_UI,
         NEW_INSTRUMENT_STARTER_DSP,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -36,7 +37,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
                 bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
@@ -62,6 +63,66 @@
                 })
                 .collect(),
         )
+    }
+
+    #[test]
+    fn shared_bus_pull_copies_only_mixer_scalars_when_topology_is_unchanged() {
+        let (_state, mut app) = history_test_app();
+        app.buses = sequencer::app::BusChannelState::default_buses();
+        app.buses[0].name = "app-owned".to_string();
+        let mut shared = app.buses.clone();
+        shared[0].name = "shared-owned".to_string();
+        shared[0].volume = 0.25;
+        shared[0].mute = true;
+        shared[0].solo = true;
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(shared));
+
+        assert!(pull_shared_bus_state(&mut app, &shared));
+        assert_eq!(app.buses[0].name, "app-owned");
+        assert_eq!(app.buses[0].volume, 0.25);
+        assert!(app.buses[0].mute);
+        assert!(app.buses[0].solo);
+        assert!(!pull_shared_bus_state(&mut app, &shared));
+    }
+
+    #[test]
+    fn shared_bus_pull_replaces_full_state_when_topology_changes() {
+        let (_state, mut app) = history_test_app();
+        app.buses = sequencer::app::BusChannelState::default_buses();
+        let mut shared = app.buses.clone();
+        shared.push(sequencer::app::BusChannelState::new(
+            sequencer::sequencer::BusId(99),
+            "New bus",
+        ));
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(shared));
+
+        assert!(pull_shared_bus_state(&mut app, &shared));
+        assert_eq!(app.buses.len(), 4);
+        assert_eq!(app.buses[3].name, "New bus");
+    }
+
+    #[test]
+    fn param_sync_revision_claims_only_changed_composite_inputs() {
+        let revision = ParamSyncRevision {
+            track: 1,
+            scene: 2,
+            pattern_epoch: 3,
+            song_row_mirror_epoch: 4,
+            ui_epoch: 5,
+            fx_epoch: 6,
+            sound_binding_epoch: 7,
+            display_step: Some(8),
+            selected_steps: vec![8, 9],
+            selected_neural_neurons: Vec::new(),
+        };
+        let mut previous = None;
+
+        assert!(claim_param_sync_revision(&mut previous, &revision));
+        assert!(!claim_param_sync_revision(&mut previous, &revision));
+
+        let mut changed = revision;
+        changed.pattern_epoch += 1;
+        assert!(claim_param_sync_revision(&mut previous, &changed));
     }
 
     /// Clip-edit-target spec 3.4 end to end through the host-command seam: a

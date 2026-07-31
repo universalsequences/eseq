@@ -451,6 +451,10 @@ impl WidgetDefinition for PianoKeyboardWidget {
         )
     }
 
+    fn animation_frame_policy(&self) -> super::AnimationFramePolicy {
+        super::AnimationFramePolicy::RuntimeState
+    }
+
     fn measure(
         &self,
         node: &Value,
@@ -775,7 +779,7 @@ mod tests {
         let active = active_note_sources(&props);
         let now = crate::widget_render::sdf_widget::current_sdf_time_seconds();
         observe_key_activity(widget_id, &active, now);
-        let node = LayoutNode {
+        let mut node = LayoutNode {
             widget_id,
             stable_widget_id: None,
             subtree_root_id: None,
@@ -791,9 +795,17 @@ mod tests {
             props,
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         };
+        crate::widget_render::cache_layout_animation_hints(&mut node);
         assert!(PIANO_KEYBOARD_WIDGET.wants_animation_frames(&node));
+        assert!(node.animation.subtree_dynamic);
+        assert!(!node.animation.subtree_static);
         assert!(crate::widget_render::layout_wants_animation_frames(&node));
+        assert_eq!(
+            crate::widget_render::active_animation_widget_ids(&node),
+            vec![widget_id]
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -856,6 +868,7 @@ mod tests {
             props,
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         };
         let viewport = WidgetViewport {
             cell_w: 10.0,

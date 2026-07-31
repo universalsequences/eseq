@@ -282,6 +282,10 @@ impl WidgetDefinition for PhaserNotchWidget {
         prop_num(&node.props, "amount", 0.25) > 0.0001
     }
 
+    fn animation_frame_policy(&self) -> super::AnimationFramePolicy {
+        super::AnimationFramePolicy::LayoutStatic
+    }
+
     fn metal_shader_uses_time(&self) -> bool {
         true
     }

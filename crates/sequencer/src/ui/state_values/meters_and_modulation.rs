@@ -322,52 +322,74 @@ pub(crate) fn sync_track_peak_fields(rt: &mut Runtime, levels: &[f64]) -> bool {
     effects_dirty
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct VisualizationLiveness {
+    neural: bool,
+    graph: bool,
+    track_output: bool,
+}
+
 pub(crate) fn sync_neural_visualization_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
+    previous_liveness: &mut VisualizationLiveness,
 ) -> bool {
-    let mut effects_dirty = rt
-        .set_reactive(
-            "SEQ",
-            "neural-energy-matrix",
-            build_neural_energy_matrix_value(state),
-        )
-        .effects_dirty;
-    effects_dirty |= rt
-        .set_reactive(
-            "SEQ",
-            "neural-trigger-matrix",
-            build_neural_trigger_matrix_value(state),
-        )
-        .effects_dirty;
-    effects_dirty |= rt
-        .set_reactive(
-            "SEQ",
-            "neural-dampening-matrix",
-            build_neural_dampening_matrix_value(state),
-        )
-        .effects_dirty;
-    effects_dirty |= rt
-        .set_reactive(
-            "SEQ",
-            "graph-visualizations",
-            build_graph_visualizations_value(state),
-        )
-        .effects_dirty;
-    effects_dirty |= rt
-        .set_reactive(
-            "SEQ",
-            "track-events",
-            build_track_output_events_value(state),
-        )
-        .effects_dirty;
-    effects_dirty |= rt
-        .set_reactive(
-            "SEQ",
-            "track-event-current-beat",
-            build_track_output_current_beat_value(state),
-        )
-        .effects_dirty;
+    let liveness = VisualizationLiveness {
+        neural: state.has_neural_visualization(),
+        graph: state.has_graph_visualizations(),
+        track_output: state.has_track_output_events(),
+    };
+    let mut effects_dirty = false;
+
+    if liveness.neural || previous_liveness.neural {
+        effects_dirty |= rt
+            .set_reactive(
+                "SEQ",
+                "neural-energy-matrix",
+                build_neural_energy_matrix_value(state),
+            )
+            .effects_dirty;
+        effects_dirty |= rt
+            .set_reactive(
+                "SEQ",
+                "neural-trigger-matrix",
+                build_neural_trigger_matrix_value(state),
+            )
+            .effects_dirty;
+        effects_dirty |= rt
+            .set_reactive(
+                "SEQ",
+                "neural-dampening-matrix",
+                build_neural_dampening_matrix_value(state),
+            )
+            .effects_dirty;
+    }
+    if liveness.graph || previous_liveness.graph {
+        effects_dirty |= rt
+            .set_reactive(
+                "SEQ",
+                "graph-visualizations",
+                build_graph_visualizations_value(state),
+            )
+            .effects_dirty;
+    }
+    if liveness.track_output || previous_liveness.track_output {
+        effects_dirty |= rt
+            .set_reactive(
+                "SEQ",
+                "track-events",
+                build_track_output_events_value(state),
+            )
+            .effects_dirty;
+        effects_dirty |= rt
+            .set_reactive(
+                "SEQ",
+                "track-event-current-beat",
+                build_track_output_current_beat_value(state),
+            )
+            .effects_dirty;
+    }
+    *previous_liveness = liveness;
     effects_dirty
 }
 

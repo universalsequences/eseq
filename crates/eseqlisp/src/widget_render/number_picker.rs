@@ -88,6 +88,7 @@ mod tests {
             props,
             children: Vec::new(),
             focusable: true,
+            animation: Default::default(),
         }
     }
 

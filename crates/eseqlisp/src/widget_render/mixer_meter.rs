@@ -197,6 +197,7 @@ mod tests {
             props: HashMap::new(),
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         };
         let viewport = WidgetViewport {
             cell_w: 10.0,
@@ -266,6 +267,7 @@ mod tests {
             props,
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         };
         let viewport = WidgetViewport {
             cell_w: 10.0,

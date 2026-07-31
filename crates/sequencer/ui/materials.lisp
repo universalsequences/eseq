@@ -119,10 +119,9 @@
   :width 4 :height 3
   :paint-margin 1
   :state (active plocked selected)
-  :animates true
   :bindable (active plocked selected)
   :shader
-  (let ((sel-y (if (= selected 1) (* 0.03 (cos (* 1 itime))) 0)))
+  (let ((sel-y (if (= selected 1) 0.03 0)))
     (sdf/translate 0 sel-y
       (sdf/layer
         (sdf/fill (+ (* (if (= selected 1) (* sel-y 1) 0.001) (smoothstep 0 0.1 (* y x))) (sdf/fill-rounded-rect -0.01 0.85))
@@ -148,9 +147,8 @@
   :width 1.5 :height 1.5
   :state (active plocked selected)
   :bindable (active plocked selected)
-  :animates true
   :shader
-  (let ((sel-y (if (= selected 1) (* 0.01 (cos (* .03 itime))) 0)))
+  (let ((sel-y (if (= selected 1) 0.01 0)))
     (sdf/translate 0 sel-y
       (sdf/layer
         (sdf/fill (sdf/circle (+ 1 (* sel-y 100)))

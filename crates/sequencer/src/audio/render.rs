@@ -226,16 +226,22 @@ pub(super) fn sync_bus_gate_params(data: &mut AudioCallbackData, block_start_sam
 
     let elapsed_samples = block_start_sample.saturating_sub(data.bus_gate_play_start_sample);
     let total_beats = elapsed_samples as f64 * bpm / (data.sample_rate * 60.0);
-    let Ok(gates) = data.bus_gate_runtime.try_lock() else {
-        return;
-    };
-    let gates = gates.clone();
-    let mut playheads = Vec::with_capacity(gates.len());
+    // Refresh the RT-side snapshot without deep-cloning: the UI publishes a
+    // whole new Arc, so a pointer compare detects changes and a failed
+    // try_lock just reuses last block's snapshot.
+    if let Ok(shared) = data.bus_gate_runtime.try_lock() {
+        if !Arc::ptr_eq(&shared, &data.bus_gate_cache) {
+            data.bus_gate_cache = Arc::clone(&shared);
+        }
+    }
+    let gates = Arc::clone(&data.bus_gate_cache);
+    let mut playheads = std::mem::take(&mut data.bus_gate_playheads_scratch);
+    playheads.clear();
 
     data.bus_gate_clocks
         .retain(|clock| gates.iter().any(|gate| gate.id == clock.id));
 
-    for gate in gates {
+    for gate in gates.iter() {
         if gate.gate_id <= 0 {
             continue;
         }
@@ -280,8 +286,11 @@ pub(super) fn sync_bus_gate_params(data: &mut AudioCallbackData, block_start_sam
         }
     }
     if let Ok(mut shared_playheads) = data.bus_gate_playheads.try_lock() {
-        *shared_playheads = playheads;
+        std::mem::swap(&mut *shared_playheads, &mut playheads);
     }
+    // Keep whichever Vec we ended up with as next block's scratch buffer so
+    // steady-state publishing never allocates on the audio thread.
+    data.bus_gate_playheads_scratch = playheads;
 }
 
 pub(super) fn compute_host_transport_clock(

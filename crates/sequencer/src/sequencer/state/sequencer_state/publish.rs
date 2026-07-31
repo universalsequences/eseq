@@ -13,12 +13,20 @@ impl SequencerState {
         self.neural_visualization.lock().unwrap().clone()
     }
 
+    pub fn has_neural_visualization(&self) -> bool {
+        self.neural_visualization.lock().unwrap().num_neurons > 0
+    }
+
     pub fn set_graph_visualizations(&self, snapshots: Vec<GraphVisualizationSnapshot>) {
         *self.graph_visualizations.lock().unwrap() = snapshots;
     }
 
     pub fn graph_visualizations(&self) -> Vec<GraphVisualizationSnapshot> {
         self.graph_visualizations.lock().unwrap().clone()
+    }
+
+    pub fn has_graph_visualizations(&self) -> bool {
+        !self.graph_visualizations.lock().unwrap().is_empty()
     }
 
     pub fn push_graph_control_command(&self, command: crate::graph::GraphControlCommand) {
@@ -44,6 +52,10 @@ impl SequencerState {
 
     pub fn track_output_events(&self) -> Vec<TrackOutputEvent> {
         self.track_output_events.lock().unwrap().clone()
+    }
+
+    pub fn has_track_output_events(&self) -> bool {
+        !self.track_output_events.lock().unwrap().is_empty()
     }
 
     pub fn set_track_output_current_beat(&self, beat: f64) {

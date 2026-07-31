@@ -482,7 +482,7 @@ pub(crate) fn extract_bool_from_payload(payload: &Value, key: &str) -> bool {
 }
 
 /// Push individual tp-* reactive fields for the current track.
-pub(crate) fn sync_track_params(
+fn sync_track_param_fields(
     rt: &mut Runtime,
     app: &app::App,
     state: &Arc<SequencerState>,
@@ -591,6 +591,16 @@ pub(crate) fn sync_track_params(
     rt.set_reactive("SEQ", "fts-options", build_fts_options());
     rt.set_reactive("SEQ", "mute-group-options", build_mute_group_options());
     rt.set_reactive("SEQ", "accum-mode-options", build_accum_mode_options());
+}
+
+pub(crate) fn sync_track_params(
+    rt: &mut Runtime,
+    app: &app::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected: &Arc<Mutex<HashSet<usize>>>,
+) {
+    sync_track_param_fields(rt, app, state, track, selected);
     rt.set_reactive(
         "SEQ",
         "track-plocks",
@@ -655,7 +665,7 @@ pub(crate) fn sync_track_params_with_neural_selection(
         &std::collections::BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
     >,
 ) {
-    sync_track_params(rt, app, state, track, selected);
+    sync_track_param_fields(rt, app, state, track, selected);
     rt.set_reactive(
         "SEQ",
         "track-plocks",

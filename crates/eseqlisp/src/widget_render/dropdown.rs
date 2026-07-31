@@ -1324,6 +1324,7 @@ mod tests {
             props,
             children: Vec::new(),
             focusable: true,
+            animation: Default::default(),
         };
         let viewport = WidgetViewport {
             cell_w: 10.0,

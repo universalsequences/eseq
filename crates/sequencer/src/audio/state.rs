@@ -118,8 +118,14 @@ pub(super) struct AudioCallbackData {
     pub(super) block_events_need_sort: bool,
     pub(super) current_callback_nframes: usize,
     pub(super) rendered_samples: Arc<AtomicU64>,
-    pub(super) bus_gate_runtime: Arc<Mutex<Vec<BusGateRuntimeState>>>,
+    pub(super) bus_gate_runtime: Arc<Mutex<Arc<Vec<BusGateRuntimeState>>>>,
+    /// RT-side snapshot of `bus_gate_runtime`. Refreshed by pointer-comparing
+    /// under `try_lock`; a failed lock just means the callback keeps using the
+    /// previous snapshot for one block. Never deep-cloned on the audio thread.
+    pub(super) bus_gate_cache: Arc<Vec<BusGateRuntimeState>>,
     pub(super) bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
+    /// Reused buffer for publishing playheads without per-block allocation.
+    pub(super) bus_gate_playheads_scratch: Vec<(BusId, usize)>,
     pub(super) bus_gate_clocks: Vec<BusGateClock>,
     pub(super) bus_gate_was_playing: bool,
     pub(super) bus_gate_play_start_sample: u64,

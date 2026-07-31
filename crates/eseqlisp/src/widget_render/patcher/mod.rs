@@ -1034,6 +1034,10 @@ impl WidgetDefinition for PatcherWidget {
                 .any(|started| started.elapsed().as_secs_f32() < 1.2)
     }
 
+    fn animation_frame_policy(&self) -> super::AnimationFramePolicy {
+        super::AnimationFramePolicy::RuntimeState
+    }
+
     fn renders_own_focus(&self) -> bool {
         true
     }

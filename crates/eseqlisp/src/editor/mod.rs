@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -3965,7 +3965,28 @@ impl Editor {
     }
 
     pub fn visible_widgets_animating(&self) -> bool {
-        self.tile_root.leaf_ids().into_iter().any(|id| {
+        let leaf_ids = self.tile_root.leaf_ids();
+        if std::env::var_os("ESEQ_DEBUG_ANIMATING_WIDGETS").is_some() {
+            static LAST_ACTIVE_WIDGETS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+            let mut active = leaf_ids
+                .iter()
+                .filter_map(|id| self.tile_root.find_leaf(*id))
+                .filter_map(|leaf| leaf.cached_layout.as_ref())
+                .flat_map(|layout| crate::widget_render::active_animation_widgets(layout))
+                .map(|(widget_id, widget_type)| format!("{widget_type}#{widget_id}"))
+                .collect::<Vec<_>>();
+            active.sort();
+            active.dedup();
+            let mut previous = LAST_ACTIVE_WIDGETS
+                .get_or_init(|| Mutex::new(Vec::new()))
+                .lock()
+                .unwrap();
+            if *previous != active {
+                eprintln!("[animation-frames] active={active:?}");
+                *previous = active;
+            }
+        }
+        leaf_ids.into_iter().any(|id| {
             self.tile_root
                 .find_leaf(id)
                 .and_then(|leaf| leaf.cached_layout.as_ref())

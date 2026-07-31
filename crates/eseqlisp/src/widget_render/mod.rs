@@ -894,6 +894,11 @@ pub trait WidgetDefinition: Sync {
     fn wants_animation_frames(&self, _node: &LayoutNode) -> bool {
         false
     }
+    /// Describes whether `wants_animation_frames` is fixed by immutable
+    /// layout props or must be re-evaluated against runtime interaction state.
+    fn animation_frame_policy(&self) -> AnimationFramePolicy {
+        AnimationFramePolicy::Never
+    }
     /// Whether this widget's Metal shader reads `WidgetInstance::itime`.
     /// Time-dependent instances must include `itime` in primitive cache keys.
     fn metal_shader_uses_time(&self) -> bool {
@@ -922,6 +927,13 @@ pub trait WidgetDefinition: Sync {
     ) -> Vec<MetalPrimitive> {
         Vec::new()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnimationFramePolicy {
+    Never,
+    LayoutStatic,
+    RuntimeState,
 }
 
 static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
@@ -1025,13 +1037,109 @@ pub fn render_widget_tree(node: &LayoutNode, buf: &mut CellBuffer) {
     }
 }
 
-pub fn layout_wants_animation_frames(node: &LayoutNode) -> bool {
+fn node_wants_animation_frames(node: &LayoutNode) -> bool {
     widget_definition(&node.widget_type)
         .is_some_and(|definition| definition.wants_animation_frames(node))
         || sdf_widget::sdf_widget_def(&node.widget_type)
             .is_some_and(|definition| definition.animates)
         || node_uses_animated_sdf_material(node)
-        || node.children.iter().any(layout_wants_animation_frames)
+}
+
+pub(crate) fn cache_layout_animation_hints(node: &mut LayoutNode) {
+    for child in &mut node.children {
+        if !child.animation.initialized {
+            cache_layout_animation_hints(child);
+        }
+    }
+
+    let policy = widget_definition(&node.widget_type)
+        .map(WidgetDefinition::animation_frame_policy)
+        .unwrap_or(AnimationFramePolicy::Never);
+    let sdf_static = sdf_widget::sdf_widget_def(&node.widget_type)
+        .is_some_and(|definition| definition.animates)
+        || node_uses_animated_sdf_material(node);
+    let self_static = sdf_static
+        || (policy == AnimationFramePolicy::LayoutStatic
+            && widget_definition(&node.widget_type)
+                .is_some_and(|definition| definition.wants_animation_frames(node)));
+    let self_dynamic = policy == AnimationFramePolicy::RuntimeState;
+    node.animation = crate::layout::LayoutAnimationHints {
+        initialized: true,
+        self_static,
+        subtree_static: self_static
+            || node
+                .children
+                .iter()
+                .any(|child| child.animation.subtree_static),
+        self_dynamic,
+        subtree_dynamic: self_dynamic
+            || node
+                .children
+                .iter()
+                .any(|child| child.animation.subtree_dynamic),
+    };
+}
+
+fn layout_wants_animation_frames_uncached(node: &LayoutNode) -> bool {
+    node_wants_animation_frames(node)
+        || node
+            .children
+            .iter()
+            .any(layout_wants_animation_frames_uncached)
+}
+
+pub fn layout_wants_animation_frames(node: &LayoutNode) -> bool {
+    if !node.animation.initialized {
+        return layout_wants_animation_frames_uncached(node);
+    }
+    if node.animation.subtree_static {
+        return true;
+    }
+    if !node.animation.subtree_dynamic {
+        return false;
+    }
+    (node.animation.self_dynamic && node_wants_animation_frames(node))
+        || node
+            .children
+            .iter()
+            .filter(|child| child.animation.subtree_dynamic)
+            .any(layout_wants_animation_frames)
+}
+
+pub fn active_animation_widgets(node: &LayoutNode) -> Vec<(u64, &str)> {
+    fn collect<'a>(node: &'a LayoutNode, result: &mut Vec<(u64, &'a str)>) {
+        if !node.animation.initialized {
+            if node_wants_animation_frames(node) {
+                result.push((node.widget_id, &node.widget_type));
+            }
+            for child in &node.children {
+                collect(child, result);
+            }
+            return;
+        }
+        if !node.animation.subtree_static && !node.animation.subtree_dynamic {
+            return;
+        }
+        if node.animation.self_static
+            || (node.animation.self_dynamic && node_wants_animation_frames(node))
+        {
+            result.push((node.widget_id, &node.widget_type));
+        }
+        for child in &node.children {
+            collect(child, result);
+        }
+    }
+
+    let mut result = Vec::new();
+    collect(node, &mut result);
+    result
+}
+
+pub fn active_animation_widget_ids(node: &LayoutNode) -> Vec<u64> {
+    active_animation_widgets(node)
+        .into_iter()
+        .map(|(widget_id, _)| widget_id)
+        .collect()
 }
 
 fn node_uses_animated_sdf_material(node: &LayoutNode) -> bool {
@@ -2803,6 +2911,7 @@ mod tests {
             props,
             children,
             focusable: false,
+            animation: Default::default(),
         }
     }
 
@@ -3373,6 +3482,77 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn animated_subtree_refresh_reuses_static_sibling_runs() {
+        sdf_widget::register_sdf_widget(sdf_widget::SdfWidgetDef {
+            name: "test-retained-animated-sdf".to_string(),
+            shader_source: String::new(),
+            sdf_expr: crate::parser::Expression::Number(0.0),
+            state_uniforms: Vec::new(),
+            bindable_props: Vec::new(),
+            region_count: 0,
+            width: 1.0,
+            height: 1.0,
+            paint_margin: 0.0,
+            animates: true,
+        });
+        let animated = test_node(
+            2,
+            "test-retained-animated-sdf",
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            HashMap::new(),
+            Vec::new(),
+        );
+        let label = test_node(
+            3,
+            "label",
+            Rect {
+                row: 2.0,
+                col: 0.0,
+                width: 8.0,
+                height: 1.0,
+            },
+            HashMap::from([("text".to_string(), Value::String("Static".to_string()))]),
+            Vec::new(),
+        );
+        let mut root = test_node(
+            1,
+            "vstack",
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 8.0,
+                height: 3.0,
+            },
+            HashMap::new(),
+            vec![animated, label],
+        );
+        cache_layout_animation_hints(&mut root);
+        let active = active_animation_widget_ids(&root);
+        assert_eq!(active, vec![2]);
+
+        let viewport = test_viewport();
+        let (mut runs, _) = collect_metal_primitive_runs(&root, viewport, 0.0, 24);
+        let run_index = build_metal_primitive_run_index(&runs);
+        let (_overlay, stats) = refresh_metal_primitive_runs_retained_in_place(
+            &root,
+            viewport,
+            0.0,
+            24,
+            &mut runs,
+            &run_index,
+            &active,
+        );
+        assert!(stats.rebuilt_runs > 0);
+        assert!(stats.reused_runs > 0);
+    }
+
     #[test]
     fn sdf_defwidget_can_request_animation_frames() {
         sdf_widget::register_sdf_widget(sdf_widget::SdfWidgetDef {
@@ -3387,7 +3567,7 @@ mod tests {
             paint_margin: 0.0,
             animates: true,
         });
-        let node = LayoutNode {
+        let mut node = LayoutNode {
             widget_id: 1,
             stable_widget_id: None,
             subtree_root_id: None,
@@ -3403,9 +3583,18 @@ mod tests {
             props: HashMap::new(),
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         };
+        cache_layout_animation_hints(&mut node);
 
+        assert!(node.animation.initialized);
+        assert!(node.animation.self_static);
+        assert!(node.animation.subtree_static);
         assert!(layout_wants_animation_frames(&node));
+        assert_eq!(
+            active_animation_widgets(&node),
+            vec![(1, "test-animated-sdf")]
+        );
     }
 
     #[test]
@@ -3441,6 +3630,7 @@ mod tests {
             )]),
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         };
 
         assert!(layout_wants_animation_frames(&node));
@@ -3479,6 +3669,7 @@ mod tests {
             )]),
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         };
 
         assert!(layout_wants_animation_frames(&node));

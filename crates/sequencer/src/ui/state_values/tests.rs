@@ -242,6 +242,80 @@
     }
 
     #[test]
+    fn visualization_sync_skips_dead_sources_and_clears_each_source_once() {
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![default_empty_effect_chain()],
+        ));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("neural-energy-matrix", Value::Number(-1.0)),
+                ("neural-trigger-matrix", Value::Number(-1.0)),
+                ("neural-dampening-matrix", Value::Number(-1.0)),
+                ("graph-visualizations", Value::Number(-1.0)),
+                ("track-events", Value::Number(-1.0)),
+                ("track-event-current-beat", Value::Number(-1.0)),
+            ],
+            true,
+        );
+        let mut liveness = VisualizationLiveness::default();
+
+        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
+        assert_eq!(
+            runtime.eval_str("SEQ.neural-energy-matrix").unwrap(),
+            Some(Value::Number(-1.0))
+        );
+        assert_eq!(
+            runtime.eval_str("SEQ.track-events").unwrap(),
+            Some(Value::Number(-1.0))
+        );
+
+        let mut neural = sequencer::neural::NeuralVisualizationSnapshot::default();
+        neural.num_neurons = 1;
+        neural.energy[0] = 0.5;
+        state.set_neural_visualization(neural);
+        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
+        assert!(matches!(
+            runtime.eval_str("SEQ.neural-energy-matrix").unwrap(),
+            Some(Value::List(_))
+        ));
+        assert_eq!(
+            runtime.eval_str("SEQ.track-events").unwrap(),
+            Some(Value::Number(-1.0))
+        );
+
+        state.set_neural_visualization(
+            sequencer::neural::NeuralVisualizationSnapshot::default(),
+        );
+        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
+        assert_eq!(
+            runtime.eval_str("SEQ.neural-energy-matrix").unwrap(),
+            Some(Value::List(Vec::new()))
+        );
+        runtime.set_reactive("SEQ", "neural-energy-matrix", Value::Number(-2.0));
+        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
+        assert_eq!(
+            runtime.eval_str("SEQ.neural-energy-matrix").unwrap(),
+            Some(Value::Number(-2.0))
+        );
+
+        state.append_track_output_events([sequencer::sequencer::TrackOutputEvent {
+            track: 0,
+            sample_time: 1,
+            beat: 0.0,
+            transpose: 0.0,
+            velocity: 1.0,
+        }]);
+        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
+        let Some(Value::List(events)) = runtime.eval_str("SEQ.track-events").unwrap() else {
+            panic!("track output visualization should sync independently");
+        };
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
     fn graph_visualizations_value_reflects_runtime_snapshot() {
         let state = Arc::new(SequencerState::new(
             2,
@@ -650,6 +724,33 @@
             map.get("selected").map(|value| value.borrow().clone()),
             Some(Value::ReactiveRef { .. })
         ));
+    }
+
+    #[test]
+    fn step_widgets_do_not_request_time_animation_frames() {
+        let mut runtime = Runtime::new();
+        let tree = runtime
+            .eval_str(
+                r#"
+                  (load "ui/materials.lisp")
+                  (v-stack
+                    (box
+                      :active 1 :plocked 1 :selected 1
+                      :background "aqua-button"
+                      :width 3 :height 1.5)
+                    (tick :active 1 :plocked 1 :selected 1))
+                "#,
+            )
+            .expect("load materials and construct selected step widgets")
+            .expect("step widgets should return a widget tree");
+        let layout = runtime
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((20.0, 10.0)))
+            .expect("selected step widgets should lay out");
+
+        assert!(
+            !eseqlisp::widget_render::layout_wants_animation_frames(&layout),
+            "selected step widgets are state-driven and must remain static between updates"
+        );
     }
 
     #[test]
@@ -7428,7 +7529,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
@@ -7647,6 +7748,49 @@
             ["16", "4"],
             "without selected steps every row should show its track default timebase"
         );
+    }
+
+    #[test]
+    fn playhead_param_binding_gate_only_opens_across_relevant_plocks() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+        let descriptors = vec![Vec::new()];
+
+        assert!(!playhead_transition_changes_param_bindings(
+            &state,
+            0,
+            &descriptors,
+            &selected,
+            2,
+            3,
+        ));
+        state.pattern.swing_plocks[0].set(3, 70.0);
+        assert!(playhead_transition_changes_param_bindings(
+            &state,
+            0,
+            &descriptors,
+            &selected,
+            2,
+            3,
+        ));
+        assert!(playhead_transition_changes_param_bindings(
+            &state,
+            0,
+            &descriptors,
+            &selected,
+            3,
+            4,
+        ));
+
+        selected.lock().unwrap().insert(7);
+        assert!(!playhead_transition_changes_param_bindings(
+            &state,
+            0,
+            &descriptors,
+            &selected,
+            2,
+            3,
+        ));
     }
 
     #[test]
@@ -8413,7 +8557,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
@@ -9673,7 +9817,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
@@ -9749,7 +9893,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
@@ -15961,7 +16105,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
@@ -16021,7 +16165,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
@@ -20241,7 +20385,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
                 bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
@@ -20377,7 +20521,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
                 bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
@@ -20522,7 +20666,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
                 bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
@@ -20879,7 +21023,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
                 bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
@@ -21006,7 +21150,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
                 bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,
@@ -21822,7 +21966,7 @@
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                bus_gate_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
                 bus_gate_playheads: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,

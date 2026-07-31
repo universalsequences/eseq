@@ -1434,6 +1434,7 @@ fn patcher_test_node(path: &std::path::Path) -> LayoutNode {
         ]),
         children: Vec::new(),
         focusable: true,
+        animation: Default::default(),
     }
 }
 
@@ -11582,6 +11583,7 @@ fn super_y_toggles_selected_cable_segmentation() {
         props,
         children: Vec::new(),
         focusable: true,
+        animation: Default::default(),
     };
     let key = patcher_state_key(&node);
     set_patcher_interaction_state(
@@ -12089,6 +12091,7 @@ fn dragging_selected_cable_endpoint_reconnects_and_keeps_cable_selected() {
         props,
         children: Vec::new(),
         focusable: true,
+        animation: Default::default(),
     };
     let key = patcher_state_key(&node);
     set_patcher_interaction_state(
@@ -12205,6 +12208,7 @@ fn patcher_magnify_clamps_zoom() {
         props: HashMap::new(),
         children: Vec::new(),
         focusable: true,
+        animation: Default::default(),
     };
     let key = patcher_state_key(&node);
 
@@ -12237,6 +12241,7 @@ fn patcher_magnify_preserves_pointer_anchor_model_position() {
         props: HashMap::new(),
         children: Vec::new(),
         focusable: true,
+        animation: Default::default(),
     };
     let key = patcher_state_key(&node);
     let before = screen_to_model(node.rect, &get_patcher_pan_state(key), (31.0, 14.0));
@@ -12833,6 +12838,7 @@ fn touchpad_horizontal_pan_matches_canvas_drag_direction() {
         props: HashMap::new(),
         children: Vec::new(),
         focusable: true,
+        animation: Default::default(),
     };
     let key = patcher_state_key(&node);
 
@@ -12958,6 +12964,7 @@ fn double_clicking_macro_instance_edits_text_and_breadcrumb_returns_to_root() {
         props,
         children: Vec::new(),
         focusable: true,
+        animation: Default::default(),
     };
     let key = patcher_state_key(&node);
     set_patcher_interaction_state(key, PatcherInteractionState::default());
@@ -13056,6 +13063,7 @@ fn enter_on_macro_instance_inside_macro_opens_nested_macro() {
         props,
         children: Vec::new(),
         focusable: true,
+        animation: Default::default(),
     };
     let key = patcher_state_key(&node);
     let mut state = PatcherInteractionState {
@@ -13155,6 +13163,7 @@ fn double_clicking_background_creates_editable_draft_node() {
         props,
         children: Vec::new(),
         focusable: true,
+        animation: Default::default(),
     };
     let key = patcher_state_key(&node);
     set_patcher_interaction_state(key, PatcherInteractionState::default());
@@ -13368,6 +13377,7 @@ fn double_clicking_node_edits_display_text_in_memory() {
         props,
         children: Vec::new(),
         focusable: true,
+        animation: Default::default(),
     };
     let key = patcher_state_key(&node);
     set_patcher_interaction_state(key, PatcherInteractionState::default());
@@ -13456,6 +13466,7 @@ fn backspace_without_text_edit_deletes_selected_nodes() {
         props,
         children: Vec::new(),
         focusable: true,
+        animation: Default::default(),
     };
     let key = patcher_state_key(&node);
     let mut state = PatcherInteractionState::default();
@@ -13511,6 +13522,7 @@ fn patcher_reports_text_capture_only_while_node_text_edit_is_active() {
         props: HashMap::new(),
         children: Vec::new(),
         focusable: true,
+        animation: Default::default(),
     };
     let key = patcher_state_key(&node);
     set_patcher_interaction_state(key, PatcherInteractionState::default());

@@ -428,6 +428,7 @@ mod tests {
             props: HashMap::new(),
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         };
         let requests = collect_band_meter_requests(&node);
         assert_eq!(requests.len(), 1);

@@ -676,6 +676,10 @@ impl WidgetDefinition for EventViewWidget {
             && prop_bool(&node.props, "auto-rotate", false)
     }
 
+    fn animation_frame_policy(&self) -> super::AnimationFramePolicy {
+        super::AnimationFramePolicy::LayoutStatic
+    }
+
     #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
@@ -972,6 +976,7 @@ mod tests {
             props,
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         }
     }
 

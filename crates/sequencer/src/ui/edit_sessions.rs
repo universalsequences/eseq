@@ -867,27 +867,31 @@ pub(super) fn pull_shared_bus_state(
     app: &mut app::App,
     bus_state: &Arc<Mutex<Vec<app::BusChannelState>>>,
 ) -> bool {
-    let latest = bus_state.lock().unwrap().clone();
-    if app.buses.len() != latest.len()
-        || app
-            .buses
-            .iter()
-            .zip(latest.iter())
-            .any(|(a, b)| a.volume != b.volume || a.mute != b.mute || a.solo != b.solo)
-    {
-        if app.buses.len() == latest.len() {
-            for (bus, latest_bus) in app.buses.iter_mut().zip(latest.iter()) {
-                bus.volume = latest_bus.volume;
-                bus.mute = latest_bus.mute;
-                bus.solo = latest_bus.solo;
-            }
-        } else {
-            app.buses = latest;
-        }
-        true
-    } else {
-        false
+    let latest = bus_state.lock().unwrap();
+    if app.buses.len() != latest.len() {
+        app.buses = latest.clone();
+        return true;
     }
+
+    let changed = app
+        .buses
+        .iter()
+        .zip(latest.iter())
+        .any(|(bus, latest_bus)| {
+            bus.volume != latest_bus.volume
+                || bus.mute != latest_bus.mute
+                || bus.solo != latest_bus.solo
+        });
+    if !changed {
+        return false;
+    }
+
+    for (bus, latest_bus) in app.buses.iter_mut().zip(latest.iter()) {
+        bus.volume = latest_bus.volume;
+        bus.mute = latest_bus.mute;
+        bus.solo = latest_bus.solo;
+    }
+    true
 }
 
 pub(super) fn editor_has_visible_buffer(editor: &Editor, name: &str) -> bool {

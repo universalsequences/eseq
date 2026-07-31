@@ -19,6 +19,102 @@ pub(crate) enum TickFlow {
     Quit,
 }
 
+fn capture_param_sync_revision(
+    app: &app::App,
+    ctx: &LoopCtx<'_>,
+    track: usize,
+    selected_neural_neurons: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
+) -> ParamSyncRevision {
+    let mut selected_steps = ctx
+        .shared
+        .selected_steps
+        .lock()
+        .unwrap()
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    selected_steps.sort_unstable();
+    ParamSyncRevision {
+        track,
+        scene: ctx.shared.state.current_scene_index(),
+        pattern_epoch: ctx
+            .shared
+            .state
+            .transport
+            .pattern_epoch
+            .load(Ordering::Relaxed),
+        song_row_mirror_epoch: app.song_row_mirror_epoch,
+        ui_epoch: ctx.shared.ui_epoch.load(Ordering::Relaxed),
+        fx_epoch: ctx.shared.fx_epoch.load(Ordering::Relaxed),
+        sound_binding_epoch: app.sound_binding_epoch,
+        display_step: displayed_plock_step(
+            &ctx.shared.state,
+            track,
+            selected_steps.first().copied(),
+        ),
+        selected_steps,
+        selected_neural_neurons: selected_neural_neurons.iter().copied().collect(),
+    }
+}
+
+pub(super) fn claim_param_sync_revision(
+    previous: &mut Option<ParamSyncRevision>,
+    revision: &ParamSyncRevision,
+) -> bool {
+    if previous.as_ref() == Some(revision) {
+        return false;
+    }
+    *previous = Some(revision.clone());
+    true
+}
+
+fn sync_track_params_delta(
+    previous: &mut Option<ParamSyncRevision>,
+    revision: ParamSyncRevision,
+    rt: &mut Runtime,
+    app: &app::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    selected_neural_neurons: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
+) {
+    if !claim_param_sync_revision(previous, &revision) {
+        return;
+    }
+    sync_track_params_with_neural_selection(
+        rt,
+        app,
+        state,
+        track,
+        selected_steps,
+        Some(selected_neural_neurons),
+    );
+}
+
+fn sync_fx_param_bindings_delta(
+    previous: &mut Option<ParamSyncRevision>,
+    revision: ParamSyncRevision,
+    rt: &mut Runtime,
+    app: &app::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    selected_neural_neurons: &BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
+) -> bool {
+    if !claim_param_sync_revision(previous, &revision) {
+        return false;
+    }
+    let dirty = sync_fx_param_binding_fields_with_neural_selection(
+        rt,
+        app,
+        state,
+        track,
+        selected_steps,
+        Some(selected_neural_neurons),
+    );
+    dirty
+}
+
 /// Post-event reactive sync + render: diffs sequencer/transport state against
 /// the previous frame, republishes reactives, and renders when dirty.
 #[allow(clippy::too_many_lines)]
@@ -74,6 +170,7 @@ pub(crate) fn reactive_tick_and_render(
             track_meter_bindings_visible(mixer_visible, sequencer_visible);
         let current_track_playhead_visible = editor_has_visible_buffer(&editor, "*metal*")
             || editor_has_visible_buffer(&editor, "*piano-roll*");
+        let previous_playhead = ctx.frame.prev_playhead;
         let current_track_playhead_changed = playhead != ctx.frame.prev_playhead;
         if ctx.meters.last_meter_poll_at.elapsed() >= METER_POLL_INTERVAL {
             ctx.meters.cached_peak_l_level = meter_display_level(f32::from_bits(
@@ -137,13 +234,17 @@ pub(crate) fn reactive_tick_and_render(
                 &ctx.shared.state,
                 &selected_neural_snapshot,
             );
-            needs_reactive_cycle |= sync_fx_param_binding_fields_with_neural_selection(
+            let revision =
+                capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot);
+            needs_reactive_cycle |= sync_fx_param_bindings_delta(
+                &mut ctx.frame.fx_param_sync_revision,
+                revision,
                 editor.runtime_mut(),
                 &app,
                 &ctx.shared.state,
                 ct,
                 &ctx.shared.selected_steps,
-                Some(&selected_neural_snapshot),
+                &selected_neural_snapshot,
             );
             needs_reactive_cycle |= sync_track_plocks_for_neural_selection(
                 editor.runtime_mut(),
@@ -177,6 +278,8 @@ pub(crate) fn reactive_tick_and_render(
             }
             let _ = editor.runtime_mut().eval_str("(set! selected-bus -1)");
             reset_sampler_waveform_view(&mut editor);
+            let param_sync_revision =
+                capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot);
             let rt = editor.runtime_mut();
             sync_shared_track_collapsed(&ctx.shared.track_collapsed, &app);
             sync_track_name_state(rt, &mut *ctx.track_names, &app);
@@ -232,21 +335,25 @@ pub(crate) fn reactive_tick_and_render(
                 build_instrument_panel_value(&app, ct, &ctx.shared.selected_steps),
             );
             *ctx.shared.accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-            sync_track_params_with_neural_selection(
+            sync_track_params_delta(
+                &mut ctx.frame.track_param_sync_revision,
+                param_sync_revision.clone(),
                 rt,
                 &app,
                 &ctx.shared.state,
                 ct,
                 &ctx.shared.selected_steps,
-                Some(&selected_neural_snapshot),
+                &selected_neural_snapshot,
             );
-            sync_fx_param_binding_fields_with_neural_selection(
+            sync_fx_param_bindings_delta(
+                &mut ctx.frame.fx_param_sync_revision,
+                param_sync_revision,
                 rt,
                 &app,
                 &ctx.shared.state,
                 ct,
                 &ctx.shared.selected_steps,
-                Some(&selected_neural_snapshot),
+                &selected_neural_snapshot,
             );
             rt.set_reactive(
                 "SEQ",
@@ -287,6 +394,8 @@ pub(crate) fn reactive_tick_and_render(
         }
 
         if playing != ctx.frame.prev_playing {
+            let param_sync_revision =
+                capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot);
             let rt = editor.runtime_mut();
             rt.set_reactive("SEQ", "playing", Value::Bool(playing));
             if sequencer_visible {
@@ -300,13 +409,15 @@ pub(crate) fn reactive_tick_and_render(
             needs_reactive_cycle = true;
             if (fx_visible || step_visible) && !app.tracks.is_empty() {
                 let rt = editor.runtime_mut();
-                sync_track_params_with_neural_selection(
+                sync_track_params_delta(
+                    &mut ctx.frame.track_param_sync_revision,
+                    param_sync_revision.clone(),
                     rt,
                     &app,
                     &ctx.shared.state,
                     ct,
                     &ctx.shared.selected_steps,
-                    Some(&selected_neural_snapshot),
+                    &selected_neural_snapshot,
                 );
                 if ctx.gesture.preview_plock_variant.as_ref().is_some_and(|(track, _)| {
                     *track != ct || !ctx.shared.selected_steps.lock().unwrap().is_empty()
@@ -324,13 +435,15 @@ pub(crate) fn reactive_tick_and_render(
                 needs_reactive_cycle |= preview_dirty;
                 refresh_visible_step_after_cycle |= preview_dirty;
                 if fx_visible {
-                    sync_fx_param_binding_fields_with_neural_selection(
+                    needs_reactive_cycle |= sync_fx_param_bindings_delta(
+                        &mut ctx.frame.fx_param_sync_revision,
+                        param_sync_revision,
                         rt,
                         &app,
                         &ctx.shared.state,
                         ct,
                         &ctx.shared.selected_steps,
-                        Some(&selected_neural_snapshot),
+                        &selected_neural_snapshot,
                     );
                 }
             }
@@ -394,13 +507,17 @@ pub(crate) fn reactive_tick_and_render(
             // instrument knob reads a per-param `SEQ` value field that only a
             // param sync republishes — without this the instrument panel keeps
             // the previous source's knob positions while the FX panel updates.
-            needs_reactive_cycle |= sync_fx_param_binding_fields_with_neural_selection(
+            let revision =
+                capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot);
+            needs_reactive_cycle |= sync_fx_param_bindings_delta(
+                &mut ctx.frame.fx_param_sync_revision,
+                revision,
                 editor.runtime_mut(),
                 &app,
                 &ctx.shared.state,
                 ct,
                 &ctx.shared.selected_steps,
-                Some(&selected_neural_snapshot),
+                &selected_neural_snapshot,
             );
         }
         needs_reactive_cycle |= sync_song_state(
@@ -475,8 +592,11 @@ pub(crate) fn reactive_tick_and_render(
         }
         if ctx.meters.last_neural_visualization_poll_at.elapsed() >= NEURAL_VISUALIZATION_POLL_INTERVAL {
             ctx.meters.last_neural_visualization_poll_at = Instant::now();
-            needs_reactive_cycle |=
-                sync_neural_visualization_fields(editor.runtime_mut(), &ctx.shared.state);
+            needs_reactive_cycle |= sync_neural_visualization_fields(
+                editor.runtime_mut(),
+                &ctx.shared.state,
+                &mut ctx.meters.visualization_liveness,
+            );
         }
         if ctx.meters.cached_modulator_phases != ctx.frame.prev_modulator_phases {
             if fx_visible {
@@ -575,15 +695,32 @@ pub(crate) fn reactive_tick_and_render(
             && current_track_playhead_changed
             && !app.tracks.is_empty()
         {
-            let rt = editor.runtime_mut();
-            sync_track_params_with_neural_selection(
-                rt,
-                &app,
+            let last_step = ctx.shared.state.pattern.track_params[ct]
+                .get_num_steps()
+                .max(1)
+                .min(sequencer::sequencer::MAX_STEPS)
+                .saturating_sub(1);
+            let previous_step = (previous_playhead as usize).min(last_step);
+            let current_step = (playhead as usize).min(last_step);
+            let displayed_param_value_may_change = playhead_transition_changes_param_bindings(
                 &ctx.shared.state,
                 ct,
+                &app.graph.effect_descriptors,
                 &ctx.shared.selected_steps,
-                Some(&selected_neural_snapshot),
+                previous_step,
+                current_step,
             );
+            let param_sync_revision = displayed_param_value_may_change
+                .then(|| capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot));
+            let rt = editor.runtime_mut();
+            if displayed_param_value_may_change {
+                needs_reactive_cycle |= sync_track_selection_param_binding_fields(
+                    rt,
+                    &ctx.shared.state,
+                    ct,
+                    &ctx.shared.selected_steps,
+                );
+            }
             if ctx.gesture.preview_plock_variant.as_ref().is_some_and(|(track, _)| {
                 *track != ct || !ctx.shared.selected_steps.lock().unwrap().is_empty()
             }) {
@@ -599,16 +736,20 @@ pub(crate) fn reactive_tick_and_render(
             );
             refresh_visible_step_after_cycle |= preview_dirty;
             if fx_visible {
-                sync_fx_param_binding_fields_with_neural_selection(
-                    rt,
-                    &app,
-                    &ctx.shared.state,
-                    ct,
-                    &ctx.shared.selected_steps,
-                    Some(&selected_neural_snapshot),
-                );
+                if let Some(param_sync_revision) = param_sync_revision {
+                    needs_reactive_cycle |= sync_fx_param_bindings_delta(
+                        &mut ctx.frame.fx_param_sync_revision,
+                        param_sync_revision,
+                        rt,
+                        &app,
+                        &ctx.shared.state,
+                        ct,
+                        &ctx.shared.selected_steps,
+                        &selected_neural_snapshot,
+                    );
+                }
             }
-            needs_reactive_cycle = true;
+            needs_reactive_cycle |= preview_dirty;
         }
         ctx.frame.prev_current_track_playhead_visible = current_track_playhead_visible;
         let mut profile_pattern_reactive_cycle = false;
@@ -720,12 +861,15 @@ pub(crate) fn reactive_tick_and_render(
             let sync_fx_bindings_elapsed;
             let sync_plocks_sidebar_elapsed;
             let old_pattern_epoch = ctx.frame.prev_pattern_epoch;
+            let selected_neural_snapshot =
+                ctx.shared.selected_neural_neurons.lock().unwrap().clone();
+            let param_sync_revision =
+                capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot);
             let rt = editor.runtime_mut();
             let started = Instant::now();
             sync_shared_track_collapsed(&ctx.shared.track_collapsed, &app);
             sync_track_name_state(rt, &mut *ctx.track_names, &app);
             sync_pattern_state(rt, &ctx.shared.state);
-            let selected_neural_snapshot = ctx.shared.selected_neural_neurons.lock().unwrap().clone();
             sync_selected_neural_neuron_bindings(rt, &ctx.shared.state, &selected_neural_snapshot);
             sync_names_pattern_elapsed = started.elapsed();
             if current_track_playhead_visible {
@@ -785,13 +929,15 @@ pub(crate) fn reactive_tick_and_render(
             sync_mixer_elapsed = started.elapsed();
             *ctx.shared.accumulator_names.lock().unwrap() = build_accumulator_names(&app);
             let started = Instant::now();
-            sync_track_params_with_neural_selection(
+            sync_track_params_delta(
+                &mut ctx.frame.track_param_sync_revision,
+                param_sync_revision.clone(),
                 rt,
                 &app,
                 &ctx.shared.state,
                 ct,
                 &ctx.shared.selected_steps,
-                Some(&selected_neural_snapshot),
+                &selected_neural_snapshot,
             );
             if ctx.gesture.preview_plock_variant.as_ref().is_some_and(|(track, _)| {
                 *track != ct || !ctx.shared.selected_steps.lock().unwrap().is_empty()
@@ -809,13 +955,15 @@ pub(crate) fn reactive_tick_and_render(
             refresh_visible_step_after_cycle |= preview_dirty;
             sync_track_params_elapsed = started.elapsed();
             let started = Instant::now();
-            sync_fx_param_binding_fields_with_neural_selection(
+            sync_fx_param_bindings_delta(
+                &mut ctx.frame.fx_param_sync_revision,
+                param_sync_revision,
                 rt,
                 &app,
                 &ctx.shared.state,
                 ct,
                 &ctx.shared.selected_steps,
-                Some(&selected_neural_snapshot),
+                &selected_neural_snapshot,
             );
             sync_fx_bindings_elapsed = started.elapsed();
             ctx.frame.prev_selected_neural_neurons = selected_neural_snapshot;
@@ -878,6 +1026,8 @@ pub(crate) fn reactive_tick_and_render(
                     track_button_states.len()
                 );
             }
+            let param_sync_revision = (!app.tracks.is_empty())
+                .then(|| capture_param_sync_revision(&app, ctx, ct, &selected_neural_snapshot));
             let rt = editor.runtime_mut();
             sync_macro_state(rt, &app);
             if app.tracks.is_empty() {
@@ -895,6 +1045,8 @@ pub(crate) fn reactive_tick_and_render(
                 );
                 sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
             } else {
+                let param_sync_revision =
+                    param_sync_revision.expect("nonempty track state has a sync revision");
                 sync_shared_track_collapsed(&ctx.shared.track_collapsed, &app);
                 sync_track_name_state(rt, &mut *ctx.track_names, &app);
                 rt.set_reactive("SEQ", "steps", build_steps_value(&ctx.shared.state, ct));
@@ -923,13 +1075,15 @@ pub(crate) fn reactive_tick_and_render(
                 sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
                 sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
                 *ctx.shared.accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-                sync_track_params_with_neural_selection(
+                sync_track_params_delta(
+                    &mut ctx.frame.track_param_sync_revision,
+                    param_sync_revision.clone(),
                     rt,
                     &app,
                     &ctx.shared.state,
                     ct,
                     &ctx.shared.selected_steps,
-                    Some(&selected_neural_snapshot),
+                    &selected_neural_snapshot,
                 );
                 if ctx.gesture.preview_plock_variant.as_ref().is_some_and(|(track, _)| {
                     *track != ct || !ctx.shared.selected_steps.lock().unwrap().is_empty()
@@ -945,13 +1099,15 @@ pub(crate) fn reactive_tick_and_render(
                     ctx.gesture.preview_plock_variant.as_ref(),
                 );
                 refresh_visible_step_after_cycle |= preview_dirty;
-                sync_fx_param_binding_fields_with_neural_selection(
+                sync_fx_param_bindings_delta(
+                    &mut ctx.frame.fx_param_sync_revision,
+                    param_sync_revision,
                     rt,
                     &app,
                     &ctx.shared.state,
                     ct,
                     &ctx.shared.selected_steps,
-                    Some(&selected_neural_snapshot),
+                    &selected_neural_snapshot,
                 );
                 rt.set_reactive(
                     "SEQ",
