@@ -430,10 +430,9 @@
         (rgba 1 0.6 0.3 1)
         '(rgba 1 1 1 0.1))
       :color (if selected (rgba 0.1 0.1 0.2 1) :white)
-      :border-color (if selected 
+      :border-color 
         :transparent
-        (rgba 1 1 1 0.3)
-        )
+        
       :height 0.9
       :padding 0.532
       :font-size 11.0

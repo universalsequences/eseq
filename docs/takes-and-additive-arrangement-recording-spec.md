@@ -1003,7 +1003,9 @@ through a chain.
   post-launch fader tweaks write into pattern 7's Mix and survive
   relaunch (today's save-back behavior, without the save-back). After any
   launch, cell and pattern name the same entities, so a panel edit has
-  exactly one destination.
+  exactly one destination. *(As built the repoint is an override resolved
+  through `effective_sound_refs()`, not a cell assignment — behaviorally
+  identical; see §18.5.)*
 - **Pattern cleared from a cell** (track plays nothing in this scene):
   the cell's refs simply remain. Monitor still sounds, the panel still
   binds, takes still have something to reference.
@@ -1088,7 +1090,9 @@ applying it elsewhere is deliberate.
 - **Clip indicator**: a subtle dot/affordance on timeline clips whose
   patch is not the track's scene-effective patch (gray base = the
   scene-effective sound, colors for forks — same visual language as
-  p-lock variants).
+  p-lock variants). *(As built the dot shows unconditionally and encodes
+  patch identity — the divergence variant made dots hop with the
+  playhead; see §18.5.)*
 - **Palette overlay**: opened from the clip and from the
   instrument-panel binding badge: lists the track's pool entries —
   color, name, referents ("used by: Scene 1, Scene 3, Take 2"; the
@@ -1354,3 +1358,69 @@ Cross-track palette (17.12), `snap_structure_at` morph follow-ups (macro
 spec §8.3), palette lineage display, and any change to p-lock variant
 storage. The §16.8 "hoist to `TrackTake`" note is superseded by S1
 rather than implemented as written.
+
+### 18.5 As built (all phases merged 2026-07-31; PRs #27/#29/#30)
+
+All §18.1–18.3 items shipped against their exit criteria (S1
+behavior-identical, suite green, migration round-trip clean — the
+chunk-duplicate assertion never fired, so no latent §16-era divergence
+existed; S2 landed whole; S3 flagship flows tested). Where the
+implementation deliberately deviates from this spec's letter, the code
+and the PR record are authoritative:
+
+- **The struct split is storage-level, not type-level** (vs §18.1 step
+  1). `TrackPatternData` survives as the composed working type (mirror
+  capture, launches, undo, serialization all untouched); the split
+  lives in `TrackPatternPool.patterns: StoredPattern { seq, sound:
+  SoundRefs }` + per-track `TrackSoundPool { patches, mixes }`
+  (`state/sound_entities.rs`), composing/decomposing at the pool edge.
+  Consequence for all future device sweeps: non-idempotent edits must
+  iterate `pool.sounds` entities, never patterns — a per-pattern loop
+  double-applies under sharing.
+- **Pattern launch is an override, not a cell assignment** (vs §17.3
+  "launch → repoint"). The repoint is expressed through
+  `effective_sound_refs()` resolution — the launch-override pattern's
+  refs win while `cell_sounds` retains the cell's own sound beneath,
+  for when the override clears. Behaviorally identical to §17.3's
+  intent. This shaped palette targeting: a `Cell` target resolves
+  through `effective_pattern_id`, so Apply re-links what is actually
+  sounding, never the hidden cell sound; only a genuinely bare cell
+  re-links `cell_sounds` directly.
+- **The §16.5 gestures were kept, not retired** (§18.2 item 2 left this
+  open). `seq-sound-push-to-pattern` / `seq-sound-apply-to-all-takes`
+  remain as thin conveniences; they, and palette Apply/Fork, funnel
+  through one `commit_sound_relink` → `relink_track_sound_refs_masked`
+  → `App::after_sound_repoint` (loan drop → binding re-sync →
+  `push_all_restored_defaults` → lock-identity re-stamp). That is the
+  single repoint seam of §17.10 — every future ref-changing gesture
+  must route through it or locks and engaged overrides silently die.
+- **The clip dot encodes patch identity, not divergence** (vs §17.6).
+  Shown unconditionally on every clip with a resolvable sound; same
+  color = same Patch. Two specced/considered variants were rejected in
+  testing: divergence-from-effective-refs made dots hop with the
+  playhead under song playback, and suppressing single-patch lanes made
+  dots toggle wholesale when a splice collapsed a lane to one patch.
+- **The §17.10 override-leak invariant is a debug tripwire with a known
+  blind spot**: a base shadow maintained at the effective-send funnel,
+  asserted at save-back/capture seams. A leak path that also re-sends
+  through the effective layer refreshes the shadow and masks itself —
+  the tripwire guards send-less capture paths, which is the surface
+  §17.10 names. Revisit if/when the macro override layer (macro spec
+  Phase 1) is built.
+- **Re-stamp has two modes** (§18.2 item 6 refined):
+  `EffectSlotState::adopt_identity_and_restamp` keeps the LIVE slot's
+  graph identity for launch/borrow restores, but lane-*relocating*
+  restores (track delete/reorder compaction) must adopt the snapshot
+  identity instead (`restore_to` split) — preserving live identity
+  there breaks the shift.
+- **Display metadata** (§17.11) lives in `TrackSoundPool`
+  (`patch_meta`/`mix_meta`), serialized as additive id-keyed lists on
+  the v7 `track_sounds` overlay (no version bump; older v7 files get
+  mint-style auto-assignment on load via `ensure_meta`). 8-color
+  per-track set, smallest-free allocation, recycled on cleanup,
+  name-only past the set.
+
+Still open after all phases, tracked here so §17/§18 close cleanly:
+§16's rule-2 bound-clip highlight remains undrawn (the playing clip
+carries the binding with no distinct highlight when nothing is
+selected), and the §18.4 deferrals stand unchanged.
