@@ -587,6 +587,7 @@ mod tests {
             props,
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         }
     }
 
@@ -607,6 +608,7 @@ mod tests {
             props: HashMap::new(),
             children,
             focusable: false,
+            animation: Default::default(),
         }
     }
 
@@ -1994,6 +1996,7 @@ mod pointer_capture_tests {
             props,
             children,
             focusable: false,
+            animation: Default::default(),
         }
     }
 

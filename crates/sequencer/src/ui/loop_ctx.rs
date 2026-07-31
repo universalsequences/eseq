@@ -39,7 +39,23 @@ pub(crate) struct MeterCache {
     pub(crate) last_meter_poll_at: Instant,
     pub(crate) last_cpu_ui_poll_at: Instant,
     pub(crate) last_neural_visualization_poll_at: Instant,
+    pub(crate) visualization_liveness: VisualizationLiveness,
     pub(crate) last_voice_count_log_at: Instant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ParamSyncRevision {
+    pub(crate) track: usize,
+    pub(crate) scene: usize,
+    pub(crate) pattern_epoch: u64,
+    pub(crate) song_row_mirror_epoch: u64,
+    pub(crate) ui_epoch: usize,
+    pub(crate) fx_epoch: usize,
+    pub(crate) sound_binding_epoch: usize,
+    pub(crate) display_step: Option<usize>,
+    pub(crate) selected_steps: Vec<usize>,
+    pub(crate) selected_neural_neurons:
+        Vec<sequencer::lisp_host::SelectedNeuralNeuron>,
 }
 
 /// Previous-frame values the reactive tick diffs against to decide which
@@ -75,6 +91,8 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_ui_epoch: usize,
     pub(crate) prev_fx_epoch: usize,
     pub(crate) prev_sound_binding_epoch: usize,
+    pub(crate) track_param_sync_revision: Option<ParamSyncRevision>,
+    pub(crate) fx_param_sync_revision: Option<ParamSyncRevision>,
     /// Identity of the CLIP-derived piano-roll surfaces (clip panel, window
     /// overlay, clip kind): `(selected (track, clip id), clip source kind,
     /// committed-song revision)`. They are keyed off the clip SELECTION,

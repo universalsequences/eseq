@@ -2243,6 +2243,77 @@ fragment float4 live_spectrogram_frag(
 
     // ── Backend ───────────────────────────────────────────────────────────────
 
+    struct BackendPollProfile {
+        enabled: bool,
+        window_start: Instant,
+        calls: u64,
+        immediate_events: u64,
+        pump_calls: u64,
+        delivered_events: u64,
+        requested_wait: Duration,
+        pump_wall: Duration,
+    }
+
+    impl BackendPollProfile {
+        fn new() -> Self {
+            Self {
+                enabled: std::env::var_os("ESEQ_DEBUG_BACKEND_POLL").is_some(),
+                window_start: Instant::now(),
+                calls: 0,
+                immediate_events: 0,
+                pump_calls: 0,
+                delivered_events: 0,
+                requested_wait: Duration::ZERO,
+                pump_wall: Duration::ZERO,
+            }
+        }
+
+        fn note_immediate(&mut self) {
+            if !self.enabled {
+                return;
+            }
+            self.calls += 1;
+            self.immediate_events += 1;
+            self.report_if_due();
+        }
+
+        fn note_pump(&mut self, timeout: Duration, elapsed: Duration, delivered: bool) {
+            if !self.enabled {
+                return;
+            }
+            self.calls += 1;
+            self.pump_calls += 1;
+            self.delivered_events += u64::from(delivered);
+            self.requested_wait += timeout;
+            self.pump_wall += elapsed;
+            self.report_if_due();
+        }
+
+        fn report_if_due(&mut self) {
+            let window = self.window_start.elapsed();
+            if window < Duration::from_secs(1) {
+                return;
+            }
+            eprintln!(
+                "[backend-poll] window_ms={:.1} calls={} immediate={} pump_calls={} delivered={} requested_wait_ms={:.1} pump_wall_ms={:.1}",
+                window.as_secs_f64() * 1000.0,
+                self.calls,
+                self.immediate_events,
+                self.pump_calls,
+                self.delivered_events,
+                self.requested_wait.as_secs_f64() * 1000.0,
+                self.pump_wall.as_secs_f64() * 1000.0,
+            );
+            self.window_start = Instant::now();
+            self.calls = 0;
+            self.immediate_events = 0;
+            self.pump_calls = 0;
+            self.delivered_events = 0;
+            self.requested_wait = Duration::ZERO;
+            self.pump_wall = Duration::ZERO;
+        }
+    }
+
     pub struct MetalBackend {
         // Metal state
         device: Retained<ProtocolObject<dyn MTLDevice>>,
@@ -2293,6 +2364,7 @@ fragment float4 live_spectrogram_frag(
         widget_scene_last_keys: HashMap<usize, WidgetSceneCacheKey>,
         image_rotation_states: HashMap<u64, ImageRotationState>,
         stats: RenderStats,
+        backend_poll_profile: BackendPollProfile,
         agent_instrument_stub_animation_visible: bool,
         // Winit
         event_loop: Option<EventLoop<()>>,
@@ -2428,6 +2500,7 @@ fragment float4 live_spectrogram_frag(
                 widget_scene_last_keys: HashMap::new(),
                 image_rotation_states: HashMap::new(),
                 stats: RenderStats::new(),
+                backend_poll_profile: BackendPollProfile::new(),
                 agent_instrument_stub_animation_visible: false,
                 event_loop: None,
                 window: None,
@@ -2579,9 +2652,27 @@ fragment float4 live_spectrogram_frag(
                 self.stats.note_widget_primitives(primitives.len());
                 return primitives;
             }
-            if widget_render::layout_wants_animation_frames(layout) {
-                let (mut primitives, _overlay) =
-                    widget_render::collect_metal_primitives(layout, viewport, scroll_top, max_rows);
+            let active_animation_widget_ids =
+                widget_render::active_animation_widget_ids(layout);
+            if !active_animation_widget_ids.is_empty() {
+                let mut refresh_widget_ids = dirty_widget_ids.to_vec();
+                refresh_widget_ids.extend(active_animation_widget_ids);
+                refresh_widget_ids.sort_unstable();
+                refresh_widget_ids.dedup();
+                let (cache_key, _overlay) = self.refresh_widget_run_scene_for_dirty_layout(
+                    owner_frame_key,
+                    layout_cache_key,
+                    layout,
+                    &refresh_widget_ids,
+                    viewport,
+                    scroll_top,
+                    max_rows,
+                );
+                let mut primitives = self
+                    .cached_widget_run_scenes
+                    .get(&cache_key)
+                    .map(|scene| widget_render::flatten_metal_primitive_runs(&scene.runs))
+                    .unwrap_or_default();
                 Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
                 self.stats.note_widget_primitives(primitives.len());
                 return primitives;
@@ -2675,9 +2766,7 @@ fragment float4 live_spectrogram_frag(
             max_rows: u16,
             runs: &[widget_render::MetalPrimitiveRun],
         ) {
-            if widget_render::overlay_widget_id().is_some()
-                || widget_render::layout_wants_animation_frames(layout)
-            {
+            if widget_render::overlay_widget_id().is_some() {
                 return;
             }
             let cache_parts = self.widget_scene_cache_parts(
@@ -6423,6 +6512,7 @@ fragment float4 live_spectrogram_frag(
 
         fn poll_backend_event(&mut self, timeout: Duration) -> Option<BackendEvent> {
             if let Some(paths) = self.pending_file_drops.pop_front() {
+                self.backend_poll_profile.note_immediate();
                 return Some(BackendEvent::FileDrop(paths));
             }
             self.poll_event(timeout).map(BackendEvent::Terminal)
@@ -6430,16 +6520,19 @@ fragment float4 live_spectrogram_frag(
 
         fn poll_event(&mut self, timeout: Duration) -> Option<Event> {
             if let Some(ev) = self.pending.pop_front() {
+                self.backend_poll_profile.note_immediate();
                 if matches!(ev, Event::Mouse(_)) {
                     self.last_precise_mouse = Some(self.cursor_pos);
                 }
                 return Some(ev);
             }
             if let Some(ev) = self.pending_drag.take() {
+                self.backend_poll_profile.note_immediate();
                 self.last_precise_mouse = Some(self.cursor_pos);
                 return Some(ev);
             }
             if let Some(ev) = self.pending_move.take() {
+                self.backend_poll_profile.note_immediate();
                 self.last_precise_mouse = Some(self.cursor_pos);
                 return Some(ev);
             }
@@ -6465,6 +6558,7 @@ fragment float4 live_spectrogram_frag(
                 .unwrap_or((8.0, 16.0));
             let wake_at = Instant::now() + timeout;
             let mut dropped_paths = Vec::new();
+            let pump_started = Instant::now();
             event_loop.pump_events(Some(timeout), |event, elwt| {
                 elwt.set_control_flow(if timeout.is_zero() {
                     ControlFlow::Poll
@@ -6614,10 +6708,11 @@ fragment float4 live_spectrogram_frag(
                     _ => {}
                 }
             });
+            let pump_elapsed = pump_started.elapsed();
             if !dropped_paths.is_empty() {
                 self.pending_file_drops.push_back(dropped_paths);
             }
-            if let Some(ev) = self.pending.pop_front() {
+            let result = if let Some(ev) = self.pending.pop_front() {
                 if matches!(ev, Event::Mouse(_)) {
                     self.last_precise_mouse = Some(self.cursor_pos);
                 }
@@ -6627,7 +6722,10 @@ fragment float4 live_spectrogram_frag(
                 Some(ev)
             } else {
                 None
-            }
+            };
+            self.backend_poll_profile
+                .note_pump(timeout, pump_elapsed, result.is_some());
+            result
         }
 
         fn render(&mut self, frame: &RenderFrame) -> Result<(), BackendError> {
@@ -10114,6 +10212,7 @@ fragment float4 live_spectrogram_frag(
                 props,
                 children: Vec::new(),
                 focusable: false,
+                animation: Default::default(),
             }
         }
 
@@ -10507,6 +10606,7 @@ fragment float4 live_spectrogram_frag(
                 ]),
                 children: Vec::new(),
                 focusable: true,
+                animation: Default::default(),
             };
 
             let strip = LayoutNode {
@@ -10533,6 +10633,7 @@ fragment float4 live_spectrogram_frag(
                 )]),
                 children: vec![button],
                 focusable: false,
+                animation: Default::default(),
             };
 
             let (primitives, _) =

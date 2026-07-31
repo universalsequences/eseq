@@ -60,6 +60,21 @@ pub struct LayoutNode {
     pub props: HashMap<String, Value>,
     pub children: Vec<LayoutNode>,
     pub focusable: bool,
+    pub animation: LayoutAnimationHints,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LayoutAnimationHints {
+    pub(crate) initialized: bool,
+    pub(crate) self_static: bool,
+    pub(crate) subtree_static: bool,
+    pub(crate) self_dynamic: bool,
+    pub(crate) subtree_dynamic: bool,
+}
+
+fn with_cached_animation(mut node: LayoutNode) -> LayoutNode {
+    widget_render::cache_layout_animation_hints(&mut node);
+    node
 }
 
 pub fn layout_root_matches_viewport(layout: &LayoutNode, cols: f32, rows: f32) -> bool {
@@ -513,7 +528,7 @@ impl<'a> LayoutEngine<'a> {
         }
 
         let focusable = matches!(new_props.get("focusable"), Some(Value::Bool(true)));
-        Ok(LayoutNode {
+        Ok(with_cached_animation(LayoutNode {
             widget_id: existing.widget_id,
             stable_widget_id: existing.stable_widget_id,
             subtree_root_id: existing.subtree_root_id,
@@ -524,7 +539,8 @@ impl<'a> LayoutEngine<'a> {
             props: new_props,
             children,
             focusable,
-        })
+            animation: LayoutAnimationHints::default(),
+        }))
     }
 
     /// Measure the natural (unconstrained) content width of a widget tree.
@@ -650,7 +666,7 @@ impl<'a> LayoutEngine<'a> {
         let stable_widget_id = get_stable_widget_id(node);
         let subtree_root_id = get_prop_u64(node, "__subtree-root-id");
         let parent_subtree_root_id = get_prop_u64(node, "__parent-subtree-root-id");
-        LayoutNode {
+        with_cached_animation(LayoutNode {
             widget_id: 0,
             stable_widget_id,
             subtree_root_id,
@@ -661,7 +677,8 @@ impl<'a> LayoutEngine<'a> {
             props,
             children,
             focusable,
-        }
+            animation: LayoutAnimationHints::default(),
+        })
     }
 
     fn layout_children_with_font(
@@ -911,7 +928,7 @@ fn reuse_layout_node_impl(
         .collect::<Result<Vec<_>, _>>()?;
 
     let focusable = matches!(new_props.get("focusable"), Some(Value::Bool(true)));
-    Ok(LayoutNode {
+    Ok(with_cached_animation(LayoutNode {
         widget_id: existing.widget_id,
         stable_widget_id: existing.stable_widget_id,
         subtree_root_id: existing.subtree_root_id,
@@ -922,7 +939,8 @@ fn reuse_layout_node_impl(
         props: new_props,
         children,
         focusable,
-    })
+        animation: LayoutAnimationHints::default(),
+    }))
 }
 
 pub fn reuse_layout_node(
@@ -1256,7 +1274,7 @@ fn reuse_layout_node_at_path(
     let mut children = existing.children.clone();
     children[child_idx] = updated_child;
     let focusable = matches!(new_props.get("focusable"), Some(Value::Bool(true)));
-    Ok(LayoutNode {
+    Ok(with_cached_animation(LayoutNode {
         widget_id: existing.widget_id,
         stable_widget_id: existing.stable_widget_id,
         subtree_root_id: existing.subtree_root_id,
@@ -1267,7 +1285,8 @@ fn reuse_layout_node_at_path(
         props: new_props,
         children,
         focusable,
-    })
+        animation: LayoutAnimationHints::default(),
+    }))
 }
 
 pub fn reuse_layout_failure_reason(existing: &LayoutNode, tree: &Value) -> Option<String> {
@@ -1753,6 +1772,7 @@ mod tests {
             props: std::collections::HashMap::new(),
             children,
             focusable: false,
+            animation: Default::default(),
         }
     }
 

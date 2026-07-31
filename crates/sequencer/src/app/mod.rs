@@ -535,7 +535,7 @@ pub struct GraphState {
     pub bus_l_id: i32,
     pub bus_r_id: i32,
     pub bus_node_ids: Vec<BusNodeIds>,
-    pub bus_gate_runtime: Arc<Mutex<Vec<BusGateRuntimeState>>>,
+    pub bus_gate_runtime: Arc<Mutex<Arc<Vec<BusGateRuntimeState>>>>,
     pub bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
     pub reverb_bus_id: i32,
     pub reverb_node_id: i32,
@@ -679,7 +679,7 @@ pub struct AudioBuses {
     pub bus_l_id: i32,
     pub bus_r_id: i32,
     pub default_bus_nodes: Vec<BusNodeIds>,
-    pub bus_gate_runtime: Arc<Mutex<Vec<BusGateRuntimeState>>>,
+    pub bus_gate_runtime: Arc<Mutex<Arc<Vec<BusGateRuntimeState>>>>,
     pub bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
     pub reverb_bus_id: i32,
     pub reverb_node_id: i32,
@@ -2193,7 +2193,7 @@ impl App {
                 })
             })
             .collect();
-        *self.graph.bus_gate_runtime.lock().unwrap() = runtime;
+        *self.graph.bus_gate_runtime.lock().unwrap() = Arc::new(runtime);
 
         let mut playheads = self.graph.bus_gate_playheads.lock().unwrap();
         let next_playheads = self

@@ -814,6 +814,7 @@ mod tests {
             )]),
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         }
     }
 

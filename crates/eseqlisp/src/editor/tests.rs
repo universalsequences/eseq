@@ -6605,6 +6605,7 @@ fn inspect_source_opens_as_root_right_tile() {
         props,
         children: Vec::new(),
         focusable: false,
+        animation: Default::default(),
     };
 
     assert!(editor.open_source_for_inspected_node(&node).unwrap());
@@ -6662,6 +6663,7 @@ fn inspect_source_opens_as_root_right_tile() {
         props: second_props,
         children: Vec::new(),
         focusable: false,
+        animation: Default::default(),
     };
 
     assert!(editor.open_source_for_inspected_node(&second_node).unwrap());
@@ -6728,6 +6730,7 @@ fn inspect_source_prefers_module_path_over_transient_source_buffer() {
         props,
         children: Vec::new(),
         focusable: false,
+        animation: Default::default(),
     };
 
     assert!(editor.open_source_for_inspected_node(&node).unwrap());
@@ -6797,6 +6800,7 @@ fn inspect_source_span_opens_exact_widget_form_without_legacy_identity() {
         props,
         children: Vec::new(),
         focusable: false,
+        animation: Default::default(),
     };
 
     assert!(super::inspect_node_has_source_identity(&node));
@@ -6871,6 +6875,7 @@ fn inspect_source_span_opens_evaluated_snapshot_when_file_changed() {
         props,
         children: Vec::new(),
         focusable: false,
+        animation: Default::default(),
     };
 
     assert!(editor.open_source_for_inspected_node(&node).unwrap());
@@ -6943,6 +6948,7 @@ fn inspect_source_span_opens_sampler_base_knob_fixture() {
         props,
         children: Vec::new(),
         focusable: true,
+        animation: Default::default(),
     };
 
     assert!(editor.open_source_for_inspected_node(&node).unwrap());
@@ -6989,6 +6995,7 @@ fn inspect_source_lookup_finds_debug_named_widget_form() {
         props,
         children: Vec::new(),
         focusable: false,
+        animation: Default::default(),
     };
 
     assert_eq!(super::find_widget_form_in_text(source, &node), Some((6, 4)));
@@ -7019,6 +7026,7 @@ fn inspect_hit_test_prefers_source_identified_ancestor() {
         props: HashMap::new(),
         children: Vec::new(),
         focusable: false,
+        animation: Default::default(),
     };
     let parent = crate::layout::LayoutNode {
         widget_id: 1,
@@ -7036,6 +7044,7 @@ fn inspect_hit_test_prefers_source_identified_ancestor() {
         props: parent_props,
         children: vec![child],
         focusable: false,
+        animation: Default::default(),
     };
 
     let hit = super::inspect_hit_test_layout(&parent, 1.2, 2.0).expect("hit");
@@ -7072,6 +7081,7 @@ fn inspect_source_lookup_finds_widget_form_with_dynamic_str_key() {
         props: HashMap::new(),
         children: Vec::new(),
         focusable: false,
+        animation: Default::default(),
     };
 
     let expected = source
@@ -7113,6 +7123,7 @@ fn inspect_source_lookup_finds_unique_widget_form_inside_source_symbol() {
         props,
         children: Vec::new(),
         focusable: false,
+        animation: Default::default(),
     };
 
     let expected = source

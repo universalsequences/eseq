@@ -639,6 +639,10 @@ impl WidgetDefinition for MatrixWidget {
         )
     }
 
+    fn animation_frame_policy(&self) -> super::AnimationFramePolicy {
+        super::AnimationFramePolicy::RuntimeState
+    }
+
     #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
         Some(MATRIX_FRAGMENT_SHADER)
@@ -769,6 +773,7 @@ mod tests {
             props,
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         }
     }
 

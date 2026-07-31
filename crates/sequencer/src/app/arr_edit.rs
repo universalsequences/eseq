@@ -1133,7 +1133,7 @@ mod tests {
                 bus_l_id: 0,
                 bus_r_id: 0,
                 default_bus_nodes: Vec::new(),
-                bus_gate_runtime: Arc::new(Mutex::new(Vec::new())),
+                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
                 bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
                 reverb_bus_id: 0,
                 reverb_node_id: 0,

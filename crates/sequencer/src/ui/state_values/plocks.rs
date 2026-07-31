@@ -1595,3 +1595,18 @@ pub(crate) fn track_step_has_plock(
         || sequencer::plock_variants::live_track_has_seq_lock(state.as_ref(), track, step)
         || sequencer::plock_variants::live_track_variant_key(state.as_ref(), track, step).is_some()
 }
+
+pub(crate) fn playhead_transition_changes_param_bindings(
+    state: &Arc<SequencerState>,
+    track: usize,
+    descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    previous_step: usize,
+    current_step: usize,
+) -> bool {
+    if previous_step == current_step || !selected_steps.lock().unwrap().is_empty() {
+        return false;
+    }
+    track_step_has_plock(state, track, descriptors, previous_step)
+        || track_step_has_plock(state, track, descriptors, current_step)
+}

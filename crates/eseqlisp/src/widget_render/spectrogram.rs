@@ -357,6 +357,7 @@ mod tests {
             props,
             children: Vec::new(),
             focusable: false,
+            animation: Default::default(),
         }
     }
 
@@ -555,6 +556,7 @@ mod tests {
             props: HashMap::new(),
             children: vec![child],
             focusable: false,
+            animation: Default::default(),
         };
         assert_eq!(collect_spectrogram_requests(&root).len(), 1);
     }

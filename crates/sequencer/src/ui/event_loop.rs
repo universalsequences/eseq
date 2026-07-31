@@ -91,6 +91,8 @@ pub(crate) fn run_event_loop(
         prev_ui_epoch: 0,
         prev_fx_epoch: 0,
         prev_sound_binding_epoch: 0,
+        track_param_sync_revision: None,
+        fx_param_sync_revision: None,
         prev_focus_clip_surface: (None, None, u64::MAX),
         prev_instrument_active_notes: Vec::new(),
         prev_track_active_notes: Vec::new(),
@@ -118,6 +120,7 @@ pub(crate) fn run_event_loop(
         last_meter_poll_at: Instant::now() - METER_POLL_INTERVAL,
         last_cpu_ui_poll_at: Instant::now() - CPU_UI_POLL_INTERVAL,
         last_neural_visualization_poll_at: Instant::now() - NEURAL_VISUALIZATION_POLL_INTERVAL,
+        visualization_liveness: VisualizationLiveness::default(),
         last_voice_count_log_at: Instant::now() - VOICE_COUNT_LOG_INTERVAL,
     };
     let mut live_audio_analyzer = LiveAudioAnalyzerManager::new(app.graph.lg);
