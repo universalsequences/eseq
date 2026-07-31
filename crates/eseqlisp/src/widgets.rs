@@ -40,6 +40,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "wrap",
     "virtual-v-stack",
     "box",
+    "modal",
     "grid",
     "responsive-grid",
     "image",

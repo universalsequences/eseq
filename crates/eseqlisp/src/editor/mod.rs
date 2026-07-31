@@ -3811,6 +3811,14 @@ impl Editor {
         self.sync_layout_to_active_leaf();
     }
 
+    /// Whole-window viewport in the active tile's local cell coordinates,
+    /// consumed by frame-anchored widgets (modal). Set by the tiled frame
+    /// builder before laying out the active tile; `None` for single-tile
+    /// paths (the tile root area is the frame).
+    pub fn set_layout_frame_viewport(&mut self, frame_viewport: Option<crate::layout::Rect>) {
+        self.runtime.set_layout_frame_viewport(frame_viewport);
+    }
+
     pub fn set_layout_viewport_exact(&mut self, cols: f32, rows: f32) {
         let cols = cols.max(1.0);
         let rows = rows.max(1.0);

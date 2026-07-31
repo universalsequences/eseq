@@ -1118,6 +1118,11 @@ pub struct Runtime {
     layout_aspect: f32,
     layout_cell_w: f32,
     layout_cell_h: f32,
+    /// Whole-window viewport in the current tile's local cell coordinates
+    /// (negative origin for non-top-left tiles). Set by the tiled frame
+    /// builder; `None` means frame-anchored widgets fall back to the tile's
+    /// own root area.
+    layout_frame_viewport: Option<crate::layout::Rect>,
     widget_id_offset: u64,
     text_measurer: Option<Box<dyn TextMeasurer>>,
     perf_stats: RuntimePerfStats,
@@ -1181,6 +1186,7 @@ impl Runtime {
             layout_aspect: 1.0,
             layout_cell_w: 1.0,
             layout_cell_h: 1.0,
+            layout_frame_viewport: None,
             widget_id_offset: 0,
             text_measurer: None,
             perf_stats: RuntimePerfStats::new(),
@@ -1660,6 +1666,7 @@ impl Runtime {
             "h-stack",
             "wrap",
             "box",
+            "modal",
             "grid",
             "tabs",
             "response-curve-editor",
@@ -2305,6 +2312,22 @@ impl Runtime {
         self.relayout_current_tree();
     }
 
+    /// Set the whole-window viewport in the current tile's local cell
+    /// coordinates (see `LayoutEngine::frame_viewport`). Invalidates the
+    /// current layout lazily on change — the next viewport/relayout call
+    /// rebuilds it — so callers can set this before `set_layout_viewport_exact`
+    /// without triggering a double layout.
+    pub fn set_layout_frame_viewport(&mut self, frame_viewport: Option<crate::layout::Rect>) {
+        if self.layout_frame_viewport == frame_viewport {
+            return;
+        }
+        self.layout_frame_viewport = frame_viewport;
+        let previous_layout = self.current_layout.clone();
+        self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
+        self.current_layout = None;
+        self.force_layout_revision_bump = true;
+    }
+
     /// Force a full relayout on the next render pass.
     /// Used when internal widget state (e.g. tree expand/collapse) changes
     /// the widget's size without changing the widget tree data.
@@ -2929,7 +2952,7 @@ impl Runtime {
         dirty_widget_ids: &mut Vec<u64>,
     ) -> Result<LayoutNode, String> {
         let (cols, rows) = viewport.unwrap_or((self.layout_cols, self.layout_rows));
-        let engine = if let Some(measurer) = self.text_measurer.as_deref() {
+        let mut engine = if let Some(measurer) = self.text_measurer.as_deref() {
             LayoutEngine::with_text_measurer_exact(
                 cols,
                 rows,
@@ -2941,6 +2964,7 @@ impl Runtime {
         } else {
             LayoutEngine::new_exact(cols, rows, self.layout_aspect)
         };
+        engine.frame_viewport = self.layout_frame_viewport;
         relayout_subtree_path_result(existing, tree, child_path, dirty_widget_ids, &engine)
     }
 
@@ -3558,7 +3582,7 @@ impl Runtime {
         let failure_reason = previous_layout
             .as_ref()
             .and_then(|existing| reuse_layout_failure_reason(existing.as_ref(), tree));
-        let engine = if let Some(measurer) = self.text_measurer.as_deref() {
+        let mut engine = if let Some(measurer) = self.text_measurer.as_deref() {
             LayoutEngine::with_text_measurer_exact(
                 self.layout_cols,
                 self.layout_rows,
@@ -3570,6 +3594,7 @@ impl Runtime {
         } else {
             LayoutEngine::new_exact(self.layout_cols, self.layout_rows, self.layout_aspect)
         };
+        engine.frame_viewport = self.layout_frame_viewport;
         if let Some(layout) = engine.layout_with_id_offset(tree, self.widget_id_offset) {
             let geometry_changed = previous_layout
                 .as_ref()

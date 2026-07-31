@@ -259,6 +259,9 @@ pub fn build_render_frame(
     viewport_width: usize,
     viewport_height: usize,
 ) -> RenderFrame {
+    // Single-tile path: the tile root area is the whole frame, which is the
+    // layout engine's fallback when no frame viewport is set.
+    editor.set_layout_frame_viewport(None);
     build_render_frame_with_layout_viewport(
         editor,
         viewport_width,
@@ -1220,6 +1223,26 @@ fn build_tiled_render_frame_impl(
             .map(|(_, frame)| frame.clone());
 
         if is_active {
+            // Whole-window viewport in this tile's local content coordinates
+            // (same border-inset arithmetic as the Metal backend's content
+            // origin) so frame-anchored widgets (modal) can center against
+            // the window rather than the tile.
+            let border_inset_px = if show_border {
+                border_width_px
+                    .max(0.0)
+                    .min(body_rect.width * cell_w * 0.5)
+                    .min(body_rect.height * cell_h * 0.5)
+            } else {
+                0.0
+            };
+            let content_col = body_rect.col + border_inset_px / cell_w.max(1.0);
+            let content_row = body_rect.row + border_inset_px / cell_h.max(1.0);
+            editor.set_layout_frame_viewport(Some(crate::layout::Rect {
+                row: -content_row,
+                col: -content_col,
+                width: total_width as f32,
+                height: total_height as f32,
+            }));
             // Active tile: use full build_render_frame for highlights/cursor, but
             // completion is rendered once globally by the tiled backend.
             let cacheable_ui_frame =

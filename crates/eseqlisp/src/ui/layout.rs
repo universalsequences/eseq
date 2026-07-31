@@ -127,6 +127,43 @@ pub struct LayoutEngine<'a> {
     pub text_measurer: Option<&'a dyn TextMeasurer>,
     pub cell_w: f32,
     pub cell_h: f32,
+    /// Whole-window viewport in this tile's local cell coordinates (origin
+    /// may be negative for non-top-left tiles). Consumed by frame-anchored
+    /// widgets (modal). `None` falls back to the tile's own root area.
+    pub frame_viewport: Option<Rect>,
+}
+
+std::thread_local! {
+    /// The frame viewport for the layout pass currently running on this
+    /// thread. Installed by the `LayoutEngine` entry points so container
+    /// definitions (which only see node/area/children) can anchor against
+    /// the whole window.
+    static FRAME_VIEWPORT: std::cell::Cell<Option<Rect>> = const { std::cell::Cell::new(None) };
+}
+
+/// The frame viewport of the in-progress layout pass, if any.
+pub(crate) fn current_frame_viewport() -> Option<Rect> {
+    FRAME_VIEWPORT.with(|slot| slot.get())
+}
+
+/// Installs a frame viewport for the duration of a layout pass; restores the
+/// previous value on drop so nested/snapshot layouts do not leak state.
+struct FrameViewportGuard {
+    previous: Option<Rect>,
+}
+
+impl FrameViewportGuard {
+    fn install(frame_viewport: Option<Rect>) -> Self {
+        let previous = FRAME_VIEWPORT.with(|slot| slot.replace(frame_viewport));
+        Self { previous }
+    }
+}
+
+impl Drop for FrameViewportGuard {
+    fn drop(&mut self) {
+        let previous = self.previous;
+        FRAME_VIEWPORT.with(|slot| slot.set(previous));
+    }
 }
 
 impl<'a> LayoutEngine<'a> {
@@ -142,6 +179,7 @@ impl<'a> LayoutEngine<'a> {
             text_measurer: None,
             cell_w: 1.0,
             cell_h: 1.0,
+            frame_viewport: None,
         }
     }
 
@@ -178,6 +216,7 @@ impl<'a> LayoutEngine<'a> {
             text_measurer: Some(text_measurer),
             cell_w,
             cell_h,
+            frame_viewport: None,
         }
     }
 
@@ -186,6 +225,7 @@ impl<'a> LayoutEngine<'a> {
     }
 
     pub fn layout_with_id_offset(&self, tree: &Value, widget_id_offset: u64) -> Option<LayoutNode> {
+        let _frame_viewport = FrameViewportGuard::install(Some(self.effective_frame_viewport()));
         let size = self.measure(tree, self.root_constraints(), DEFAULT_FONT_SIZE)?;
         let root_rect = self.root_rect(tree, size, 0.0, 0.0);
         let mut layout =
@@ -193,6 +233,17 @@ impl<'a> LayoutEngine<'a> {
         let mut next_widget_id = widget_id_offset.wrapping_add(1);
         assign_widget_ids(&mut layout, &mut next_widget_id);
         Some(layout)
+    }
+
+    /// The frame viewport used for frame-anchored layout: the backend-supplied
+    /// window rect when present, otherwise the tile's own root area.
+    fn effective_frame_viewport(&self) -> Rect {
+        self.frame_viewport.unwrap_or(Rect {
+            row: 0.0,
+            col: 0.0,
+            width: self.terminal_cols,
+            height: self.terminal_rows,
+        })
     }
 
     fn root_constraints(&self) -> Constraints {
@@ -661,6 +712,17 @@ impl<'a> LayoutEngine<'a> {
             );
         }
 
+        // Open modals record the frame viewport + panel rect they were laid
+        // out against so the render path can rebuild the scrim/panel chrome
+        // (the frame viewport is only known during layout).
+        if widget_type == "modal" && !children.is_empty() {
+            let frame = current_frame_viewport().unwrap_or(rect);
+            let modal_rect = widget_render::modal::modal_rect_for_value(node, frame);
+            for (key, value) in widget_render::modal::injected_layout_props(frame, modal_rect) {
+                props.insert(key, value);
+            }
+        }
+
         let focusable = matches!(props.get("focusable"), Some(Value::Bool(true)));
         let stable_key = get_stable_widget_key(node);
         let stable_widget_id = get_stable_widget_id(node);
@@ -1023,6 +1085,7 @@ pub fn relayout_subtree_path_result(
     dirty_widget_ids: &mut Vec<u64>,
     engine: &LayoutEngine<'_>,
 ) -> Result<LayoutNode, String> {
+    let _frame_viewport = FrameViewportGuard::install(Some(engine.effective_frame_viewport()));
     let mut trace_path = Vec::new();
     let mut next_widget_id = max_layout_widget_id(existing).wrapping_add(1);
     let root_size = engine.measure_node_at_path(

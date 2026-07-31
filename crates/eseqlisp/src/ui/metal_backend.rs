@@ -4104,113 +4104,36 @@ fragment float4 live_spectrogram_frag(
                 );
             }
 
-            // ── Overlay stage (dropdown menus, etc.) ────────────────────────
-            // Drawn after the main scene, mirroring the live global overlay
-            // pass ordering, so captures include open overlays.
+            // ── Overlay stage (dropdown menus, modal panels, etc.) ─────────
+            // Drawn after the main scene with the same ordered, clip-
+            // segmented path as the live global overlay pass, so captures
+            // include open overlays with their clip rects honored.
             if !overlay_scene.is_empty() {
-                let (overlay_bg_runs, overlay_fg_runs) =
-                    partition_widget_instance_runs(&overlay_scene);
-                for (widget_type, instances) in &overlay_bg_runs {
-                    let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
-                        continue;
-                    };
-                    if instances.is_empty() {
-                        continue;
-                    }
-                    draw_widget_instances(
+                let overlay_scissor = MTLScissorRect {
+                    x: 0,
+                    y: 0,
+                    width: vp_w as usize,
+                    height: vp_h as usize,
+                };
+                let mut image_load_budget = usize::MAX;
+                let segments =
+                    split_prim_segment_ranges(&overlay_scene, overlay_scissor, cell_w, cell_h);
+                for (seg_scissor, seg_range) in &segments {
+                    enc.setScissorRect(*seg_scissor);
+                    self.draw_dynamic_segment_all(
                         &enc,
-                        &self.device,
-                        &mut self.upload_arena,
-                        &mut self.stats,
-                        wpipe,
-                        instances.as_slice(),
-                    );
-                }
-
-                if let Some(image_pipeline) = self.image_pipeline.clone() {
-                    let mut image_load_budget = usize::MAX;
-                    let images = collect_image_primitives(&overlay_scene);
-                    self.draw_image_primitives(
-                        &enc,
-                        &image_pipeline,
-                        &images,
-                        None,
-                        &mut image_load_budget,
+                        *seg_scissor,
+                        &overlay_scene[seg_range.clone()],
+                        &atlas_texture,
                         cell_w,
                         cell_h,
                         vp_w,
                         vp_h,
+                        &mut image_load_budget,
                         time_seconds,
                     );
                 }
-
-                let overlay_quads = {
-                    let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
-                    build_widget_primitive_quads(&overlay_scene, atlas, vp_w, vp_h)
-                };
-                draw_vertices(
-                    &enc,
-                    &self.device,
-                    &mut self.upload_arena,
-                    &mut self.stats,
-                    &pipeline,
-                    &atlas_texture,
-                    overlay_quads.as_slice(),
-                );
-
-                if let (Some(prop_atlas), Some(prop_pipe)) =
-                    (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
-                {
-                    let prop_verts = build_proportional_text_quads_cached(
-                        &overlay_scene,
-                        prop_atlas,
-                        &mut self.prop_text_layout_cache,
-                        &mut self.stats,
-                        cell_w,
-                        cell_h,
-                        vp_w,
-                        vp_h,
-                    );
-                    let prop_tex = prop_atlas.texture.clone();
-                    draw_vertices(
-                        &enc,
-                        &self.device,
-                        &mut self.upload_arena,
-                        &mut self.stats,
-                        prop_pipe,
-                        &prop_tex,
-                        prop_verts.as_slice(),
-                    );
-                }
-
-                for (widget_type, instances) in &overlay_fg_runs {
-                    let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
-                        continue;
-                    };
-                    if instances.is_empty() {
-                        continue;
-                    }
-                    draw_widget_instances(
-                        &enc,
-                        &self.device,
-                        &mut self.upload_arena,
-                        &mut self.stats,
-                        wpipe,
-                        instances.as_slice(),
-                    );
-                }
-
-                let overlay_fg_rect_quads =
-                    build_foreground_rect_quads(&overlay_scene, cell_w, cell_h, vp_w, vp_h);
-                draw_vertices(
-                    &enc,
-                    &self.device,
-                    &mut self.upload_arena,
-                    &mut self.stats,
-                    &pipeline,
-                    &atlas_texture,
-                    overlay_fg_rect_quads.as_slice(),
-                );
+                enc.setScissorRect(overlay_scissor);
             }
 
             enc.endEncoding();
@@ -5875,114 +5798,39 @@ fragment float4 live_spectrogram_frag(
             // Drawn after tiles and patch cables so open dropdowns always sit
             // above interactive wiring and tile chrome.
             if !global_overlay_prims.is_empty() {
-                enc.setScissorRect(MTLScissorRect {
+                // Draw overlay content with the same ordered, clip-segmented
+                // path as tile scenes so PushClipRect/PopClipRect emitted by
+                // overlay subtrees (modal panels, scroll regions inside them)
+                // are honored. Each segment's scissor derives from the full
+                // viewport, which is what lets overlays escape tile bounds.
+                let overlay_scissor = MTLScissorRect {
                     x: 0,
                     y: 0,
                     width: vp_w as usize,
                     height: vp_h as usize,
-                });
-
-                let (bg_runs, fg_runs) = partition_widget_instance_runs(&global_overlay_prims);
-                for (widget_type, instances) in &bg_runs {
-                    let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
-                        continue;
-                    };
-                    if instances.is_empty() {
-                        continue;
-                    }
-                    draw_widget_instances(
+                };
+                let segments = split_prim_segment_ranges(
+                    &global_overlay_prims,
+                    overlay_scissor,
+                    cell_w,
+                    cell_h,
+                );
+                for (seg_scissor, seg_range) in &segments {
+                    enc.setScissorRect(*seg_scissor);
+                    self.draw_dynamic_segment_all(
                         &enc,
-                        &self.device,
-                        &mut self.upload_arena,
-                        &mut self.stats,
-                        wpipe,
-                        instances.as_slice(),
-                    );
-                }
-
-                if let Some(image_pipeline) = self.image_pipeline.clone() {
-                    let images = collect_image_primitives(&global_overlay_prims);
-                    self.draw_image_primitives(
-                        &enc,
-                        &image_pipeline,
-                        &images,
-                        None,
-                        &mut image_load_budget,
+                        *seg_scissor,
+                        &global_overlay_prims[seg_range.clone()],
+                        &atlas_texture,
                         cell_w,
                         cell_h,
                         vp_w,
                         vp_h,
+                        &mut image_load_budget,
                         render_time_seconds,
                     );
                 }
-
-                let prim_quads = {
-                    let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
-                    build_widget_primitive_quads(&global_overlay_prims, atlas, vp_w, vp_h)
-                };
-                draw_vertices(
-                    &enc,
-                    &self.device,
-                    &mut self.upload_arena,
-                    &mut self.stats,
-                    &pipeline,
-                    &atlas_texture,
-                    &prim_quads,
-                );
-
-                if let (Some(prop_atlas), Some(prop_pipe)) =
-                    (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
-                {
-                    let prop_verts = build_proportional_text_quads_cached(
-                        &global_overlay_prims,
-                        prop_atlas,
-                        &mut self.prop_text_layout_cache,
-                        &mut self.stats,
-                        cell_w,
-                        cell_h,
-                        vp_w,
-                        vp_h,
-                    );
-                    let prop_tex = prop_atlas.texture.clone();
-                    draw_vertices(
-                        &enc,
-                        &self.device,
-                        &mut self.upload_arena,
-                        &mut self.stats,
-                        prop_pipe,
-                        &prop_tex,
-                        &prop_verts,
-                    );
-                }
-
-                for (widget_type, instances) in &fg_runs {
-                    let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
-                        continue;
-                    };
-                    if instances.is_empty() {
-                        continue;
-                    }
-                    draw_widget_instances(
-                        &enc,
-                        &self.device,
-                        &mut self.upload_arena,
-                        &mut self.stats,
-                        wpipe,
-                        instances.as_slice(),
-                    );
-                }
-
-                let foreground_rect_quads =
-                    build_foreground_rect_quads(&global_overlay_prims, cell_w, cell_h, vp_w, vp_h);
-                draw_vertices(
-                    &enc,
-                    &self.device,
-                    &mut self.upload_arena,
-                    &mut self.stats,
-                    &pipeline,
-                    &atlas_texture,
-                    &foreground_rect_quads,
-                );
+                enc.setScissorRect(overlay_scissor);
             }
 
             // ── Completion popup (no scissor — drawn on top of everything) ───
