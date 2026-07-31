@@ -1497,8 +1497,8 @@ fn build_metal_primitives(
         let mut label_col = x + 0.34;
         if let Some(dot) = item.sound_dot {
             if width >= 1.2 && label_height >= 0.85 {
-                let side_px = (view.item_label_font_size * 0.9).max(5.0);
-                let side_rows = (side_px / viewport.cell_h).min(label_height * 0.8);
+                let side_px = (view.item_label_font_size * 1.8).max(5.0);
+                let side_rows = (side_px / viewport.cell_h).min(label_height * 0.92);
                 let side_cols = side_rows * viewport.cell_h / viewport.cell_w;
                 primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
                     x: x + 0.30,
