@@ -2634,6 +2634,11 @@ fragment float4 live_spectrogram_frag(
             }
         }
 
+        /// Returns the tile scene primitives plus any overlay primitives
+        /// (dropdown menus, etc.) drained during collection. Overlay prims are
+        /// only produced on collecting paths; cache hits return an empty
+        /// overlay, which is correct because caches are bypassed whenever an
+        /// overlay is open.
         fn widget_scene_for_layout(
             &mut self,
             owner_frame_key: u64,
@@ -2643,14 +2648,17 @@ fragment float4 live_spectrogram_frag(
             viewport: WidgetViewport,
             scroll_top: f32,
             max_rows: u16,
-        ) -> Vec<widget_render::MetalPrimitive> {
+        ) -> (
+            Vec<widget_render::MetalPrimitive>,
+            Vec<widget_render::MetalPrimitive>,
+        ) {
             if widget_render::overlay_widget_id().is_some() {
                 self.stats.note_widget_scene_overlay_bypass();
-                let (mut primitives, _overlay) =
+                let (mut primitives, overlay) =
                     widget_render::collect_metal_primitives(layout, viewport, scroll_top, max_rows);
                 Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
                 self.stats.note_widget_primitives(primitives.len());
-                return primitives;
+                return (primitives, overlay);
             }
             let active_animation_widget_ids =
                 widget_render::active_animation_widget_ids(layout);
@@ -2659,7 +2667,7 @@ fragment float4 live_spectrogram_frag(
                 refresh_widget_ids.extend(active_animation_widget_ids);
                 refresh_widget_ids.sort_unstable();
                 refresh_widget_ids.dedup();
-                let (cache_key, _overlay) = self.refresh_widget_run_scene_for_dirty_layout(
+                let (cache_key, overlay) = self.refresh_widget_run_scene_for_dirty_layout(
                     owner_frame_key,
                     layout_cache_key,
                     layout,
@@ -2675,7 +2683,7 @@ fragment float4 live_spectrogram_frag(
                     .unwrap_or_default();
                 Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
                 self.stats.note_widget_primitives(primitives.len());
-                return primitives;
+                return (primitives, overlay);
             }
 
             let cache_parts = self.widget_scene_cache_parts(
@@ -2695,7 +2703,7 @@ fragment float4 live_spectrogram_frag(
                 let mut primitives = scene.primitives.clone();
                 Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
                 self.stats.note_widget_primitives(primitives.len());
-                return primitives;
+                return (primitives, Vec::new());
             }
             if dirty_widget_ids.is_empty()
                 && let Some(scene) = self.cached_widget_run_scenes.get(&cache_key)
@@ -2717,7 +2725,7 @@ fragment float4 live_spectrogram_frag(
                 }
                 Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
                 self.stats.note_widget_primitives(primitives.len());
-                return primitives;
+                return (primitives, Vec::new());
             }
 
             if dirty_widget_ids.is_empty() {
@@ -2733,7 +2741,7 @@ fragment float4 live_spectrogram_frag(
                     .note_widget_scene_dirty_bypass(dirty_widget_ids.len());
             }
 
-            let (runs, _overlay) =
+            let (runs, overlay) =
                 widget_render::collect_metal_primitive_runs(layout, viewport, scroll_top, max_rows);
             let mut primitives = widget_render::flatten_metal_primitive_runs(&runs);
             if self.cached_widget_scenes.len() >= 128 {
@@ -2753,7 +2761,7 @@ fragment float4 live_spectrogram_frag(
                 .insert(cache_key, CachedWidgetRunScene { runs, run_indices });
             Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
             self.stats.note_widget_primitives(primitives.len());
-            primitives
+            (primitives, overlay)
         }
 
         fn update_widget_scene_cache_from_primitive_runs(
@@ -3848,7 +3856,7 @@ fragment float4 live_spectrogram_frag(
             let max_rows_exact = (vp_h / cell_h - 1.0).max(0.0);
             let max_rows = max_rows_exact.floor() as u16;
 
-            let primitive_scene = frame
+            let (primitive_scene, overlay_scene) = frame
                 .widget_layout
                 .as_ref()
                 .map(|layout| {
@@ -4093,6 +4101,115 @@ fragment float4 live_spectrogram_frag(
                     prop_pipe,
                     &prop_tex,
                     prop_verts.as_slice(),
+                );
+            }
+
+            // ── Overlay stage (dropdown menus, etc.) ────────────────────────
+            // Drawn after the main scene, mirroring the live global overlay
+            // pass ordering, so captures include open overlays.
+            if !overlay_scene.is_empty() {
+                let (overlay_bg_runs, overlay_fg_runs) =
+                    partition_widget_instance_runs(&overlay_scene);
+                for (widget_type, instances) in &overlay_bg_runs {
+                    let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
+                        continue;
+                    };
+                    if instances.is_empty() {
+                        continue;
+                    }
+                    draw_widget_instances(
+                        &enc,
+                        &self.device,
+                        &mut self.upload_arena,
+                        &mut self.stats,
+                        wpipe,
+                        instances.as_slice(),
+                    );
+                }
+
+                if let Some(image_pipeline) = self.image_pipeline.clone() {
+                    let mut image_load_budget = usize::MAX;
+                    let images = collect_image_primitives(&overlay_scene);
+                    self.draw_image_primitives(
+                        &enc,
+                        &image_pipeline,
+                        &images,
+                        None,
+                        &mut image_load_budget,
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                        time_seconds,
+                    );
+                }
+
+                let overlay_quads = {
+                    let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
+                    build_widget_primitive_quads(&overlay_scene, atlas, vp_w, vp_h)
+                };
+                draw_vertices(
+                    &enc,
+                    &self.device,
+                    &mut self.upload_arena,
+                    &mut self.stats,
+                    &pipeline,
+                    &atlas_texture,
+                    overlay_quads.as_slice(),
+                );
+
+                if let (Some(prop_atlas), Some(prop_pipe)) =
+                    (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
+                {
+                    let prop_verts = build_proportional_text_quads_cached(
+                        &overlay_scene,
+                        prop_atlas,
+                        &mut self.prop_text_layout_cache,
+                        &mut self.stats,
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                    );
+                    let prop_tex = prop_atlas.texture.clone();
+                    draw_vertices(
+                        &enc,
+                        &self.device,
+                        &mut self.upload_arena,
+                        &mut self.stats,
+                        prop_pipe,
+                        &prop_tex,
+                        prop_verts.as_slice(),
+                    );
+                }
+
+                for (widget_type, instances) in &overlay_fg_runs {
+                    let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
+                        continue;
+                    };
+                    if instances.is_empty() {
+                        continue;
+                    }
+                    draw_widget_instances(
+                        &enc,
+                        &self.device,
+                        &mut self.upload_arena,
+                        &mut self.stats,
+                        wpipe,
+                        instances.as_slice(),
+                    );
+                }
+
+                let overlay_fg_rect_quads =
+                    build_foreground_rect_quads(&overlay_scene, cell_w, cell_h, vp_w, vp_h);
+                draw_vertices(
+                    &enc,
+                    &self.device,
+                    &mut self.upload_arena,
+                    &mut self.stats,
+                    &pipeline,
+                    &atlas_texture,
+                    overlay_fg_rect_quads.as_slice(),
                 );
             }
 
@@ -5243,7 +5360,7 @@ fragment float4 live_spectrogram_frag(
                         self.stats.note_widget_primitives(offset_prims.len());
                         (offset_prims, offset_run_indices, offset_runs, overlay, true)
                     } else {
-                        let primitives = self.widget_scene_for_layout(
+                        let (primitives, overlay) = self.widget_scene_for_layout(
                             tile.frame.widget_content_cache_key,
                             tile.frame.widget_layout_cache_key,
                             layout,
@@ -5252,17 +5369,6 @@ fragment float4 live_spectrogram_frag(
                             combined_scroll,
                             inner_rows,
                         );
-                        let overlay = if widget_render::overlay_widget_id().is_some() {
-                            let (_, overlay) = widget_render::collect_metal_primitives(
-                                layout,
-                                viewport,
-                                combined_scroll,
-                                inner_rows,
-                            );
-                            overlay
-                        } else {
-                            Vec::new()
-                        };
                         let offset_prims: Vec<_> = primitives
                             .into_iter()
                             .map(|p| {
@@ -6771,7 +6877,7 @@ fragment float4 live_spectrogram_frag(
                 .as_ref()
                 .map(|layout| {
                     let started = Instant::now();
-                    let scene = self.widget_scene_for_layout(
+                    let (scene, _overlay) = self.widget_scene_for_layout(
                         frame.widget_content_cache_key,
                         frame.widget_layout_cache_key,
                         layout,
