@@ -1497,12 +1497,14 @@ fn build_metal_primitives(
         let mut label_col = x + 0.34;
         if let Some(dot) = item.sound_dot {
             if width >= 1.2 && label_height >= 0.85 {
-                let side_px = (view.item_label_font_size * 1.8).max(5.0);
-                let side_rows = (side_px / viewport.cell_h).min(label_height * 0.92);
+                let side_px = (view.item_label_font_size * 1.26).max(5.0);
+                let side_rows = (side_px / viewport.cell_h).min(label_height * 0.66);
                 let side_cols = side_rows * viewport.cell_h / viewport.cell_w;
+                // Nudged slightly below true center to sit on the label's
+                // optical line (the text row leans low in the bar).
                 primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
                     x: x + 0.30,
-                    y: y + ((label_height - side_rows).max(0.0) * 0.5),
+                    y: y + ((label_height - side_rows).max(0.0) * 0.5) + 0.04,
                     width: side_cols,
                     height: side_rows,
                     color: dot,
