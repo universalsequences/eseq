@@ -13036,6 +13036,14 @@
             "seq-song-region-duplicate",
             "seq-sound-push-to-pattern",
             "seq-sound-apply-to-all-takes",
+            // Sound palette (takes spec 17.6/18.3).
+            "seq-sound-palette-open",
+            "seq-sound-palette-close",
+            "seq-sound-apply",
+            "seq-sound-apply-with-mix",
+            "seq-sound-fork",
+            "seq-sound-rename",
+            "seq-sound-cleanup-unused",
         ] {
             editor
                 .runtime_mut()
@@ -13113,6 +13121,8 @@
                 ),
                 ("current-track", Value::Number(0.0)),
                 ("song-bound-clip", Value::Nil),
+                ("sound-palette", Value::Nil),
+                ("song-clip-sounds", test_list(vec![])),
                 ("song-region", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_bool_list(&[false])),
@@ -19696,6 +19706,213 @@
             }
             other => panic!("expected preview-plock-variant host command, got {other:?}"),
         }
+    }
+
+    /// Sound palette fixture (takes spec 17.6): two entries — the gray base
+    /// (scene-effective, color nil) and a colored current entry.
+    fn sound_palette_fixture() -> Value {
+        map_value([
+            ("track", Value::Number(0.0)),
+            ("target-kind", Value::String("take".to_string())),
+            ("target-id", Value::Number(1.0)),
+            (
+                "entries",
+                test_list(vec![
+                    map_value([
+                        ("patch-id", Value::Number(0.0)),
+                        ("mix-id", Value::Number(0.0)),
+                        ("name", Value::String("Patch 1".to_string())),
+                        ("referents", Value::String("Scene 1".to_string())),
+                        ("base", Value::Bool(true)),
+                        ("current", Value::Bool(false)),
+                        ("color", Value::Nil),
+                    ]),
+                    map_value([
+                        ("patch-id", Value::Number(3.0)),
+                        ("mix-id", Value::Number(2.0)),
+                        ("name", Value::String("Warm Keys".to_string())),
+                        ("referents", Value::String("Pattern 3, Take 2".to_string())),
+                        ("base", Value::Bool(false)),
+                        ("current", Value::Bool(true)),
+                        ("color", Value::Number(1.0)),
+                        ("color-r", Value::Number(0.909_803_9)),
+                        ("color-g", Value::Number(0.643_137_3)),
+                        ("color-b", Value::Number(0.309_803_93)),
+                    ]),
+                ]),
+            ),
+        ])
+    }
+
+    /// Takes spec 18.3 exit criterion: the palette overlay renders — header,
+    /// both entry rows (gray base + colored current), and the per-entry
+    /// action buttons — all inside the panel; closed (Nil) it collapses.
+    #[test]
+    fn metal_seq_sound_palette_overlay_layout() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "sound-palette", sound_palette_fixture());
+        editor
+            .runtime_mut()
+            .eval_str(r#"(effect-buffer "*sound-palette-test*" (sound-palette-panel))"#)
+            .expect("create sound palette test buffer");
+        editor.refresh_runtime_side_effects();
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sound-palette-test*")
+            .expect("sound palette test buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(24, 60);
+        editor.refresh_visible_layouts_for_buffer_named("*sound-palette-test*");
+        let layout = editor.widget_layout().expect("sound palette layout");
+        let panel = find_layout_node_by_debug_name(&layout, "sound-palette-panel")
+            .expect("palette panel should render");
+        let header = find_layout_node_by_stable_key(&layout, "sound-palette-header-label")
+            .expect("palette header should render");
+        let base_row = find_layout_node_by_stable_key(&layout, "sound-palette-entry-0")
+            .expect("gray base entry should render");
+        let current_row = find_layout_node_by_stable_key(&layout, "sound-palette-entry-3")
+            .expect("current entry should render");
+        let apply = find_layout_node_by_stable_key(&layout, "sound-palette-apply-3")
+            .expect("apply button should render");
+        let apply_mix = find_layout_node_by_stable_key(&layout, "sound-palette-apply-mix-3")
+            .expect("apply-with-mix button should render");
+        assert_finite_nonzero_rect(panel, "sound palette panel");
+        assert_finite_nonzero_rect(base_row, "gray base entry");
+        assert_finite_nonzero_rect(current_row, "current entry");
+        assert_finite_nonzero_rect(apply, "apply button");
+        assert_layout_inside(header, panel, "palette header");
+        assert_layout_inside(base_row, panel, "gray base entry");
+        assert_layout_inside(current_row, panel, "current entry");
+        assert_layout_inside(apply, current_row, "apply button");
+        assert_layout_inside(apply_mix, current_row, "apply-with-mix button");
+
+        // Closed again: the reactive Nil collapses the panel to nothing.
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "sound-palette", Value::Nil);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*sound-palette-test*");
+        let layout = editor.widget_layout().expect("closed palette layout");
+        assert!(
+            find_layout_node_by_stable_key(&layout, "sound-palette-entry-3").is_none(),
+            "a closed palette renders no entries"
+        );
+    }
+
+    /// The overlay's Apply/Apply-with-mix rows dispatch the palette natives
+    /// with the entry's ids (takes spec 17.6).
+    #[test]
+    fn metal_seq_sound_palette_apply_click_dispatches_the_entry() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "sound-palette", sound_palette_fixture());
+        editor.runtime_mut().run_reactive_cycle();
+        // Capture the native calls as host commands so the dispatch is
+        // observable (the real natives enqueue the same wire commands).
+        editor
+            .runtime_mut()
+            .register_native("seq-sound-apply", |args, ctx| {
+                ctx.enqueue_command(eseqlisp::host::HostCommand::Custom {
+                    name: "test-sound-apply".to_string(),
+                    payload: Value::List(
+                        args.iter()
+                            .map(|value| std::rc::Rc::new(std::cell::RefCell::new(value.clone())))
+                            .collect(),
+                    ),
+                });
+                Ok(Value::Bool(true))
+            });
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(sound-palette-apply (dict :patch-id 3 :mix-id 2))"#)
+            .expect("apply the fixture entry");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "test-sound-apply");
+                let Value::List(args) = payload else {
+                    panic!("captured args should be a list: {payload:?}");
+                };
+                assert_eq!(*args[0].borrow(), Value::Number(0.0), "track from the open palette");
+                assert_eq!(*args[1].borrow(), Value::Number(3.0), "the entry's patch id");
+            }
+            other => panic!("expected the captured apply, got {other:?}"),
+        }
+    }
+
+    /// Clip dot join logic (takes spec 17.6, amended to patch IDENTITY):
+    /// dotted clips yield their patch color, name-only patches the gray
+    /// fallback (true), clips with no resolvable sound nothing.
+    #[test]
+    fn metal_seq_arrangement_clip_sound_dot_resolves_color_and_fallback() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "song-clip-sounds",
+            test_list(vec![test_list(vec![
+                map_value([
+                    ("clip-id", Value::Number(5.0)),
+                    ("dot", Value::Bool(true)),
+                    ("color", Value::Number(1.0)),
+                    ("color-r", Value::Number(0.9)),
+                    ("color-g", Value::Number(0.6)),
+                    ("color-b", Value::Number(0.3)),
+                ]),
+                map_value([
+                    ("clip-id", Value::Number(6.0)),
+                    ("dot", Value::Bool(true)),
+                    ("color", Value::Nil),
+                ]),
+                // dot false = the clip's sound does not resolve; the
+                // producer never emits color fields alongside it.
+                map_value([
+                    ("clip-id", Value::Number(7.0)),
+                    ("dot", Value::Bool(false)),
+                ]),
+            ])]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        let colored = editor
+            .runtime_mut()
+            .eval_str("(arrangement-clip-sound-dot 0 5)")
+            .expect("colored clip")
+            .expect("dot value");
+        let Value::List(rgb) = colored else {
+            panic!("expected (r g b), got {colored:?}");
+        };
+        assert_eq!(*rgb[0].borrow(), Value::Number(0.9));
+        assert_eq!(*rgb[2].borrow(), Value::Number(0.3));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(arrangement-clip-sound-dot 0 6)")
+                .expect("name-only clip"),
+            Some(Value::Bool(true)),
+            "name-only clip uses the gray fallback"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(arrangement-clip-sound-dot 0 7)")
+                .expect("unresolvable clip"),
+            Some(Value::Nil),
+            "a clip with no resolvable sound draws no dot"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(arrangement-clip-sound-dot 3 5)")
+                .expect("out-of-range track"),
+            Some(Value::Nil)
+        );
     }
 
     #[test]

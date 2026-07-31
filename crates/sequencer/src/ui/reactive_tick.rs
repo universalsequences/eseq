@@ -526,6 +526,12 @@ pub(crate) fn reactive_tick_and_render(
             &mut ctx.frame.song,
             transport_visible || arrangement_visible,
         );
+        needs_reactive_cycle |= sync_sound_palette(
+            editor.runtime_mut(),
+            &app,
+            &mut ctx.frame.sound_palette,
+            arrangement_visible,
+        );
         if master_meter_visible && ctx.meters.cached_peak_l_level != ctx.frame.prev_peak_l_level {
             needs_reactive_cycle |= editor
                 .runtime_mut()

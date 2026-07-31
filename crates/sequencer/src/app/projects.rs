@@ -2069,11 +2069,56 @@ impl App {
                     ),
                 });
             }
+            // §17.11 display metadata for every entity this file names —
+            // pruned entities are never named, so their meta drops with them.
+            let mut named_patches: std::collections::HashSet<u64> = carried_patches;
+            let mut named_mixes: std::collections::HashSet<u64> = carried_mixes;
+            for refs in &cells {
+                if refs.patch != u64::MAX {
+                    named_patches.insert(refs.patch);
+                }
+                if refs.mix != u64::MAX {
+                    named_mixes.insert(refs.mix);
+                }
+            }
+            let meta_entry = |id: u64, meta: Option<&crate::sequencer::SoundEntityMeta>| {
+                meta.map(|meta| crate::project::ProjectSoundEntityMeta {
+                    id,
+                    name: meta.name.clone(),
+                    color: meta.color.map(i32::from).unwrap_or(-1),
+                })
+            };
+            let mut patch_meta: Vec<crate::project::ProjectSoundEntityMeta> = named_patches
+                .iter()
+                .filter_map(|id| {
+                    meta_entry(
+                        *id,
+                        pool.and_then(|pool| {
+                            pool.sounds.patch_meta.get(&crate::sequencer::PatchId(*id))
+                        }),
+                    )
+                })
+                .collect();
+            patch_meta.sort_by_key(|meta| meta.id);
+            let mut mix_meta: Vec<crate::project::ProjectSoundEntityMeta> = named_mixes
+                .iter()
+                .filter_map(|id| {
+                    meta_entry(
+                        *id,
+                        pool.and_then(|pool| {
+                            pool.sounds.mix_meta.get(&crate::sequencer::MixId(*id))
+                        }),
+                    )
+                })
+                .collect();
+            mix_meta.sort_by_key(|meta| meta.id);
             track_sounds.push(crate::project::ProjectTrackSounds {
                 cells,
                 patterns,
                 takes,
                 orphan_sounds,
+                patch_meta,
+                mix_meta,
             });
         }
 
@@ -3235,6 +3280,16 @@ impl App {
                     .map(|refs| (refs.patch, refs.mix))
                     .collect::<Vec<_>>(),
                 carriers,
+                sounds
+                    .patch_meta
+                    .into_iter()
+                    .map(|meta| (meta.id, meta.name, meta.color))
+                    .collect::<Vec<_>>(),
+                sounds
+                    .mix_meta
+                    .into_iter()
+                    .map(|meta| (meta.id, meta.name, meta.color))
+                    .collect::<Vec<_>>(),
             ));
         }
         self.state.apply_project_sound_model(&sound_model);

@@ -164,8 +164,14 @@
   (let ((binding (get inst :sound-binding)))
     (if (= binding nil)
       (box :width 0 :height 0 :bg :transparent)
-      (label (str "> " binding)
-        :font-size 9 :color :dim :bg :transparent))))
+      ;; Clicking the badge opens the sound palette on this track's binding
+      ;; (takes spec 17.6). The badge text itself rides the `inst` map -- a
+      ;; panel-scope SEQ.* read here would break the *fx* buffer.
+      (box :key (str "sound-binding-badge-" (get inst :track))
+        :bg :transparent
+        :on-click |x y r| (seq-sound-palette-open (get inst :track))
+        (label (str "> " binding)
+          :font-size 9 :color :dim :bg :transparent)))))
 
 (def instrument-keys-button ()
   (instrument-header-tab-button "keys" (= instrument-panel-tab 1) 4.0

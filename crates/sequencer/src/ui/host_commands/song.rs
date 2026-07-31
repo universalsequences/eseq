@@ -81,7 +81,56 @@ pub(super) const COMMANDS: &[&str] = &[
     "focus-take-set-length",
     "sound-push-to-pattern",
     "sound-apply-to-all-takes",
+    // Sound palette (takes spec §17.6/§18.3). Apply/fork route through the
+    // single repoint seam (`after_sound_repoint`); open/close drive the
+    // `SEQ.sound-palette` read surface.
+    "sound-palette-open",
+    "sound-palette-close",
+    "sound-apply",
+    "sound-apply-with-mix",
+    "sound-fork",
+    "sound-rename",
+    "sound-cleanup-unused",
 ];
+
+/// Palette gesture target from a payload's `:target-kind`/`:target-id`
+/// (§17.6): `take`/`pattern` with an id, `cell` for the track's effective
+/// sound here and now, or absent (`None`) — the caller falls back to the
+/// open overlay's target or the track's binding.
+fn parse_palette_target(
+    map: &HashMap<String, Rc<RefCell<Value>>>,
+) -> Result<Option<sequencer::app::sound_palette::PaletteTarget>, String> {
+    use sequencer::app::sound_palette::PaletteTarget;
+    let Some(kind) = map_string(map, "target-kind") else {
+        return Ok(None);
+    };
+    match kind.as_str() {
+        "cell" => Ok(Some(PaletteTarget::Cell)),
+        "take" => Ok(Some(PaletteTarget::Take(TakeId(map_entity_id(
+            map,
+            "target-id",
+        )?)))),
+        "pattern" => Ok(Some(PaletteTarget::Pattern(PatternId(map_entity_id(
+            map,
+            "target-id",
+        )?)))),
+        other => Err(format!("unknown palette target kind: {other}")),
+    }
+}
+
+/// A pool entity id from a payload: a finite non-negative integer. `as u64`
+/// alone would fold a negative or fractional number onto a real id
+/// (saturating to 0 / truncating) and silently retarget entity 0.
+fn map_entity_id(
+    map: &HashMap<String, Rc<RefCell<Value>>>,
+    key: &str,
+) -> Result<u64, String> {
+    let id = map_number(map, key).ok_or_else(|| format!("missing or invalid :{key}"))?;
+    if !id.is_finite() || id < 0.0 || id.fract() != 0.0 {
+        return Err(format!(":{key} is not a valid entity id: {id}"));
+    }
+    Ok(id as u64)
+}
 
 fn payload_map(payload: &Value) -> Result<&HashMap<String, Rc<RefCell<Value>>>, String> {
     match payload {
@@ -667,6 +716,76 @@ fn run_transport(
             let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
             app.apply_bound_sound_to_all_takes(track).map(Some)
         }
+        // Sound palette (takes spec §17.6/§18.3). Every arm that can change
+        // what the badge or panels show bumps the fx epoch — the palette
+        // list itself diffs by value each tick and needs no push.
+        "sound-palette-open" => {
+            let map = payload_map(payload)?;
+            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            let target = parse_palette_target(map)?;
+            let target = app.palette_target_or_binding(track, target);
+            app.sound_palette_open = Some((track, target));
+            Ok(None)
+        }
+        "sound-palette-close" => {
+            app.sound_palette_open = None;
+            Ok(None)
+        }
+        "sound-apply" | "sound-apply-with-mix" => {
+            let map = payload_map(payload)?;
+            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            let target = parse_palette_target(map)?.or_else(|| {
+                app.sound_palette_open
+                    .filter(|(open_track, _)| *open_track == track)
+                    .map(|(_, target)| target)
+            });
+            let target = app.palette_target_or_binding(track, target);
+            let patch = sequencer::sequencer::PatchId(map_entity_id(map, "patch")?);
+            let mix = if name == "sound-apply-with-mix" {
+                Some(sequencer::sequencer::MixId(map_entity_id(map, "mix")?))
+            } else {
+                None
+            };
+            let status = app.palette_apply(track, target, patch, mix)?;
+            ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(status))
+        }
+        "sound-fork" => {
+            let map = payload_map(payload)?;
+            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            let target = parse_palette_target(map)?.or_else(|| {
+                app.sound_palette_open
+                    .filter(|(open_track, _)| *open_track == track)
+                    .map(|(_, target)| target)
+            });
+            let target = app.palette_target_or_binding(track, target);
+            let status = app.palette_fork(track, target)?;
+            ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(status))
+        }
+        "sound-rename" => {
+            let map = payload_map(payload)?;
+            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            let kind = map_string(map, "kind").unwrap_or_else(|| "patch".to_string());
+            let id = map_entity_id(map, "entity")?;
+            let name_arg =
+                map_string(map, "name").ok_or("missing or invalid :name")?;
+            let (patch, mix) = match kind.as_str() {
+                "patch" => (Some(sequencer::sequencer::PatchId(id)), None),
+                "mix" => (None, Some(sequencer::sequencer::MixId(id))),
+                other => return Err(format!("unknown entity kind: {other}")),
+            };
+            let status = app.palette_rename(track, patch, mix, &name_arg)?;
+            ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(status))
+        }
+        "sound-cleanup-unused" => {
+            let map = payload_map(payload)?;
+            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            let status = app.palette_cleanup_unused(track)?;
+            ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(status))
+        }
         _ => Err(format!("unknown song transport command: {name}")),
     }
 }
@@ -721,6 +840,13 @@ const TRANSPORT_COMMANDS: &[&str] = &[
     "song-set-arr-cursor",
     "sound-push-to-pattern",
     "sound-apply-to-all-takes",
+    "sound-palette-open",
+    "sound-palette-close",
+    "sound-apply",
+    "sound-apply-with-mix",
+    "sound-fork",
+    "sound-rename",
+    "sound-cleanup-unused",
 ];
 
 /// Region clipboard commands (region spec 5.2/5.3). They live here rather

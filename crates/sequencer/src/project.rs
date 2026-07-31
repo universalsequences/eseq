@@ -167,6 +167,30 @@ pub struct ProjectTrackSounds {
     /// defaults. One entry per uncarried `(patch, mix)` pair.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub orphan_sounds: Vec<ProjectOrphanSound>,
+    /// §17.11 display metadata (name + palette color) per Patch entity,
+    /// keyed by file-local id — never positional, pool iteration order is
+    /// nondeterministic. Empty for files predating the palette UI; the
+    /// loader auto-assigns, matching mint behavior.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patch_meta: Vec<ProjectSoundEntityMeta>,
+    /// Same, per Mix entity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mix_meta: Vec<ProjectSoundEntityMeta>,
+}
+
+/// Display metadata for one sound entity (§17.11).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectSoundEntityMeta {
+    pub id: u64,
+    pub name: String,
+    /// Color index into the track's palette set; -1 = name-only display
+    /// (the set was exhausted at mint).
+    #[serde(default = "default_sound_meta_color")]
+    pub color: i32,
+}
+
+fn default_sound_meta_color() -> i32 {
+    -1
 }
 
 /// One carrier: the entity pair's file-local ids plus their content, composed
@@ -3435,6 +3459,8 @@ mod tests {
                 mix: 6,
                 data: project.patterns[0].clone(),
             }],
+            patch_meta: Vec::new(),
+            mix_meta: Vec::new(),
         }];
         let json = serde_json::to_string(&project).expect("serialize project");
         let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
@@ -3462,6 +3488,69 @@ mod tests {
         bare.track_sounds = vec![ProjectTrackSounds::default()];
         let json = serde_json::to_string(&bare).expect("serialize project");
         assert!(!json.contains("orphan_sounds"), "empty carriers are skipped");
+    }
+
+    /// §17.11 display metadata rides `track_sounds` additively: it round
+    /// trips, older v7 files without the keys still load (auto-assignment is
+    /// the loader's job), and empty metadata writes no field.
+    #[test]
+    fn sound_entity_meta_round_trips_and_defaults_empty() {
+        let mut project = sample_project();
+        project.track_sounds = vec![ProjectTrackSounds {
+            cells: vec![ProjectSoundRefs { patch: 5, mix: 6 }],
+            patterns: vec![None],
+            takes: Vec::new(),
+            orphan_sounds: Vec::new(),
+            patch_meta: vec![ProjectSoundEntityMeta {
+                id: 5,
+                name: "Warm Keys".to_string(),
+                color: 2,
+            }],
+            mix_meta: vec![ProjectSoundEntityMeta {
+                id: 6,
+                name: "Mix 7".to_string(),
+                color: -1,
+            }],
+        }];
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+        let sounds = &restored.track_sounds[0];
+        assert_eq!(sounds.patch_meta.len(), 1);
+        assert_eq!(sounds.patch_meta[0].id, 5);
+        assert_eq!(sounds.patch_meta[0].name, "Warm Keys");
+        assert_eq!(sounds.patch_meta[0].color, 2);
+        assert_eq!(sounds.mix_meta[0].color, -1, "name-only survives");
+
+        // Older v7 files without the metadata keys still load.
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        let sounds = value
+            .as_object_mut()
+            .and_then(|object| object.get_mut("track_sounds"))
+            .and_then(|sounds| sounds.as_array_mut())
+            .and_then(|sounds| sounds[0].as_object_mut())
+            .expect("track sounds entry is a json object");
+        sounds.remove("patch_meta");
+        sounds.remove("mix_meta");
+        let restored: ProjectFile =
+            serde_json::from_value(value).expect("deserialize pre-metadata project");
+        assert!(restored.track_sounds[0].patch_meta.is_empty());
+        assert!(restored.track_sounds[0].mix_meta.is_empty());
+
+        // A color-less entry defaults to -1 (name-only) rather than failing.
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        value["track_sounds"][0]["patch_meta"][0]
+            .as_object_mut()
+            .expect("meta entry is an object")
+            .remove("color");
+        let restored: ProjectFile =
+            serde_json::from_value(value).expect("deserialize color-less metadata");
+        assert_eq!(restored.track_sounds[0].patch_meta[0].color, -1);
+
+        // Empty metadata writes no field.
+        let mut bare = sample_project();
+        bare.track_sounds = vec![ProjectTrackSounds::default()];
+        let json = serde_json::to_string(&bare).expect("serialize project");
+        assert!(!json.contains("patch_meta"), "empty metadata is skipped");
     }
 
     #[test]

@@ -580,7 +580,15 @@ impl App {
             .state
             .effective_track_pattern_id(track)
             .ok_or_else(|| "The current scene has no pattern on this track".to_string())?;
-        self.commit_sound_relink(track, &[target], &[], refs, "Push sound to pattern")
+        self.commit_sound_relink(
+            track,
+            &[target],
+            &[],
+            &[],
+            Some(refs.patch),
+            Some(refs.mix),
+            "Push sound to pattern",
+        )
     }
 
     /// **Apply to all takes on track** (16.5, S2 semantics): re-link every
@@ -603,23 +611,35 @@ impl App {
         if takes.is_empty() {
             return Err(format!("Track {} has no takes", track + 1));
         }
-        self.commit_sound_relink(track, &[], &takes, refs, "Apply sound to all takes")
+        self.commit_sound_relink(
+            track,
+            &[],
+            &takes,
+            &[],
+            Some(refs.patch),
+            Some(refs.mix),
+            "Apply sound to all takes",
+        )
     }
 
     /// One re-link gesture = one undo entry (§17.4: an entity edit — and a
-    /// repoint — affects all referents through one history entry).
-    fn commit_sound_relink(
+    /// repoint — affects all referents through one history entry). `patch` /
+    /// `mix` may each be `None` to keep a target's current half (palette
+    /// Apply is patch-only, §17.6); `cells` are bare-cell scene indices.
+    pub(crate) fn commit_sound_relink(
         &mut self,
         track: usize,
         patterns: &[PatternId],
         takes: &[TakeId],
-        refs: SoundRefs,
+        cells: &[usize],
+        patch: Option<crate::sequencer::PatchId>,
+        mix: Option<crate::sequencer::MixId>,
         label: &'static str,
     ) -> Result<String, String> {
         let before = self.capture_synchronized_scene_structure_state()?;
         let changed = self
             .state
-            .relink_track_sound_refs(track, patterns, takes, refs)?;
+            .relink_track_sound_refs_masked(track, patterns, takes, cells, patch, mix)?;
         if changed == 0 {
             return Ok(format!("{label}: already linked"));
         }

@@ -550,6 +550,20 @@ pub(crate) fn build_sampler_panel_value(
         "duration".to_string(),
         Rc::new(RefCell::new(Value::Number(sample_duration))),
     );
+    // Sound-binding badge (takes spec 16.6, §17.5 S3 form) — sampler tracks
+    // are the common take-recording case, so they carry the badge too.
+    panel_map.insert(
+        "sound-binding".to_string(),
+        Rc::new(RefCell::new(
+            match app
+                .sound_binding_badge(track)
+                .or_else(|| app.track_binding_label(track))
+            {
+                Some(label) => Value::String(label),
+                None => Value::Nil,
+            },
+        )),
+    );
 
     Value::List(vec![Rc::new(RefCell::new(Value::Map(panel_map)))])
 }
@@ -1206,15 +1220,22 @@ pub(crate) fn build_instrument_panel_value(
             &instrument_name,
         )))),
     );
-    // Sound-binding badge (takes spec 16.6): which source this panel is
-    // showing and editing. Rides the panel map rather than a per-track
-    // reactive list because the FX strip is driven entirely by `inst`.
+    // Sound-binding badge (takes spec 16.6, §17.5 S3 form): the bound
+    // Patch's identity plus its referent index — "Patch A — used by
+    // Scene 1, Take 2". Rides the panel map rather than a per-track
+    // reactive list because the FX strip is driven entirely by `inst` —
+    // a panel-scope SEQ.* read breaks the *fx* buffer's evaluation.
     panel_map.insert(
         "sound-binding".to_string(),
-        Rc::new(RefCell::new(match app.track_binding_label(track) {
-            Some(label) => Value::String(label),
-            None => Value::Nil,
-        })),
+        Rc::new(RefCell::new(
+            match app
+                .sound_binding_badge(track)
+                .or_else(|| app.track_binding_label(track))
+            {
+                Some(label) => Value::String(label),
+                None => Value::Nil,
+            },
+        )),
     );
     panel_map.insert(
         "synth".to_string(),

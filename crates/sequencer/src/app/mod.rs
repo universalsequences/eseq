@@ -49,6 +49,7 @@ pub mod song_capture;
 pub mod song_edit;
 pub mod song_region;
 pub mod sound_binding;
+pub mod sound_palette;
 pub mod take_edit;
 pub mod take_recording;
 pub mod song_transport;
@@ -963,6 +964,10 @@ pub struct App {
     /// primitives read it directly. Mutually exclusive with the clip and
     /// scene-row selections.
     pub song_region_selection: Option<song_region::SongRegionSelection>,
+    /// The open sound-palette overlay (takes spec §17.6): the track it was
+    /// opened on and the referent its Apply/Fork gestures target. `None` =
+    /// closed (the `SEQ.sound-palette` surface publishes Nil).
+    pub sound_palette_open: Option<(usize, sound_palette::PaletteTarget)>,
     /// Mirror of the arrangement edit cursor (region spec 5.3). The Lisp view
     /// owns the click gesture, but the Cmd-V seam lives in Rust and needs a
     /// paste target, so `seq-song-set-arr-cursor` reflects the cursor here
@@ -2389,6 +2394,7 @@ impl App {
             record_arm_sync_pending: false,
             song_clip_selection: None,
             song_region_selection: None,
+            sound_palette_open: None,
             arrangement_cursor_beat: 0.0,
             arrangement_cursor_track: -1,
             arrangement_view_visible: false,

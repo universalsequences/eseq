@@ -103,6 +103,7 @@ pub(crate) fn run_event_loop(
         prev_auto_follow: true,
         prev_queued_transport_scene: None,
         song: SongFrameState::default(),
+        sound_palette: SoundPaletteFrameState::default(),
         watched_sampler_voice_track: None,
         watched_sampler_voice_ids: Vec::new(),
     };

@@ -90,6 +90,22 @@ pub struct SeqParams {
     pub global_transpose: bool,
 }
 
+/// Display metadata for one pool entity (§17.11): an auto-assigned name
+/// ("Patch 3" / "Mix 2" — naming is never required) and an optional color
+/// index into the track's palette set. `None` means the set was exhausted at
+/// mint (name-only display); colors are recycled by the cleanup gesture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SoundEntityMeta {
+    pub name: String,
+    pub color: Option<u8>,
+}
+
+/// Size of the per-track color set (§17.11): colors are unique per track per
+/// entity kind while the set lasts — a timeline dot's color identifies
+/// exactly one Patch on that track — and entities minted past the set fall
+/// back to name-only display.
+pub const SOUND_COLOR_SET: u8 = 8;
+
 /// Per-track entity pools. Stored inside `TrackPatternPool` so undo lane
 /// snapshots, track moves, and serialization carry the entities with the
 /// patterns automatically.
@@ -99,6 +115,11 @@ pub struct TrackSoundPool {
     pub mixes: HashMap<MixId, Mix>,
     pub next_patch_id: u64,
     pub next_mix_id: u64,
+    /// §17.11 display metadata, parallel to `patches`/`mixes`. Entries are
+    /// auto-assigned at mint; a missing entry (an older save) is repaired by
+    /// `ensure_meta` at load.
+    pub patch_meta: HashMap<PatchId, SoundEntityMeta>,
+    pub mix_meta: HashMap<MixId, SoundEntityMeta>,
 }
 
 impl TrackSoundPool {
@@ -106,6 +127,14 @@ impl TrackSoundPool {
         let id = PatchId(self.next_patch_id);
         self.next_patch_id = self.next_patch_id.saturating_add(1);
         self.patches.insert(id, patch);
+        let color = self.allocate_patch_color();
+        self.patch_meta.insert(
+            id,
+            SoundEntityMeta {
+                name: format!("Patch {}", id.0 + 1),
+                color,
+            },
+        );
         id
     }
 
@@ -113,7 +142,81 @@ impl TrackSoundPool {
         let id = MixId(self.next_mix_id);
         self.next_mix_id = self.next_mix_id.saturating_add(1);
         self.mixes.insert(id, mix);
+        let color = self.allocate_mix_color();
+        self.mix_meta.insert(
+            id,
+            SoundEntityMeta {
+                name: format!("Mix {}", id.0 + 1),
+                color,
+            },
+        );
         id
+    }
+
+    /// Smallest color index not held by a live Patch, or `None` past the set
+    /// (§17.11). Scanning live entities makes recycling automatic: cleanup
+    /// removes the entity and its meta, freeing the color.
+    fn allocate_patch_color(&self) -> Option<u8> {
+        let used: HashSet<u8> = self
+            .patch_meta
+            .iter()
+            .filter(|(id, _)| self.patches.contains_key(id))
+            .filter_map(|(_, meta)| meta.color)
+            .collect();
+        (0..SOUND_COLOR_SET).find(|color| !used.contains(color))
+    }
+
+    fn allocate_mix_color(&self) -> Option<u8> {
+        let used: HashSet<u8> = self
+            .mix_meta
+            .iter()
+            .filter(|(id, _)| self.mixes.contains_key(id))
+            .filter_map(|(_, meta)| meta.color)
+            .collect();
+        (0..SOUND_COLOR_SET).find(|color| !used.contains(color))
+    }
+
+    /// Repair pass for loads that predate display metadata (older v7 files):
+    /// every live entity without a meta entry gets the auto-assignment it
+    /// would have received at mint. Also drops meta for entities that no
+    /// longer exist, so color allocation never counts ghosts.
+    pub fn ensure_meta(&mut self) {
+        self.patch_meta.retain(|id, _| self.patches.contains_key(id));
+        self.mix_meta.retain(|id, _| self.mixes.contains_key(id));
+        let mut missing: Vec<PatchId> = self
+            .patches
+            .keys()
+            .filter(|id| !self.patch_meta.contains_key(id))
+            .copied()
+            .collect();
+        missing.sort();
+        for id in missing {
+            let color = self.allocate_patch_color();
+            self.patch_meta.insert(
+                id,
+                SoundEntityMeta {
+                    name: format!("Patch {}", id.0 + 1),
+                    color,
+                },
+            );
+        }
+        let mut missing: Vec<MixId> = self
+            .mixes
+            .keys()
+            .filter(|id| !self.mix_meta.contains_key(id))
+            .copied()
+            .collect();
+        missing.sort();
+        for id in missing {
+            let color = self.allocate_mix_color();
+            self.mix_meta.insert(
+                id,
+                SoundEntityMeta {
+                    name: format!("Mix {}", id.0 + 1),
+                    color,
+                },
+            );
+        }
     }
 
     pub fn insert(&mut self, patch: Patch, mix: Mix) -> SoundRefs {
@@ -147,6 +250,9 @@ impl TrackSoundPool {
         let mixes: HashSet<MixId> = keep.iter().map(|refs| refs.mix).collect();
         self.patches.retain(|id, _| patches.contains(id));
         self.mixes.retain(|id, _| mixes.contains(id));
+        // Meta follows the entity; dropping it frees the color (§17.11).
+        self.patch_meta.retain(|id, _| patches.contains(id));
+        self.mix_meta.retain(|id, _| mixes.contains(id));
     }
 }
 
@@ -659,6 +765,8 @@ mod tests {
             patterns,
             Vec::new(),
             vec![(cell_refs.patch.0, cell_refs.mix.0, carrier_data)],
+            Vec::new(),
+            Vec::new(),
         )]);
 
         loaded.with_project_scenes(|scenes| {
@@ -854,6 +962,68 @@ mod tests {
             0.66f32.to_bits(),
             "relaunch restores the post-launch tweak"
         );
+    }
+
+    /// §17.11: mint auto-assigns a name and a color unique per track while
+    /// the set lasts; past the set entities are name-only; cleanup recycles
+    /// colors; `ensure_meta` repairs metadata-less loads.
+    #[test]
+    fn display_metadata_mints_unique_colors_and_recycles() {
+        let mut pool = TrackSoundPool::default();
+        let ids: Vec<PatchId> = (0..SOUND_COLOR_SET as usize + 1)
+            .map(|_| pool.insert_patch(Patch::new_default()))
+            .collect();
+        let colors: Vec<Option<u8>> = ids
+            .iter()
+            .map(|id| pool.patch_meta.get(id).expect("meta minted").color)
+            .collect();
+        let assigned: HashSet<u8> = colors.iter().flatten().copied().collect();
+        assert_eq!(
+            assigned.len(),
+            SOUND_COLOR_SET as usize,
+            "colors are unique while the set lasts"
+        );
+        assert_eq!(
+            colors.last().copied().flatten(),
+            None,
+            "past the set falls back to name-only"
+        );
+        assert_eq!(
+            pool.patch_meta.get(&ids[2]).expect("meta").name,
+            format!("Patch {}", ids[2].0 + 1),
+            "auto-name at mint"
+        );
+
+        // Cleanup frees the dropped entity's color for the next mint.
+        let freed = colors[3].expect("in-set entity has a color");
+        let mix = pool.insert_mix(Mix::default());
+        let keep: HashSet<SoundRefs> = ids
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx != 3)
+            .map(|(_, id)| SoundRefs { patch: *id, mix })
+            .collect();
+        pool.retain_refs(&keep);
+        assert!(!pool.patch_meta.contains_key(&ids[3]), "meta follows the entity");
+        let recycled = pool.insert_patch(Patch::new_default());
+        assert_eq!(
+            pool.patch_meta.get(&recycled).expect("meta").color,
+            Some(freed),
+            "the freed color is recycled"
+        );
+
+        // A metadata-less load (older v7 file) repairs to mint behavior.
+        pool.patch_meta.clear();
+        pool.mix_meta.clear();
+        pool.ensure_meta();
+        assert_eq!(pool.patch_meta.len(), pool.patches.len());
+        assert_eq!(pool.mix_meta.len(), pool.mixes.len());
+        let repaired: HashSet<u8> = pool
+            .patch_meta
+            .values()
+            .filter_map(|meta| meta.color)
+            .collect();
+        assert_eq!(repaired.len(), SOUND_COLOR_SET as usize);
     }
 
     /// Deleting a track shifts every scene's `cell_sounds` together with
