@@ -6,6 +6,8 @@
 //! silently kills p-locks/key locks and engaged macro overrides. Each
 //! gesture is one undo entry (§17.4).
 
+use std::collections::HashSet;
+
 use crate::sequencer::{MixId, PatchId, PatternId, SoundRefs, TakeId, SOUND_COLOR_SET};
 
 use super::sound_binding::BoundSource;
@@ -379,10 +381,14 @@ impl App {
         })
     }
 
-    /// Clip-dot join (§17.6): per track, each stored clip's sound divergence
-    /// flag and color — `(clip_id, diverges, color)` where `diverges` is
-    /// "this clip's patch is not the track's scene-effective patch". The
-    /// color identifies the clip's patch (§17.11) when one is assigned.
+    /// Clip-dot join (§17.6, amended): per track, each stored clip's dot
+    /// visibility and color — `(clip_id, dot, color)`. The dot is **patch
+    /// identity**, not divergence from the live effective refs: every clip
+    /// shows its patch's color (§17.11: a color identifies exactly one Patch
+    /// on the track), suppressed only when the whole lane uses a single
+    /// patch. Comparing against the scene-effective refs was rejected — the
+    /// baseline follows the playhead under song playback, so the dots
+    /// flickered from clip to clip as rows repointed the cell refs.
     pub fn song_clip_sounds(&self) -> Vec<Vec<(u64, bool, Option<u8>)>> {
         // Two sequential lock scopes, never nested (arrangement and scenes
         // have no established lock order): first the minimal clip tuples,
@@ -412,31 +418,37 @@ impl App {
                 .into_iter()
                 .enumerate()
                 .map(|(track, clips)| {
-                    let base_patch = scenes
-                        .effective_sound_refs(track)
-                        .map(|refs| refs.patch);
                     let pool = scenes.track_pools.get(track);
                     let takes = scenes.take_pools.get(track);
+                    let clip_patch = |take_id: Option<u64>, pattern_id: Option<u64>| {
+                        if let Some(take_id) = take_id {
+                            takes
+                                .and_then(|takes| takes.get(crate::sequencer::TakeId(take_id)))
+                                .map(|take| take.sound.patch)
+                        } else if let Some(pattern_id) = pattern_id {
+                            pool.and_then(|pool| pool.refs(PatternId(pattern_id)))
+                                .map(|refs| refs.patch)
+                        } else {
+                            None
+                        }
+                    };
+                    // A lane whose clips all share one patch has nothing to
+                    // distinguish; dots appear only once a second sound
+                    // exists on the lane.
+                    let distinct: HashSet<PatchId> = clips
+                        .iter()
+                        .filter_map(|(_, take_id, pattern_id)| clip_patch(*take_id, *pattern_id))
+                        .collect();
+                    let multi = distinct.len() > 1;
                     clips
                         .into_iter()
                         .map(|(clip_id, take_id, pattern_id)| {
-                            let patch = if let Some(take_id) = take_id {
-                                takes
-                                    .and_then(|takes| takes.get(crate::sequencer::TakeId(take_id)))
-                                    .map(|take| take.sound.patch)
-                            } else if let Some(pattern_id) = pattern_id {
-                                pool.and_then(|pool| pool.refs(PatternId(pattern_id)))
-                                    .map(|refs| refs.patch)
-                            } else {
-                                None
-                            };
-                            let diverges =
-                                patch.is_some() && base_patch.is_some() && patch != base_patch;
+                            let patch = clip_patch(take_id, pattern_id);
                             let color = patch.and_then(|patch| {
                                 pool.and_then(|pool| pool.sounds.patch_meta.get(&patch))
                                     .and_then(|meta| meta.color)
                             });
-                            (clip_id, diverges, color)
+                            (clip_id, multi && patch.is_some(), color)
                         })
                         .collect()
                 })
@@ -712,6 +724,61 @@ mod tests {
         let after = app.sound_palette_entries(0, PaletteTarget::Take(take));
         assert_eq!(after.len(), before - 1, "exactly the orphan dropped");
         assert!(after.iter().all(|entry| entry.patch != donor_refs.patch));
+    }
+
+    /// Clip dots are patch IDENTITY, not divergence from the (playhead-
+    /// following) effective refs: a single-patch lane shows no dots; once a
+    /// second patch appears, EVERY clip is dotted with its own color — and
+    /// nothing here reads the current scene, so playback row transitions
+    /// cannot move the dots.
+    #[test]
+    fn clip_dots_mark_patch_identity_and_ignore_the_effective_refs() {
+        let (mut app, take, _scene_pattern, _chunks) = app_with_take();
+        let lanes = app.song_clip_sounds();
+        assert!(
+            lanes[0].iter().all(|(_, dot, _)| !dot),
+            "a single-patch lane shows no dots: {lanes:?}"
+        );
+
+        // A second clip with a different patch: both clips now show dots.
+        let (donor, donor_refs) = distinctive_pattern(&app);
+        let mut arrangement = crate::sequencer::ProjectArrangement::new(1, 32.0);
+        arrangement.track_lanes[0].push(crate::sequencer::ArrClip::new_take(
+            ClipId(0),
+            0.0,
+            16.0,
+            take.0,
+            0.0,
+        ));
+        arrangement.track_lanes[0].push(crate::sequencer::ArrClip::new(
+            ClipId(1),
+            16.0,
+            32.0,
+            Some(donor.0),
+        ));
+        arrangement.next_clip_id = 2;
+        app.state
+            .set_committed_arrangement(Some(arrangement))
+            .expect("arrangement installs");
+
+        let lanes = app.song_clip_sounds();
+        assert_eq!(lanes[0].len(), 2);
+        assert!(
+            lanes[0].iter().all(|(_, dot, _)| *dot),
+            "every clip on a multi-patch lane is dotted: {lanes:?}"
+        );
+        let donor_color = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0]
+                .sounds
+                .patch_meta
+                .get(&donor_refs.patch)
+                .and_then(|meta| meta.color)
+        });
+        assert_eq!(
+            lanes[0][1].2, donor_color,
+            "the dot carries the clip's own patch color"
+        );
+        assert_ne!(lanes[0][0].2, lanes[0][1].2, "colors differ per patch");
     }
 
     /// The badge (§17.5): "Patch A — used by …" for the bound sound.

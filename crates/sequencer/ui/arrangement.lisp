@@ -569,10 +569,13 @@
     ;; and every other take badge are one-based.
     (str "Take " (+ (get clip :take-id) 1))))
 
-;; Sound-divergence dot (takes spec 17.6): SEQ.song-clip-sounds joins each
-;; clip to its patch's divergence flag and palette color. A diverging clip
-;; with a colored patch passes (r g b); a name-only patch passes true (gray
-;; fallback, 17.11); a clip on the scene-effective sound passes nil (no dot).
+;; Sound identity dot (takes spec 17.6, amended): SEQ.song-clip-sounds joins
+;; each clip to its Patch's palette color. The dot marks patch IDENTITY —
+;; same color = same sound — and is shown on every clip once the lane uses
+;; more than one patch (Rust suppresses single-patch lanes). Divergence from
+;; the live effective refs was rejected: that baseline follows the playhead
+;; under song playback, so the dots hopped between clips. A colored patch
+;; passes (r g b); a name-only patch passes true (gray fallback, 17.11).
 (def arrangement-clip-sound-dot (i clip-id)
   (if (>= i (len SEQ.song-clip-sounds))
     nil
@@ -581,7 +584,7 @@
       (if (= (len matches) 0)
         nil
         (let ((entry (nth matches 0)))
-          (if (get entry :diverges)
+          (if (get entry :dot)
             (if (= (get entry :color) nil)
               true
               (list (get entry :color-r) (get entry :color-g) (get entry :color-b)))

@@ -19704,9 +19704,10 @@
         }
     }
 
-    /// Clip dot join logic (takes spec 17.6): diverging clips yield their
-    /// patch color, name-only patches the gray fallback (true), matching or
-    /// unknown clips nothing.
+    /// Clip dot join logic (takes spec 17.6, amended to patch IDENTITY):
+    /// dotted clips yield their patch color, name-only patches the gray
+    /// fallback (true), suppressed (single-patch lane) or unknown clips
+    /// nothing.
     #[test]
     fn metal_seq_arrangement_clip_sound_dot_resolves_color_and_fallback() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -19716,7 +19717,7 @@
             test_list(vec![test_list(vec![
                 map_value([
                     ("clip-id", Value::Number(5.0)),
-                    ("diverges", Value::Bool(true)),
+                    ("dot", Value::Bool(true)),
                     ("color", Value::Number(1.0)),
                     ("color-r", Value::Number(0.9)),
                     ("color-g", Value::Number(0.6)),
@@ -19724,12 +19725,12 @@
                 ]),
                 map_value([
                     ("clip-id", Value::Number(6.0)),
-                    ("diverges", Value::Bool(true)),
+                    ("dot", Value::Bool(true)),
                     ("color", Value::Nil),
                 ]),
                 map_value([
                     ("clip-id", Value::Number(7.0)),
-                    ("diverges", Value::Bool(false)),
+                    ("dot", Value::Bool(false)),
                     ("color", Value::Number(2.0)),
                     ("color-r", Value::Number(0.1)),
                     ("color-g", Value::Number(0.2)),
@@ -19762,7 +19763,7 @@
                 .eval_str("(arrangement-clip-sound-dot 0 7)")
                 .expect("matching clip"),
             Some(Value::Nil),
-            "a clip on the scene-effective sound draws no dot"
+            "a suppressed (single-patch lane) clip draws no dot"
         );
         assert_eq!(
             editor

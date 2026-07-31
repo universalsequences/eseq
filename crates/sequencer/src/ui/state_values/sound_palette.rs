@@ -1,6 +1,6 @@
 //! Sound palette read surfaces (takes spec §17.6 / §18.3):
 //! `SEQ.sound-palette` (the open overlay's entries) and
-//! `SEQ.song-clip-sounds` (the timeline clip-dot join). Both diff by value
+//! `SEQ.song-clip-sounds` (the timeline clip-dot identity join). Both diff by value
 //! before publishing, like `scene-names` — the underlying scenes have no
 //! revision counter and palette gestures can move refs without touching the
 //! committed-song revision.
@@ -119,15 +119,15 @@ fn build_clip_sounds_value(tracks: &[Vec<(u64, bool, Option<u8>)>]) -> Value {
             .map(|clips| {
                 let clips = clips
                     .iter()
-                    .map(|(clip_id, diverges, color)| {
+                    .map(|(clip_id, dot, color)| {
                         let mut map = HashMap::new();
                         map.insert(
                             "clip-id".to_string(),
                             Rc::new(RefCell::new(Value::Number(*clip_id as f64))),
                         );
                         map.insert(
-                            "diverges".to_string(),
-                            Rc::new(RefCell::new(Value::Bool(*diverges))),
+                            "dot".to_string(),
+                            Rc::new(RefCell::new(Value::Bool(*dot))),
                         );
                         color_fields(&mut map, *color);
                         Rc::new(RefCell::new(Value::Map(map)))
