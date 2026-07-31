@@ -19706,8 +19706,7 @@
 
     /// Clip dot join logic (takes spec 17.6, amended to patch IDENTITY):
     /// dotted clips yield their patch color, name-only patches the gray
-    /// fallback (true), suppressed (single-patch lane) or unknown clips
-    /// nothing.
+    /// fallback (true), clips with no resolvable sound nothing.
     #[test]
     fn metal_seq_arrangement_clip_sound_dot_resolves_color_and_fallback() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -19728,13 +19727,11 @@
                     ("dot", Value::Bool(true)),
                     ("color", Value::Nil),
                 ]),
+                // dot false = the clip's sound does not resolve; the
+                // producer never emits color fields alongside it.
                 map_value([
                     ("clip-id", Value::Number(7.0)),
                     ("dot", Value::Bool(false)),
-                    ("color", Value::Number(2.0)),
-                    ("color-r", Value::Number(0.1)),
-                    ("color-g", Value::Number(0.2)),
-                    ("color-b", Value::Number(0.3)),
                 ]),
             ])]),
         );
@@ -19742,7 +19739,7 @@
         let colored = editor
             .runtime_mut()
             .eval_str("(arrangement-clip-sound-dot 0 5)")
-            .expect("diverging colored clip")
+            .expect("colored clip")
             .expect("dot value");
         let Value::List(rgb) = colored else {
             panic!("expected (r g b), got {colored:?}");
@@ -19755,15 +19752,15 @@
                 .eval_str("(arrangement-clip-sound-dot 0 6)")
                 .expect("name-only clip"),
             Some(Value::Bool(true)),
-            "name-only diverging clip uses the gray fallback"
+            "name-only clip uses the gray fallback"
         );
         assert_eq!(
             editor
                 .runtime_mut()
                 .eval_str("(arrangement-clip-sound-dot 0 7)")
-                .expect("matching clip"),
+                .expect("unresolvable clip"),
             Some(Value::Nil),
-            "a suppressed (single-patch lane) clip draws no dot"
+            "a clip with no resolvable sound draws no dot"
         );
         assert_eq!(
             editor

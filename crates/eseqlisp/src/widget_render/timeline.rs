@@ -1498,8 +1498,17 @@ fn build_metal_primitives(
         if let Some(dot) = item.sound_dot {
             if width >= 1.2 && label_height >= 0.85 {
                 let side_px = (view.item_label_font_size * 1.26).max(5.0);
-                let side_rows = (side_px / viewport.cell_h).min(label_height * 0.66);
-                let side_cols = side_rows * viewport.cell_h / viewport.cell_w;
+                let mut side_rows = (side_px / viewport.cell_h).min(label_height * 0.66);
+                let mut side_cols = side_rows * viewport.cell_h / viewport.cell_w;
+                // The quad is not scissored (only the label run is), so it
+                // must also fit the clip's own width or it paints into the
+                // neighbor; when the width cap binds, re-derive the height
+                // from it so the square stays square.
+                let max_cols = (width - 0.6).max(0.0);
+                if side_cols > max_cols {
+                    side_cols = max_cols;
+                    side_rows = side_cols * viewport.cell_w / viewport.cell_h;
+                }
                 // Nudged slightly below true center to sit on the label's
                 // optical line (the text row leans low in the bar).
                 primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
