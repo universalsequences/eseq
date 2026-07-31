@@ -606,6 +606,14 @@ fn apply_capture_macro_host_commands(
             applied = true;
             continue;
         }
+        // Sound-palette open/close so fixtures can capture the palette modal.
+        if let Some(result) =
+            crate::host_commands::apply_sound_palette_view_command(&name, &payload, app)
+        {
+            result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
+            applied = true;
+            continue;
+        }
         match handle_macro_host_command(&name, &payload, app, state, current_track) {
             MacroHostCommandOutcome::Applied => applied = true,
             MacroHostCommandOutcome::Ignored => {
@@ -837,6 +845,14 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
             true,
         );
     }
+    // Publish the sound-palette read surfaces so capture scripts can open the
+    // palette modal via the real (seq-sound-palette-open ...) funnel.
+    let _ = sync_sound_palette(
+        editor.runtime_mut(),
+        &app,
+        &mut SoundPaletteFrameState::default(),
+        true,
+    );
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
 
