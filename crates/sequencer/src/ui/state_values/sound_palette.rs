@@ -140,11 +140,15 @@ fn build_clip_sounds_value(tracks: &[Vec<(u64, bool, Option<u8>)>]) -> Value {
 }
 
 /// Publish the palette read surfaces. Returns true when a reactive cycle is
-/// needed.
+/// needed. The clip-sounds join (two lock scopes + a full per-clip build)
+/// only runs while the arrangement is visible — nothing else reads it; the
+/// cache clears on hide so re-showing republishes fresh. The palette half
+/// stays ungated (cheap, and it also mounts in the *step* side panel).
 pub(crate) fn sync_sound_palette(
     rt: &mut Runtime,
     app: &app::App,
     frame: &mut SoundPaletteFrameState,
+    arrangement_visible: bool,
 ) -> bool {
     let mut dirty = false;
     match app.sound_palette_open {
@@ -173,16 +177,22 @@ pub(crate) fn sync_sound_palette(
             }
         }
     }
-    let clip_sounds = app.song_clip_sounds();
-    if frame.cached_clip_sounds.as_ref() != Some(&clip_sounds) {
-        dirty |= rt
-            .set_reactive(
-                "SEQ",
-                "song-clip-sounds",
-                build_clip_sounds_value(&clip_sounds),
-            )
-            .effects_dirty;
-        frame.cached_clip_sounds = Some(clip_sounds);
+    if arrangement_visible {
+        let clip_sounds = app.song_clip_sounds();
+        if frame.cached_clip_sounds.as_ref() != Some(&clip_sounds) {
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    "song-clip-sounds",
+                    build_clip_sounds_value(&clip_sounds),
+                )
+                .effects_dirty;
+            frame.cached_clip_sounds = Some(clip_sounds);
+        }
+    } else {
+        // Hidden: skip the join entirely and forget the cache so the next
+        // visible frame recomputes and republishes.
+        frame.cached_clip_sounds = None;
     }
     dirty
 }

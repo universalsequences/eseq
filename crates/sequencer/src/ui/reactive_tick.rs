@@ -413,6 +413,7 @@ pub(crate) fn reactive_tick_and_render(
             editor.runtime_mut(),
             &app,
             &mut ctx.frame.sound_palette,
+            arrangement_visible,
         );
         if master_meter_visible && ctx.meters.cached_peak_l_level != ctx.frame.prev_peak_l_level {
             needs_reactive_cycle |= editor
