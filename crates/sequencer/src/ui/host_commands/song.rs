@@ -824,6 +824,31 @@ pub(crate) fn apply_song_edit_command(
     Some(run(name, payload, app))
 }
 
+/// Palette open/close live in the loop layer, but their arms are pure
+/// `App` mutations (same logic as `run_transport`'s) — exposed so capture
+/// setup scripts can open the palette modal through the real funnel.
+pub(crate) fn apply_sound_palette_view_command(
+    name: &str,
+    payload: &Value,
+    app: &mut app::App,
+) -> Option<Result<(), String>> {
+    match name {
+        "sound-palette-open" => Some((|| {
+            let map = payload_map(payload)?;
+            let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
+            let target = parse_palette_target(map)?;
+            let target = app.palette_target_or_binding(track, target);
+            app.sound_palette_open = Some((track, target));
+            Ok(())
+        })()),
+        "sound-palette-close" => {
+            app.sound_palette_open = None;
+            Some(Ok(()))
+        }
+        _ => None,
+    }
+}
+
 const TRANSPORT_COMMANDS: &[&str] = &[
     "song-transport-toggle-play",
     "song-transport-play",

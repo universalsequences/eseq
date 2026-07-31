@@ -192,18 +192,20 @@
         (seq-sound-palette-open SEQ.current-track)
         (sound-palette-open-for-clip (nth bound 0) (nth bound 1))))))
 
-;; The overlay band. Collapses to nothing while closed, so both mounts are
-;; always-safe to compose.
+;; The palette surface (modal spec §4): a centered modal over the whole
+;; frame instead of a band prepended to the arrangement view. The open state
+;; stays app-owned (SEQ.sound-palette is the :is-open binding); scrim clicks
+;; and Escape fire :on-close, which requests close through the same funnel
+;; as the header's "x" button. Closed, the modal contributes zero layout, so
+;; the mount is always-safe to compose. Entries scroll inside the panel.
 (def sound-palette-panel ()
-  (if (not (sound-palette-open?))
-    (box :width 0 :height 0 :bg :transparent)
+  (modal :is-open (sound-palette-open?)
+         :on-close (lambda () (sound-palette-close))
     (box :debug-name "sound-palette-panel"
-      :width :fill :padding 0.4
-      :corner-radius 8
-      :background-color (rgba 0.09 0.10 0.12 1.0)
-      :border-width 0.5
-      :border-color (rgba 1 1 1 0.10)
-      (v-stack :gap 0.22
+      :width :fill :height :fill :bg :transparent
+      (v-stack :width :fill :gap 0.22
         (sound-palette-header)
-        (each (sound-palette-entries) |entry idx|
-          (sound-palette-entry-row entry))))))
+        (scroll :width :fill :flex 1
+          (v-stack :width :fill :gap 0.22
+            (each (sound-palette-entries) |entry idx|
+              (sound-palette-entry-row entry))))))))

@@ -1609,8 +1609,8 @@
     (subtree :key "arr-error-banner"
       (arrangement-error-banner))
     ;; Sound palette overlay (takes spec 17.6): opened from a clip via the
-    ;; toolbar/badge gestures; renders as a band so the timeline below stays
-    ;; live while grabbing a sound.
+    ;; toolbar/badge gestures; renders as a centered modal over the whole
+    ;; frame (modal spec §4) with zero footprint here while closed.
     (subtree :key "arr-sound-palette"
       (sound-palette-panel))
     (subtree :key "arr-scene-row"

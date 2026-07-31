@@ -20,6 +20,7 @@ pub mod lane_preview;
 pub mod live_audio;
 pub mod matrix;
 pub mod mixer_meter;
+pub mod modal;
 pub mod modulator_curve;
 pub mod multiband_meter;
 pub mod number_label;
@@ -191,16 +192,27 @@ pub fn trigger_alignment_haptic() {
 pub fn trigger_alignment_haptic() {}
 
 // ── Overlay system ───────────────────────────────────────────────────────────
-// Only one overlay (dropdown menu, etc.) can be active at a time.
+// Overlays form a small kind-tagged stack (expected depth ≤ 2: a modal with a
+// dropdown above it). One entry per kind at a time: registering a kind that is
+// already on the stack replaces that entry in place. Input routes to the
+// topmost entry; cache bypasses trigger while any entry is active.
 
-struct OverlayInfo {
-    widget_id: u64,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayKind {
+    Dropdown,
+    Modal,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OverlayEntry {
+    pub widget_id: u64,
     /// Hit-test bounds in layout space (screen-relative, post-scroll).
-    rect: Rect,
+    pub rect: Rect,
+    pub kind: OverlayKind,
 }
 
 thread_local! {
-    static OVERLAY_INFO: RefCell<Option<OverlayInfo>> = RefCell::new(None);
+    static OVERLAY_STACK: RefCell<Vec<OverlayEntry>> = const { RefCell::new(Vec::new()) };
     static HAPTIC_BUCKETS: RefCell<HashMap<u64, i64>> = RefCell::new(HashMap::new());
     static DROP_HOVER_TARGET: RefCell<Option<u64>> = const { RefCell::new(None) };
     #[cfg(target_os = "macos")]
@@ -209,35 +221,94 @@ thread_local! {
     static WIDGET_PRIMITIVE_CACHE: RefCell<HashMap<u64, Vec<MetalPrimitive>>> = RefCell::new(HashMap::new());
 }
 
-pub fn set_overlay(widget_id: u64, rect: Rect) {
-    OVERLAY_INFO.with(|o| *o.borrow_mut() = Some(OverlayInfo { widget_id, rect }));
+/// Register (or refresh) an overlay entry. Replaces the existing entry of the
+/// same kind if one is on the stack, otherwise pushes on top.
+pub fn push_overlay(entry: OverlayEntry) {
+    OVERLAY_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if let Some(existing) = stack.iter_mut().find(|e| e.kind == entry.kind) {
+            *existing = entry;
+        } else {
+            stack.push(entry);
+        }
+    });
 }
 
+/// Dropdown registration shim: dropdowns are the only widgets that used the
+/// single-slot API this replaced.
+pub fn set_overlay(widget_id: u64, rect: Rect) {
+    push_overlay(OverlayEntry {
+        widget_id,
+        rect,
+        kind: OverlayKind::Dropdown,
+    });
+}
+
+/// Remove the entry owned by `widget_id`, if present. Used when an overlay
+/// owner dismisses itself (dropdown close/select/Escape).
+pub fn remove_overlay(widget_id: u64) {
+    let removed = OVERLAY_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        let before = stack.len();
+        stack.retain(|entry| entry.widget_id != widget_id);
+        before != stack.len()
+    });
+    if removed {
+        #[cfg(target_os = "macos")]
+        if !any_overlay_active() {
+            OVERLAY_PRIMITIVES.with(|o| o.borrow_mut().clear());
+        }
+        bump_widget_state_generation();
+    }
+}
+
+/// Clear the whole overlay stack. Used when the overlay world is torn down
+/// wholesale (buffer/tree switches, hot reload, tests).
 pub fn clear_overlay() {
-    OVERLAY_INFO.with(|o| *o.borrow_mut() = None);
+    OVERLAY_STACK.with(|stack| stack.borrow_mut().clear());
     #[cfg(target_os = "macos")]
     OVERLAY_PRIMITIVES.with(|o| o.borrow_mut().clear());
     bump_widget_state_generation();
 }
 
+/// The topmost overlay entry — the input-routing target.
+pub fn topmost_overlay() -> Option<OverlayEntry> {
+    OVERLAY_STACK.with(|stack| stack.borrow().last().copied())
+}
+
+/// True while any overlay is active — the cache-bypass gate.
+pub fn any_overlay_active() -> bool {
+    OVERLAY_STACK.with(|stack| !stack.borrow().is_empty())
+}
+
+/// Widget id of the topmost overlay entry.
 pub fn overlay_widget_id() -> Option<u64> {
-    OVERLAY_INFO.with(|o| o.borrow().as_ref().map(|s| s.widget_id))
+    topmost_overlay().map(|entry| entry.widget_id)
 }
 
+/// Hit rect of the topmost overlay entry.
 pub fn get_overlay_rect() -> Option<Rect> {
-    OVERLAY_INFO.with(|o| o.borrow().as_ref().map(|s| s.rect))
+    topmost_overlay().map(|entry| entry.rect)
 }
 
+/// Hit rect of the entry owned by `widget_id`, wherever it sits on the stack.
+pub fn overlay_rect_for_widget(widget_id: u64) -> Option<Rect> {
+    OVERLAY_STACK.with(|stack| {
+        stack
+            .borrow()
+            .iter()
+            .find(|entry| entry.widget_id == widget_id)
+            .map(|entry| entry.rect)
+    })
+}
+
+/// True if the point lies inside the topmost overlay entry's rect.
 pub fn overlay_contains(local_col: f32, local_row: f32) -> bool {
-    OVERLAY_INFO.with(|o| {
-        if let Some(ref s) = *o.borrow() {
-            local_row >= s.rect.row
-                && local_row < s.rect.row + s.rect.height
-                && local_col >= s.rect.col
-                && local_col < s.rect.col + s.rect.width
-        } else {
-            false
-        }
+    topmost_overlay().is_some_and(|entry| {
+        local_row >= entry.rect.row
+            && local_row < entry.rect.row + entry.rect.height
+            && local_col >= entry.rect.col
+            && local_col < entry.rect.col + entry.rect.width
     })
 }
 
@@ -267,6 +338,27 @@ pub fn push_overlay_primitive(prim: MetalPrimitive) {
 #[cfg(target_os = "macos")]
 fn drain_overlay_primitives() -> Vec<MetalPrimitive> {
     OVERLAY_PRIMITIVES.with(|o| std::mem::take(&mut *o.borrow_mut()))
+}
+
+/// Current length of the overlay-primitive channel. Paired with
+/// `split_off_overlay_primitives` to capture primitives that nested widgets
+/// (e.g. a dropdown inside a modal) push during a subtree recursion, so the
+/// enclosing overlay can re-order them on top of its own content.
+#[cfg(target_os = "macos")]
+fn overlay_primitives_mark() -> usize {
+    OVERLAY_PRIMITIVES.with(|o| o.borrow().len())
+}
+
+#[cfg(target_os = "macos")]
+fn split_off_overlay_primitives(mark: usize) -> Vec<MetalPrimitive> {
+    OVERLAY_PRIMITIVES.with(|o| {
+        let mut prims = o.borrow_mut();
+        if mark >= prims.len() {
+            Vec::new()
+        } else {
+            prims.split_off(mark)
+        }
+    })
 }
 
 // ── Flex-style alignment enums ──────────────────────────────────────────────
@@ -949,6 +1041,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &knob::KNOB_WIDGET,
     &knob_number::KNOB_NUMBER_WIDGET,
     &mixer_meter::MIXER_METER_WIDGET,
+    &modal::MODAL_WIDGET,
     &modulator_curve::MODULATOR_CURVE_WIDGET,
     &number_label::NUMBER_LABEL_WIDGET,
     &patcher::PATCHER_WIDGET,
@@ -1216,7 +1309,7 @@ fn hash_value(value: &Value, hasher: &mut DefaultHasher) {
 
 #[cfg(target_os = "macos")]
 fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Option<u64> {
-    if overlay_widget_id().is_some() || !cacheable_widget_primitives(&node.widget_type) {
+    if any_overlay_active() || !cacheable_widget_primitives(&node.widget_type) {
         return None;
     }
     if props_contain_reactive_ref(&node.props) {
@@ -1767,6 +1860,73 @@ fn suppresses_default_focus(node: &LayoutNode) -> bool {
         .unwrap_or(false)
 }
 
+/// Divert an (open) modal node's entire subtree into the overlay channel:
+/// full-frame scrim, panel chrome, then the clipped subtree primitives. The
+/// modal contributes nothing to the tile scene. Primitives that nested
+/// overlay widgets (a dropdown inside the modal) push during the subtree
+/// recursion are captured and re-appended after the modal's own content so
+/// they stay on top.
+///
+/// Shared by all three collectors: the modal subtree is never retained as
+/// runs — overlay content is excluded from scene caching, and caches are
+/// bypassed while any overlay is active.
+#[cfg(target_os = "macos")]
+fn collect_modal_overlay(node: &LayoutNode, viewport: WidgetViewport, scroll_top: f32, max_rows: u16) {
+    if node.children.is_empty() {
+        // Closed this frame: drop any stale overlay entry we own.
+        remove_overlay(node.widget_id);
+        return;
+    }
+    let Some((frame_rect, modal_rect)) = modal::overlay_rects_from_props(&node.props) else {
+        return;
+    };
+    // Layout coords -> post-scroll tile-local coords (the overlay channel's
+    // convention; the backend offsets overlays by tile origin only). This only
+    // stays coherent with the frame-anchored panel because tile scroll is
+    // trapped while a modal is open (handle_widget_scroll consumes it).
+    let dx = -viewport.scroll_left;
+    let dy = -viewport.scroll_top;
+    let shift = |rect: Rect| Rect {
+        row: rect.row + dy,
+        col: rect.col + dx,
+        ..rect
+    };
+    let screen_frame = shift(frame_rect);
+    let screen_modal = shift(modal_rect);
+
+    let mark = overlay_primitives_mark();
+    let mut subtree = Vec::new();
+    for child in &node.children {
+        collect_metal_primitives_recursive(child, viewport, scroll_top, max_rows, &mut subtree);
+    }
+    let nested_overlay = split_off_overlay_primitives(mark);
+
+    // The scrim gets its own clip segment: overlay drawing batches primitive
+    // classes within a segment, so an unsegmented scrim rect would paint over
+    // the panel background instance.
+    push_overlay_primitive(MetalPrimitive::PushClipRect(screen_frame));
+    modal::emit_modal_scrim(&node.props, screen_frame, viewport);
+    push_overlay_primitive(MetalPrimitive::PopClipRect);
+    modal::emit_modal_panel_chrome(&node.props, screen_modal, viewport);
+    push_overlay_primitive(MetalPrimitive::PushClipRect(screen_modal));
+    modal::emit_modal_title(&node.props, screen_modal, viewport);
+    for mut prim in subtree {
+        offset_primitive_x_mut(&mut prim, dx, viewport);
+        offset_primitive_y_mut(&mut prim, dy, viewport);
+        push_overlay_primitive(prim);
+    }
+    push_overlay_primitive(MetalPrimitive::PopClipRect);
+    for prim in nested_overlay {
+        push_overlay_primitive(prim);
+    }
+
+    push_overlay(OverlayEntry {
+        widget_id: node.widget_id,
+        rect: screen_modal,
+        kind: OverlayKind::Modal,
+    });
+}
+
 #[cfg(target_os = "macos")]
 fn collect_metal_primitives_recursive(
     node: &LayoutNode,
@@ -1794,6 +1954,13 @@ fn collect_metal_primitives_recursive(
         focused_branch,
         ..viewport
     };
+
+    // Modal: the whole subtree renders in the overlay pass, nothing in the
+    // tile scene.
+    if node.widget_type == "modal" {
+        collect_modal_overlay(node, node_viewport, _scroll_top, _max_rows);
+        return;
+    }
 
     // Scroll container: clip children to viewport rect and offset by scroll amount
     if node.widget_type == "scroll" {
@@ -1878,6 +2045,12 @@ fn collect_metal_primitive_runs_recursive(
         focused_branch,
         ..viewport
     };
+
+    // Modal: subtree renders in the overlay pass only — no retained runs.
+    if node.widget_type == "modal" {
+        collect_modal_overlay(node, node_viewport, _scroll_top, _max_rows);
+        return;
+    }
 
     if node.widget_type == "scroll" {
         let state = scroll::sync_node_state(node);
@@ -2045,6 +2218,13 @@ fn collect_metal_primitive_runs_retained_recursive(
         focused_branch,
         ..viewport
     };
+
+    // Modal: subtree renders in the overlay pass only; overlay content is
+    // rebuilt every collection, never retained.
+    if node.widget_type == "modal" {
+        collect_modal_overlay(node, node_viewport, _scroll_top, _max_rows);
+        return;
+    }
 
     if node.widget_type == "scroll" {
         let state = scroll::sync_node_state(node);
@@ -2463,6 +2643,42 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
             visited_indices,
             stats,
         );
+    }
+}
+
+/// Shift a metal primitive horizontally by `dx` cells (in-place).
+#[cfg(target_os = "macos")]
+fn offset_primitive_x_mut(prim: &mut MetalPrimitive, dx: f32, viewport: WidgetViewport) {
+    match prim {
+        MetalPrimitive::ZLayer { primitive, .. } => offset_primitive_x_mut(primitive, dx, viewport),
+        MetalPrimitive::Rect(r) => r.rect.col += dx,
+        MetalPrimitive::ForegroundRect(r) => r.rect.col += dx,
+        MetalPrimitive::Quad(q) => q.x += dx,
+        MetalPrimitive::Triangle(t) => {
+            for point in &mut t.points {
+                point[0] += dx;
+            }
+        }
+        MetalPrimitive::GlyphRun(g) => g.col += dx.round() as i32,
+        MetalPrimitive::ProportionalText(t) => t.col += dx,
+        MetalPrimitive::PatchCable(c) => {
+            c.start[0] += dx;
+            c.control1[0] += dx;
+            c.control2[0] += dx;
+            c.end[0] += dx;
+        }
+        MetalPrimitive::Circle(c) => c.center[0] += dx,
+        MetalPrimitive::Waveform(w) => w.rect.col += dx,
+        MetalPrimitive::Wavetable(w) => w.rect.col += dx,
+        MetalPrimitive::LiveSpectrogram(s) => s.rect.col += dx,
+        MetalPrimitive::Image(i) => i.rect.col += dx,
+        MetalPrimitive::WidgetInstance { instance, .. } => {
+            let ndc_dx = (dx * viewport.cell_w / viewport.vp_w) * 2.0;
+            instance.ndc_min[0] += ndc_dx;
+            instance.ndc_max[0] += ndc_dx;
+        }
+        MetalPrimitive::PushClipRect(r) => r.col += dx,
+        MetalPrimitive::PopClipRect => {}
     }
 }
 

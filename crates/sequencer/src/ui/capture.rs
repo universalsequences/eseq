@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use eseqlisp::frame::build_render_frame;
 use eseqlisp::parser::{Expr, ExprKind, Expression, Parser, SpannedASTParser};
 
@@ -605,6 +606,14 @@ fn apply_capture_macro_host_commands(
             applied = true;
             continue;
         }
+        // Sound-palette open/close so fixtures can capture the palette modal.
+        if let Some(result) =
+            crate::host_commands::apply_sound_palette_view_command(&name, &payload, app)
+        {
+            result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
+            applied = true;
+            continue;
+        }
         match handle_macro_host_command(&name, &payload, app, state, current_track) {
             MacroHostCommandOutcome::Applied => applied = true,
             MacroHostCommandOutcome::Ignored => {
@@ -616,6 +625,77 @@ fn apply_capture_macro_host_commands(
         }
     }
     Ok(applied)
+}
+
+/// Optional `(def capture-click-widgets (list "dropdown"))` in a capture
+/// script: after the first layout, synthesize a left click on the center of
+/// the first widget of each named type. This lets fixtures capture state that
+/// only opens through input, such as a dropdown's menu overlay. Returns true
+/// if any click was dispatched (the frame must then be rebuilt).
+fn apply_capture_click_widgets(
+    editor: &mut Editor,
+    columns: usize,
+    rows: usize,
+) -> Result<bool, String> {
+    fn find_widget_of_type<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        widget_type: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if node.widget_type == widget_type {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_widget_of_type(child, widget_type))
+    }
+
+    let Ok(Some(eseqlisp::vm::Value::List(entries))) =
+        editor.runtime_mut().eval_str("capture-click-widgets")
+    else {
+        return Ok(false);
+    };
+    let names = entries
+        .iter()
+        .map(|entry| match &*entry.borrow() {
+            eseqlisp::vm::Value::String(name) => Ok(name.clone()),
+            other => Err(format!(
+                "capture-click-widgets expects widget-type strings, got {other:?}"
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if names.is_empty() {
+        return Ok(false);
+    }
+    for name in names {
+        let layout = editor
+            .widget_layout()
+            .ok_or("capture-click-widgets requires a widget layout")?;
+        let node = find_widget_of_type(&layout, &name)
+            .ok_or_else(|| format!("capture-click-widgets: no {name:?} widget in the layout"))?;
+        let col = node.rect.col + node.rect.width * 0.5;
+        let row = node.rect.row + node.rect.height * 0.5;
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            editor.handle_mouse_precise(
+                MouseEvent {
+                    kind,
+                    column: col.floor() as u16,
+                    row: row.floor() as u16,
+                    modifiers: KeyModifiers::NONE,
+                },
+                0,
+                0,
+                columns as u16,
+                rows as u16,
+                col,
+                row,
+            );
+        }
+        editor.refresh_runtime_side_effects();
+    }
+    Ok(true)
 }
 
 pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -765,6 +845,14 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
             true,
         );
     }
+    // Publish the sound-palette read surfaces so capture scripts can open the
+    // palette modal via the real (seq-sound-palette-open ...) funnel.
+    let _ = sync_sound_palette(
+        editor.runtime_mut(),
+        &app,
+        &mut SoundPaletteFrameState::default(),
+        true,
+    );
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
 
@@ -788,7 +876,10 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     let rows = ((args.height as f32 / cell_height).floor() as usize).clamp(1, u16::MAX as usize);
     editor.set_layout_viewport(columns as u16, rows as u16);
     editor.update_tile_rects(columns as u16, rows as u16);
-    let frame = build_render_frame(&mut editor, columns, rows);
+    let mut frame = build_render_frame(&mut editor, columns, rows);
+    if apply_capture_click_widgets(&mut editor, columns, rows)? {
+        frame = build_render_frame(&mut editor, columns, rows);
+    }
 
     if let Some(parent) = args.out.parent() {
         std::fs::create_dir_all(parent)?;

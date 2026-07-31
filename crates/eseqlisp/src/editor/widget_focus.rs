@@ -65,6 +65,7 @@ impl Editor {
     }
 
     pub(super) fn remap_focused_widget_after_layout_change(&mut self) {
+        self.sync_modal_focus_state();
         let Some(previous) = self.active_leaf().focused_widget_node.clone() else {
             return;
         };
@@ -112,6 +113,122 @@ impl Editor {
         self.tile_root.clear_focus_except(active);
     }
 
+    /// Focus trap bookkeeping for the modal overlay. Called after every
+    /// layout change: when an open modal appears, remember the previously
+    /// focused widget and focus the first focusable child inside the modal;
+    /// when it closes, restore the remembered focus (if the widget still
+    /// exists). While open, focus that escaped the modal subtree (e.g. via a
+    /// stale remap) is pulled back inside.
+    pub(super) fn sync_modal_focus_state(&mut self) {
+        let modal = self
+            .runtime
+            .current_layout
+            .as_deref()
+            .and_then(find_open_modal_node)
+            .cloned();
+        match (modal, self.modal_focus_return.is_some()) {
+            (Some(modal), false) => {
+                self.modal_focus_return = Some(self.focused_widget_node());
+                self.focus_first_focusable_in(&modal);
+                self.mark_needs_redraw();
+            }
+            (None, true) => {
+                let previous = self.modal_focus_return.take().flatten();
+                let restored = previous.as_ref().and_then(|previous| {
+                    let layout = self.runtime.current_layout.as_deref()?;
+                    previous
+                        .stable_widget_id
+                        .and_then(|id| find_focusable_node_by_stable_widget_id(layout, id))
+                        .or_else(|| {
+                            previous.stable_key.as_deref().and_then(|key| {
+                                find_focusable_node_by_stable_key_and_type(
+                                    layout,
+                                    key,
+                                    &previous.widget_type,
+                                )
+                            })
+                        })
+                        .or_else(|| {
+                            find_node_by_id(layout, previous.widget_id)
+                                .filter(|node| same_focus_identity(previous, node))
+                        })
+                });
+                match restored {
+                    Some(node) => self.set_focused_widget(node),
+                    None => self.clear_focused_widget(),
+                }
+                self.mark_needs_redraw();
+            }
+            (Some(modal), true) => {
+                if let Some(focused_id) = self.active_leaf().focused_widget_id
+                    && !crate::layout::layout_contains_widget_id(&modal, focused_id)
+                {
+                    self.focus_first_focusable_in(&modal);
+                    self.mark_needs_redraw();
+                }
+            }
+            (None, false) => {}
+        }
+    }
+
+    fn focus_first_focusable_in(&mut self, root: &LayoutNode) {
+        let mut focusable = Vec::new();
+        collect_focusable_nodes(root, &mut focusable);
+        let first = focusable
+            .first()
+            .and_then(|(id, ..)| find_node_by_id(root, *id));
+        match first {
+            Some(node) => {
+                self.set_focused_widget(node);
+                self.clear_focus_on_other_tiles();
+            }
+            None => self.clear_focused_widget(),
+        }
+    }
+
+    /// Invoke the modal's `:on-close` handler (a request to close — the app
+    /// closes by flipping the `:is-open` binding). Consumes the trigger even
+    /// when no handler is present.
+    pub(super) fn fire_modal_on_close(&mut self, modal_widget_id: u64) {
+        let Some(layout) = self.runtime.current_layout.clone() else {
+            return;
+        };
+        // Stale-id fallback: a relayout can reassign widget ids before the
+        // next render refreshes the overlay entry. There is at most one open
+        // modal, so fall back to it by type; only a layout with no open modal
+        // at all means the entry is truly dead and gets dropped.
+        let Some(node) = find_node_by_id(&layout, modal_widget_id)
+            .or_else(|| find_open_modal_node(&layout).cloned())
+        else {
+            crate::widget_render::remove_overlay(modal_widget_id);
+            self.mark_needs_redraw();
+            return;
+        };
+        let Some(callback) = node.props.get("on-close").cloned() else {
+            return;
+        };
+        self.sync_runtime_source_context();
+        let result = self.runtime.invoke(callback, vec![]);
+        if let Some(status) = self.runtime.take_status_message() {
+            self.minibuffer = Some(status);
+        } else if let Err(error) = result {
+            self.minibuffer = Some(format!("Error: {error:?}"));
+        }
+        self.refresh_runtime_side_effects();
+        self.sync_runtime_context();
+        self.mark_needs_redraw();
+    }
+
+    /// Focus the focusable widget at a point within the modal subtree (used
+    /// by the pointer intercept, which bypasses the normal focus-click path).
+    pub(super) fn focus_modal_child_at(&mut self, modal_node: &LayoutNode, row: f32, col: f32) {
+        if let Some(node) = crate::ui::layout::hit_test_focusable(modal_node, row, col).cloned() {
+            self.set_focused_widget(node);
+            self.clear_focus_on_other_tiles();
+            self.mark_needs_redraw();
+        }
+    }
+
     pub(super) fn try_click_focusable_widget(
         &mut self,
         precise_col: f32,
@@ -119,21 +236,28 @@ impl Editor {
         content_col: u16,
         content_row: u16,
     ) -> bool {
-        // If an overlay (dropdown menu) is active and click is inside it,
-        // skip focus so the overlay intercept handles it. If outside, dismiss
-        // the overlay and consume the click so it cannot activate the widget
-        // underneath the menu in the same mouse-down.
-        if crate::widget_render::overlay_widget_id().is_some() {
+        // If an overlay is active and the click is inside the topmost entry,
+        // skip focus so the overlay intercept handles it (the modal intercept
+        // does its own subtree focus click). If outside, dismiss the topmost
+        // entry only — a dropdown above a modal closes first, the modal
+        // survives — and consume the click so it cannot activate the widget
+        // underneath in the same mouse-down.
+        if let Some(entry) = crate::widget_render::topmost_overlay() {
             let local_row = precise_row - content_row as f32;
             let local_col = precise_col - content_col as f32;
             if crate::widget_render::overlay_contains(local_col, local_row) {
                 return false;
             }
-            // Dismiss overlay and stop here.
-            if let Some(id) = crate::widget_render::overlay_widget_id() {
-                crate::widget_render::dropdown::close_dropdown(id);
+            match entry.kind {
+                crate::widget_render::OverlayKind::Dropdown => {
+                    crate::widget_render::dropdown::close_dropdown(entry.widget_id);
+                    crate::widget_render::remove_overlay(entry.widget_id);
+                }
+                crate::widget_render::OverlayKind::Modal => {
+                    // Request to close; the app flips the :is-open binding.
+                    self.fire_modal_on_close(entry.widget_id);
+                }
             }
-            crate::widget_render::clear_overlay();
             self.mark_needs_redraw();
             return true;
         }
@@ -361,8 +485,10 @@ impl Editor {
         let Some(layout) = self.runtime.current_layout.clone() else {
             return;
         };
+        // While a modal is open, focus navigation is trapped inside it.
+        let scan_root = find_open_modal_node(&layout).unwrap_or(&layout);
         let mut focusable_nodes: Vec<(u64, f32, f32, f32, f32)> = Vec::new();
-        collect_focusable_nodes(&layout, &mut focusable_nodes);
+        collect_focusable_nodes(scan_root, &mut focusable_nodes);
         if focusable_nodes.is_empty() {
             return;
         }
@@ -655,6 +781,14 @@ fn find_focusable_node_by_subtree_root_and_type(
         }
     }
     None
+}
+
+/// The open modal node in a layout, if any (open = it laid out children).
+pub(super) fn find_open_modal_node(node: &LayoutNode) -> Option<&LayoutNode> {
+    if node.widget_type == "modal" && !node.children.is_empty() {
+        return Some(node);
+    }
+    node.children.iter().find_map(find_open_modal_node)
 }
 
 pub(super) fn has_focusable_node(node: &LayoutNode) -> bool {

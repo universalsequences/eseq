@@ -3353,3 +3353,179 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod modal_layout_tests {
+    use crate::layout::{LayoutEngine, LayoutNode, Rect};
+    use crate::run_prog;
+
+    fn find_widget<'a>(node: &'a LayoutNode, widget_type: &str) -> Option<&'a LayoutNode> {
+        if node.widget_type == widget_type {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_widget(child, widget_type))
+    }
+
+    fn modal_tree(is_open: bool) -> crate::vm::Value {
+        run_prog(&format!(
+            r#"
+            (v-stack
+              (label "before")
+              (modal :is-open {is_open}
+                (v-stack
+                  (label "modal body")
+                  (scroll :height 6
+                    (each (list "a" "b" "c") |s| (label s)))))
+              (label "after"))
+            "#
+        ))
+        .unwrap()
+        .unwrap()
+    }
+
+    #[test]
+    fn open_modal_leaves_parent_geometry_unchanged() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let closed = engine.layout(&modal_tree(false)).expect("closed layout");
+        let open = engine.layout(&modal_tree(true)).expect("open layout");
+
+        assert_eq!(closed.rect, open.rect, "root rect must not shift on open");
+        // Sibling labels keep identical geometry in both states.
+        for (closed_child, open_child) in closed.children.iter().zip(open.children.iter()) {
+            assert_eq!(
+                closed_child.rect, open_child.rect,
+                "sibling {} shifted when the modal opened",
+                open_child.widget_type
+            );
+        }
+        let closed_modal = find_widget(&closed, "modal").expect("modal node");
+        let open_modal = find_widget(&open, "modal").expect("modal node");
+        assert_eq!(closed_modal.rect.width, 0.0);
+        assert_eq!(closed_modal.rect.height, 0.0);
+        assert_eq!(open_modal.rect.width, 0.0);
+        assert_eq!(open_modal.rect.height, 0.0);
+        assert!(closed_modal.children.is_empty(), "closed modal lays out no children");
+        assert_eq!(open_modal.children.len(), 1, "open modal lays out its child");
+    }
+
+    #[test]
+    fn open_modal_centers_against_the_fallback_tile_viewport() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&modal_tree(true)).expect("layout");
+        let modal = find_widget(&layout, "modal").expect("modal node");
+
+        // Fallback frame = the 80x24 tile. Default panel = 70% of the frame,
+        // centered: rect (12, 3.6) 56x16.8. Content is inset by the panel
+        // padding (1.5 cols, 0.7 rows).
+        let child = &modal.children[0];
+        assert!((child.rect.col - 13.5).abs() < 0.01, "col {}", child.rect.col);
+        assert!((child.rect.row - 4.3).abs() < 0.01, "row {}", child.rect.row);
+        assert!((child.rect.width - 53.0).abs() < 0.01, "width {}", child.rect.width);
+        assert!((child.rect.height - 15.4).abs() < 0.01, "height {}", child.rect.height);
+
+        // Children (including the `each` rows inside scroll) stay within the
+        // panel rect.
+        let panel = Rect { row: 3.6, col: 12.0, width: 56.0, height: 16.8 };
+        fn assert_within(node: &LayoutNode, panel: Rect) {
+            // Scroll content may extend below the clip; the scroll viewport
+            // itself must fit.
+            assert!(node.rect.col >= panel.col - 0.01, "{} col {}", node.widget_type, node.rect.col);
+            assert!(node.rect.row >= panel.row - 0.01, "{} row {}", node.widget_type, node.rect.row);
+            assert!(
+                node.rect.col + node.rect.width <= panel.col + panel.width + 0.01,
+                "{} right {}",
+                node.widget_type,
+                node.rect.col + node.rect.width
+            );
+            if node.widget_type == "scroll" {
+                return;
+            }
+            for child in &node.children {
+                assert_within(child, panel);
+            }
+        }
+        assert_within(child, panel);
+    }
+
+    #[test]
+    fn open_modal_centers_against_a_backend_frame_viewport() {
+        let mut engine = LayoutEngine::new(30, 8, 1.0);
+        engine.frame_viewport = Some(Rect {
+            row: -6.0,
+            col: -4.0,
+            width: 60.0,
+            height: 40.0,
+        });
+        let layout = engine.layout(&modal_tree(true)).expect("layout");
+        let modal = find_widget(&layout, "modal").expect("modal node");
+        let child = &modal.children[0];
+
+        // Panel = 70% of the 60x40 frame centered at its (offset) origin:
+        // rect (5, 0) 42x28; the child content is inset by the panel padding.
+        assert!((child.rect.col - 6.5).abs() < 0.01, "col {}", child.rect.col);
+        assert!((child.rect.row - 0.7).abs() < 0.01, "row {}", child.rect.row);
+        assert!((child.rect.width - 39.0).abs() < 0.01, "width {}", child.rect.width);
+        assert!((child.rect.height - 26.6).abs() < 0.01, "height {}", child.rect.height);
+        // The subtree escapes the 30x8 tile: content extends past row 8.
+        assert!(child.rect.row + child.rect.height > 8.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn open_modal_emits_overlay_primitives_beyond_a_short_tile() {
+        use crate::widget_render::{
+            OverlayKind, WidgetViewport, clear_overlay, collect_metal_primitives, topmost_overlay,
+        };
+
+        clear_overlay();
+        let mut engine = LayoutEngine::new(30, 8, 1.0);
+        engine.frame_viewport = Some(Rect {
+            row: -6.0,
+            col: -4.0,
+            width: 60.0,
+            height: 40.0,
+        });
+        let layout = engine.layout(&modal_tree(true)).expect("layout");
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 600.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 34.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+
+        let (tile_prims, overlay_prims) = collect_metal_primitives(&layout, viewport, 0.0, 8);
+        assert!(
+            !overlay_prims.is_empty(),
+            "open modal must emit overlay primitives"
+        );
+        let entry = topmost_overlay().expect("open modal registers an overlay entry");
+        assert_eq!(entry.kind, OverlayKind::Modal);
+        assert!(entry.rect.width.is_finite() && entry.rect.width > 0.0);
+        assert!(entry.rect.height.is_finite() && entry.rect.height > 0.0);
+        // Panel escapes the 8-row tile.
+        assert!(entry.rect.row + entry.rect.height > 8.0);
+        // Nothing from the modal subtree leaks into the tile scene: the modal
+        // body label must not appear among tile primitives.
+        let tile_text: Vec<String> = tile_prims
+            .iter()
+            .filter_map(|prim| match prim {
+                crate::widget_render::MetalPrimitive::ProportionalText(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !tile_text.iter().any(|text| text == "modal body"),
+            "modal subtree leaked into the tile scene: {tile_text:?}"
+        );
+        clear_overlay();
+    }
+}

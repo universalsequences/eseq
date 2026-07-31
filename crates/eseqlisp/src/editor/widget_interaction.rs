@@ -757,7 +757,7 @@ impl Editor {
             self.widget_cursor = WidgetCursor::Default;
             return;
         };
-        let Some(node) = self.widget_node_at_local(local_col, local_row) else {
+        let Some(node) = self.hover_node_at_local(local_col, local_row) else {
             self.widget_cursor = WidgetCursor::Default;
             return;
         };
@@ -778,52 +778,89 @@ impl Editor {
         precise_col: f32,
         precise_row: f32,
     ) -> bool {
-        // Overlay (dropdown menu, etc.) intercepts pointer events before normal
+        // The topmost overlay intercepts pointer events before normal
         // hit-test. Compute its tile-local position directly: a frame-level
         // overlay may legitimately extend above or left of its originating
         // tile, where the normal content-area conversion rejects the point.
-        if widget_render::overlay_widget_id().is_some()
-            && matches!(
-                mouse.kind,
-                MouseEventKind::Down(MouseButton::Left)
-                    | MouseEventKind::Drag(MouseButton::Left)
-                    | MouseEventKind::Up(MouseButton::Left)
-            )
-        {
+        //
+        // Dropdown: dispatch every button event to the owner widget (its
+        // mouse_event handles inside/outside itself). Modal: inside the panel
+        // → ordinary subtree hit-testing rooted at the modal node; outside →
+        // consume so the click can't reach the widgets underneath (the scrim
+        // dismissal itself fires from the focus-click path on mouse-down).
+        if let Some(entry) = widget_render::topmost_overlay() {
             let local_col = precise_col - content_col as f32;
             let local_row = precise_row - content_row as f32;
-            if let Some(overlay_id) = widget_render::overlay_widget_id() {
-                let Some(layout) = self.runtime.current_layout.clone() else {
-                    widget_render::dropdown::close_dropdown(overlay_id);
-                    widget_render::clear_overlay();
-                    self.mark_needs_redraw();
-                    return false;
-                };
-                if let Some(node) = super::widget_focus::find_node_by_id(&layout, overlay_id) {
-                    let (cell_w, cell_h) = self.runtime.layout_cell_dims();
-                    let widget_event = map_mouse_event(
-                        &node,
+            match entry.kind {
+                widget_render::OverlayKind::Dropdown
+                    if matches!(
                         mouse.kind,
-                        local_col,
-                        local_row,
-                        None,
-                        None,
-                        mouse.modifiers,
-                        cell_w,
-                        cell_h,
-                    );
-                    let output = match widget_event {
-                        MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
-                        MouseEventOutcome::Dispatch(widget_event) => {
-                            handle_event(&node, widget_event)
-                        }
+                        MouseEventKind::Down(MouseButton::Left)
+                            | MouseEventKind::Drag(MouseButton::Left)
+                            | MouseEventKind::Up(MouseButton::Left)
+                    ) =>
+                {
+                    let overlay_id = entry.widget_id;
+                    let Some(layout) = self.runtime.current_layout.clone() else {
+                        widget_render::dropdown::close_dropdown(overlay_id);
+                        widget_render::remove_overlay(overlay_id);
+                        self.mark_needs_redraw();
+                        return false;
                     };
-                    let _ = self.apply_widget_output(output);
+                    if let Some(node) = super::widget_focus::find_node_by_id(&layout, overlay_id)
+                    {
+                        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
+                        let widget_event = map_mouse_event(
+                            &node,
+                            mouse.kind,
+                            local_col,
+                            local_row,
+                            None,
+                            None,
+                            mouse.modifiers,
+                            cell_w,
+                            cell_h,
+                        );
+                        let output = match widget_event {
+                            MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
+                            MouseEventOutcome::Dispatch(widget_event) => {
+                                handle_event(&node, widget_event)
+                            }
+                        };
+                        let _ = self.apply_widget_output(output);
+                        return true;
+                    }
+                    widget_render::dropdown::close_dropdown(overlay_id);
+                    widget_render::remove_overlay(overlay_id);
+                    self.mark_needs_redraw();
+                }
+                widget_render::OverlayKind::Modal
+                    if matches!(
+                        mouse.kind,
+                        MouseEventKind::Down(MouseButton::Left)
+                            | MouseEventKind::Drag(MouseButton::Left)
+                            | MouseEventKind::Up(MouseButton::Left)
+                            | MouseEventKind::ScrollUp
+                            | MouseEventKind::ScrollDown
+                            | MouseEventKind::ScrollLeft
+                            | MouseEventKind::ScrollRight
+                    ) =>
+                {
+                    if widget_render::overlay_contains(local_col, local_row) {
+                        return self.handle_modal_pointer_event(
+                            entry.widget_id,
+                            mouse,
+                            content_col,
+                            content_row,
+                            precise_col,
+                            precise_row,
+                        );
+                    }
+                    // Outside the panel: consume. The on-close request fires
+                    // once, from try_click_focusable_widget's mouse-down path.
                     return true;
                 }
-                widget_render::dropdown::close_dropdown(overlay_id);
-                widget_render::clear_overlay();
-                self.mark_needs_redraw();
+                _ => {}
             }
         }
 
@@ -837,7 +874,7 @@ impl Editor {
         };
         if matches!(mouse.kind, MouseEventKind::Moved) {
             widget_render::set_pointer_hover_widget(
-                self.widget_node_at_local(local_col, local_row)
+                self.hover_node_at_local(local_col, local_row)
                     .map(|node| node.widget_id),
             );
         }
@@ -1263,6 +1300,28 @@ impl Editor {
         let Some(hit_node) = self.widget_node_at_local(local_col, local_row) else {
             return;
         };
+        self.begin_widget_gesture_for_hit(
+            hit_node,
+            local_col,
+            local_row,
+            precise_col,
+            precise_row,
+            modifiers,
+        );
+    }
+
+    /// Gesture begin for an already-resolved hit node (the modal pointer
+    /// intercept hit-tests within the modal subtree instead of the layout
+    /// root, then shares this path).
+    pub(super) fn begin_widget_gesture_for_hit(
+        &mut self,
+        hit_node: LayoutNode,
+        local_col: f32,
+        local_row: f32,
+        precise_col: f32,
+        precise_row: f32,
+        modifiers: KeyModifiers,
+    ) {
         let scrolled_col = local_col + self.widget_layout_scroll_left();
         let scrolled_row = local_row + self.total_scroll_top();
         let event_scroll_offset = self
@@ -1463,6 +1522,100 @@ impl Editor {
         let layout_row = local_row + self.total_scroll_top();
 
         hit_test_layout(layout, layout_row, layout_col).cloned()
+    }
+
+    /// Pointer-event handling while a modal is the topmost overlay and the
+    /// point is inside its panel: ordinary subtree hit-testing rooted at the
+    /// modal node, dispatched through the normal widget-event path. Always
+    /// consumes — clicks can never fall through the panel to the tile below.
+    pub(super) fn handle_modal_pointer_event(
+        &mut self,
+        modal_widget_id: u64,
+        mouse: MouseEvent,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> bool {
+        let Some(layout) = self.runtime.current_layout.clone() else {
+            return true;
+        };
+        // The overlay entry's widget id can go stale when a relayout (e.g. a
+        // click handler growing an `each` list) reassigns ids before the next
+        // render re-registers the entry. Fall back to the open modal node in
+        // the current layout — there is at most one — so a stale id can never
+        // strand the modal with every click consumed.
+        let Some(modal_node) = super::widget_focus::find_node_by_id(&layout, modal_widget_id)
+            .or_else(|| super::widget_focus::find_open_modal_node(&layout).cloned())
+        else {
+            return true;
+        };
+        let local_col = precise_col - content_col as f32;
+        let local_row = precise_row - content_row as f32;
+        let layout_col = local_col + self.widget_layout_scroll_left();
+        let layout_row = local_row + self.total_scroll_top();
+
+        let hit = hit_test_layout(&modal_node, layout_row, layout_col).cloned();
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            // The normal focus-click and gesture-begin steps are skipped for
+            // intercepted events; run their modal-rooted equivalents.
+            self.focus_modal_child_at(&modal_node, layout_row, layout_col);
+            if let Some(hit) = hit.clone() {
+                self.begin_widget_gesture_for_hit(
+                    hit,
+                    local_col,
+                    local_row,
+                    precise_col,
+                    precise_row,
+                    mouse.modifiers,
+                );
+            }
+        }
+
+        let Some(hit) = hit else {
+            return true;
+        };
+        let hit = pointer_dispatch_node(&layout, hit);
+        let output = self.dispatch_widget_mouse_event(
+            &hit,
+            mouse.kind,
+            content_col,
+            content_row,
+            precise_col,
+            precise_row,
+            None,
+            None,
+            mouse.modifiers,
+        );
+        if !self.apply_widget_output(output) {
+            self.mark_needs_redraw();
+        }
+        true
+    }
+
+    /// The hit node for hover/cursor resolution, restricted to the modal
+    /// subtree while a modal is the topmost overlay (a dropdown above it
+    /// takes precedence via the ordinary overlay checks).
+    pub(super) fn hover_node_at_local(
+        &mut self,
+        local_col: f32,
+        local_row: f32,
+    ) -> Option<LayoutNode> {
+        if let Some(entry) = widget_render::topmost_overlay()
+            && entry.kind == widget_render::OverlayKind::Modal
+        {
+            if !widget_render::overlay_contains(local_col, local_row) {
+                return None;
+            }
+            let layout = self.runtime.current_layout.clone()?;
+            let modal_node = super::widget_focus::find_node_by_id(&layout, entry.widget_id)
+                .or_else(|| super::widget_focus::find_open_modal_node(&layout).cloned())?;
+            let layout_col = local_col + self.widget_layout_scroll_left();
+            let layout_row = local_row + self.total_scroll_top();
+            return hit_test_layout(&modal_node, layout_row, layout_col).cloned();
+        }
+        self.widget_node_at_local(local_col, local_row)
     }
 
     pub(super) fn widget_node_at_screen(
@@ -1841,11 +1994,34 @@ impl Editor {
         delta_x: f32,
         delta_y: f32,
     ) -> bool {
-        // If a dropdown overlay is open, intercept scroll events for it
-        if let Some(overlay_id) = widget_render::overlay_widget_id() {
-            if widget_render::dropdown::scroll_overlay(overlay_id, delta_y) {
-                self.mark_needs_redraw();
-                return true;
+        // Topmost dropdown menus scroll their own list; a topmost modal
+        // routes normal scroll, hit-tested within the modal subtree only
+        // (scroll outside the panel is consumed, never reaching the tile).
+        let mut modal_root: Option<LayoutNode> = None;
+        if let Some(entry) = widget_render::topmost_overlay() {
+            match entry.kind {
+                widget_render::OverlayKind::Dropdown => {
+                    if widget_render::dropdown::scroll_overlay(entry.widget_id, delta_y) {
+                        self.mark_needs_redraw();
+                        return true;
+                    }
+                }
+                widget_render::OverlayKind::Modal => {
+                    let inside = hit::to_local(precise_col, precise_row, content_col, content_row)
+                        .is_some_and(|(local_col, local_row)| {
+                            widget_render::overlay_contains(local_col, local_row)
+                        });
+                    if !inside {
+                        return true;
+                    }
+                    modal_root = self.runtime.current_layout.as_deref().and_then(|layout| {
+                        super::widget_focus::find_node_by_id(layout, entry.widget_id)
+                            .or_else(|| super::widget_focus::find_open_modal_node(layout).cloned())
+                    });
+                    if modal_root.is_none() {
+                        return true;
+                    }
+                }
             }
         }
 
@@ -1854,8 +2030,17 @@ impl Editor {
         else {
             return false;
         };
-        let Some(node) = self.widget_node_at_local(local_col, local_row) else {
-            return false;
+        let node = match &modal_root {
+            Some(root) => {
+                let layout_col = local_col + self.widget_layout_scroll_left();
+                let layout_row = local_row + self.total_scroll_top();
+                hit_test_layout(root, layout_row, layout_col).cloned()
+            }
+            None => self.widget_node_at_local(local_col, local_row),
+        };
+        let Some(node) = node else {
+            // Inside the panel but not over a scrollable child: still consume.
+            return modal_root.is_some();
         };
         let scrolled_col = local_col + self.widget_layout_scroll_left();
         let scrolled_row = local_row + self.total_scroll_top();
@@ -1919,7 +2104,8 @@ impl Editor {
             }
         }
 
-        false
+        // Scroll inside an open modal never falls through to the tile.
+        modal_root.is_some()
     }
 }
 
