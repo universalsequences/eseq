@@ -1540,7 +1540,13 @@ impl Editor {
         let Some(layout) = self.runtime.current_layout.clone() else {
             return true;
         };
+        // The overlay entry's widget id can go stale when a relayout (e.g. a
+        // click handler growing an `each` list) reassigns ids before the next
+        // render re-registers the entry. Fall back to the open modal node in
+        // the current layout — there is at most one — so a stale id can never
+        // strand the modal with every click consumed.
         let Some(modal_node) = super::widget_focus::find_node_by_id(&layout, modal_widget_id)
+            .or_else(|| super::widget_focus::find_open_modal_node(&layout).cloned())
         else {
             return true;
         };
@@ -1549,11 +1555,13 @@ impl Editor {
         let layout_col = local_col + self.widget_layout_scroll_left();
         let layout_row = local_row + self.total_scroll_top();
 
+        let hit = hit_test_layout(&modal_node, layout_row, layout_col).cloned();
+
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             // The normal focus-click and gesture-begin steps are skipped for
             // intercepted events; run their modal-rooted equivalents.
             self.focus_modal_child_at(&modal_node, layout_row, layout_col);
-            if let Some(hit) = hit_test_layout(&modal_node, layout_row, layout_col).cloned() {
+            if let Some(hit) = hit.clone() {
                 self.begin_widget_gesture_for_hit(
                     hit,
                     local_col,
@@ -1565,7 +1573,7 @@ impl Editor {
             }
         }
 
-        let Some(hit) = hit_test_layout(&modal_node, layout_row, layout_col).cloned() else {
+        let Some(hit) = hit else {
             return true;
         };
         let hit = pointer_dispatch_node(&layout, hit);
@@ -1601,7 +1609,8 @@ impl Editor {
                 return None;
             }
             let layout = self.runtime.current_layout.clone()?;
-            let modal_node = super::widget_focus::find_node_by_id(&layout, entry.widget_id)?;
+            let modal_node = super::widget_focus::find_node_by_id(&layout, entry.widget_id)
+                .or_else(|| super::widget_focus::find_open_modal_node(&layout).cloned())?;
             let layout_col = local_col + self.widget_layout_scroll_left();
             let layout_row = local_row + self.total_scroll_top();
             return hit_test_layout(&modal_node, layout_row, layout_col).cloned();
@@ -2007,6 +2016,7 @@ impl Editor {
                     }
                     modal_root = self.runtime.current_layout.as_deref().and_then(|layout| {
                         super::widget_focus::find_node_by_id(layout, entry.widget_id)
+                            .or_else(|| super::widget_focus::find_open_modal_node(layout).cloned())
                     });
                     if modal_root.is_none() {
                         return true;

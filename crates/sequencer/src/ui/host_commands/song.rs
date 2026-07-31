@@ -824,7 +824,7 @@ pub(crate) fn apply_song_edit_command(
     Some(run(name, payload, app))
 }
 
-/// Palette open/close live in the loop layer live, but their arms are pure
+/// Palette open/close live in the loop layer, but their arms are pure
 /// `App` mutations (same logic as `run_transport`'s) — exposed so capture
 /// setup scripts can open the palette modal through the real funnel.
 pub(crate) fn apply_sound_palette_view_command(

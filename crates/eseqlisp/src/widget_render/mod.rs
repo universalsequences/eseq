@@ -1881,7 +1881,9 @@ fn collect_modal_overlay(node: &LayoutNode, viewport: WidgetViewport, scroll_top
         return;
     };
     // Layout coords -> post-scroll tile-local coords (the overlay channel's
-    // convention; the backend offsets overlays by tile origin only).
+    // convention; the backend offsets overlays by tile origin only). This only
+    // stays coherent with the frame-anchored panel because tile scroll is
+    // trapped while a modal is open (handle_widget_scroll consumes it).
     let dx = -viewport.scroll_left;
     let dy = -viewport.scroll_top;
     let shift = |rect: Rect| Rect {
@@ -2644,8 +2646,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
     }
 }
 
-/// Shift a metal primitive vertically by `dy` cells (in-place).
-#[cfg(target_os = "macos")]
+/// Shift a metal primitive horizontally by `dx` cells (in-place).
 #[cfg(target_os = "macos")]
 fn offset_primitive_x_mut(prim: &mut MetalPrimitive, dx: f32, viewport: WidgetViewport) {
     match prim {
@@ -2681,6 +2682,8 @@ fn offset_primitive_x_mut(prim: &mut MetalPrimitive, dx: f32, viewport: WidgetVi
     }
 }
 
+/// Shift a metal primitive vertically by `dy` cells (in-place).
+#[cfg(target_os = "macos")]
 fn offset_primitive_y_mut(prim: &mut MetalPrimitive, dy: f32, viewport: WidgetViewport) {
     match prim {
         MetalPrimitive::ZLayer { primitive, .. } => offset_primitive_y_mut(primitive, dy, viewport),

@@ -11603,6 +11603,19 @@ fn inline_widget_dims_in_place_when_its_source_form_is_edited() {
 
 // ── Modal input + focus (modal spec phase 3) ────────────────────────────────
 
+/// Clears the thread-local overlay stack when the test ends, pass or fail, so
+/// a mid-test assertion failure cannot leak overlay state into whichever test
+/// runs next on the same thread.
+#[cfg(target_os = "macos")]
+struct OverlayClearGuard;
+
+#[cfg(target_os = "macos")]
+impl Drop for OverlayClearGuard {
+    fn drop(&mut self) {
+        crate::widget_render::clear_overlay();
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn find_widget_of_type<'a>(
     node: &'a crate::layout::LayoutNode,
@@ -11725,6 +11738,7 @@ fn eval_bool(editor: &mut Editor, expr: &str) -> bool {
 #[cfg(target_os = "macos")]
 #[test]
 fn modal_click_inside_hits_a_modal_child_not_the_tile_below() {
+    let _overlay_guard = OverlayClearGuard;
     let mut editor = modal_two_tile_editor(MODAL_PANEL_BODY);
     register_active_layout_overlays(&mut editor);
     let entry = crate::widget_render::topmost_overlay().expect("modal overlay entry");
@@ -11755,12 +11769,63 @@ fn modal_click_inside_hits_a_modal_child_not_the_tile_below() {
     assert!(eval_bool(&mut editor, "modal-clicked"), "modal child must receive the click");
     assert!(!eval_bool(&mut editor, "underlay-clicked"), "click must not reach the tile below");
     assert!(eval_bool(&mut editor, "modal-open"), "inside click must not close the modal");
-    crate::widget_render::clear_overlay();
+}
+
+/// Regression: a relayout triggered by a click handler (e.g. the sound
+/// palette's "fork" growing its entry list) can reassign widget ids before
+/// the next render refreshes the overlay entry. The stale id must not strand
+/// the modal — clicks inside and Escape fall back to the open modal node by
+/// type instead of consuming every event with no effect.
+#[cfg(target_os = "macos")]
+#[test]
+fn stale_overlay_widget_id_cannot_strand_the_modal() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = modal_two_tile_editor(MODAL_PANEL_BODY);
+    register_active_layout_overlays(&mut editor);
+    let entry = crate::widget_render::topmost_overlay().expect("modal overlay entry");
+
+    // Same rect, dead widget id — what the stack looks like between the
+    // id-reassigning relayout and the next render.
+    crate::widget_render::push_overlay(crate::widget_render::OverlayEntry {
+        widget_id: entry.widget_id + 100_000,
+        rect: entry.rect,
+        kind: crate::widget_render::OverlayKind::Modal,
+    });
+
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    let button = find_widget_of_type(&layout, "button")
+        .expect("modal child button")
+        .clone();
+    let click_col = button.rect.col + button.rect.width * 0.5;
+    let click_row = button.rect.row + button.rect.height * 0.5;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_tiled_mouse_precise(
+            mouse_event(kind, click_col.floor() as u16, click_row.floor() as u16),
+            click_col,
+            click_row,
+            0,
+        );
+    }
+    assert!(
+        eval_bool(&mut editor, "modal-clicked"),
+        "inside click must reach the modal child despite the stale entry id"
+    );
+
+    // Escape must still request close through the by-type fallback.
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        !eval_bool(&mut editor, "modal-open"),
+        "escape must close the modal despite the stale entry id"
+    );
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn modal_outside_click_fires_on_close_without_activating_underneath() {
+    let _overlay_guard = OverlayClearGuard;
     let mut editor = modal_two_tile_editor(MODAL_PANEL_BODY);
     register_active_layout_overlays(&mut editor);
     let entry = crate::widget_render::topmost_overlay().expect("modal overlay entry");
@@ -11792,7 +11857,6 @@ fn modal_outside_click_fires_on_close_without_activating_underneath() {
         !eval_bool(&mut editor, "underlay-clicked"),
         "the dismissing click must not activate the widget underneath"
     );
-    crate::widget_render::clear_overlay();
 }
 
 #[cfg(target_os = "macos")]
@@ -11840,6 +11904,7 @@ fn open_dropdown_inside_modal(editor: &mut Editor) {
 #[cfg(target_os = "macos")]
 #[test]
 fn outside_click_closes_dropdown_inside_modal_but_keeps_the_modal() {
+    let _overlay_guard = OverlayClearGuard;
     let mut editor = modal_two_tile_editor(MODAL_WITH_DROPDOWN_BODY);
     open_dropdown_inside_modal(&mut editor);
 
@@ -11869,12 +11934,12 @@ fn outside_click_closes_dropdown_inside_modal_but_keeps_the_modal() {
         0,
     );
     assert!(!eval_bool(&mut editor, "modal-open"));
-    crate::widget_render::clear_overlay();
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn escape_closes_the_dropdown_first_then_the_modal() {
+    let _overlay_guard = OverlayClearGuard;
     let mut editor = modal_two_tile_editor(MODAL_WITH_DROPDOWN_BODY);
     open_dropdown_inside_modal(&mut editor);
 
@@ -11885,12 +11950,12 @@ fn escape_closes_the_dropdown_first_then_the_modal() {
 
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(!eval_bool(&mut editor, "modal-open"), "second escape reaches the modal");
-    crate::widget_render::clear_overlay();
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn modal_traps_focus_while_open_and_restores_it_after_close() {
+    let _overlay_guard = OverlayClearGuard;
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
     editor
@@ -11960,5 +12025,4 @@ fn modal_traps_focus_while_open_and_restores_it_after_close() {
         Some(&Value::String("under".to_string())),
         "closing the modal must restore the previous focus"
     );
-    crate::widget_render::clear_overlay();
 }

@@ -189,15 +189,23 @@ impl Editor {
     /// Invoke the modal's `:on-close` handler (a request to close — the app
     /// closes by flipping the `:is-open` binding). Consumes the trigger even
     /// when no handler is present.
-    pub(super) fn fire_modal_on_close(&mut self, modal_widget_id: u64) -> bool {
+    pub(super) fn fire_modal_on_close(&mut self, modal_widget_id: u64) {
         let Some(layout) = self.runtime.current_layout.clone() else {
-            return true;
+            return;
         };
-        let Some(node) = find_node_by_id(&layout, modal_widget_id) else {
-            return true;
+        // Stale-id fallback: a relayout can reassign widget ids before the
+        // next render refreshes the overlay entry. There is at most one open
+        // modal, so fall back to it by type; only a layout with no open modal
+        // at all means the entry is truly dead and gets dropped.
+        let Some(node) = find_node_by_id(&layout, modal_widget_id)
+            .or_else(|| find_open_modal_node(&layout).cloned())
+        else {
+            crate::widget_render::remove_overlay(modal_widget_id);
+            self.mark_needs_redraw();
+            return;
         };
         let Some(callback) = node.props.get("on-close").cloned() else {
-            return true;
+            return;
         };
         self.sync_runtime_source_context();
         let result = self.runtime.invoke(callback, vec![]);
@@ -209,7 +217,6 @@ impl Editor {
         self.refresh_runtime_side_effects();
         self.sync_runtime_context();
         self.mark_needs_redraw();
-        true
     }
 
     /// Focus the focusable widget at a point within the modal subtree (used
