@@ -569,6 +569,24 @@
     ;; and every other take badge are one-based.
     (str "Take " (+ (get clip :take-id) 1))))
 
+;; Sound-divergence dot (takes spec 17.6): SEQ.song-clip-sounds joins each
+;; clip to its patch's divergence flag and palette color. A diverging clip
+;; with a colored patch passes (r g b); a name-only patch passes true (gray
+;; fallback, 17.11); a clip on the scene-effective sound passes nil (no dot).
+(def arrangement-clip-sound-dot (i clip-id)
+  (if (>= i (len SEQ.song-clip-sounds))
+    nil
+    (let ((matches (filter (lambda (entry) (= (get entry :clip-id) clip-id))
+                     (nth SEQ.song-clip-sounds i))))
+      (if (= (len matches) 0)
+        nil
+        (let ((entry (nth matches 0)))
+          (if (get entry :diverges)
+            (if (= (get entry :color) nil)
+              true
+              (list (get entry :color-r) (get entry :color-g) (get entry :color-b)))
+            nil))))))
+
 (def arrangement-track-clip-items (i)
   (map
     (lambda (clip)
@@ -589,7 +607,8 @@
           :kind :midi
           :label (arrangement-track-clip-label clip)
           :content (arrangement-clip-content i clip)
-          :color (arrangement-clip-color i))))
+          :color (arrangement-clip-color i)
+          :sound-dot (arrangement-clip-sound-dot i (get clip :clip-id)))))
     (arrangement-track-clips i)))
 
 ;; ── Provisional capture content (realtime feedback spec 3) ────────────────
@@ -1585,6 +1604,11 @@
         (arrangement-empty-banner)))
     (subtree :key "arr-error-banner"
       (arrangement-error-banner))
+    ;; Sound palette overlay (takes spec 17.6): opened from a clip via the
+    ;; toolbar/badge gestures; renders as a band so the timeline below stays
+    ;; live while grabbing a sound.
+    (subtree :key "arr-sound-palette"
+      (sound-palette-panel))
     (subtree :key "arr-scene-row"
       (box :width :fill
         (h-stack :width :fill :align :start

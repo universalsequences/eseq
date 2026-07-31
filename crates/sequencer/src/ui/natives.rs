@@ -1589,6 +1589,167 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
         },
     );
 
+    // Sound palette (takes spec 17.6/18.3). The overlay natives address the
+    // open palette's target implicitly (the host command falls back to
+    // `App::sound_palette_open`, then the track's binding), so the lisp side
+    // only ever names the entity being grabbed.
+    fn number_entry(value: f64) -> Rc<RefCell<Value>> {
+        Rc::new(RefCell::new(Value::Number(value)))
+    }
+    fn palette_payload(args: &[Value]) -> Result<HashMap<String, Rc<RefCell<Value>>>, String> {
+        let Some(Value::Number(track)) = args.first() else {
+            return Err("expected track number".into());
+        };
+        let mut payload = HashMap::new();
+        payload.insert("track".to_string(), number_entry(*track));
+        Ok(payload)
+    }
+    runtime.register_native_with_docs(
+        "seq-sound-palette-open",
+        "(seq-sound-palette-open track [target-kind target-id])",
+        "Open the sound palette overlay for a track (takes spec 17.6). \
+         target-kind is \"take\", \"pattern\", or \"cell\"; omitted, the \
+         track's bound source is the target.",
+        move |args, ctx| {
+            let mut payload = palette_payload(&args)
+                .map_err(|error| format!("seq-sound-palette-open: {error}"))?;
+            if let Some(Value::String(kind)) = args.get(1) {
+                payload.insert(
+                    "target-kind".to_string(),
+                    Rc::new(RefCell::new(Value::String(kind.clone()))),
+                );
+                if let Some(Value::Number(id)) = args.get(2) {
+                    payload.insert("target-id".to_string(), number_entry(*id));
+                }
+            }
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "sound-palette-open".to_string(),
+                payload: Value::Map(payload),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+    runtime.register_native_with_docs(
+        "seq-sound-palette-close",
+        "(seq-sound-palette-close)",
+        "Close the sound palette overlay.",
+        move |_args, ctx| {
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "sound-palette-close".to_string(),
+                payload: Value::Map(HashMap::new()),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+    runtime.register_native_with_docs(
+        "seq-sound-apply",
+        "(seq-sound-apply track patch-id)",
+        "Palette Apply (takes spec 17.6): re-link the open target's patch \
+         ref to the named Patch entity. Reference semantics - future edits \
+         to that patch follow. One undo entry; key locks ride the patch.",
+        move |args, ctx| {
+            let mut payload = palette_payload(&args)
+                .map_err(|error| format!("seq-sound-apply: {error}"))?;
+            let Some(Value::Number(patch)) = args.get(1) else {
+                return Err("seq-sound-apply: expected patch id".into());
+            };
+            payload.insert("patch".to_string(), number_entry(*patch));
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "sound-apply".to_string(),
+                payload: Value::Map(payload),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+    runtime.register_native_with_docs(
+        "seq-sound-apply-with-mix",
+        "(seq-sound-apply-with-mix track patch-id mix-id)",
+        "Palette Apply with mix (takes spec 17.6): re-link BOTH refs of the \
+         open target to the named entity pair. One undo entry.",
+        move |args, ctx| {
+            let mut payload = palette_payload(&args)
+                .map_err(|error| format!("seq-sound-apply-with-mix: {error}"))?;
+            let (Some(Value::Number(patch)), Some(Value::Number(mix))) =
+                (args.get(1), args.get(2))
+            else {
+                return Err("seq-sound-apply-with-mix: expected patch and mix ids".into());
+            };
+            payload.insert("patch".to_string(), number_entry(*patch));
+            payload.insert("mix".to_string(), number_entry(*mix));
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "sound-apply-with-mix".to_string(),
+                payload: Value::Map(payload),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+    runtime.register_native_with_docs(
+        "seq-sound-fork",
+        "(seq-sound-fork track)",
+        "Palette Fork / own parameters (takes spec 17.3): clone the open \
+         target's Patch+Mix and repoint the target at the clones. One undo \
+         entry.",
+        move |args, ctx| {
+            let payload =
+                palette_payload(&args).map_err(|error| format!("seq-sound-fork: {error}"))?;
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "sound-fork".to_string(),
+                payload: Value::Map(payload),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+    runtime.register_native_with_docs(
+        "seq-sound-rename",
+        "(seq-sound-rename track kind entity-id name)",
+        "Rename a pooled sound entity (takes spec 17.11). kind is \"patch\" \
+         or \"mix\". Overlay-only gesture; one undo entry.",
+        move |args, ctx| {
+            let (
+                Some(Value::Number(track)),
+                Some(Value::String(kind)),
+                Some(Value::Number(entity)),
+                Some(Value::String(name)),
+            ) = (args.first(), args.get(1), args.get(2), args.get(3))
+            else {
+                return Err(
+                    "seq-sound-rename: expected (track kind entity-id name)".into()
+                );
+            };
+            let mut payload = HashMap::new();
+            payload.insert("track".to_string(), number_entry(*track));
+            payload.insert(
+                "kind".to_string(),
+                Rc::new(RefCell::new(Value::String(kind.clone()))),
+            );
+            payload.insert("entity".to_string(), number_entry(*entity));
+            payload.insert(
+                "name".to_string(),
+                Rc::new(RefCell::new(Value::String(name.clone()))),
+            );
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "sound-rename".to_string(),
+                payload: Value::Map(payload),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+    runtime.register_native_with_docs(
+        "seq-sound-cleanup-unused",
+        "(seq-sound-cleanup-unused track)",
+        "Clean up unused sound entities on a track (takes spec 17.4): the \
+         interactive version of the save-time prune. Frees palette colors.",
+        move |args, ctx| {
+            let payload = palette_payload(&args)
+                .map_err(|error| format!("seq-sound-cleanup-unused: {error}"))?;
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "sound-cleanup-unused".to_string(),
+                payload: Value::Map(payload),
+            });
+            Ok(Value::Bool(true))
+        },
+    );
+
     runtime.register_native_with_docs(
         "seq-song-status",
         "(seq-song-status)",
@@ -2062,6 +2223,11 @@ pub(crate) fn init_runtime(
                 ("song-lanes", Value::List(vec![])),
                 ("scene-spans", Value::List(vec![])),
                 ("song-lane-events", Value::List(vec![])),
+                // Sound palette read surfaces (takes spec 17.6/18.3): the
+                // open overlay's entries (Nil = closed) and the per-clip
+                // sound divergence/color join for the timeline dots.
+                ("sound-palette", Value::Nil),
+                ("song-clip-sounds", Value::List(vec![])),
                 // Provisional arrangement-capture content
                 // (docs/realtime-arrangement-feedback-spec.md 3.2): nil
                 // unless a capture is running. Inert — no ids, so no gesture

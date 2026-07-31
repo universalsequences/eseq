@@ -739,10 +739,14 @@ impl SequencerState {
     /// content-priority order — patterns, then takes, then orphan carriers,
     /// then cells — so an id's canonical entity always comes from a referent
     /// whose content the file actually carried (cells carry none). Tuple per
-    /// track: `(cells-per-scene, patterns-per-scene, takes, carriers)` of
-    /// file-local `(patch, mix)` ids; `u64::MAX` marks an absent
-    /// placeholder; carriers additionally hold the composed content for
-    /// entities no pattern or chunk serialized (bare cells, §17.2).
+    /// track: `(cells-per-scene, patterns-per-scene, takes, carriers,
+    /// patch-meta, mix-meta)` of file-local `(patch, mix)` ids; `u64::MAX`
+    /// marks an absent placeholder; carriers additionally hold the composed
+    /// content for entities no pattern or chunk serialized (bare cells,
+    /// §17.2); meta entries are `(file-id, name, color)` with color `< 0`
+    /// meaning name-only (§17.11). Every pool finishes with `ensure_meta`,
+    /// so files predating display metadata load with mint-style
+    /// auto-assignments.
     pub(crate) fn apply_project_sound_model(
         &self,
         track_sounds: &[(
@@ -750,10 +754,14 @@ impl SequencerState {
             Vec<Option<(u64, u64)>>,
             Vec<(u64, u64)>,
             Vec<(u64, u64, TrackPatternData)>,
+            Vec<(u64, String, i32)>,
+            Vec<(u64, String, i32)>,
         )],
     ) {
         let mut scenes = self.pattern.scenes.lock().unwrap();
-        for (track, (cells, patterns, takes, carriers)) in track_sounds.iter().enumerate() {
+        for (track, (cells, patterns, takes, carriers, patch_meta, mix_meta)) in
+            track_sounds.iter().enumerate()
+        {
             if track >= scenes.track_pools.len() {
                 break;
             }
@@ -878,6 +886,44 @@ impl SequencerState {
                     };
                 }
             }
+            // §17.11 display metadata, translated through the file-id →
+            // canonical-entity maps built above so names land on the entity
+            // every referent actually adopted.
+            if let Some(pool) = scenes.track_pools.get_mut(track) {
+                for (file_id, name, color) in patch_meta {
+                    let Some(live) = patch_map.get(file_id) else {
+                        continue;
+                    };
+                    if pool.sounds.patches.contains_key(live) {
+                        pool.sounds.patch_meta.insert(
+                            *live,
+                            SoundEntityMeta {
+                                name: name.clone(),
+                                color: u8::try_from(*color).ok(),
+                            },
+                        );
+                    }
+                }
+                for (file_id, name, color) in mix_meta {
+                    let Some(live) = mix_map.get(file_id) else {
+                        continue;
+                    };
+                    if pool.sounds.mixes.contains_key(live) {
+                        pool.sounds.mix_meta.insert(
+                            *live,
+                            SoundEntityMeta {
+                                name: name.clone(),
+                                color: u8::try_from(*color).ok(),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        // Auto-assign for anything the file didn't cover (older v7 saves,
+        // legacy migrations) and drop meta for entities that no longer exist.
+        for pool in &mut scenes.track_pools {
+            pool.sounds.ensure_meta();
         }
     }
 
@@ -1092,33 +1138,76 @@ impl SequencerState {
         result
     }
 
-    /// Re-link patterns and takes on `track` to an existing Patch/Mix pair
-    /// (§17.3 re-link — the S2 successor of the §16.5 device copy: reference
-    /// semantics, not a value copy). Scene cells whose cell is a re-linked
-    /// pattern follow it, keeping cell and pattern naming the same entities.
-    /// All-or-nothing: every target is validated before anything moves.
-    /// Returns how many of the named referents (patterns + takes) moved;
-    /// cell follow-ups ride along uncounted.
-    pub(crate) fn relink_track_sound_refs(
+    /// Re-link patterns, takes, and bare cells on `track` to existing
+    /// entities (§17.3 re-link — the S2 successor of the §16.5 device copy:
+    /// reference semantics, not a value copy). `patch` / `mix` may each be
+    /// `None` to keep a target's current half — palette Apply moves the
+    /// patch only, Apply-with-mix moves both (§17.6). `cells` are scene
+    /// indices whose BARE cell refs move directly; a cell that holds a
+    /// pattern must be addressed by that pattern instead, and scene cells
+    /// whose cell is a re-linked pattern follow it, keeping cell and
+    /// pattern naming the same entities. All-or-nothing: every target is
+    /// validated before anything moves. Returns how many of the named
+    /// referents moved; pattern-cell follow-ups ride along uncounted.
+    pub(crate) fn relink_track_sound_refs_masked(
         &self,
         track: usize,
         patterns: &[PatternId],
         takes: &[TakeId],
-        refs: SoundRefs,
+        cells: &[usize],
+        patch: Option<PatchId>,
+        mix: Option<MixId>,
     ) -> Result<usize, String> {
+        if patch.is_none() && mix.is_none() {
+            return Err("Nothing to re-link: neither a patch nor a mix was named".to_string());
+        }
+        let merged = |current: SoundRefs| SoundRefs {
+            patch: patch.unwrap_or(current.patch),
+            mix: mix.unwrap_or(current.mix),
+        };
         let mut scenes = self.pattern.scenes.lock().unwrap();
         let scenes = &mut *scenes;
         let pool = scenes
             .track_pools
             .get_mut(track)
             .ok_or_else(|| format!("Track {} does not exist", track + 1))?;
-        if !pool.sounds.resolves(refs) {
-            return Err(format!(
-                "Sound refs (patch {} / mix {}) do not resolve on track {}",
-                refs.patch.0,
-                refs.mix.0,
-                track + 1
-            ));
+        if let Some(id) = patch {
+            if !pool.sounds.patches.contains_key(&id) {
+                return Err(format!(
+                    "Patch {} does not resolve on track {}",
+                    id.0,
+                    track + 1
+                ));
+            }
+        }
+        if let Some(id) = mix {
+            if !pool.sounds.mixes.contains_key(&id) {
+                return Err(format!(
+                    "Mix {} does not resolve on track {}",
+                    id.0,
+                    track + 1
+                ));
+            }
+        }
+        for scene_idx in cells {
+            let scene = scenes
+                .scenes
+                .get(*scene_idx)
+                .ok_or_else(|| format!("Scene {} does not exist", scene_idx + 1))?;
+            if scene.cells.get(track).copied().flatten().is_some() {
+                return Err(format!(
+                    "Scene {} track {} holds a pattern; re-link the pattern, not the cell",
+                    scene_idx + 1,
+                    track + 1
+                ));
+            }
+            if scene.cell_sounds.get(track).is_none() {
+                return Err(format!(
+                    "Scene {} has no cell sound for track {}",
+                    scene_idx + 1,
+                    track + 1
+                ));
+            }
         }
         // Erroring below this point would leave earlier re-links applied with
         // no history entry recording them (the caller only commits a patch on
@@ -1138,33 +1227,54 @@ impl SequencerState {
             }
         }
         let mut changed = 0;
-        let mut moved_patterns: Vec<PatternId> = Vec::new();
+        let mut moved_patterns: Vec<(PatternId, SoundRefs)> = Vec::new();
         for pattern in patterns {
-            if pool.relink_sound(*pattern, refs) {
+            let Some(current) = pool.refs(*pattern) else {
+                continue;
+            };
+            let target = merged(current);
+            if pool.relink_sound(*pattern, target) {
                 changed += 1;
-                moved_patterns.push(*pattern);
+                moved_patterns.push((*pattern, target));
             }
         }
         for take_id in takes {
             let mut moved = false;
-            let chunks = scenes
+            let (target, chunks) = scenes
                 .take_pools
                 .get_mut(track)
                 .and_then(|takes| takes.get_mut(*take_id))
                 .map(|take| {
-                    if take.sound != refs {
-                        take.sound = refs;
+                    let target = merged(take.sound);
+                    if take.sound != target {
+                        take.sound = target;
                         moved = true;
                     }
-                    take.chunks.clone()
+                    (target, take.chunks.clone())
                 })
                 .expect("validated above under the same lock");
             for chunk in chunks {
-                if pool.relink_sound(chunk, refs) {
+                if pool.relink_sound(chunk, target) {
                     moved = true;
                 }
             }
             if moved {
+                changed += 1;
+            }
+        }
+        // Bare-cell targets: the cell's refs move directly (§17.2 "no steps
+        // ≠ no sound" — a bare cell is still a referent).
+        for scene_idx in cells {
+            let Some(slot) = scenes
+                .scenes
+                .get_mut(*scene_idx)
+                .and_then(|scene| scene.cell_sounds.get_mut(track))
+            else {
+                continue;
+            };
+            let target = merged(*slot);
+            if *slot != target {
+                *slot = target;
                 changed += 1;
             }
         }
@@ -1174,9 +1284,9 @@ impl SequencerState {
         // `changed` already reflects it.
         for scene in &mut scenes.scenes {
             if let Some(Some(cell)) = scene.cells.get(track) {
-                if moved_patterns.contains(cell) {
+                if let Some((_, target)) = moved_patterns.iter().find(|(id, _)| id == cell) {
                     if let Some(slot) = scene.cell_sounds.get_mut(track) {
-                        *slot = refs;
+                        *slot = *target;
                     }
                 }
             }
@@ -1197,6 +1307,64 @@ impl SequencerState {
             .lock()
             .unwrap()
             .prune_unreferenced_sounds()
+    }
+
+    /// One-track interactive pruning (§17.4 "clean up unused" / §18.3):
+    /// the same reachability rule as the save-time prune, scoped to `track`.
+    pub(crate) fn prune_unreferenced_sounds_for_track(&self, track: usize) -> usize {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let keep = scenes.referenced_track_sounds(track);
+        let Some(pool) = scenes.track_pools.get_mut(track) else {
+            return 0;
+        };
+        let before = pool.sounds.patches.len() + pool.sounds.mixes.len();
+        pool.sounds.retain_refs(&keep);
+        before - (pool.sounds.patches.len() + pool.sounds.mixes.len())
+    }
+
+    /// Fork (§17.3 "own parameters"): mint clones of `refs` on `track`,
+    /// returning the fresh pair. The caller repoints a referent at it (via
+    /// the masked re-link) under the same undo entry.
+    pub(crate) fn fork_track_sound(&self, track: usize, refs: SoundRefs) -> Option<SoundRefs> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes.track_pools.get_mut(track)?;
+        pool.sounds.resolves(refs).then(|| pool.sounds.fork(refs))
+    }
+
+    /// Rename one entity's display name (§17.11 — overlay-only gesture).
+    /// Exactly one of `patch`/`mix` is expected.
+    pub(crate) fn rename_track_sound_entity(
+        &self,
+        track: usize,
+        patch: Option<PatchId>,
+        mix: Option<MixId>,
+        name: &str,
+    ) -> Result<(), String> {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let pool = scenes
+            .track_pools
+            .get_mut(track)
+            .ok_or_else(|| format!("Track {} does not exist", track + 1))?;
+        let meta = match (patch, mix) {
+            (Some(id), None) => pool
+                .sounds
+                .patch_meta
+                .get_mut(&id)
+                .filter(|_| pool.sounds.patches.contains_key(&id)),
+            (None, Some(id)) => pool
+                .sounds
+                .mix_meta
+                .get_mut(&id)
+                .filter(|_| pool.sounds.mixes.contains_key(&id)),
+            _ => return Err("Name exactly one entity (a patch or a mix)".to_string()),
+        };
+        match meta {
+            Some(meta) => {
+                meta.name = name.trim().to_string();
+                Ok(())
+            }
+            None => Err(format!("The entity does not exist on track {}", track + 1)),
+        }
     }
 
     /// Bare-scene lazy materialization (takes spec 11.1): insert `data` into

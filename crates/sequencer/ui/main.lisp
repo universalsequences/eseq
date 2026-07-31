@@ -892,6 +892,9 @@
     (seq-show-fx-lower-panel)))
 
 (bind-key "Tab" "seq-toggle-arrangement")
+;; Sound palette overlay (takes spec 17.6): toggles on the bound clip, or
+;; the current track's binding outside the timeline.
+(bind-key "C-x p" "seq-toggle-sound-palette")
 (bind-key "BackTab" "seq-toggle-main-or-piano-roll")
 
 (def page-button-width 2.8)
@@ -2035,6 +2038,7 @@
 
 (load "@/ui/step-grid.lisp")
 (load "@/ui/sequencer.lisp")
+(load "@/ui/sound-palette.lisp")
 (load "@/ui/arrangement.lisp")
 (load "@/ui/effects/step-buffer.lisp")
 

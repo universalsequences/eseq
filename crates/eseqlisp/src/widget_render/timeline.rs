@@ -79,6 +79,11 @@ struct TimelineItem {
     #[allow(dead_code)]
     kind: Option<TimelineItemKind>,
     content: Option<TimelineItemContent>,
+    /// Sound-divergence indicator (takes spec §17.6): a small title-bar dot
+    /// drawn when the clip's patch is not the track's scene-effective one.
+    /// The color identifies the patch (§17.11 palette semantics); hosts pass
+    /// `(r g b)` or `true` for the name-only gray fallback.
+    sound_dot: Option<crate::backend::Color>,
 }
 
 /// What kind of clip an item represents (docs/arrangement-timeline-ui-spec.md
@@ -1484,6 +1489,23 @@ fn build_metal_primitives(
         // intrinsic width constraint, and a short clip must never paint its
         // label over the next clip or an empty part of the lane.
         let label_height = title_bar_height.unwrap_or(height);
+        // Sound-divergence dot (takes spec §17.6): a small swatch at the
+        // title bar's left edge, same visual language as the p-lock variant
+        // chips. The label shifts right to make room.
+        let mut label_col = x + 0.34;
+        if let Some(dot) = item.sound_dot {
+            if width >= 1.2 && label_height >= 0.85 {
+                let dot_height = 0.42;
+                primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                    x: x + 0.30,
+                    y: y + ((label_height - dot_height).max(0.0) * 0.5),
+                    width: 0.28,
+                    height: dot_height,
+                    color: dot,
+                }));
+                label_col = x + 0.78;
+            }
+        }
         if let Some(label) = &item.label {
             if width >= 3.0 && label_height >= 0.85 {
                 primitives.push(MetalPrimitive::PushClipRect(Rect {
@@ -1495,7 +1517,7 @@ fn build_metal_primitives(
                 primitives.push(MetalPrimitive::ProportionalText(
                     MetalProportionalTextPrimitive {
                         row: y + ((label_height - 0.80).max(0.0) * 0.5) - 0.02,
-                        col: x + 0.34,
+                        col: label_col,
                         align_width: 0.0,
                         h_align: 0.0,
                         text: label.clone(),
@@ -4079,9 +4101,59 @@ fn get_items(props: &HashMap<String, Value>) -> Vec<TimelineItem> {
                 }),
                 kind: map.get("kind").and_then(parse_item_kind),
                 content: map.get("content").and_then(parse_item_content),
+                sound_dot: map.get("sound-dot").and_then(parse_sound_dot),
             })
         })
         .collect()
+}
+
+/// Lenient `:sound-dot` parse: an `(r g b)` list becomes the dot color, a
+/// bare `true` the name-only gray fallback (takes spec §17.11); anything
+/// else is no dot, never a render error.
+fn parse_sound_dot(value: &Value) -> Option<crate::backend::Color> {
+    match value {
+        Value::List(items) if items.len() >= 3 => {
+            let channel = |idx: usize| as_number(&items[idx].borrow());
+            Some(crate::backend::Color {
+                r: channel(0)? as f32,
+                g: channel(1)? as f32,
+                b: channel(2)? as f32,
+                a: 1.0,
+            })
+        }
+        Value::Bool(true) => Some(crate::backend::Color {
+            r: 0.62,
+            g: 0.62,
+            b: 0.66,
+            a: 1.0,
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod sound_dot_tests {
+    use super::*;
+
+    #[test]
+    fn sound_dot_parses_rgb_list_gray_fallback_and_rejects_junk() {
+        let rgb = Value::List(
+            [0.9, 0.6, 0.3]
+                .iter()
+                .map(|v| std::rc::Rc::new(std::cell::RefCell::new(Value::Number(*v))))
+                .collect(),
+        );
+        let color = parse_sound_dot(&rgb).expect("rgb list parses");
+        assert!((color.r - 0.9).abs() < 1e-6);
+        assert!((color.b - 0.3).abs() < 1e-6);
+        assert!(
+            parse_sound_dot(&Value::Bool(true)).is_some(),
+            "true is the name-only gray fallback"
+        );
+        assert!(parse_sound_dot(&Value::Bool(false)).is_none());
+        assert!(parse_sound_dot(&Value::Nil).is_none());
+        assert!(parse_sound_dot(&Value::String("red".to_string())).is_none());
+    }
 }
 
 /// Lenient `:kind` parse (docs/arrangement-timeline-ui-spec.md 7): unknown or
