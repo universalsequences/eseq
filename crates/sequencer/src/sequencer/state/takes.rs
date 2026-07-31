@@ -186,21 +186,25 @@ pub fn validate_track_take_pool(
                     chunk.0
                 ));
             }
+            // §17.2: chunks hold no sound of their own — every chunk shares
+            // the take's Patch/Mix pair. Divergence is structurally
+            // unrepresentable; a chunk pointing elsewhere is a wiring bug.
+            if pattern_pool.refs(*chunk) != Some(take.sound) {
+                return Err(format!(
+                    "Track {} take {} chunk pattern {} does not share the take's \
+                     sound refs (takes spec 17.2)",
+                    track + 1,
+                    take.id.0,
+                    chunk.0
+                ));
+            }
         }
-        debug_assert!(
-            take_chunk_device_state_agrees(take, pattern_pool),
-            "Track {} take {} has chunks whose device state diverged; take-bound \
-             edits must fan out to every chunk (takes spec 16.4)",
-            track + 1,
-            take.id.0
-        );
     }
     Ok(())
 }
 
-/// Bit-exact device-half agreement between two patterns, at §16.4 fan-out
-/// scope (instrument/effect/MIDI-FX authoring values + base note offset).
-/// Used by the take-chunk no-divergence assertion and by the §17.7 migration
+/// Bit-exact device-half agreement between two patterns (instrument/effect/
+/// MIDI-FX authoring values + base note offset). Used by the §17.7 migration
 /// collapse (a divergence found there is a latent §16-era bug worth
 /// reporting).
 pub(crate) fn track_pattern_device_state_agrees(
@@ -221,51 +225,6 @@ pub(crate) fn track_pattern_device_state_agrees(
             .iter()
             .zip(&b.midi_fx_slots)
             .all(|(left, right)| left.authoring_values().bit_exact_eq(&right.authoring_values()))
-}
-
-/// Takes spec 16.4: a take's device snapshot is duplicated per chunk (16.8),
-/// so every chunk must carry the same one. Debug-only — the fan-out in
-/// `edit.rs` is what keeps it true.
-#[cfg(debug_assertions)]
-fn take_chunk_device_state_agrees(take: &TrackTake, pattern_pool: &TrackPatternPool) -> bool {
-    // Structural fast path (§17.2): chunks that share the take's entities
-    // cannot diverge — there is nothing to diverge.
-    if take
-        .chunks
-        .iter()
-        .all(|id| pattern_pool.refs(*id) == Some(take.sound))
-    {
-        return true;
-    }
-    let mut chunks = take.chunks.iter().filter_map(|id| pattern_pool.get(*id));
-    let Some(first) = chunks.next() else {
-        return true;
-    };
-    chunks.all(|chunk| {
-        first
-            .instrument_slot
-            .authoring_values()
-            .bit_exact_eq(&chunk.instrument_slot.authoring_values())
-            && first.instrument_base_note_offset.to_bits()
-                == chunk.instrument_base_note_offset.to_bits()
-            && first.effect_slots.len() == chunk.effect_slots.len()
-            && first
-                .effect_slots
-                .iter()
-                .zip(&chunk.effect_slots)
-                .all(|(a, b)| a.authoring_values().bit_exact_eq(&b.authoring_values()))
-            && first.midi_fx_slots.len() == chunk.midi_fx_slots.len()
-            && first
-                .midi_fx_slots
-                .iter()
-                .zip(&chunk.midi_fx_slots)
-                .all(|(a, b)| a.authoring_values().bit_exact_eq(&b.authoring_values()))
-    })
-}
-
-#[cfg(not(debug_assertions))]
-fn take_chunk_device_state_agrees(_take: &TrackTake, _pattern_pool: &TrackPatternPool) -> bool {
-    true
 }
 
 #[cfg(test)]

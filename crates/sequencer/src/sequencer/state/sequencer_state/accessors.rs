@@ -9,11 +9,6 @@ impl SequencerState {
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> PatternSnapshot {
-        // A borrowed lane's mirror holds a take's/clip's devices, not the
-        // scene pattern's; capturing it would save that sound over the scene
-        // (takes spec 16.2). Release first — the App rebinds on its next
-        // tick, after whatever launch or row transition triggered this.
-        self.release_bound_device_state();
         let (mod_connections, neural_networks, graph_overrides) = self.current_scene_metadata();
         let mut snapshot = PatternSnapshot::capture_with_mod_connections(
             self,
@@ -26,6 +21,34 @@ impl SequencerState {
             neural_networks,
             graph_overrides,
         );
+        // A borrowed lane's mirror holds a bound take's/clip's devices, not
+        // the scene pattern's (takes spec 16.2). §16.11 released the borrow
+        // here (an audible reset + rebind on every capture); under §17 the
+        // bound sound already lives in its pool entities — panel edits write
+        // them directly — so the capture is instead made TRUTHFUL: the
+        // borrowed lane's device half is replaced with the scene-effective
+        // entity state, and the borrow (and the monitor) survives the
+        // capture untouched. No consumer of this snapshot can leak a bound
+        // sound into the scene's entities.
+        let borrowed = self.sound_binding_borrowed_mask();
+        if borrowed != 0 {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            for track in 0..num_tracks.min(64) {
+                if borrowed >> track & 1 == 0 {
+                    continue;
+                }
+                let effective = scenes.effective_track_pattern(track).or_else(|| {
+                    let refs = scenes.effective_sound_refs(track)?;
+                    scenes
+                        .track_pools
+                        .get(track)
+                        .and_then(|pool| pool.compose_bare_sound(refs))
+                });
+                if let Some(data) = effective {
+                    snapshot.overwrite_track_device_state(track, &data);
+                }
+            }
+        }
         snapshot.project_process_chain = self.project_process_chain();
         let effect_descriptors = self.scratch_effect_descriptors.lock().unwrap().clone();
         let instrument_descriptors = self.scratch_instrument_descriptors.lock().unwrap().clone();
@@ -436,12 +459,18 @@ impl SequencerState {
     /// Insert `chunks` into `track`'s pattern pool and register a take over
     /// them (takes spec 6.1). Production facade for scenes mutation (the raw
     /// `with_scenes_mut` seam is test-only).
+    ///
+    /// `sound: Some(refs)` shares an existing Patch/Mix pair (§17.3 "take
+    /// record → share": punch-in passes the bound cell's refs); the chunks'
+    /// device halves are dropped. `None` mints a private pair from the first
+    /// chunk's device state (legacy imports and callers with no live binding).
     pub(crate) fn register_track_take(
         &self,
         track: usize,
         name: Option<String>,
         chunks: Vec<TrackPatternData>,
         total_len_steps: u32,
+        sound: Option<SoundRefs>,
     ) -> Result<TakeId, String> {
         if chunks.is_empty() {
             return Err("a take requires at least one chunk pattern".to_string());
@@ -450,29 +479,31 @@ impl SequencerState {
         if track >= scenes.track_pools.len() {
             return Err(format!("track {} does not exist", track + 1));
         }
-        // One sound for the whole take (§17.2): the first chunk mints the
-        // take's Patch + Mix; every further chunk shares them. Incoming
-        // chunks were cloned from one template, so their device halves agree
-        // (§16.4) — assert it, because a divergence here is a latent bug.
         let (chunk_ids, take_sound) = {
             let pool = &mut scenes.track_pools[track];
+            let shared = sound.filter(|refs| pool.sounds.resolves(*refs));
+            debug_assert!(
+                sound.is_none() || shared.is_some(),
+                "register_track_take on track {} was passed sound refs that do \
+                 not resolve — a caller read stale refs; falling back to a \
+                 private mint forks the sound",
+                track + 1
+            );
             let mut chunks = chunks.into_iter();
             let first = chunks.next().expect("checked non-empty above");
             let mut ids = Vec::with_capacity(chunks.len() + 1);
-            let mut rest = Vec::new();
-            for (idx, data) in chunks.enumerate() {
-                debug_assert!(
-                    crate::sequencer::state::track_pattern_device_state_agrees(&first, &data),
-                    "take chunk {} device state diverges from chunk 0 at registration \
-                     (takes spec 16.4)",
-                    idx + 1
-                );
-                rest.push(data);
-            }
-            let first_id = pool.insert(first);
-            let sound = pool.refs(first_id).expect("chunk just inserted");
-            ids.push(first_id);
-            for data in rest {
+            let sound = match shared {
+                Some(refs) => {
+                    ids.push(pool.insert_with_refs(first, refs));
+                    refs
+                }
+                None => {
+                    let first_id = pool.insert(first);
+                    ids.push(first_id);
+                    pool.refs(first_id).expect("chunk just inserted")
+                }
+            };
+            for data in chunks {
                 ids.push(pool.insert_with_refs(data, sound));
             }
             (ids, sound)
@@ -1061,35 +1092,96 @@ impl SequencerState {
         result
     }
 
-    /// Copy `source`'s device snapshot onto `targets` within `track`'s
-    /// pattern pool, leaving every target's step content alone. The one
-    /// production seam for moving a sound between patterns: the explicit
-    /// propagation gestures (takes spec 16.5). Returns how many targets
-    /// actually changed hands.
-    pub(crate) fn copy_track_pattern_device_state(
+    /// Re-link patterns and takes on `track` to an existing Patch/Mix pair
+    /// (§17.3 re-link — the S2 successor of the §16.5 device copy: reference
+    /// semantics, not a value copy). Scene cells whose cell is a re-linked
+    /// pattern follow it, keeping cell and pattern naming the same entities.
+    /// All-or-nothing: every target is validated before anything moves.
+    /// Returns how many of the named referents (patterns + takes) moved;
+    /// cell follow-ups ride along uncounted.
+    pub(crate) fn relink_track_sound_refs(
         &self,
         track: usize,
-        source: PatternId,
-        targets: &[PatternId],
+        patterns: &[PatternId],
+        takes: &[TakeId],
+        refs: SoundRefs,
     ) -> Result<usize, String> {
         let mut scenes = self.pattern.scenes.lock().unwrap();
+        let scenes = &mut *scenes;
         let pool = scenes
             .track_pools
             .get_mut(track)
             .ok_or_else(|| format!("Track {} does not exist", track + 1))?;
-        let sound = pool
-            .get(source)
-            .ok_or_else(|| format!("Pattern {} is not in the track's pool", source.0))?;
-        let mut copied = 0;
-        for target in targets {
-            if *target == source {
-                continue;
-            }
-            if pool.edit(*target, |data| data.copy_device_state_from(&sound)) {
-                copied += 1;
+        if !pool.sounds.resolves(refs) {
+            return Err(format!(
+                "Sound refs (patch {} / mix {}) do not resolve on track {}",
+                refs.patch.0,
+                refs.mix.0,
+                track + 1
+            ));
+        }
+        // Erroring below this point would leave earlier re-links applied with
+        // no history entry recording them (the caller only commits a patch on
+        // Ok), so every take must resolve before anything moves.
+        for take_id in takes {
+            if scenes
+                .take_pools
+                .get(track)
+                .and_then(|takes| takes.get(*take_id))
+                .is_none()
+            {
+                return Err(format!(
+                    "Take {} does not exist on track {}",
+                    take_id.0,
+                    track + 1
+                ));
             }
         }
-        Ok(copied)
+        let mut changed = 0;
+        let mut moved_patterns: Vec<PatternId> = Vec::new();
+        for pattern in patterns {
+            if pool.relink_sound(*pattern, refs) {
+                changed += 1;
+                moved_patterns.push(*pattern);
+            }
+        }
+        for take_id in takes {
+            let mut moved = false;
+            let chunks = scenes
+                .take_pools
+                .get_mut(track)
+                .and_then(|takes| takes.get_mut(*take_id))
+                .map(|take| {
+                    if take.sound != refs {
+                        take.sound = refs;
+                        moved = true;
+                    }
+                    take.chunks.clone()
+                })
+                .expect("validated above under the same lock");
+            for chunk in chunks {
+                if pool.relink_sound(chunk, refs) {
+                    moved = true;
+                }
+            }
+            if moved {
+                changed += 1;
+            }
+        }
+        // Cells follow their pattern (§17.3: after any launch/assignment,
+        // cell and pattern name the same entities — a re-link included).
+        // Uncounted: a cell can only move when its pattern just did, so
+        // `changed` already reflects it.
+        for scene in &mut scenes.scenes {
+            if let Some(Some(cell)) = scene.cells.get(track) {
+                if moved_patterns.contains(cell) {
+                    if let Some(slot) = scene.cell_sounds.get_mut(track) {
+                        *slot = refs;
+                    }
+                }
+            }
+        }
+        Ok(changed)
     }
 
     #[cfg(test)]

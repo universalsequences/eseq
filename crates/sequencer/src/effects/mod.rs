@@ -493,6 +493,54 @@ mod tests {
         );
     }
 
+    /// Takes spec §18.2 item 6: a snapshot restore that would carry a STALE
+    /// graph identity into a live slot re-adopts the live identity and
+    /// re-stamps every lock under it, so restored p-locks and key locks keep
+    /// passing the staleness guards at trigger resolution.
+    #[test]
+    fn adopt_identity_and_restamp_rebinds_restored_lock_ids_to_the_live_node() {
+        let desc = EffectDescriptor {
+            name: "synth".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![ParamDescriptor {
+                name: "pitch".to_string(),
+                min: -10.0,
+                max: 10.0,
+                default: 0.0,
+                kind: ParamKind::Continuous { unit: None },
+                scaling: ParamScaling::Linear,
+                node_param_idx: 5,
+                node_param_span: 1,
+                host_control: None,
+                ui_metadata: None,
+            }],
+        };
+        // A stored Patch stamped under node 100 (it missed a rebuild sweep)…
+        let stale = EffectSlotState::new(&desc, 100);
+        stale.set_plock(3, 0, -4.25);
+        stale.set_key_lock(60, 0, 2.5);
+        let snapshot = EffectSlotSnapshot::capture(&stale);
+        // …restored into the live slot whose graph identity is node 200.
+        let live = EffectSlotState::new(&desc, 200);
+        snapshot.restore(&live);
+        assert_eq!(live.node_id.load(Ordering::Relaxed), 100, "restore adopts the snapshot id");
+        live.adopt_identity_and_restamp(200, 0);
+
+        let expected = Some(ParamNodeId {
+            logical_id: 200,
+            node_param_idx: 5,
+        });
+        assert_eq!(live.node_id.load(Ordering::Relaxed), 200);
+        assert_eq!(live.plocks.get(3, 0), Some(-4.25));
+        assert_eq!(live.plocks.get_id(3, 0), expected, "p-lock id re-stamped");
+        assert_eq!(live.key_locks.get(60, 0), Some(2.5));
+        assert_eq!(live.key_locks.get_id(60, 0), expected, "key-lock id re-stamped");
+    }
+
     #[test]
     fn tensor_param_descriptors_expose_small_named_mutable_tensors() {
         let tensors = vec![
@@ -8412,6 +8460,40 @@ impl EffectSlotState {
             }
         }
         self.tensor_params.apply_descriptor(&desc.tensor_params);
+    }
+
+    /// Re-adopt a graph identity and re-stamp every stored lock under it
+    /// (takes spec §18.2 item 6). A snapshot restore writes the SNAPSHOT's
+    /// node ids into this slot; when the live graph's identity for the slot
+    /// differs (the stored Patch missed a rebuild sweep), the restored locks
+    /// carry ids the staleness guards reject and silently play base
+    /// defaults. Cheap no-op when the identities already agree.
+    pub fn adopt_identity_and_restamp(&self, node_id: u32, modulator_node_id: u32) {
+        if self.node_id.load(Ordering::Relaxed) == node_id
+            && self.modulator_node_id.load(Ordering::Relaxed) == modulator_node_id
+        {
+            return;
+        }
+        self.node_id.store(node_id, Ordering::Relaxed);
+        self.modulator_node_id
+            .store(modulator_node_id, Ordering::Relaxed);
+        let preserve = (self.num_params.load(Ordering::Relaxed) as usize).min(MAX_SLOT_PARAMS);
+        for step in 0..MAX_STEPS {
+            for param_idx in 0..preserve {
+                if let Some(value) = self.plocks.get(step, param_idx) {
+                    self.set_plock(step, param_idx, value);
+                }
+            }
+        }
+        let (saved_key_locks, _) = self.key_locks.capture_rows(preserve);
+        self.key_locks.clear_all();
+        for (&note, row) in &saved_key_locks {
+            for (param_idx, value) in row.iter().enumerate().take(preserve) {
+                if let Some(value) = value {
+                    self.set_key_lock(note, param_idx, *value);
+                }
+            }
+        }
     }
 
     /// Rebind this live slot to the current graph descriptor/node while

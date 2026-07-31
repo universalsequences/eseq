@@ -15,7 +15,9 @@
 //! `[P, Q)`, in the same single undo entry as the launch splice (spec 8.5).
 
 use crate::record_quantize::RecordQuantize;
-use crate::sequencer::{PatternSnapshot, StepParam, TakeId, TrackPatternData, MAX_STEPS};
+use crate::sequencer::{
+    PatternSnapshot, SoundRefs, StepParam, TakeId, TrackPatternData, MAX_STEPS,
+};
 
 use super::song_transport::SongTransportMode;
 use super::App;
@@ -37,6 +39,10 @@ pub(crate) struct PendingTakeLane {
     pub(crate) chunks: Vec<TrackPatternData>,
     /// Cleared template used to mint rollover chunks.
     template: TrackPatternData,
+    /// The bound cell's sound at punch-in (§17.3 "take record → share"):
+    /// recording performs the current sound rather than minting a new one,
+    /// so the committed take references this pair instead of cloning it.
+    sound: Option<SoundRefs>,
     /// Furthest written step end (note-on + duration), in take steps:
     /// finalizes `total_len_steps` (spec 8.5, release tail included).
     pub(crate) max_end_steps: f64,
@@ -390,6 +396,43 @@ mod tests {
             .all(|row| row.overrides.iter().all(|over| over.take_id.is_none())));
     }
 
+    /// §17.3 "take record → share": punch-in stores the bound cell's refs,
+    /// so the committed take references the scene's Patch/Mix pair instead
+    /// of minting a private clone — and an entity edit made through either
+    /// referent is heard by both.
+    #[test]
+    fn punch_in_shares_the_bound_cells_sound_refs() {
+        let (mut app, anchor) = capture_app();
+        let expected = app
+            .state
+            .with_project_scenes(|scenes| scenes.effective_sound_refs(0))
+            .expect("effective refs resolve");
+        assert!(app.take_record_note(0, press_at_beats(anchor, 12.1), 60.0, 2.0));
+        app.song_transport_mode = SongTransportMode::Stopped;
+        app.finish_song_capture_take(40.0).expect("commit succeeds");
+
+        let takes = app.state.track_takes(0);
+        assert_eq!(takes.len(), 1);
+        assert_eq!(
+            takes[0].sound, expected,
+            "the take shares the bound cell's Patch/Mix (takes spec 17.3)"
+        );
+        // Sharing is structural: writing the scene pattern's entities is
+        // heard through the take's chunks with no fan-out anywhere.
+        let scene_pattern = app
+            .state
+            .effective_track_pattern_id(0)
+            .expect("scene pattern");
+        let chunk = takes[0].chunks[0];
+        app.state.with_scenes_mut(|scenes| {
+            assert!(scenes.track_pools[0].edit(scene_pattern, |data| {
+                data.instrument_base_note_offset = 5.0;
+            }));
+            let heard = scenes.track_pools[0].get(chunk).expect("chunk resolves");
+            assert_eq!(heard.instrument_base_note_offset.to_bits(), 5.0f32.to_bits());
+        });
+    }
+
     #[test]
     fn recording_past_the_song_end_extends_it() {
         let (mut app, anchor) = capture_app();
@@ -500,9 +543,12 @@ impl App {
                 .load(std::sync::atomic::Ordering::Relaxed) as u8,
         );
         // Template for a lazily minted lane: the track's BOUND source
-        // (takes spec 16.2 — punch-in clones whatever the panel shows and
-        // the monitor sounds), else a default lane for bare tracks.
+        // (takes spec 16.2 — punch-in performs whatever the panel shows and
+        // the monitor sounds), else a default lane for bare tracks. Only the
+        // sequence half of the template survives registration; the sound is
+        // SHARED via the bound refs (§17.3), not cloned.
         let bound = self.bound_read_pattern(track);
+        let bound_sound = self.bound_sound_refs(track);
         let template = || {
             let mut data = self
                 .state
@@ -552,6 +598,7 @@ impl App {
                 step_beats,
                 chunks: vec![template.clone()],
                 template,
+                sound: bound_sound,
                 max_end_steps: 0.0,
             });
         }
@@ -612,7 +659,7 @@ impl App {
             chunks.truncate(needed_chunks.max(1));
             let take_id = self
                 .state
-                .register_track_take(track, None, chunks, total_len_steps)?;
+                .register_track_take(track, None, chunks, total_len_steps, lane.sound)?;
             committed.push(CommittedTakeLane {
                 track,
                 take_id,

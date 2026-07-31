@@ -174,6 +174,23 @@ impl TrackPatternPool {
         }
     }
 
+    /// Re-link a pattern's sound to an existing entity pair (§17.3 re-link /
+    /// repoint). Reference semantics: future edits to those entities follow.
+    /// Returns whether the refs actually moved; refuses dangling refs (the
+    /// always-resolves invariant).
+    pub fn relink_sound(&mut self, id: PatternId, refs: SoundRefs) -> bool {
+        if !self.sounds.resolves(refs) {
+            return false;
+        }
+        match self.patterns.get_mut(&id) {
+            Some(stored) if stored.sound != refs => {
+                stored.sound = refs;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Remove a pattern, returning its composed form. Its entities stay in
     /// the pool (§17.4: never GC'd behind the user's back mid-session;
     /// unreferenced entities are pruned at save).

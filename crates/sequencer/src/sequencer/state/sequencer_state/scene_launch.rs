@@ -161,6 +161,11 @@ impl SequencerState {
             names,
             instrument_types,
         );
+        // The capture no longer releases device loans (takes spec 18.1 step
+        // 3: it captures the scene-effective device state for borrowed lanes
+        // instead); this path overwrites the mirror below, so drop the loans
+        // here — the App re-binds on its next sync.
+        self.release_bound_device_state();
         profile.capture_current_snapshot = started.elapsed();
 
         let (sample_ids, snapshot_source) = {
@@ -281,6 +286,11 @@ impl SequencerState {
             names,
             instrument_types,
         );
+        // The capture no longer releases device loans (takes spec 18.1 step
+        // 3: it captures the scene-effective device state for borrowed lanes
+        // instead); this path overwrites the mirror below, so drop the loans
+        // here — the App re-binds on its next sync.
+        self.release_bound_device_state();
         let launched = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
@@ -369,6 +379,11 @@ impl SequencerState {
             names,
             instrument_types,
         );
+        // The capture no longer releases device loans (takes spec 18.1 step
+        // 3: it captures the scene-effective device state for borrowed lanes
+        // instead); this path overwrites the mirror below, so drop the loans
+        // here — the App re-binds on its next sync.
+        self.release_bound_device_state();
         let launched = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             if scene >= scenes.scene_count() {
@@ -587,12 +602,11 @@ impl SequencerState {
                 instrument_types,
             )
         });
-        if scene_latched {
-            // The capture above normally releases device loans before the
-            // per-lane restores below overwrite the mirror; keep that when
-            // the save-back is skipped.
-            self.release_bound_device_state();
-        }
+        // The capture no longer releases device loans (it captures the
+        // scene-effective device state for borrowed lanes instead, takes
+        // spec 18.1 step 3); the per-lane restores below overwrite the
+        // mirror, so the loans must still be dropped here.
+        self.release_bound_device_state();
         let launched = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             if scene >= scenes.scene_count() {
@@ -774,6 +788,11 @@ impl SequencerState {
             names,
             instrument_types,
         );
+        // The capture no longer releases device loans (takes spec 18.1 step
+        // 3: it captures the scene-effective device state for borrowed lanes
+        // instead); this path overwrites the mirror below, so drop the loans
+        // here — the App re-binds on its next sync.
+        self.release_bound_device_state();
         let id = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
@@ -805,6 +824,11 @@ impl SequencerState {
             names,
             instrument_types,
         );
+        // The capture no longer releases device loans (takes spec 18.1 step
+        // 3: it captures the scene-effective device state for borrowed lanes
+        // instead); this path overwrites the mirror below, so drop the loans
+        // here — the App re-binds on its next sync.
+        self.release_bound_device_state();
         let (id, data) = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
@@ -840,6 +864,11 @@ impl SequencerState {
             names,
             instrument_types,
         );
+        // The capture no longer releases device loans (takes spec 18.1 step
+        // 3: it captures the scene-effective device state for borrowed lanes
+        // instead); this path overwrites the mirror below, so drop the loans
+        // here — the App re-binds on its next sync.
+        self.release_bound_device_state();
         let (id, data) = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
@@ -889,6 +918,11 @@ impl SequencerState {
             names,
             instrument_types,
         );
+        // The capture no longer releases device loans (takes spec 18.1 step
+        // 3: it captures the scene-effective device state for borrowed lanes
+        // instead); this path overwrites the mirror below, so drop the loans
+        // here — the App re-binds on its next sync.
+        self.release_bound_device_state();
         let (was_effective, replacement) = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
@@ -943,6 +977,11 @@ impl SequencerState {
             names,
             instrument_types,
         );
+        // The capture no longer releases device loans (takes spec 18.1 step
+        // 3: it captures the scene-effective device state for borrowed lanes
+        // instead); this path overwrites the mirror below, so drop the loans
+        // here — the App re-binds on its next sync.
+        self.release_bound_device_state();
         let restore_current_track = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
@@ -994,6 +1033,11 @@ impl SequencerState {
             names,
             instrument_types,
         );
+        // The capture no longer releases device loans (takes spec 18.1 step
+        // 3: it captures the scene-effective device state for borrowed lanes
+        // instead); this path overwrites the mirror below, so drop the loans
+        // here — the App re-binds on its next sync.
+        self.release_bound_device_state();
         let (cleared, should_silence) = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();

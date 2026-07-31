@@ -974,11 +974,63 @@ impl PatternSnapshot {
         }
     }
 
+    /// Whole-grid restores relocate lanes (track delete/reorder compaction),
+    /// so the snapshot's graph identity is adopted verbatim — the live slot
+    /// at this index belonged to a different track before the shift.
     pub fn restore_track(&self, state: &SequencerState, track: usize) -> bool {
         let Some(data) = self.track_pattern_data(track) else {
             return false;
         };
-        data.restore_to(state, track)
+        data.restore_to_adopting_snapshot_identity(state, track)
+    }
+
+    /// Replace one lane's device/sound half with `data`'s — instruments,
+    /// effects, MIDI FX, rack, process chain, and the device+mixer track
+    /// params — leaving the lane's step content and step-grid fields
+    /// (`num_steps`, timebase, swing) untouched. Used to make a capture
+    /// TRUTHFUL for a borrowed lane (takes spec 18.1 step 3): the mirror
+    /// holds the bound source's devices, and the scene save-back must
+    /// persist the scene-effective sound instead.
+    pub fn overwrite_track_device_state(&mut self, track: usize, data: &TrackPatternData) {
+        let Some(params) = self.track_params.get_mut(track) else {
+            return;
+        };
+        let mut device_params = data.track_params.clone();
+        device_params.num_steps = params.num_steps;
+        device_params.timebase = params.timebase;
+        device_params.swing = params.swing;
+        device_params.swing_resolution = params.swing_resolution;
+        *params = device_params;
+        if let Some(slots) = self.effect_slots.get_mut(track) {
+            *slots = data.effect_slots.clone();
+        }
+        if let Some(slots) = self.midi_fx_slots.get_mut(track) {
+            *slots = data.midi_fx_slots.clone();
+        }
+        if let Some(slot) = self.instrument_slots.get_mut(track) {
+            *slot = data.instrument_slot.clone();
+        }
+        if let Some(offset) = self.instrument_base_note_offsets.get_mut(track) {
+            *offset = data.instrument_base_note_offset;
+        }
+        if let Some(state) = self.track_sound_states.get_mut(track) {
+            *state = data.track_sound_state.clone();
+        }
+        if let Some(sample) = self.sample_ids.get_mut(track) {
+            *sample = data.sample_id.clone();
+        }
+        if let Some(instrument_type) = self.instrument_types.get_mut(track) {
+            *instrument_type = data.instrument_type;
+        }
+        if let Some(run_mode) = self.instrument_run_modes.get_mut(track) {
+            *run_mode = data.instrument_run_mode;
+        }
+        if let Some(rack) = self.rack_tracks.get_mut(track) {
+            *rack = data.rack_track.clone();
+        }
+        if let Some(chain) = self.process_chains.get_mut(track) {
+            *chain = data.process_chain.clone();
+        }
     }
 
     pub fn track_pattern_data(&self, track: usize) -> Option<TrackPatternData> {

@@ -632,6 +632,10 @@ impl App {
     /// Silent while the mirror holds a bound-but-not-audible clip (takes
     /// spec 16.7): tuning a past/future clip is display + edit only.
     pub(super) fn send_effective_instrument_param(&self, track: usize, param_idx: usize) {
+        // A base edit under an engaged override is legal (release pops back
+        // to the new base): keep the leak shadow tracking the fresh base.
+        #[cfg(debug_assertions)]
+        self.refresh_macro_base_shadow_for_instrument(track, param_idx);
         if self.sound_binding_is_silent(track) {
             return;
         }

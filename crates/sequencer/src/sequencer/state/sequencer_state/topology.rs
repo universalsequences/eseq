@@ -584,6 +584,9 @@ impl SequencerState {
             names,
             instrument_types,
         );
+        // Track indices are about to shift; the index-keyed device loans
+        // must not survive the shift (the App re-binds on its next sync).
+        self.release_bound_device_state();
         {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             scenes.save_scene_snapshot_masked(current_pattern, current_snapshot.clone(), self.stale_live_lane_mask());

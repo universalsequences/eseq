@@ -863,6 +863,14 @@ pub struct App {
     pub history: history::UndoManager<history::EditPatch>,
     pub macro_engine: crate::macro_engine::MacroEngine,
     scene_macro_runtime: HashMap<crate::macro_engine::MacroId, SceneMacroRuntime>,
+    /// Debug tripwire for the override-leak invariant (takes spec §17.10 /
+    /// macro spec §8.7): per engaged override, the base value the capture
+    /// seams are allowed to persist. Save-back writes pool ENTITIES now, so
+    /// one leaked override into a shared Patch/Mix corrupts every referent
+    /// silently — the capture seams assert against this shadow.
+    #[cfg(debug_assertions)]
+    pub(crate) macro_base_shadow:
+        std::sync::Mutex<HashMap<crate::macro_engine::MacroParamKey, f32>>,
     pub tracks: Vec<String>,
     pub track_colors: Vec<TrackColor>,
     pub track_collapsed: Vec<bool>,
@@ -972,6 +980,12 @@ pub struct App {
     /// loaded into the live mirror (takes spec 16.2). `None` = the mirror
     /// holds the effective scene pattern's devices, i.e. nothing is borrowed.
     pub(crate) loaded_sound_binding: Vec<Option<sound_binding::BoundSource>>,
+    /// Per track, the last non-empty source rule 2 resolved under song
+    /// playback. Gaps hold refs (takes spec §17.3): an empty span is *no
+    /// events*, not *no sound*, so the binding retains this instead of
+    /// resetting to the scene pattern between clips. Cleared when song
+    /// playback stops being authoritative for the lane.
+    pub(crate) song_held_sources: Vec<Option<sound_binding::BoundSource>>,
     /// Per track, whether the ENGINE currently reflects the loaded binding
     /// (takes spec 16.7). False while a non-audible clip is bound during song
     /// playback: the panel and the edit target move, the sound does not —
@@ -1538,6 +1552,9 @@ impl App {
         audible_beats: Option<f64>,
         mirror: bool,
     ) -> Result<PatternLaunchOutcome, PatternLaunchError> {
+        // Launch save-back seam (takes spec 17.10): the scene capture below
+        // must persist base values, never an engaged macro override.
+        self.debug_assert_no_macro_override_leak();
         let num_tracks = self.tracks.len();
         let scene = match target {
             PatternLaunchTarget::Scene { scene }
@@ -2231,6 +2248,8 @@ impl App {
             device_registry: DeviceIdentityRegistry::default(),
             history: history::UndoManager::default(),
             macro_engine: crate::macro_engine::MacroEngine::default(),
+            #[cfg(debug_assertions)]
+            macro_base_shadow: std::sync::Mutex::new(HashMap::new()),
             scene_macro_runtime: HashMap::new(),
             tracks: Vec::new(),
             track_colors: Vec::new(),
@@ -2374,6 +2393,7 @@ impl App {
             arrangement_cursor_track: -1,
             arrangement_view_visible: false,
             loaded_sound_binding: Vec::new(),
+            song_held_sources: Vec::new(),
             sound_binding_monitored: Vec::new(),
             pending_song_row_invalidation: None,
             sound_binding_epoch: 0,

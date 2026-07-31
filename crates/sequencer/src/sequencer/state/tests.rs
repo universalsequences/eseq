@@ -5601,7 +5601,7 @@
         chunk.track_params.num_steps = MAX_STEPS;
         chunk.track_bits[0] |= 1;
         let take_id = state
-            .register_track_take(0, None, vec![chunk], 16)
+            .register_track_take(0, None, vec![chunk], 16, None)
             .expect("take registers");
         let chunk_id = state.track_takes(0)[0].chunks[0];
 
