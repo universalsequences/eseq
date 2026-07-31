@@ -106,19 +106,30 @@ fn parse_palette_target(
     };
     match kind.as_str() {
         "cell" => Ok(Some(PaletteTarget::Cell)),
-        "take" => {
-            let id = map_number(map, "target-id")
-                .ok_or_else(|| "missing or invalid :target-id for a take target".to_string())?;
-            Ok(Some(PaletteTarget::Take(TakeId(id as u64))))
-        }
-        "pattern" => {
-            let id = map_number(map, "target-id").ok_or_else(|| {
-                "missing or invalid :target-id for a pattern target".to_string()
-            })?;
-            Ok(Some(PaletteTarget::Pattern(PatternId(id as u64))))
-        }
+        "take" => Ok(Some(PaletteTarget::Take(TakeId(map_entity_id(
+            map,
+            "target-id",
+        )?)))),
+        "pattern" => Ok(Some(PaletteTarget::Pattern(PatternId(map_entity_id(
+            map,
+            "target-id",
+        )?)))),
         other => Err(format!("unknown palette target kind: {other}")),
     }
+}
+
+/// A pool entity id from a payload: a finite non-negative integer. `as u64`
+/// alone would fold a negative or fractional number onto a real id
+/// (saturating to 0 / truncating) and silently retarget entity 0.
+fn map_entity_id(
+    map: &HashMap<String, Rc<RefCell<Value>>>,
+    key: &str,
+) -> Result<u64, String> {
+    let id = map_number(map, key).ok_or_else(|| format!("missing or invalid :{key}"))?;
+    if !id.is_finite() || id < 0.0 || id.fract() != 0.0 {
+        return Err(format!(":{key} is not a valid entity id: {id}"));
+    }
+    Ok(id as u64)
 }
 
 fn payload_map(payload: &Value) -> Result<&HashMap<String, Rc<RefCell<Value>>>, String> {
@@ -729,15 +740,9 @@ fn run_transport(
                     .map(|(_, target)| target)
             });
             let target = app.palette_target_or_binding(track, target);
-            let patch = map_number(map, "patch")
-                .ok_or("missing or invalid :patch")
-                .map(|id| sequencer::sequencer::PatchId(id as u64))?;
+            let patch = sequencer::sequencer::PatchId(map_entity_id(map, "patch")?);
             let mix = if name == "sound-apply-with-mix" {
-                Some(
-                    map_number(map, "mix")
-                        .ok_or("missing or invalid :mix")
-                        .map(|id| sequencer::sequencer::MixId(id as u64))?,
-                )
+                Some(sequencer::sequencer::MixId(map_entity_id(map, "mix")?))
             } else {
                 None
             };
@@ -762,12 +767,12 @@ fn run_transport(
             let map = payload_map(payload)?;
             let track = map_usize(map, "track").ok_or("missing or invalid :track")?;
             let kind = map_string(map, "kind").unwrap_or_else(|| "patch".to_string());
-            let id = map_number(map, "entity").ok_or("missing or invalid :entity")?;
+            let id = map_entity_id(map, "entity")?;
             let name_arg =
                 map_string(map, "name").ok_or("missing or invalid :name")?;
             let (patch, mix) = match kind.as_str() {
-                "patch" => (Some(sequencer::sequencer::PatchId(id as u64)), None),
-                "mix" => (None, Some(sequencer::sequencer::MixId(id as u64))),
+                "patch" => (Some(sequencer::sequencer::PatchId(id)), None),
+                "mix" => (None, Some(sequencer::sequencer::MixId(id))),
                 other => return Err(format!("unknown entity kind: {other}")),
             };
             let status = app.palette_rename(track, patch, mix, &name_arg)?;
