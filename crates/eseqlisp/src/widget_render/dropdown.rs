@@ -112,7 +112,7 @@ pub fn hover_overlay(widget_id: u64, local_row: f32) -> bool {
             return false;
         }
 
-        let overlay_rect = super::get_overlay_rect();
+        let overlay_rect = super::overlay_rect_for_widget(widget_id);
         let menu_row = if let Some(rect) = overlay_rect {
             let r = local_row - rect.row;
             if r >= 0.0 && r < rect.height { r } else { -1.0 }
@@ -537,7 +537,7 @@ impl WidgetDefinition for DropdownWidget {
             }
             // Use the overlay rect (registered at render time) for hit-testing.
             // The overlay rect is in screen-space; local_row is in layout-space.
-            let overlay_rect = super::get_overlay_rect();
+            let overlay_rect = super::overlay_rect_for_widget(node.widget_id);
             let menu_row = if let Some(rect) = overlay_rect {
                 let r = local_row - rect.row;
                 if r >= 0.0 && r < rect.height { r } else { -1.0 }
@@ -559,7 +559,7 @@ impl WidgetDefinition for DropdownWidget {
                         state.ignore_opening_mouse_up = false;
                         state.scroll_offset = 0.0;
                         set_state(node.widget_id, state);
-                        super::clear_overlay();
+                        super::remove_overlay(node.widget_id);
                         return MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::String(
                             options[item_idx].clone(),
                         )));
@@ -574,7 +574,7 @@ impl WidgetDefinition for DropdownWidget {
                 state.ignore_opening_mouse_up = false;
                 state.scroll_offset = 0.0;
                 set_state(node.widget_id, state);
-                super::clear_overlay();
+                super::remove_overlay(node.widget_id);
             }
             MouseEventOutcome::Consume
         } else {
@@ -640,13 +640,13 @@ impl WidgetDefinition for DropdownWidget {
                     state.hovered_idx = None;
                     state.scroll_offset = 0.0;
                     set_state(node.widget_id, state);
-                    super::clear_overlay();
+                    super::remove_overlay(node.widget_id);
                     Some(WidgetEvent::Custom(Value::String(value)))
                 } else {
                     state.open = false;
                     state.scroll_offset = 0.0;
                     set_state(node.widget_id, state);
-                    super::clear_overlay();
+                    super::remove_overlay(node.widget_id);
                     Some(WidgetEvent::Custom(Value::Nil))
                 }
             }
@@ -655,7 +655,7 @@ impl WidgetDefinition for DropdownWidget {
                 state.hovered_idx = None;
                 state.scroll_offset = 0.0;
                 set_state(node.widget_id, state);
-                super::clear_overlay();
+                super::remove_overlay(node.widget_id);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             _ => None,
@@ -1063,10 +1063,8 @@ impl WidgetDefinition for DropdownWidget {
                 emit_rounded_rect_overlay(thumb_rect, thumb_color, 3.0, viewport);
             }
         } else if !state.open {
-            // Ensure overlay is cleared when closed
-            if super::overlay_widget_id() == Some(node.widget_id) {
-                super::clear_overlay();
-            }
+            // Ensure this dropdown's overlay entry is removed when closed
+            super::remove_overlay(node.widget_id);
         }
 
         prims

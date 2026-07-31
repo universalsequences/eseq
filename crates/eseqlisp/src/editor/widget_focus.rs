@@ -119,21 +119,20 @@ impl Editor {
         content_col: u16,
         content_row: u16,
     ) -> bool {
-        // If an overlay (dropdown menu) is active and click is inside it,
-        // skip focus so the overlay intercept handles it. If outside, dismiss
-        // the overlay and consume the click so it cannot activate the widget
-        // underneath the menu in the same mouse-down.
-        if crate::widget_render::overlay_widget_id().is_some() {
+        // If an overlay (dropdown menu) is active and the click is inside the
+        // topmost entry, skip focus so the overlay intercept handles it. If
+        // outside, dismiss the topmost entry and consume the click so it
+        // cannot activate the widget underneath the menu in the same
+        // mouse-down.
+        if let Some(entry) = crate::widget_render::topmost_overlay() {
             let local_row = precise_row - content_row as f32;
             let local_col = precise_col - content_col as f32;
             if crate::widget_render::overlay_contains(local_col, local_row) {
                 return false;
             }
-            // Dismiss overlay and stop here.
-            if let Some(id) = crate::widget_render::overlay_widget_id() {
-                crate::widget_render::dropdown::close_dropdown(id);
-            }
-            crate::widget_render::clear_overlay();
+            // Dismiss the topmost overlay and stop here.
+            crate::widget_render::dropdown::close_dropdown(entry.widget_id);
+            crate::widget_render::remove_overlay(entry.widget_id);
             self.mark_needs_redraw();
             return true;
         }

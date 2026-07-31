@@ -191,16 +191,27 @@ pub fn trigger_alignment_haptic() {
 pub fn trigger_alignment_haptic() {}
 
 // ── Overlay system ───────────────────────────────────────────────────────────
-// Only one overlay (dropdown menu, etc.) can be active at a time.
+// Overlays form a small kind-tagged stack (expected depth ≤ 2: a modal with a
+// dropdown above it). One entry per kind at a time: registering a kind that is
+// already on the stack replaces that entry in place. Input routes to the
+// topmost entry; cache bypasses trigger while any entry is active.
 
-struct OverlayInfo {
-    widget_id: u64,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayKind {
+    Dropdown,
+    Modal,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OverlayEntry {
+    pub widget_id: u64,
     /// Hit-test bounds in layout space (screen-relative, post-scroll).
-    rect: Rect,
+    pub rect: Rect,
+    pub kind: OverlayKind,
 }
 
 thread_local! {
-    static OVERLAY_INFO: RefCell<Option<OverlayInfo>> = RefCell::new(None);
+    static OVERLAY_STACK: RefCell<Vec<OverlayEntry>> = const { RefCell::new(Vec::new()) };
     static HAPTIC_BUCKETS: RefCell<HashMap<u64, i64>> = RefCell::new(HashMap::new());
     static DROP_HOVER_TARGET: RefCell<Option<u64>> = const { RefCell::new(None) };
     #[cfg(target_os = "macos")]
@@ -209,35 +220,94 @@ thread_local! {
     static WIDGET_PRIMITIVE_CACHE: RefCell<HashMap<u64, Vec<MetalPrimitive>>> = RefCell::new(HashMap::new());
 }
 
-pub fn set_overlay(widget_id: u64, rect: Rect) {
-    OVERLAY_INFO.with(|o| *o.borrow_mut() = Some(OverlayInfo { widget_id, rect }));
+/// Register (or refresh) an overlay entry. Replaces the existing entry of the
+/// same kind if one is on the stack, otherwise pushes on top.
+pub fn push_overlay(entry: OverlayEntry) {
+    OVERLAY_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if let Some(existing) = stack.iter_mut().find(|e| e.kind == entry.kind) {
+            *existing = entry;
+        } else {
+            stack.push(entry);
+        }
+    });
 }
 
+/// Dropdown registration shim: dropdowns are the only widgets that used the
+/// single-slot API this replaced.
+pub fn set_overlay(widget_id: u64, rect: Rect) {
+    push_overlay(OverlayEntry {
+        widget_id,
+        rect,
+        kind: OverlayKind::Dropdown,
+    });
+}
+
+/// Remove the entry owned by `widget_id`, if present. Used when an overlay
+/// owner dismisses itself (dropdown close/select/Escape).
+pub fn remove_overlay(widget_id: u64) {
+    let removed = OVERLAY_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        let before = stack.len();
+        stack.retain(|entry| entry.widget_id != widget_id);
+        before != stack.len()
+    });
+    if removed {
+        #[cfg(target_os = "macos")]
+        if !any_overlay_active() {
+            OVERLAY_PRIMITIVES.with(|o| o.borrow_mut().clear());
+        }
+        bump_widget_state_generation();
+    }
+}
+
+/// Clear the whole overlay stack. Used when the overlay world is torn down
+/// wholesale (buffer/tree switches, hot reload, tests).
 pub fn clear_overlay() {
-    OVERLAY_INFO.with(|o| *o.borrow_mut() = None);
+    OVERLAY_STACK.with(|stack| stack.borrow_mut().clear());
     #[cfg(target_os = "macos")]
     OVERLAY_PRIMITIVES.with(|o| o.borrow_mut().clear());
     bump_widget_state_generation();
 }
 
+/// The topmost overlay entry — the input-routing target.
+pub fn topmost_overlay() -> Option<OverlayEntry> {
+    OVERLAY_STACK.with(|stack| stack.borrow().last().copied())
+}
+
+/// True while any overlay is active — the cache-bypass gate.
+pub fn any_overlay_active() -> bool {
+    OVERLAY_STACK.with(|stack| !stack.borrow().is_empty())
+}
+
+/// Widget id of the topmost overlay entry.
 pub fn overlay_widget_id() -> Option<u64> {
-    OVERLAY_INFO.with(|o| o.borrow().as_ref().map(|s| s.widget_id))
+    topmost_overlay().map(|entry| entry.widget_id)
 }
 
+/// Hit rect of the topmost overlay entry.
 pub fn get_overlay_rect() -> Option<Rect> {
-    OVERLAY_INFO.with(|o| o.borrow().as_ref().map(|s| s.rect))
+    topmost_overlay().map(|entry| entry.rect)
 }
 
+/// Hit rect of the entry owned by `widget_id`, wherever it sits on the stack.
+pub fn overlay_rect_for_widget(widget_id: u64) -> Option<Rect> {
+    OVERLAY_STACK.with(|stack| {
+        stack
+            .borrow()
+            .iter()
+            .find(|entry| entry.widget_id == widget_id)
+            .map(|entry| entry.rect)
+    })
+}
+
+/// True if the point lies inside the topmost overlay entry's rect.
 pub fn overlay_contains(local_col: f32, local_row: f32) -> bool {
-    OVERLAY_INFO.with(|o| {
-        if let Some(ref s) = *o.borrow() {
-            local_row >= s.rect.row
-                && local_row < s.rect.row + s.rect.height
-                && local_col >= s.rect.col
-                && local_col < s.rect.col + s.rect.width
-        } else {
-            false
-        }
+    topmost_overlay().is_some_and(|entry| {
+        local_row >= entry.rect.row
+            && local_row < entry.rect.row + entry.rect.height
+            && local_col >= entry.rect.col
+            && local_col < entry.rect.col + entry.rect.width
     })
 }
 
@@ -1216,7 +1286,7 @@ fn hash_value(value: &Value, hasher: &mut DefaultHasher) {
 
 #[cfg(target_os = "macos")]
 fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Option<u64> {
-    if overlay_widget_id().is_some() || !cacheable_widget_primitives(&node.widget_type) {
+    if any_overlay_active() || !cacheable_widget_primitives(&node.widget_type) {
         return None;
     }
     if props_contain_reactive_ref(&node.props) {

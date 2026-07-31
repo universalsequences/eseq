@@ -778,24 +778,23 @@ impl Editor {
         precise_col: f32,
         precise_row: f32,
     ) -> bool {
-        // Overlay (dropdown menu, etc.) intercepts pointer events before normal
-        // hit-test. Compute its tile-local position directly: a frame-level
-        // overlay may legitimately extend above or left of its originating
-        // tile, where the normal content-area conversion rejects the point.
-        if widget_render::overlay_widget_id().is_some()
-            && matches!(
-                mouse.kind,
-                MouseEventKind::Down(MouseButton::Left)
-                    | MouseEventKind::Drag(MouseButton::Left)
-                    | MouseEventKind::Up(MouseButton::Left)
-            )
-        {
+        // The topmost overlay (dropdown menu, etc.) intercepts pointer events
+        // before normal hit-test. Compute its tile-local position directly: a
+        // frame-level overlay may legitimately extend above or left of its
+        // originating tile, where the normal content-area conversion rejects
+        // the point.
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Up(MouseButton::Left)
+        ) {
             let local_col = precise_col - content_col as f32;
             let local_row = precise_row - content_row as f32;
             if let Some(overlay_id) = widget_render::overlay_widget_id() {
                 let Some(layout) = self.runtime.current_layout.clone() else {
                     widget_render::dropdown::close_dropdown(overlay_id);
-                    widget_render::clear_overlay();
+                    widget_render::remove_overlay(overlay_id);
                     self.mark_needs_redraw();
                     return false;
                 };
@@ -822,7 +821,7 @@ impl Editor {
                     return true;
                 }
                 widget_render::dropdown::close_dropdown(overlay_id);
-                widget_render::clear_overlay();
+                widget_render::remove_overlay(overlay_id);
                 self.mark_needs_redraw();
             }
         }
@@ -1841,7 +1840,7 @@ impl Editor {
         delta_x: f32,
         delta_y: f32,
     ) -> bool {
-        // If a dropdown overlay is open, intercept scroll events for it
+        // If the topmost overlay is a dropdown menu, intercept scroll events for it
         if let Some(overlay_id) = widget_render::overlay_widget_id() {
             if widget_render::dropdown::scroll_overlay(overlay_id, delta_y) {
                 self.mark_needs_redraw();

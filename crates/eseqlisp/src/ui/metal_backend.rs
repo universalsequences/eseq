@@ -2652,7 +2652,7 @@ fragment float4 live_spectrogram_frag(
             Vec<widget_render::MetalPrimitive>,
             Vec<widget_render::MetalPrimitive>,
         ) {
-            if widget_render::overlay_widget_id().is_some() {
+            if widget_render::any_overlay_active() {
                 self.stats.note_widget_scene_overlay_bypass();
                 let (mut primitives, overlay) =
                     widget_render::collect_metal_primitives(layout, viewport, scroll_top, max_rows);
@@ -2774,7 +2774,7 @@ fragment float4 live_spectrogram_frag(
             max_rows: u16,
             runs: &[widget_render::MetalPrimitiveRun],
         ) {
-            if widget_render::overlay_widget_id().is_some() {
+            if widget_render::any_overlay_active() {
                 return;
             }
             let cache_parts = self.widget_scene_cache_parts(
@@ -5297,7 +5297,7 @@ fragment float4 live_spectrogram_frag(
                         ((content_right_px - content_left_px) / cell_w).max(0.0);
                     let fill_extra_cols = (content_width_cells - layout.rect.width).max(0.0);
                     let use_widget_run_cache = !tile.frame.dirty_widget_ids.is_empty()
-                        && widget_render::overlay_widget_id().is_none()
+                        && !widget_render::any_overlay_active()
                         && !widget_render::layout_wants_animation_frames(layout);
                     let scene_started = Instant::now();
                     let (
