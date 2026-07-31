@@ -73,6 +73,7 @@ pub mod live_audio;
 pub mod mode;
 pub mod reactive;
 pub mod runtime;
+pub mod sound_glyph_data;
 pub mod text;
 pub mod tile;
 pub mod widget_render;

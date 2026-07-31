@@ -89,24 +89,26 @@
     :color :dim
     :on-click |x y r| (on-press entry)))
 
-;; One palette row (17.6): swatch + name (inline-renameable) + referents +
-;; Apply / Apply-with-mix / Fork. The gray base entry is the
+;; One palette box (17.6 + sound-glyph spec §4): top-left swatch + name
+;; (inline-renameable), the plant glyph as the center region, referents +
+;; Apply / Apply-with-mix along the bottom. The gray base entry is the
 ;; scene-effective sound: outlined swatch, not filled — exactly the p-lock
-;; "def" chip treatment.
+;; "def" chip treatment. Boxes tile in a responsive grid (see
+;; sound-palette-panel) so the glyph gets real area instead of a row sliver.
 (def sound-palette-entry-row (entry)
   (let ((c (sound-palette-entry-color entry))
       (base (get entry :base))
       (current (get entry :current)))
     (box :key (str "sound-palette-entry-" (get entry :patch-id))
       :width :fill
-      :padding 0.18
+      :padding 0.25
       :corner-radius 5
       :background-color (if current
         (sound-palette-entry-tint entry)
         (rgba 1 1 1 0.025))
       :border-width (if current 0.75 0.35)
       :border-color (if current c (rgba 1 1 1 0.10))
-      (v-stack :gap 0.08
+      (v-stack :gap 0.12 :width :fill
         (h-stack :gap 0.28 :align :center
           (box :width 0.36 :height 0.9
             :corner-radius 2
@@ -128,16 +130,23 @@
               :on-click |x y r| (sound-palette-begin-rename entry)
               (label (str (substring (get entry :name) 0 9) (if base " (scene)" ""))
                 :font-size 9 :color (if current :white :dim) :bg :transparent)))
+          (box :flex 1 :bg :transparent))
+        ;; Center glyph region (sound-glyph spec §4/P2): the plant rendered
+        ;; from a host-published frame; the widget only knows the key.
+        (sound-glyph :key (str "sound-palette-glyph-" (get entry :patch-id))
+          :source (get entry :glyph-key)
+          :height 6.5)
+        (h-stack :gap 0.2 :align :center
+          ;; Reverse referent index ("used by ..."), truncated so long lists
+          ;; never push the action buttons out of the box.
+          (label (substring (get entry :referents) 0 14)
+            :key (str "sound-palette-referents-" (get entry :patch-id))
+            :font-size 8 :color :dim :bg :transparent)
           (box :flex 1 :bg :transparent)
           (sound-palette-action-button "apply" entry "apply"
             (lambda (entry) (sound-palette-apply entry)))
           (sound-palette-action-button "apply-mix" entry "+mix"
-            (lambda (entry) (sound-palette-apply-with-mix entry))))
-        ;; Second line: the reverse referent index ("used by ..."), on its
-        ;; own row so long lists never push the action buttons off screen.
-        (label (get entry :referents)
-          :key (str "sound-palette-referents-" (get entry :patch-id))
-          :font-size 8 :color :dim :bg :transparent)))))
+            (lambda (entry) (sound-palette-apply-with-mix entry))))))))
 
 (def sound-palette-header ()
   (box :width :fill :bg :transparent
@@ -206,6 +215,12 @@
       (v-stack :width :fill :gap 0.22
         (sound-palette-header)
         (scroll :width :fill :flex 1
-          (v-stack :width :fill :gap 0.22
+          ;; Grid of §4 boxes (not a row list): each cell gets enough area
+          ;; for a legible plant glyph; the grid reflows with the panel.
+          (responsive-grid :width :fill :gap 0.35
+            :min-item-width 14 :min-columns 2 :max-columns 4
+            ;; Explicit row height: without it the grid falls back to
+            ;; slot-width * row-aspect and cells balloon to near-square.
+            :row-height 10.4
             (each (sound-palette-entries) |entry idx|
               (sound-palette-entry-row entry))))))))

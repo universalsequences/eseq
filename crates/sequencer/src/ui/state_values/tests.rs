@@ -19741,6 +19741,10 @@
                         ("color-r", Value::Number(0.909_803_9)),
                         ("color-g", Value::Number(0.643_137_3)),
                         ("color-b", Value::Number(0.309_803_93)),
+                        (
+                            "glyph-key",
+                            Value::String("sound-glyph:track:0:patch:3".to_string()),
+                        ),
                     ]),
                 ]),
             ),
@@ -19792,6 +19796,19 @@
         assert_layout_inside(current_row, panel, "current entry");
         assert_layout_inside(apply, current_row, "apply button");
         assert_layout_inside(apply_mix, current_row, "apply-with-mix button");
+
+        // Sound-glyph spec P2: each box carries the plant glyph as its
+        // center region, fed by the host-published frame key.
+        let glyph = find_layout_node_by_stable_key(&layout, "sound-palette-glyph-3")
+            .expect("sound glyph widget should render");
+        assert_eq!(glyph.widget_type, "sound-glyph");
+        assert_finite_nonzero_rect(glyph, "sound glyph");
+        assert_layout_inside(glyph, current_row, "sound glyph");
+        assert_eq!(
+            glyph.props.get("source").map(|value| value.clone()),
+            Some(Value::String("sound-glyph:track:0:patch:3".to_string())),
+            "glyph source key comes from the entry's glyph-key"
+        );
 
         // Closed again: the reactive Nil collapses the panel to nothing.
         editor

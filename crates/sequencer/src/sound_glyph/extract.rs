@@ -111,11 +111,11 @@ fn parse_source(source: &str) -> ParsedSource {
     let mut node_index: HashMap<String, usize> = HashMap::new();
 
     let push_node = |nodes: &mut Vec<Node>,
-                         node_index: &mut HashMap<String, usize>,
-                         name: &str,
-                         kind: NodeKind,
-                         src_idx: usize,
-                         refs: Vec<String>| {
+                     node_index: &mut HashMap<String, usize>,
+                     name: &str,
+                     kind: NodeKind,
+                     src_idx: usize,
+                     refs: Vec<String>| {
         if let Some(&existing) = node_index.get(name) {
             nodes[existing].refs.extend(refs);
         } else {
@@ -148,7 +148,14 @@ fn parse_source(source: &str) -> ParsedSource {
                     for item in &items[2..] {
                         collect_symbols(item, &mut refs);
                     }
-                    push_node(&mut nodes, &mut node_index, name, NodeKind::Def, src_idx, refs);
+                    push_node(
+                        &mut nodes,
+                        &mut node_index,
+                        name,
+                        NodeKind::Def,
+                        src_idx,
+                        refs,
+                    );
                 }
             }
             "defun" | "defmacro" => {
@@ -474,7 +481,8 @@ fn collapse_chains(
             (i, p)
         })
         .collect();
-    let mut consumers: HashMap<usize, Vec<usize>> = owned.iter().map(|&i| (i, Vec::new())).collect();
+    let mut consumers: HashMap<usize, Vec<usize>> =
+        owned.iter().map(|&i| (i, Vec::new())).collect();
     for &i in owned {
         for &j in &producers[&i] {
             consumers.get_mut(&j).unwrap().push(i);

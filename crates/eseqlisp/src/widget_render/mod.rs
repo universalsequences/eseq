@@ -45,6 +45,7 @@ pub mod tree;
 pub mod virtual_vstack;
 pub mod vslider;
 pub mod vstack;
+pub mod sound_glyph;
 pub mod waveform;
 pub mod wavetable_viewer;
 pub mod wrap;
@@ -1052,6 +1053,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &transport_clock::TRANSPORT_CLOCK_WIDGET,
     &waveform::WAVEFORM_WIDGET,
     &wavetable_viewer::WAVETABLE_VIEWER_WIDGET,
+    &sound_glyph::SOUND_GLYPH_WIDGET,
     &spectrogram::SPECTROGRAM_WIDGET,
     &eq8_editor::EQ8_EDITOR_WIDGET,
     &phaser_notch::PHASER_NOTCH_WIDGET,

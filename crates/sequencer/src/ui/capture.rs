@@ -627,6 +627,93 @@ fn apply_capture_macro_host_commands(
     Ok(applied)
 }
 
+/// Optional `(def capture-sound-glyphs (list (dict :key "..." :instrument
+/// "core/operator" :params (dict "filter_freq" 12000)) ...))` in a capture
+/// script: publish a sound-glyph frame per entry so fixtures can render the
+/// `sound-glyph` widget at arbitrary param settings without app plumbing
+/// (sound-glyph spec §6 P2 visual iteration). `:params` holds raw (declared
+/// unit) overrides; unlisted params sit at their `@default`.
+fn publish_capture_sound_glyphs(editor: &mut Editor) -> Result<(), String> {
+    use eseqlisp::vm::Value;
+
+    let Ok(Some(Value::List(entries))) =
+        editor.runtime_mut().eval_str("capture-sound-glyphs")
+    else {
+        return Ok(());
+    };
+    let get_string = |map: &std::collections::HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>,
+                      key: &str|
+     -> Option<String> {
+        map.get(key).and_then(|value| match &*value.borrow() {
+            Value::String(s) => Some(s.clone()),
+            _ => None,
+        })
+    };
+    for entry in &entries {
+        let entry = entry.borrow();
+        let Value::Map(map) = &*entry else {
+            return Err("capture-sound-glyphs expects dict entries".to_string());
+        };
+        let key = get_string(map, "key").ok_or("capture-sound-glyphs entry missing :key")?;
+        let instrument = get_string(map, "instrument")
+            .ok_or("capture-sound-glyphs entry missing :instrument")?;
+        let source = sequencer::lisp_host::load_instrument_source(&instrument)
+            .map_err(|error| format!("capture-sound-glyphs: load {instrument}: {error}"))?;
+        let extracted = sequencer::sound_glyph::extract_skeleton(&source);
+        let specs = sequencer::sound_glyph::param_specs(&source);
+
+        let mut raw: std::collections::BTreeMap<String, f32> = specs
+            .iter()
+            .map(|(name, spec)| (name.clone(), spec.default))
+            .collect();
+        if let Some(params) = map.get("params") {
+            if let Value::Map(params) = &*params.borrow() {
+                for (name, value) in params {
+                    if let Value::Number(number) = &*value.borrow() {
+                        raw.insert(name.clone(), *number as f32);
+                    }
+                }
+            }
+        }
+        let values: std::collections::BTreeMap<String, f32> = raw
+            .into_iter()
+            .map(|(name, value)| {
+                let norm = match specs.get(&name) {
+                    Some(spec) if (spec.max - spec.min).abs() > f32::EPSILON => {
+                        ((value - spec.min) / (spec.max - spec.min)).clamp(0.0, 1.0)
+                    }
+                    _ => 0.5,
+                };
+                (name, norm)
+            })
+            .collect();
+        let geometry = sequencer::sound_glyph::resolve_geometry(&extracted, &values);
+        eseqlisp::sound_glyph_data::publish_sound_glyph_frame(
+            key,
+            eseqlisp::sound_glyph_data::SoundGlyphFrame {
+                revision: 1,
+                strokes: geometry
+                    .strokes
+                    .into_iter()
+                    .map(|stroke| eseqlisp::sound_glyph_data::SoundGlyphStroke {
+                        points: stroke.points,
+                        width: stroke.width,
+                    })
+                    .collect(),
+                marks: geometry
+                    .marks
+                    .into_iter()
+                    .map(|mark| eseqlisp::sound_glyph_data::SoundGlyphMark {
+                        pos: mark.pos,
+                        radius: mark.radius,
+                    })
+                    .collect(),
+            },
+        );
+    }
+    Ok(())
+}
+
 /// Optional `(def capture-click-widgets (list "dropdown"))` in a capture
 /// script: after the first layout, synthesize a left click on the center of
 /// the first widget of each named type. This lets fixtures capture state that
@@ -853,6 +940,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         &mut SoundPaletteFrameState::default(),
         true,
     );
+    publish_capture_sound_glyphs(&mut editor)?;
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
 

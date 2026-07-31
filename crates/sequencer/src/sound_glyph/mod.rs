@@ -11,6 +11,7 @@
 //! groups via [`stock_skeleton`].
 
 mod extract;
+mod geometry;
 mod sexpr;
 mod stock;
 #[cfg(test)]
@@ -18,6 +19,10 @@ mod tests;
 
 pub use extract::{
     extract_skeleton, Branch, ExtractedSkeleton, Skeleton, GLOBAL_CLUSTER, MAX_BRANCHES,
+};
+pub use geometry::{
+    param_ranges, param_specs, resolve_geometry, GlyphGeometry, GlyphMark, GlyphStroke, ParamSpec,
+    TRUNK,
 };
 pub use stock::stock_skeleton;
 

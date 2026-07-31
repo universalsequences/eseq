@@ -73,7 +73,11 @@ fn operator_param_membership() {
     assert_eq!(extracted.param_branch.len(), 110);
     for (param, cluster) in &extracted.param_branch {
         assert!(
-            extracted.skeleton.branches.iter().any(|b| &b.cluster == cluster),
+            extracted
+                .skeleton
+                .branches
+                .iter()
+                .any(|b| &b.cluster == cluster),
             "param {param} maps to unknown branch {cluster}",
         );
     }
@@ -111,7 +115,11 @@ fn operator_weights_cover_params_and_owned_defs() {
         );
         // children carry the owned-def heft: their weights sum to it.
         let child_sum: usize = b.children.iter().map(|c| c.weight).sum();
-        assert_eq!(b.weight, params + child_sum, "weight identity for {cluster}");
+        assert_eq!(
+            b.weight,
+            params + child_sum,
+            "weight identity for {cluster}"
+        );
     }
     // Per-op level/coarse/fine pre-resolves are owned defs, so op branches
     // outweigh their raw param count.
@@ -134,7 +142,10 @@ fn wavetable_cluster_names_and_order() {
         Some("global"),
     );
     assert_eq!(
-        extracted.param_branch.get("filter_env_amt").map(String::as_str),
+        extracted
+            .param_branch
+            .get("filter_env_amt")
+            .map(String::as_str),
         Some("filter"),
     );
     // Oscillator branches own their def chains (phase/warp/fold/scan).
@@ -146,7 +157,9 @@ fn wavetable_cluster_names_and_order() {
 fn triton_extracts_within_target_granularity() {
     let extracted = extract_skeleton(&instrument_source("core/triton/dsp.lisp"));
     let names = cluster_names(&extracted.skeleton);
-    for expected in ["osc1", "osc2", "feg", "aeg", "lfo1", "lfo2", "peg", "global"] {
+    for expected in [
+        "osc1", "osc2", "feg", "aeg", "lfo1", "lfo2", "peg", "global",
+    ] {
         assert!(names.contains(&expected), "missing {expected} in {names:?}");
     }
     let count = extracted.skeleton.branches.len();
@@ -253,10 +266,7 @@ fn param_extending_another_param_name_joins_its_cluster() {
                   (param filter_freq @default 100 @min 20 @max 20000)\n\
                   (param tone @default 0 @min 0 @max 1)\n";
     let extracted = extract_skeleton(source);
-    assert_eq!(
-        cluster_names(&extracted.skeleton),
-        vec!["filter", "global"],
-    );
+    assert_eq!(cluster_names(&extracted.skeleton), vec!["filter", "global"],);
     assert_eq!(
         extracted.param_branch.get("filter").map(String::as_str),
         Some("filter"),
@@ -277,7 +287,10 @@ fn sub_prefix_cluster_folds_into_parent_cluster() {
     let extracted = extract_skeleton(source);
     assert_eq!(cluster_names(&extracted.skeleton), vec!["env"]);
     assert_eq!(
-        extracted.param_branch.get("env_loop_rate").map(String::as_str),
+        extracted
+            .param_branch
+            .get("env_loop_rate")
+            .map(String::as_str),
         Some("env"),
     );
     assert_eq!(
@@ -328,10 +341,18 @@ fn stock_skeletons_cover_all_builtins_and_sampler() {
             "{name}: over branch cap",
         );
         // Every param maps to an existing branch.
-        assert_eq!(extracted.param_branch.len(), descriptor.params.len(), "{name}");
+        assert_eq!(
+            extracted.param_branch.len(),
+            descriptor.params.len(),
+            "{name}"
+        );
         for (param, cluster) in &extracted.param_branch {
             assert!(
-                extracted.skeleton.branches.iter().any(|b| &b.cluster == cluster),
+                extracted
+                    .skeleton
+                    .branches
+                    .iter()
+                    .any(|b| &b.cluster == cluster),
                 "{name}: param {param} maps to unknown branch {cluster}",
             );
         }
@@ -368,4 +389,118 @@ fn cache_reuses_extraction_per_source_hash() {
     let c = cache.get_or_extract(&edited);
     assert_eq!(cache.len(), 2);
     assert_eq!(*a, *c);
+}
+
+// ── geometry (P2) ──
+
+fn norm_values(
+    extracted: &ExtractedSkeleton,
+    fill: f32,
+) -> std::collections::BTreeMap<String, f32> {
+    extracted
+        .param_branch
+        .keys()
+        .map(|p| (p.clone(), fill))
+        .collect()
+}
+
+#[test]
+fn geometry_is_deterministic() {
+    let extracted = extract_skeleton(&instrument_source("core/operator/dsp.lisp"));
+    let values = norm_values(&extracted, 0.37);
+    let a = resolve_geometry(&extracted, &values);
+    let b = resolve_geometry(&extracted, &values);
+    assert_eq!(format!("{a:?}"), format!("{b:?}"));
+    assert!(!a.strokes.is_empty());
+    assert!(!a.marks.is_empty());
+}
+
+#[test]
+fn geometry_stays_inside_unit_square() {
+    for rel in [
+        "core/operator/dsp.lisp",
+        "core/wavetable/dsp.lisp",
+        "core/triton/dsp.lisp",
+    ] {
+        let extracted = extract_skeleton(&instrument_source(rel));
+        for fill in [0.0, 0.5, 1.0] {
+            let geom = resolve_geometry(&extracted, &norm_values(&extracted, fill));
+            for stroke in &geom.strokes {
+                assert!(stroke.points.len() >= 2, "{rel}: degenerate stroke");
+                for p in &stroke.points {
+                    assert!(
+                        (-0.02..=1.02).contains(&p[0]) && (-0.02..=1.02).contains(&p[1]),
+                        "{rel} fill {fill}: point {p:?} of {} escapes unit square",
+                        stroke.branch,
+                    );
+                }
+            }
+            for mark in &geom.marks {
+                assert!(mark.radius > 0.0, "{rel}: zero-radius mark {}", mark.param);
+            }
+        }
+    }
+}
+
+#[test]
+fn geometry_branch_lengths_never_degenerate() {
+    let extracted = extract_skeleton(&instrument_source("core/operator/dsp.lisp"));
+    let geom = resolve_geometry(&extracted, &norm_values(&extracted, 0.0));
+    for stroke in &geom.strokes {
+        let len: f32 = stroke
+            .points
+            .windows(2)
+            .map(|w| ((w[1][0] - w[0][0]).powi(2) + (w[1][1] - w[0][1]).powi(2)).sqrt())
+            .sum();
+        assert!(len > 0.02, "stroke {} too short: {len}", stroke.branch);
+    }
+}
+
+#[test]
+fn changing_one_param_only_moves_its_own_branch() {
+    let extracted = extract_skeleton(&instrument_source("core/operator/dsp.lisp"));
+    let base_values = norm_values(&extracted, 0.5);
+    let mut edited_values = base_values.clone();
+    edited_values.insert("filter_freq".to_string(), 1.0);
+    let owner = extracted.param_branch.get("filter_freq").unwrap().clone();
+
+    let base = resolve_geometry(&extracted, &base_values);
+    let edited = resolve_geometry(&extracted, &edited_values);
+
+    assert_eq!(base.strokes.len(), edited.strokes.len());
+    assert_eq!(base.marks.len(), edited.marks.len());
+    let mut owner_changed = false;
+    for (a, b) in base.strokes.iter().zip(&edited.strokes) {
+        assert_eq!(a.branch, b.branch);
+        if a.branch == owner {
+            owner_changed |= a != b;
+        } else {
+            assert_eq!(a, b, "non-owner stroke {} moved", a.branch);
+        }
+    }
+    for (a, b) in base.marks.iter().zip(&edited.marks) {
+        assert_eq!((&a.branch, &a.param), (&b.branch, &b.param));
+        if a.branch != owner {
+            assert_eq!(a, b, "non-owner mark {} moved", a.param);
+        }
+    }
+    assert!(owner_changed, "owning branch {owner} did not change");
+    // The edited param's own mark grew.
+    let mark = |g: &GlyphGeometry| {
+        g.marks
+            .iter()
+            .find(|m| m.param == "filter_freq")
+            .unwrap()
+            .radius
+    };
+    assert!(mark(&edited) > mark(&base));
+}
+
+#[test]
+fn param_ranges_reads_min_max() {
+    let ranges = param_ranges(&instrument_source("core/operator/dsp.lisp"));
+    assert_eq!(ranges.get("opa_level_db"), Some(&(-60.0, 0.0)));
+    assert_eq!(ranges.get("opa_freq_hz"), Some(&(0.1, 20000.0)));
+    assert_eq!(ranges.get("opa_on"), Some(&(0.0, 1.0)));
+    assert_eq!(ranges.len(), 110);
 }
