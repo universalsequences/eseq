@@ -73,5 +73,6 @@ mod scheduler;
 pub use scheduler::scheduled_event;
 #[allow(dead_code)]
 pub mod sequencer;
+pub mod sound_glyph;
 pub mod track_color;
 pub mod app;
