@@ -11600,3 +11600,365 @@ fn inline_widget_dims_in_place_when_its_source_form_is_edited() {
         .expect("stale slider remains visible");
     assert!(matches!(slider.props.get("muted"), Some(Value::Bool(true))));
 }
+
+// ── Modal input + focus (modal spec phase 3) ────────────────────────────────
+
+#[cfg(target_os = "macos")]
+fn find_widget_of_type<'a>(
+    node: &'a crate::layout::LayoutNode,
+    widget_type: &str,
+) -> Option<&'a crate::layout::LayoutNode> {
+    if node.widget_type == widget_type {
+        return Some(node);
+    }
+    node.children
+        .iter()
+        .find_map(|child| find_widget_of_type(child, widget_type))
+}
+
+/// Render the active tile's layout once so open overlays (modal panel,
+/// dropdown menus) register their entries on the overlay stack, exactly as a
+/// live frame draw would.
+#[cfg(target_os = "macos")]
+fn register_active_layout_overlays(editor: &mut Editor) {
+    let layout = editor
+        .runtime
+        .current_layout
+        .clone()
+        .expect("active widget layout");
+    let _ = crate::widget_render::collect_metal_primitives(
+        &layout,
+        crate::widget_render::WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 600.0,
+            vp_h: 400.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 20.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+        0.0,
+        20,
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn modal_two_tile_editor(panel_body: &str) -> Editor {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(&format!(
+            r#"
+            (def modal-open (state true))
+            (def modal-clicked (state false))
+            (def underlay-clicked (state false))
+            (effect-buffer "*panel*" {panel_body})
+            (effect-buffer "*sequencer*"
+              (button "underlay"
+                :width 60
+                :height 18
+                :on-click (lambda (event) (set! underlay-clicked true))))
+            (set-layout
+              (list :rows :gap 0
+                0.1 (list :buf "*panel*" :hide-status true)
+                0.9 (list :buf "*sequencer*" :hide-status true)))
+            "#
+        ))
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 20);
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+
+    // Activate the panel tile (top, 2 rows) with a click on its content, then
+    // rebuild the frame so the runtime layout is the panel's, laid out against
+    // the whole-window frame viewport.
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 0),
+        1.0,
+        0.5,
+        0,
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 0),
+        1.0,
+        0.5,
+        0,
+    );
+    let panel_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*panel*")
+        .unwrap();
+    let panel_tile = editor
+        .tile_root
+        .find_leaf_by_buffer_idx(panel_idx)
+        .unwrap()
+        .id;
+    assert_eq!(editor.active_tile, panel_tile, "panel tile must be active");
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    editor
+}
+
+#[cfg(target_os = "macos")]
+const MODAL_PANEL_BODY: &str = r#"
+    (modal :is-open modal-open
+           :on-close (lambda () (set! modal-open false))
+      (v-stack
+        (button "inside"
+          :focusable true
+          :on-click (lambda (event) (set! modal-clicked true)))))
+"#;
+
+#[cfg(target_os = "macos")]
+fn eval_bool(editor: &mut Editor, expr: &str) -> bool {
+    match editor.runtime_mut().eval_str(expr).unwrap().unwrap() {
+        Value::Bool(value) => value,
+        other => panic!("{expr} => {other:?}"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn modal_click_inside_hits_a_modal_child_not_the_tile_below() {
+    let mut editor = modal_two_tile_editor(MODAL_PANEL_BODY);
+    register_active_layout_overlays(&mut editor);
+    let entry = crate::widget_render::topmost_overlay().expect("modal overlay entry");
+    assert_eq!(entry.kind, crate::widget_render::OverlayKind::Modal);
+
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    let button = find_widget_of_type(&layout, "button")
+        .expect("modal child button")
+        .clone();
+    let click_col = button.rect.col + button.rect.width * 0.5;
+    let click_row = button.rect.row + button.rect.height * 0.5;
+    // The click point visibly overlaps the sequencer tile below the 2-row
+    // panel tile — without the modal intercept it would land there.
+    assert!(click_row > 2.0, "button row {click_row} must escape the panel tile");
+
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_tiled_mouse_precise(
+            mouse_event(kind, click_col.floor() as u16, click_row.floor() as u16),
+            click_col,
+            click_row,
+            0,
+        );
+    }
+
+    assert!(eval_bool(&mut editor, "modal-clicked"), "modal child must receive the click");
+    assert!(!eval_bool(&mut editor, "underlay-clicked"), "click must not reach the tile below");
+    assert!(eval_bool(&mut editor, "modal-open"), "inside click must not close the modal");
+    crate::widget_render::clear_overlay();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn modal_outside_click_fires_on_close_without_activating_underneath() {
+    let mut editor = modal_two_tile_editor(MODAL_PANEL_BODY);
+    register_active_layout_overlays(&mut editor);
+    let entry = crate::widget_render::topmost_overlay().expect("modal overlay entry");
+
+    // A scrim point outside the panel, over the underlay button's tile.
+    let click_col = (entry.rect.col - 2.0).max(0.5);
+    let click_row = 18.5;
+    assert!(
+        click_row < entry.rect.row || click_row >= entry.rect.row + entry.rect.height
+            || click_col < entry.rect.col,
+        "click point must be outside the panel rect {:?}",
+        entry.rect
+    );
+
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_tiled_mouse_precise(
+            mouse_event(kind, click_col.floor() as u16, click_row.floor() as u16),
+            click_col,
+            click_row,
+            0,
+        );
+    }
+
+    assert!(!eval_bool(&mut editor, "modal-open"), "scrim click must request close");
+    assert!(
+        !eval_bool(&mut editor, "underlay-clicked"),
+        "the dismissing click must not activate the widget underneath"
+    );
+    crate::widget_render::clear_overlay();
+}
+
+#[cfg(target_os = "macos")]
+const MODAL_WITH_DROPDOWN_BODY: &str = r#"
+    (modal :is-open modal-open
+           :on-close (lambda () (set! modal-open false))
+      (v-stack
+        (dropdown
+          :width 12
+          :height 1.4
+          :options '("plate" "hall" "quad")
+          :value "plate")))
+"#;
+
+#[cfg(target_os = "macos")]
+fn open_dropdown_inside_modal(editor: &mut Editor) {
+    register_active_layout_overlays(editor);
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    let dropdown = find_widget_of_type(&layout, "dropdown")
+        .expect("modal dropdown")
+        .clone();
+    let col = dropdown.rect.col + dropdown.rect.width * 0.5;
+    let row = dropdown.rect.row + dropdown.rect.height * 0.5;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_tiled_mouse_precise(
+            mouse_event(kind, col.floor() as u16, row.floor() as u16),
+            col,
+            row,
+            0,
+        );
+    }
+    // Re-render so the now-open menu registers its overlay entry above the modal.
+    register_active_layout_overlays(editor);
+    let top = crate::widget_render::topmost_overlay().expect("dropdown overlay entry");
+    assert_eq!(
+        top.kind,
+        crate::widget_render::OverlayKind::Dropdown,
+        "dropdown must stack above the modal"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn outside_click_closes_dropdown_inside_modal_but_keeps_the_modal() {
+    let mut editor = modal_two_tile_editor(MODAL_WITH_DROPDOWN_BODY);
+    open_dropdown_inside_modal(&mut editor);
+
+    // Click the scrim, outside both the menu and the panel.
+    let click_col = 0.5;
+    let click_row = 19.0;
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 19),
+        click_col,
+        click_row,
+        0,
+    );
+
+    let top = crate::widget_render::topmost_overlay().expect("modal must survive");
+    assert_eq!(
+        top.kind,
+        crate::widget_render::OverlayKind::Modal,
+        "outside click closes only the dropdown above the modal"
+    );
+    assert!(eval_bool(&mut editor, "modal-open"), "modal must stay open");
+
+    // The next outside click reaches the modal and requests close.
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 19),
+        click_col,
+        click_row,
+        0,
+    );
+    assert!(!eval_bool(&mut editor, "modal-open"));
+    crate::widget_render::clear_overlay();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn escape_closes_the_dropdown_first_then_the_modal() {
+    let mut editor = modal_two_tile_editor(MODAL_WITH_DROPDOWN_BODY);
+    open_dropdown_inside_modal(&mut editor);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let top = crate::widget_render::topmost_overlay().expect("modal must survive first escape");
+    assert_eq!(top.kind, crate::widget_render::OverlayKind::Modal);
+    assert!(eval_bool(&mut editor, "modal-open"), "first escape closes only the dropdown");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!eval_bool(&mut editor, "modal-open"), "second escape reaches the modal");
+    crate::widget_render::clear_overlay();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn modal_traps_focus_while_open_and_restores_it_after_close() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def modal-open (state false))
+            (effect-buffer "*panel*"
+              (v-stack
+                (button "under"
+                  :focusable true
+                  :width 20
+                  :height 2)
+                (modal :is-open modal-open
+                       :on-close (lambda () (set! modal-open false))
+                  (v-stack
+                    (button "inside" :focusable true)))))
+            (set-layout (list :buf "*panel*" :hide-status true))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 20);
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+
+    // Focus the underlay button with a click.
+    let layout = editor.runtime.current_layout.clone().expect("layout");
+    let under = find_widget_of_type(&layout, "button").expect("under button").clone();
+    assert_eq!(under.props.get("text"), Some(&Value::String("under".to_string())));
+    let col = under.rect.col + under.rect.width * 0.5;
+    let row = under.rect.row + under.rect.height * 0.5;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_tiled_mouse_precise(
+            mouse_event(kind, col.floor() as u16, row.floor() as u16),
+            col,
+            row,
+            0,
+        );
+    }
+    let focused_before = editor.focused_widget_node().expect("under button focused");
+    assert_eq!(
+        focused_before.props.get("text"),
+        Some(&Value::String("under".to_string()))
+    );
+
+    // Open the modal: focus jumps to its first focusable child.
+    editor.runtime_mut().eval_str("(set! modal-open true)").unwrap();
+    editor.refresh_runtime_side_effects();
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    let focused_in_modal = editor.focused_widget_node().expect("modal child focused");
+    assert_eq!(
+        focused_in_modal.props.get("text"),
+        Some(&Value::String("inside".to_string())),
+        "focus must be trapped inside the open modal"
+    );
+
+    // Close: the previously focused widget gets focus back.
+    editor.runtime_mut().eval_str("(set! modal-open false)").unwrap();
+    editor.refresh_runtime_side_effects();
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    let restored = editor.focused_widget_node().expect("focus restored");
+    assert_eq!(
+        restored.props.get("text"),
+        Some(&Value::String("under".to_string())),
+        "closing the modal must restore the previous focus"
+    );
+    crate::widget_render::clear_overlay();
+}

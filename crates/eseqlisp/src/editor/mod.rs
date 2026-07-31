@@ -608,6 +608,9 @@ pub struct Editor {
     mark: Option<Mark>,
     jump_stack: Vec<Mark>,
     active_text_drag_anchor: Option<Mark>,
+    /// `Some` while an open modal traps focus; the inner value is the widget
+    /// focused before the modal opened (restored on close, `None` = nothing).
+    modal_focus_return: Option<Option<LayoutNode>>,
     kill_ring: Vec<String>,
     minibuffer_input: Option<MinibufferMode>,
     mode_registry: HashMap<String, MajorMode>,
@@ -756,6 +759,7 @@ impl Editor {
             mark: None,
             jump_stack: vec![],
             active_text_drag_anchor: None,
+            modal_focus_return: None,
             kill_ring: vec![],
             minibuffer_input: None,
             mode_registry: HashMap::new(),
@@ -5027,6 +5031,32 @@ impl Editor {
                 }
             }
             return;
+        }
+
+        // Escape closes the topmost overlay first. Modal → fire :on-close (a
+        // request; the app flips the :is-open binding). Dropdown above a
+        // modal keeps precedence: when focused it closes via the
+        // focused-widget path below (preserving its focus semantics), when
+        // unfocused it is closed here — either way the next Escape reaches
+        // the modal.
+        if key.code == KeyCode::Esc
+            && key.modifiers == KeyModifiers::NONE
+            && let Some(entry) = crate::widget_render::topmost_overlay()
+        {
+            match entry.kind {
+                crate::widget_render::OverlayKind::Modal => {
+                    self.fire_modal_on_close(entry.widget_id);
+                    return;
+                }
+                crate::widget_render::OverlayKind::Dropdown => {
+                    if self.active_leaf().focused_widget_id != Some(entry.widget_id) {
+                        crate::widget_render::dropdown::close_dropdown(entry.widget_id);
+                        crate::widget_render::remove_overlay(entry.widget_id);
+                        self.mark_needs_redraw();
+                        return;
+                    }
+                }
+            }
         }
 
         // Escape is both a local cancellation key and a commonly bound global
