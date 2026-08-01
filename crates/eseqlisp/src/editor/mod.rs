@@ -1888,6 +1888,17 @@ impl Editor {
         precise_row: f32,
         border_inset: u16,
     ) {
+        // Inspect mode outranks the overlay intercept: inspecting a modal's
+        // widgets needs the raw hover/click, and the inspect path does its
+        // own modal-subtree hit-testing. Without an overlay the inspect
+        // check keeps its usual place further down the chain.
+        if self.inspect_mode
+            && crate::widget_render::overlay_widget_id().is_some()
+            && self.handle_tiled_inspect_mouse_precise(mouse, precise_col, precise_row, border_inset)
+        {
+            return;
+        }
+
         if crate::widget_render::overlay_widget_id().is_some()
             && matches!(
                 mouse.kind,
@@ -2243,7 +2254,12 @@ impl Editor {
             }
             _ => return false,
         }
-        let Some(tile_id) = self.tile_at_screen(precise_col, precise_row) else {
+        // With a modal open, inspect the modal's own tile — the panel can
+        // hang over neighbouring tiles whose layouts don't contain it.
+        let Some(tile_id) = self
+            .modal_inspect_tile()
+            .or_else(|| self.tile_at_screen(precise_col, precise_row))
+        else {
             if self.inspect_hover_tile_id.take().is_some()
                 || self.inspect_hover_widget_id.take().is_some()
             {
@@ -2292,6 +2308,52 @@ impl Editor {
         true
     }
 
+    /// The tile pointer gestures must route to while a modal overlay is
+    /// open: the ACTIVE tile, whose layout owns the modal node. Routing by
+    /// the tile under the pointer would silently switch the active tile when
+    /// the panel hangs over a neighbouring tile (`route_pointer_event_to_tile`
+    /// persists the switch) — after which every modal input lookup runs
+    /// against a layout with no modal in it, consuming events with no
+    /// effect and, on a widget-id collision, dispatching to background
+    /// widgets. Mirrors `handle_tiled_mouse_precise`'s overlay routing.
+    fn modal_gesture_tile(&self) -> Option<TileId> {
+        crate::widget_render::topmost_overlay()
+            .filter(|entry| entry.kind == crate::widget_render::OverlayKind::Modal)
+            .map(|_| self.active_tile)
+    }
+
+    /// The tile whose layout actually contains the open modal — the active
+    /// tile when it mounts it, otherwise whichever tile's cached layout
+    /// does (a modal can open in a non-active tile, e.g. the sound palette
+    /// opened from a badge in the device panel). Read-only resolution for
+    /// paths that must not switch the active tile (inspect).
+    fn modal_inspect_tile(&self) -> Option<TileId> {
+        crate::widget_render::topmost_overlay()
+            .filter(|entry| entry.kind == crate::widget_render::OverlayKind::Modal)?;
+        let active_has_modal = self
+            .runtime
+            .current_layout
+            .as_deref()
+            .and_then(widget_focus::find_open_modal_node)
+            .is_some();
+        if active_has_modal {
+            return Some(self.active_tile);
+        }
+        self.tile_root
+            .leaf_ids()
+            .into_iter()
+            .find(|tile_id| {
+                *tile_id != self.active_tile
+                    && self
+                        .tile_root
+                        .find_leaf(*tile_id)
+                        .and_then(|leaf| leaf.cached_layout.as_deref())
+                        .and_then(widget_focus::find_open_modal_node)
+                        .is_some()
+            })
+            .or(Some(self.active_tile))
+    }
+
     pub fn handle_tiled_touchpad_magnify(
         &mut self,
         precise_col: f32,
@@ -2299,7 +2361,10 @@ impl Editor {
         border_inset: u16,
         delta: f64,
     ) {
-        let Some(tile_id) = self.tile_at_screen(precise_col, precise_row) else {
+        let Some(tile_id) = self
+            .modal_gesture_tile()
+            .or_else(|| self.tile_at_screen(precise_col, precise_row))
+        else {
             return;
         };
         self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
@@ -2326,14 +2391,22 @@ impl Editor {
         delta_x: f32,
         delta_y: f32,
     ) -> bool {
-        let Some(tile_id) = self.tile_at_screen(precise_col, precise_row) else {
+        let modal_open = self.modal_gesture_tile().is_some();
+        let Some(tile_id) = self
+            .modal_gesture_tile()
+            .or_else(|| self.tile_at_screen(precise_col, precise_row))
+        else {
             return false;
         };
         self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
             let Some((content_col, content_row, _, _)) =
                 editor.tile_content_area(tile_id, border_inset)
             else {
-                return false;
+                // With a modal open the gesture is trapped either way: a
+                // false here would let the caller scroll the tile leaf
+                // behind the panel (see collect_modal_overlay's coherence
+                // note).
+                return modal_open;
             };
             editor.handle_touchpad_scroll(
                 content_col,
@@ -3690,6 +3763,14 @@ impl Editor {
     /// Apply smooth (sub-cell) scroll deltas to the widget viewport.
     /// `delta_cells_x` and `delta_cells_y` are in cell units (fractional).
     pub fn apply_smooth_widget_scroll(&mut self, delta_cells_x: f32, delta_cells_y: f32) {
+        // Tile scroll is trapped while a modal overlay is open — the modal's
+        // frame-anchored overlay geometry is only coherent with the layout
+        // when the leaf offset does not move under it (collect_modal_overlay).
+        if crate::widget_render::topmost_overlay()
+            .is_some_and(|entry| entry.kind == crate::widget_render::OverlayKind::Modal)
+        {
+            return;
+        }
         if !self.active_buffer().inline_code_widgets().is_empty() {
             self.active_leaf_mut().widget_scroll_top = 0.0;
             return;
@@ -4475,6 +4556,11 @@ impl Editor {
         self.inspect_mode
     }
 
+    /// The widget currently highlighted by inspect-mode hover (test hook).
+    pub fn inspect_hovered_widget_id(&self) -> Option<u64> {
+        self.inspect_hover_widget_id
+    }
+
     pub fn toggle_inspect_mode(&mut self) {
         self.inspect_mode = !self.inspect_mode;
         self.inspect_hover_tile_id = None;
@@ -4626,13 +4712,23 @@ impl Editor {
         if buffer.view_mode == ViewMode::TextOnly {
             return None;
         }
-        let (local_col, local_row) =
-            crate::ui::hit::to_local(precise_col, precise_row, content_col, content_row)?;
         let layout = if tile_id == self.active_tile {
             self.runtime.current_layout.as_ref()
         } else {
             leaf.cached_layout.as_ref()
         }?;
+        let modal = widget_focus::find_open_modal_node(layout);
+        // The modal panel may legitimately extend above/left of its tile's
+        // content origin (frame-anchored); the normal content-area
+        // conversion rejects those points.
+        let (local_col, local_row) = if modal.is_some() {
+            (
+                precise_col - content_col as f32,
+                precise_row - content_row as f32,
+            )
+        } else {
+            crate::ui::hit::to_local(precise_col, precise_row, content_col, content_row)?
+        };
         let (text_width_scale, text_height_scale) = self.text_cell_scales_for_buffer(buffer);
         let has_inline_widgets = !buffer.inline_code_widgets().is_empty();
         let layout_scroll_left = if has_inline_widgets {
@@ -4649,7 +4745,15 @@ impl Editor {
         };
         let layout_col = local_col + layout_scroll_left;
         let layout_row = local_row + leaf.widget_scroll_top + text_scroll_top;
-        inspect_hit_test_layout(layout, layout_row, layout_col).cloned()
+        // While a modal is open, inspect only its subtree — hits must never
+        // fall through the panel to the widgets underneath.
+        let (node, scroll_dy) = match modal {
+            Some(modal) => inspect_hit_test_layout(modal, layout_row, layout_col)?,
+            None => inspect_hit_test_layout(layout, layout_row, layout_col)?,
+        };
+        let mut node = node.clone();
+        node.rect.row -= scroll_dy;
+        Some(node)
     }
 
     fn inspect_status_for_node(&self, node: &crate::layout::LayoutNode) -> String {
@@ -8811,24 +8915,57 @@ fn find_definition_in_text(text: &str, symbol: &str) -> Option<(usize, usize)> {
     None
 }
 
+/// Inspect hit test. Returns the hit node plus the accumulated scroll
+/// offset between layout coordinates and rendered position, so callers can
+/// place the hover highlight where the widget is actually drawn.
 fn inspect_hit_test_layout(
     node: &crate::layout::LayoutNode,
     row: f32,
     col: f32,
-) -> Option<&crate::layout::LayoutNode> {
+) -> Option<(&crate::layout::LayoutNode, f32)> {
+    inspect_hit_test_layout_impl(node, row, col, 0.0)
+}
+
+fn inspect_hit_test_layout_impl(
+    node: &crate::layout::LayoutNode,
+    row: f32,
+    col: f32,
+    scroll_dy: f32,
+) -> Option<(&crate::layout::LayoutNode, f32)> {
+    // An open modal has a zero-size layout node (zero parent footprint);
+    // its children are anchored to the frame viewport with real rects, so
+    // descend without the containment gate.
+    if node.widget_type == "modal" {
+        return node
+            .children
+            .iter()
+            .rev()
+            .find_map(|child| inspect_hit_test_layout_impl(child, row, col, scroll_dy));
+    }
     if !rect_contains_point(node.rect, row, col) {
         return None;
     }
+    // Scroll containers: children are hit at their rendered position
+    // (mirrors hit_test_layout), and the offset is carried so hover rects
+    // can be mapped back.
+    let (child_row, child_dy) = if node.widget_type == "scroll" {
+        let state = crate::widget_render::scroll::get_scroll_state(
+            crate::widget_render::scroll::scroll_state_key(node),
+        );
+        (row + state.offset_y, scroll_dy + state.offset_y)
+    } else {
+        (row, scroll_dy)
+    };
     let deepest = node
         .children
         .iter()
         .rev()
-        .find_map(|child| inspect_hit_test_layout(child, row, col));
+        .find_map(|child| inspect_hit_test_layout_impl(child, child_row, col, child_dy));
     match deepest {
-        Some(hit) if inspect_node_has_source_identity(hit) => Some(hit),
-        Some(_) if inspect_node_has_source_identity(node) => Some(node),
+        Some(hit) if inspect_node_has_source_identity(hit.0) => Some(hit),
+        Some(_) if inspect_node_has_source_identity(node) => Some((node, scroll_dy)),
         Some(hit) => Some(hit),
-        None => Some(node),
+        None => Some((node, scroll_dy)),
     }
 }
 

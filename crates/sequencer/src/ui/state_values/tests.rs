@@ -19824,6 +19824,99 @@
         );
     }
 
+    /// Inspect mode over the open sound palette (real tiled UI): every
+    /// hover hit must land inside the modal subtree — never on the widgets
+    /// behind the panel — and hovering the panel must hit something.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_seq_inspect_mode_hits_sound_palette_modal_not_behind_it() {
+        fn find_modal<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.widget_type == "modal" && !node.children.is_empty() {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_modal)
+        }
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        assert!(
+            editor.switch_active_tile_to_buffer_named("*step*"),
+            "step tile must exist in the startup grid"
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "sound-palette", sound_palette_fixture());
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 140, 36);
+
+        let layout = editor.widget_layout().expect("step layout");
+        let modal = find_modal(&layout).expect("open sound palette modal").clone();
+
+        // Register the overlay entry exactly as a live frame draw would.
+        let _ = eseqlisp::widget_render::collect_metal_primitives(
+            &layout,
+            eseqlisp::widget_render::WidgetViewport {
+                cell_w: 10.0,
+                cell_h: 20.0,
+                vp_w: 1400.0,
+                vp_h: 720.0,
+                time_seconds: 0.0,
+                focused_widget_id: None,
+                focused_branch: false,
+                overlay_viewport_bottom: 36.0,
+                scroll_top: 0.0,
+                scroll_left: 0.0,
+                inherited_hover: false,
+            },
+            0.0,
+            36,
+        );
+        assert!(
+            eseqlisp::widget_render::topmost_overlay().is_some(),
+            "the open palette must register a modal overlay entry"
+        );
+
+        editor.toggle_inspect_mode();
+        let mut hits_inside = 0usize;
+        let mut hits_outside = Vec::new();
+        for row_step in 0..18 {
+            for col_step in 0..35 {
+                let precise_col = col_step as f32 * 4.0 + 2.0;
+                let precise_row = row_step as f32 * 2.0 + 1.0;
+                editor.handle_tiled_mouse_precise(
+                    crossterm::event::MouseEvent {
+                        kind: crossterm::event::MouseEventKind::Moved,
+                        column: precise_col as u16,
+                        row: precise_row as u16,
+                        modifiers: crossterm::event::KeyModifiers::NONE,
+                    },
+                    precise_col,
+                    precise_row,
+                    0,
+                );
+                let Some(hover_id) = editor.inspect_hovered_widget_id() else {
+                    continue;
+                };
+                if eseqlisp::layout::layout_contains_widget_id(&modal, hover_id) {
+                    hits_inside += 1;
+                } else {
+                    hits_outside.push((precise_col, precise_row, hover_id));
+                }
+            }
+        }
+        eseqlisp::widget_render::clear_overlay();
+        assert!(
+            hits_outside.is_empty(),
+            "inspect hover must never select widgets behind the open palette: {hits_outside:?}"
+        );
+        assert!(
+            hits_inside > 0,
+            "inspect hover over the panel must select palette widgets"
+        );
+    }
+
     /// The overlay's Apply/Apply-with-mix rows dispatch the palette natives
     /// with the entry's ids (takes spec 17.6).
     #[test]

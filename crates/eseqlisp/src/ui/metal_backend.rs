@@ -4986,6 +4986,10 @@ fragment float4 live_spectrogram_frag(
             let tile_chrome_pipeline = self.widget_pipelines.get("tile-chrome").cloned();
             let mut mod_patch_ports = Vec::new();
             let mut global_overlay_prims = Vec::new();
+            // Inspect highlight geometry deferred past the global overlay
+            // pass: a modal-hosted widget's highlight drawn in the tile pass
+            // would be buried under the panel (and scissored to the tile).
+            let mut deferred_inspect_overlay: Option<(f32, f32, f32, f32, Color, Color)> = None;
 
             // ── Render pass setup ────────────────────────────────────────────
             let desc = MTLRenderPassDescriptor::new();
@@ -5404,38 +5408,56 @@ fragment float4 live_spectrogram_frag(
                     let overlay_w = overlay.rect.width * cell_w;
                     let overlay_h = overlay.rect.height * cell_h;
                     if overlay_w > 0.0 && overlay_h > 0.0 {
-                        let mut inspect_verts = Vec::new();
-                        push_rect_px(
-                            &mut inspect_verts,
-                            overlay_x,
-                            overlay_y,
-                            overlay_w,
-                            overlay_h,
-                            overlay.fill,
-                            vp_w,
-                            vp_h,
-                        );
-                        push_rounded_rect_border_px(
-                            &mut inspect_verts,
-                            overlay_x,
-                            overlay_y,
-                            overlay_w,
-                            overlay_h,
-                            1.5,
-                            3.0,
-                            overlay.border,
-                            vp_w,
-                            vp_h,
-                        );
-                        draw_vertices(
-                            &enc,
-                            &self.device,
-                            &mut self.upload_arena,
-                            &mut self.stats,
-                            &pipeline,
-                            &atlas_texture,
-                            &inspect_verts,
-                        );
+                        let modal_overlay_active = crate::widget_render::topmost_overlay()
+                            .is_some_and(|entry| {
+                                entry.kind == crate::widget_render::OverlayKind::Modal
+                            });
+                        if modal_overlay_active {
+                            // Inspect hit-testing is modal-rooted while a
+                            // modal is open, so the highlight belongs above
+                            // the panel, unscissored by the tile.
+                            deferred_inspect_overlay = Some((
+                                overlay_x,
+                                overlay_y,
+                                overlay_w,
+                                overlay_h,
+                                overlay.fill,
+                                overlay.border,
+                            ));
+                        } else {
+                            let mut inspect_verts = Vec::new();
+                            push_rect_px(
+                                &mut inspect_verts,
+                                overlay_x,
+                                overlay_y,
+                                overlay_w,
+                                overlay_h,
+                                overlay.fill,
+                                vp_w,
+                                vp_h,
+                            );
+                            push_rounded_rect_border_px(
+                                &mut inspect_verts,
+                                overlay_x,
+                                overlay_y,
+                                overlay_w,
+                                overlay_h,
+                                1.5,
+                                3.0,
+                                overlay.border,
+                                vp_w,
+                                vp_h,
+                            );
+                            draw_vertices(
+                                &enc,
+                                &self.device,
+                                &mut self.upload_arena,
+                                &mut self.stats,
+                                &pipeline,
+                                &atlas_texture,
+                                &inspect_verts,
+                            );
+                        }
                     }
                 }
 
@@ -5831,6 +5853,53 @@ fragment float4 live_spectrogram_frag(
                     );
                 }
                 enc.setScissorRect(overlay_scissor);
+            }
+
+            // ── Deferred inspect highlight (modal-hosted hover) ─────────────
+            // Drawn after the overlay pass so it sits on top of the modal
+            // panel, with a full-viewport scissor so the panel's overhang
+            // beyond its tile is highlighted too.
+            if let Some((overlay_x, overlay_y, overlay_w, overlay_h, fill, border)) =
+                deferred_inspect_overlay
+            {
+                enc.setScissorRect(MTLScissorRect {
+                    x: 0,
+                    y: 0,
+                    width: vp_w as usize,
+                    height: vp_h as usize,
+                });
+                let mut inspect_verts = Vec::new();
+                push_rect_px(
+                    &mut inspect_verts,
+                    overlay_x,
+                    overlay_y,
+                    overlay_w,
+                    overlay_h,
+                    fill,
+                    vp_w,
+                    vp_h,
+                );
+                push_rounded_rect_border_px(
+                    &mut inspect_verts,
+                    overlay_x,
+                    overlay_y,
+                    overlay_w,
+                    overlay_h,
+                    1.5,
+                    3.0,
+                    border,
+                    vp_w,
+                    vp_h,
+                );
+                draw_vertices(
+                    &enc,
+                    &self.device,
+                    &mut self.upload_arena,
+                    &mut self.stats,
+                    &pipeline,
+                    &atlas_texture,
+                    &inspect_verts,
+                );
             }
 
             // ── Completion popup (no scissor — drawn on top of everything) ───
