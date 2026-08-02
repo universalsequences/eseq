@@ -84,9 +84,8 @@
   (button text
     :key (str "sound-palette-" key-suffix "-" (get entry :patch-id))
     :width 3.4 :height 0.95 :font-size 7.5
-    :background-color (rgba 1 1 1 0.05)
-    :border-color (rgba 1 1 1 0.14)
-    :color :dim
+    :background-color :primary
+    :color :white
     :on-click |x y r| (on-press entry)))
 
 ;; One palette box (17.6 + sound-glyph spec §4): top-left swatch + name
@@ -101,8 +100,11 @@
       (current (get entry :current)))
     (box :key (str "sound-palette-entry-" (get entry :patch-id))
       :width :fill
-      :padding 0.25
-      :corner-radius 5
+      :height 8
+      :padding 0.5
+      :on-click |x y r| (sound-palette-apply entry) 
+      :corner-radius 12
+      :border-width 1
       :background-color (if current
         (sound-palette-entry-tint entry)
         (rgba 1 1 1 0.025))
@@ -110,11 +112,7 @@
       :border-color (if current c (rgba 1 1 1 0.10))
       (v-stack :gap 0.12 :width :fill
         (h-stack :gap 0.28 :align :center
-          (box :width 0.36 :height 0.9
-            :corner-radius 2
-            :background-color (if base :transparent c)
-            :border-width (if base 1 0)
-            :border-color c)
+          
           (if (= sound-palette-renaming (get entry :patch-id))
             ;; Draft-buffered rename: :on-change only edits the draft (it
             ;; fires per keystroke); the "ok" button commits.
@@ -128,48 +126,58 @@
             (box :key (str "sound-palette-name-" (get entry :patch-id))
               :bg :transparent
               :on-click |x y r| (sound-palette-begin-rename entry)
-              (label (str (substring (get entry :name) 0 9) (if base " (scene)" ""))
-                :font-size 9 :color (if current :white :dim) :bg :transparent)))
-          (box :flex 1 :bg :transparent))
+              (label (str (substring (get entry :name) 0 26) (if base " (scene)" ""))
+                :font-size 9 :color (if current :black :dim) :bg :transparent))
+            )
+          (label 
+            (substring (get entry :referents) 0 16)
+            :font-size 9
+            :color (if current :black :dim) :bg :transparent           
+            )
+          (box :flex 1 :bg :transparent)
+          )
+        
+        (box :height 0.05)
+        (box :width 17.65 :height 0.2
+          :corner-radius 2
+          :background-color (if base :transparent c)
+          :border-width (if base 1 0)
+          :border-color c)  
         ;; Center glyph region (sound-glyph spec §4/P2): the plant rendered
         ;; from a host-published frame; the widget only knows the key.
-        (sound-glyph :key (str "sound-palette-glyph-" (get entry :patch-id))
-          :source (get entry :glyph-key)
-          :height 6.5)
-        (h-stack :gap 0.2 :align :center
-          ;; Reverse referent index ("used by ..."), truncated so long lists
-          ;; never push the action buttons out of the box.
-          (label (substring (get entry :referents) 0 14)
-            :key (str "sound-palette-referents-" (get entry :patch-id))
-            :font-size 8 :color :dim :bg :transparent)
-          (box :flex 1 :bg :transparent)
-          (sound-palette-action-button "apply" entry "apply"
-            (lambda (entry) (sound-palette-apply entry)))
-          (sound-palette-action-button "apply-mix" entry "+mix"
-            (lambda (entry) (sound-palette-apply-with-mix entry))))))))
+        (box :background-color :bg :padding 1
+          (sound-glyph :key (str "sound-palette-glyph-" (get entry :patch-id))
+            :source (get entry :glyph-key)
+            :height 6.5)
+          )
+        
+        )
+      )
+    )
+  )
 
 (def sound-palette-header ()
   (box :width :fill :bg :transparent
-    (h-stack :gap 0.3 :align :center
+    (h-stack :gap 0.3 :align :baseline
       (label (str "SOUNDS - " (sound-palette-target-label))
         :key "sound-palette-header-label"
-        :font-size 8.5 :color :dim :bg :transparent)
+        :font-size 12 :color :dim :bg :transparent)
       (box :flex 1 :bg :transparent)
       (button "fork"
         :key "sound-palette-fork"
-        :width 3.4 :height 0.95 :font-size 7.5
+         :font-size 12
         :background-color (rgba 1 1 1 0.05)
         :border-color (rgba 1 1 1 0.14) :color :dim
         :on-click |x y r| (sound-palette-fork))
       (button "clean"
         :key "sound-palette-cleanup"
-        :width 3.4 :height 0.95 :font-size 7.5
+        :font-size 12
         :background-color (rgba 1 1 1 0.05)
         :border-color (rgba 1 1 1 0.14) :color :dim
         :on-click |x y r| (seq-sound-cleanup-unused (sound-palette-track)))
       (button "x"
         :key "sound-palette-close"
-        :width 1.4 :height 0.95 :font-size 7.5
+        :font-size 12
         :background-color (rgba 1 1 1 0.05)
         :border-color (rgba 1 1 1 0.14) :color :dim
         :on-click |x y r| (sound-palette-close)))))
@@ -210,6 +218,10 @@
 (def sound-palette-panel ()
   (modal :is-open (sound-palette-open?)
          :on-close (lambda () (sound-palette-close))
+         ;; Stable screen-space size: resizing or opening an inspect source
+         ;; pane must not stretch the palette. The modal clamps these bounds
+         ;; to smaller windows while preserving its centered placement.
+         :width-px 960 :height-px 800
     (box :debug-name "sound-palette-panel"
       :width :fill :height :fill :bg :transparent
       (v-stack :width :fill :gap 0.22
@@ -221,6 +233,6 @@
             :min-item-width 14 :min-columns 2 :max-columns 4
             ;; Explicit row height: without it the grid falls back to
             ;; slot-width * row-aspect and cells balloon to near-square.
-            :row-height 10.4
+            :row-height 9.2
             (each (sound-palette-entries) |entry idx|
               (sound-palette-entry-row entry))))))))

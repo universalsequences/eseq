@@ -100,6 +100,10 @@ pub struct TileLeaf {
     pub widget_scroll_top: f32,
     pub widget_viewport_width: f32,
     pub widget_viewport_height: f32,
+    /// Whole-frame viewport used when this tile's cached layout was built,
+    /// expressed in the tile's local content coordinates. Frame-anchored
+    /// widgets such as modals make this part of the layout cache identity.
+    pub layout_frame_viewport: Option<Rect>,
     pub widget_scroll_left: f32,
     /// (layout revision, viewport width bits, viewport height bits, aspect
     /// bits, maximum vertical scroll, maximum horizontal scroll).
@@ -200,6 +204,7 @@ impl TileLeaf {
             widget_scroll_top: 0.0,
             widget_viewport_width: 0.0,
             widget_viewport_height: 0.0,
+            layout_frame_viewport: None,
             widget_scroll_left: 0.0,
             widget_scroll_limits_cache: None,
             active_widget_gesture: None,

@@ -134,35 +134,54 @@ pub struct LayoutEngine<'a> {
 }
 
 std::thread_local! {
-    /// The frame viewport for the layout pass currently running on this
-    /// thread. Installed by the `LayoutEngine` entry points so container
-    /// definitions (which only see node/area/children) can anchor against
-    /// the whole window.
-    static FRAME_VIEWPORT: std::cell::Cell<Option<Rect>> = const { std::cell::Cell::new(None) };
+    /// Frame and cell geometry for the layout pass currently running on this
+    /// thread. Installed by `LayoutEngine` entry points so container
+    /// definitions can resolve frame-anchored and pixel-sized geometry.
+    static LAYOUT_PASS_GEOMETRY: std::cell::Cell<Option<LayoutPassGeometry>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[derive(Clone, Copy)]
+struct LayoutPassGeometry {
+    frame_viewport: Rect,
+    cell_w: f32,
+    cell_h: f32,
 }
 
 /// The frame viewport of the in-progress layout pass, if any.
 pub(crate) fn current_frame_viewport() -> Option<Rect> {
-    FRAME_VIEWPORT.with(|slot| slot.get())
+    LAYOUT_PASS_GEOMETRY.with(|slot| slot.get().map(|geometry| geometry.frame_viewport))
+}
+
+pub(crate) fn current_layout_cell_dims() -> Option<(f32, f32)> {
+    LAYOUT_PASS_GEOMETRY.with(|slot| {
+        slot.get()
+            .map(|geometry| (geometry.cell_w, geometry.cell_h))
+    })
 }
 
 /// Installs a frame viewport for the duration of a layout pass; restores the
 /// previous value on drop so nested/snapshot layouts do not leak state.
-struct FrameViewportGuard {
-    previous: Option<Rect>,
+struct LayoutPassGeometryGuard {
+    previous: Option<LayoutPassGeometry>,
 }
 
-impl FrameViewportGuard {
-    fn install(frame_viewport: Option<Rect>) -> Self {
-        let previous = FRAME_VIEWPORT.with(|slot| slot.replace(frame_viewport));
+impl LayoutPassGeometryGuard {
+    fn install(frame_viewport: Rect, cell_w: f32, cell_h: f32) -> Self {
+        let geometry = LayoutPassGeometry {
+            frame_viewport,
+            cell_w,
+            cell_h,
+        };
+        let previous = LAYOUT_PASS_GEOMETRY.with(|slot| slot.replace(Some(geometry)));
         Self { previous }
     }
 }
 
-impl Drop for FrameViewportGuard {
+impl Drop for LayoutPassGeometryGuard {
     fn drop(&mut self) {
         let previous = self.previous;
-        FRAME_VIEWPORT.with(|slot| slot.set(previous));
+        LAYOUT_PASS_GEOMETRY.with(|slot| slot.set(previous));
     }
 }
 
@@ -225,7 +244,9 @@ impl<'a> LayoutEngine<'a> {
     }
 
     pub fn layout_with_id_offset(&self, tree: &Value, widget_id_offset: u64) -> Option<LayoutNode> {
-        let _frame_viewport = FrameViewportGuard::install(Some(self.effective_frame_viewport()));
+        let _layout_geometry = LayoutPassGeometryGuard::install(
+            self.effective_frame_viewport(), self.cell_w, self.cell_h,
+        );
         let size = self.measure(tree, self.root_constraints(), DEFAULT_FONT_SIZE)?;
         let root_rect = self.root_rect(tree, size, 0.0, 0.0);
         let mut layout =
@@ -1085,7 +1106,11 @@ pub fn relayout_subtree_path_result(
     dirty_widget_ids: &mut Vec<u64>,
     engine: &LayoutEngine<'_>,
 ) -> Result<LayoutNode, String> {
-    let _frame_viewport = FrameViewportGuard::install(Some(engine.effective_frame_viewport()));
+    let _layout_geometry = LayoutPassGeometryGuard::install(
+        engine.effective_frame_viewport(),
+        engine.cell_w,
+        engine.cell_h,
+    );
     let mut trace_path = Vec::new();
     let mut next_widget_id = max_layout_widget_id(existing).wrapping_add(1);
     let root_size = engine.measure_node_at_path(

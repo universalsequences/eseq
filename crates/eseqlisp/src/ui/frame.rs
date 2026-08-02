@@ -1223,26 +1223,10 @@ fn build_tiled_render_frame_impl(
             .map(|(_, frame)| frame.clone());
 
         if is_active {
-            // Whole-window viewport in this tile's local content coordinates
-            // (same border-inset arithmetic as the Metal backend's content
-            // origin) so frame-anchored widgets (modal) can center against
-            // the window rather than the tile.
-            let border_inset_px = if show_border {
-                border_width_px
-                    .max(0.0)
-                    .min(body_rect.width * cell_w * 0.5)
-                    .min(body_rect.height * cell_h * 0.5)
-            } else {
-                0.0
-            };
-            let content_col = body_rect.col + border_inset_px / cell_w.max(1.0);
-            let content_row = body_rect.row + border_inset_px / cell_h.max(1.0);
-            editor.set_layout_frame_viewport(Some(crate::layout::Rect {
-                row: -content_row,
-                col: -content_col,
-                width: total_width as f32,
-                height: total_height as f32,
-            }));
+            // Active and inactive tiles use the same full-frame geometry
+            // derivation, so frame-anchored widgets survive active-tile
+            // changes and resize without shifting coordinate systems.
+            editor.set_layout_frame_viewport(editor.tile_layout_frame_viewport(tile_id));
             // Active tile: use full build_render_frame for highlights/cursor, but
             // completion is rendered once globally by the tiled backend.
             let cacheable_ui_frame =

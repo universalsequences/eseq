@@ -1044,6 +1044,13 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
         return false;
     }
 
+    // The main event loop routes modal key presses directly to the editor.
+    // Keep this lower-level entry point safe for other callers and tests: no
+    // sequencer command may execute while a modal owns keyboard input.
+    if editor.modal_is_open() {
+        return false;
+    }
+
     if editor.minibuffer_prompt().is_none()
         && editor.prompt_text().is_none()
         && is_trigger_recording_shortcut(key)
@@ -1838,6 +1845,47 @@ mod live_keyboard_tests {
             &selected_steps,
             &step_clipboard,
         ));
+        assert_eq!(current_track.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn open_modal_blocks_global_track_navigation_shortcuts() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        let tree = editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (modal :is-open true
+                  (button "inside" :focusable true))
+                "#,
+            )
+            .expect("build modal")
+            .expect("modal widget tree");
+        editor
+            .active_buffer_mut()
+            .set_widget_tree(Some(tree.clone()), None);
+        editor.runtime_mut().set_widget_tree(tree);
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor.set_layout_viewport(40, 20);
+        assert!(editor.modal_is_open());
+
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(
+            !handle_metal_command_shortcut(
+                &mut editor,
+                &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "the app shortcut layer must yield to the open modal"
+        );
         assert_eq!(current_track.load(Ordering::Relaxed), 0);
     }
 

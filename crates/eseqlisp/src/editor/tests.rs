@@ -11873,7 +11873,7 @@ const SCROLLABLE_MODAL_PANEL_BODY: &str = r#"
 
 /// Regression: touchpad scroll used to route to the tile UNDER THE POINTER
 /// while a modal was open. Wherever the panel hangs over a neighbouring
-/// tile, the gesture switched the active tile (route_pointer_event_to_tile
+/// tile, the gesture switched the active tile (route_event_to_tile
 /// persists the switch) — the modal then no longer existed in
 /// runtime.current_layout, so every subsequent pointer event was consumed
 /// with no effect and Escape could not close the modal (sound palette
@@ -12126,6 +12126,202 @@ fn inspect_mode_resolves_a_modal_in_a_non_active_tile() {
     assert!(
         crate::layout::layout_contains_widget_id(&modal, hover_id),
         "inspect hover must land inside the modal subtree"
+    );
+}
+
+/// Regression for inspect-source + resize: once source inspection activates
+/// another tile, the modal owner becomes inactive. Its cached layout must be
+/// rebuilt against the resized whole-frame viewport (not its own short tile),
+/// and Escape must dispatch `:on-close` through that owner tile.
+#[cfg(target_os = "macos")]
+#[test]
+fn inactive_modal_survives_frame_resize_and_escape_closes_it() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = modal_two_tile_editor(MODAL_PANEL_BODY);
+    let panel_tile = editor.active_tile;
+    let source_tile = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .find(|tile_id| *tile_id != panel_tile)
+        .expect("second tile");
+    editor.switch_active_tile(source_tile);
+
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 90, 30);
+    assert_eq!(editor.active_tile, source_tile, "source tile stays active");
+    let panel_layout = editor
+        .tile_root
+        .find_leaf(panel_tile)
+        .and_then(|leaf| leaf.cached_layout.clone())
+        .expect("inactive modal layout after resize");
+    let modal = super::widget_focus::find_open_modal_node(&panel_layout)
+        .expect("open modal after resize");
+    let prop = |key: &str| match modal.props.get(key) {
+        Some(Value::Number(value)) => *value as f32,
+        other => panic!("missing numeric modal prop {key}: {other:?}"),
+    };
+    assert!((prop("_frame_width") - 90.0).abs() < 0.01);
+    assert!((prop("_frame_height") - 30.0).abs() < 0.01);
+
+    // Register the resized inactive tile's overlay as the backend does.
+    let _ = crate::widget_render::collect_metal_primitives(
+        &panel_layout,
+        crate::widget_render::WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 900.0,
+            vp_h: 600.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 30.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+        0.0,
+        30,
+    );
+    assert_eq!(
+        crate::widget_render::topmost_overlay().map(|entry| entry.kind),
+        Some(crate::widget_render::OverlayKind::Modal),
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        !eval_bool(&mut editor, "modal-open"),
+        "Escape must close a resized modal owned by an inactive tile"
+    );
+    assert_eq!(
+        editor.active_tile, source_tile,
+        "closing the modal must return to the inspected source tile"
+    );
+}
+
+/// A modal remains the exclusive keyboard context when source inspection has
+/// made its owner tile inactive. Focused modal controls still receive keys,
+/// but an unhandled key must not fall through to a global editor binding.
+#[cfg(target_os = "macos")]
+#[test]
+fn inactive_modal_routes_focused_keys_and_blocks_global_bindings() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = modal_two_tile_editor(MODAL_PANEL_BODY);
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def global-down-count (state 0))
+            (def count-global-down ()
+              (set! global-down-count (+ global-down-count 1)))
+            (bind-key "DOWN" "count-global-down")
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let panel_tile = editor.active_tile;
+    let source_tile = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .find(|tile_id| *tile_id != panel_tile)
+        .expect("second tile");
+    editor.switch_active_tile(source_tile);
+    assert!(editor.modal_is_open());
+
+    editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(
+        editor
+            .runtime_mut()
+            .eval_str("global-down-count")
+            .unwrap(),
+        Some(Value::Number(0.0)),
+        "an unhandled modal key must not reach a global binding"
+    );
+    assert_eq!(
+        editor.active_tile, source_tile,
+        "modal key routing must preserve the inspected source tile"
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        eval_bool(&mut editor, "modal-clicked"),
+        "Enter must still activate the focused control inside the modal"
+    );
+    assert_eq!(editor.active_tile, source_tile);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn inactive_modal_close_button_still_dispatches_after_resize() {
+    let _overlay_guard = OverlayClearGuard;
+    let body = r#"
+        (modal :is-open modal-open
+               :on-close (lambda () (set! modal-open false))
+          (button "close"
+            :focusable true
+            :on-click (lambda (event) (set! modal-open false))))
+    "#;
+    let mut editor = modal_two_tile_editor(body);
+    let panel_tile = editor.active_tile;
+    let source_tile = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .find(|tile_id| *tile_id != panel_tile)
+        .expect("second tile");
+    editor.switch_active_tile(source_tile);
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 90, 30);
+
+    let panel_layout = editor
+        .tile_root
+        .find_leaf(panel_tile)
+        .and_then(|leaf| leaf.cached_layout.clone())
+        .expect("inactive modal layout after resize");
+    let button = find_widget_of_type(&panel_layout, "button")
+        .expect("close button")
+        .clone();
+    let _ = crate::widget_render::collect_metal_primitives(
+        &panel_layout,
+        crate::widget_render::WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 900.0,
+            vp_h: 600.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 30.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+        0.0,
+        30,
+    );
+    let (content_col, content_row, _, _) = editor
+        .tile_content_area(panel_tile, 0)
+        .expect("panel content area");
+    let precise_col = content_col as f32 + button.rect.col + button.rect.width * 0.5;
+    let precise_row = content_row as f32 + button.rect.row + button.rect.height * 0.5;
+
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            precise_col.floor() as u16,
+            precise_row.floor() as u16,
+        ),
+        precise_col,
+        precise_row,
+        0,
+    );
+    assert!(
+        !eval_bool(&mut editor, "modal-open"),
+        "a modal child close button must dispatch through the inactive owner tile"
+    );
+    assert_eq!(
+        editor.active_tile, source_tile,
+        "modal interaction must preserve the inspected source as the active tile"
     );
 }
 

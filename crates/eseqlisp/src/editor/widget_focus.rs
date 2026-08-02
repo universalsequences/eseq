@@ -640,6 +640,7 @@ impl Editor {
         leaf.widget_scroll_top = 0.0;
         leaf.widget_viewport_width = 0.0;
         leaf.widget_viewport_height = 0.0;
+        leaf.layout_frame_viewport = None;
         leaf.widget_scroll_left = 0.0;
         leaf.active_widget_gesture = None;
         leaf.cached_layout = None;

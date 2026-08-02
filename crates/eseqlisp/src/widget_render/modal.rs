@@ -11,7 +11,7 @@ use super::{
 use crate::backend::Color;
 use crate::layout::{
     Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, current_frame_viewport,
-    f64_to_f32, get_prop_num, get_prop_str,
+    current_layout_cell_dims, f64_to_f32, get_prop_num, get_prop_str,
 };
 use crate::vm::Value;
 
@@ -27,6 +27,8 @@ const CONTENT_PADDING_ROWS: f32 = 0.7;
 const TITLE_ROWS: f32 = 1.6;
 #[cfg(target_os = "macos")]
 const SCRIM_ALPHA: f32 = 0.45;
+#[cfg(target_os = "macos")]
+const PANEL_CORNER_RADIUS_PX: f32 = 30.0;
 
 pub struct ModalWidget;
 
@@ -63,10 +65,17 @@ pub(crate) fn compute_modal_rect(frame: Rect, width: Option<f32>, height: Option
 
 /// Modal rect for a widget-tree node laid out against `frame`.
 pub(crate) fn modal_rect_for_value(node: &Value, frame: Rect) -> Rect {
+    let (cell_w, cell_h) = current_layout_cell_dims().unwrap_or((1.0, 1.0));
+    let dimension = |cell_prop: &str, pixel_prop: &str, cell_px: f32| {
+        get_prop_num(node, pixel_prop)
+            .map(f64_to_f32)
+            .map(|pixels| pixels / cell_px.max(1.0))
+            .or_else(|| get_prop_num(node, cell_prop).map(f64_to_f32))
+    };
     compute_modal_rect(
         frame,
-        get_prop_num(node, "width").map(f64_to_f32),
-        get_prop_num(node, "height").map(f64_to_f32),
+        dimension("width", "width-px", cell_w),
+        dimension("height", "height-px", cell_h),
     )
 }
 
@@ -180,9 +189,14 @@ pub(crate) fn emit_modal_panel_chrome(
         "border-color",
         crate::theme::DROPDOWN_MENU_BORDER(),
     );
-    emit_rounded_rect_overlay(border_rect, border_color, 11.0, viewport);
+    emit_rounded_rect_overlay(
+        border_rect,
+        border_color,
+        PANEL_CORNER_RADIUS_PX + border_px,
+        viewport,
+    );
     let panel_bg = resolve_named_color(props, "background-color", crate::theme::DROPDOWN_MENU_BG());
-    emit_rounded_rect_overlay(modal_rect, panel_bg, 10.0, viewport);
+    emit_rounded_rect_overlay(modal_rect, panel_bg, PANEL_CORNER_RADIUS_PX, viewport);
 }
 
 /// Optional `:title` header at the top of the panel.
@@ -228,7 +242,14 @@ impl WidgetDefinition for ModalWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["is-open", "width", "height", "title"]
+        &[
+            "is-open",
+            "width",
+            "height",
+            "width-px",
+            "height-px",
+            "title",
+        ]
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {

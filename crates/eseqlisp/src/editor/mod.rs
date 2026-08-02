@@ -165,6 +165,31 @@ fn leaf_cached_layout_matches_viewport(
     }
 }
 
+fn frame_viewport_matches(a: Option<crate::layout::Rect>, b: Option<crate::layout::Rect>) -> bool {
+    const EPSILON: f32 = 0.05;
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            (a.row - b.row).abs() <= EPSILON
+                && (a.col - b.col).abs() <= EPSILON
+                && (a.width - b.width).abs() <= EPSILON
+                && (a.height - b.height).abs() <= EPSILON
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn leaf_cached_layout_matches_geometry(
+    leaf: &TileLeaf,
+    layout: &LayoutNode,
+    cols: f32,
+    rows: f32,
+    frame_viewport: Option<crate::layout::Rect>,
+) -> bool {
+    leaf_cached_layout_matches_viewport(leaf, layout, cols, rows)
+        && frame_viewport_matches(leaf.layout_frame_viewport, frame_viewport)
+}
+
 fn format_lisp_reload_report(report: &ReloadReport) -> String {
     let mut lines = Vec::new();
     lines.push(if report.success {
@@ -507,6 +532,7 @@ struct RetainedTileLayout {
     widget_scroll_left: f32,
     widget_viewport_width: f32,
     widget_viewport_height: f32,
+    layout_frame_viewport: Option<crate::layout::Rect>,
 }
 
 impl RetainedTileLayout {
@@ -541,6 +567,7 @@ impl RetainedTileLayout {
             widget_scroll_left: leaf.widget_scroll_left,
             widget_viewport_width: viewport_width,
             widget_viewport_height: viewport_height,
+            layout_frame_viewport: leaf.layout_frame_viewport,
         })
     }
 
@@ -566,6 +593,7 @@ impl RetainedTileLayout {
         leaf.widget_scroll_left = self.widget_scroll_left;
         leaf.widget_viewport_width = self.widget_viewport_width;
         leaf.widget_viewport_height = self.widget_viewport_height;
+        leaf.layout_frame_viewport = self.layout_frame_viewport;
         leaf.cached_inactive_frame = self.cached_inactive_frame.clone();
         true
     }
@@ -577,6 +605,15 @@ impl RetainedTileLayout {
             cols,
             rows,
         )
+    }
+    fn matches_geometry(
+        &self,
+        cols: f32,
+        rows: f32,
+        frame_viewport: Option<crate::layout::Rect>,
+    ) -> bool {
+        self.matches_viewport(cols, rows)
+            && frame_viewport_matches(self.layout_frame_viewport, frame_viewport)
     }
 }
 
@@ -623,6 +660,8 @@ pub struct Editor {
     typing_undo_buffer_id: Option<BufferId>,
     /// Cached tile rects, recomputed when tiles change or viewport resizes.
     cached_tile_rects: Vec<(TileId, Rect)>,
+    /// Full tiled frame size used to derive frame-local overlay geometry.
+    cached_tiled_frame_size: Option<(f32, f32)>,
     /// Outer margin around the tiled layout, in cell units.
     tile_outer_gap: f32,
     remembered_split_ratios: HashMap<String, f32>,
@@ -775,6 +814,7 @@ impl Editor {
             redo_stack: Vec::new(),
             typing_undo_buffer_id: None,
             cached_tile_rects: vec![],
+            cached_tiled_frame_size: None,
             tile_outer_gap: 0.0,
             remembered_split_ratios: HashMap::new(),
             retained_tile_layouts: HashMap::new(),
@@ -969,6 +1009,10 @@ impl Editor {
             existing.widget_tree_revision == retained.widget_tree_revision
                 && existing.viewport_width_bits == retained.viewport_width_bits
                 && existing.viewport_height_bits == retained.viewport_height_bits
+                && frame_viewport_matches(
+                    existing.layout_frame_viewport,
+                    retained.layout_frame_viewport,
+                )
         }) {
             *existing = retained;
             return;
@@ -989,11 +1033,12 @@ impl Editor {
         });
     }
 
-    fn retained_tile_layout_for_viewport(
+    fn retained_tile_layout_for_geometry(
         &self,
         buffer: &Buffer,
         cols: f32,
         rows: f32,
+        frame_viewport: Option<crate::layout::Rect>,
     ) -> Option<RetainedTileLayout> {
         self.retained_tile_layouts
             .get(&buffer.id)?
@@ -1001,7 +1046,7 @@ impl Editor {
             .rev()
             .find(|retained| {
                 retained.widget_tree_revision == buffer.widget_tree_revision
-                    && retained.matches_viewport(cols, rows)
+                    && retained.matches_geometry(cols, rows, frame_viewport)
             })
             .cloned()
     }
@@ -1048,6 +1093,7 @@ impl Editor {
 
     /// Recompute cached tile rects for the given viewport.
     pub fn update_tile_rects(&mut self, total_width: u16, total_height: u16) {
+        self.cached_tiled_frame_size = Some((total_width as f32, total_height as f32));
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         let horizontal_margin = (self.tile_outer_gap.max(0.0) * TILE_GAP_PX_PER_UNIT
             / cell_w.max(1.0))
@@ -1103,6 +1149,7 @@ impl Editor {
                 .into_iter()
                 .filter(|id| *id != self.active_tile)
                 .filter_map(|id| {
+                    let frame_viewport = self.tile_layout_frame_viewport(id)?;
                     let leaf = self.tile_root.find_leaf(id)?;
                     let rect = self
                         .cached_tile_rects
@@ -1123,12 +1170,23 @@ impl Editor {
                     );
                     let valid = leaf.cached_layout.as_ref().is_some_and(|layout| {
                         leaf.cached_layout_widget_tree_revision == buffer.widget_tree_revision
-                            && leaf_cached_layout_matches_viewport(leaf, layout, cols, rows)
+                            && leaf_cached_layout_matches_geometry(
+                                leaf,
+                                layout,
+                                cols,
+                                rows,
+                                Some(frame_viewport),
+                            )
                     });
                     let retained = if valid {
                         None
                     } else {
-                        self.retained_tile_layout_for_viewport(buffer, cols, rows)
+                        self.retained_tile_layout_for_geometry(
+                            buffer,
+                            cols,
+                            rows,
+                            Some(frame_viewport),
+                        )
                     };
                     Some((
                         id,
@@ -1155,6 +1213,7 @@ impl Editor {
                     }
                     leaf.cached_layout = None;
                     leaf.cached_layout_widget_tree_revision = 0;
+                    leaf.layout_frame_viewport = None;
                     leaf.dirty_widget_ids.clear();
                     leaf.cached_inactive_frame = None;
                     if !buf_indices.contains(&buffer_idx) {
@@ -1172,6 +1231,30 @@ impl Editor {
                 leaf.widget_viewport_height = viewport_height;
             }
         }
+    }
+
+    /// Full-frame viewport expressed in a tile's local content coordinates.
+    /// This is the geometry frame-anchored widgets must be laid out against,
+    /// regardless of whether their owner tile is currently active.
+    pub(crate) fn tile_layout_frame_viewport(
+        &self,
+        tile_id: TileId,
+    ) -> Option<crate::layout::Rect> {
+        let (frame_width, frame_height) = self.cached_tiled_frame_size?;
+        let leaf = self.tile_root.find_leaf(tile_id)?;
+        let tile_rect = self
+            .cached_tile_rects
+            .iter()
+            .find(|(id, _)| *id == tile_id)
+            .map(|(_, rect)| *rect)?;
+        let body_rect = tile_body_rect(tile_rect, !leaf.tabs.is_empty());
+        let (border_col, border_row) = self.tile_content_border_insets(tile_id, 0);
+        Some(crate::layout::Rect {
+            row: -(body_rect.row + border_row),
+            col: -(body_rect.col + border_col),
+            width: frame_width,
+            height: frame_height,
+        })
     }
 
     /// Find which tile contains the given screen coordinate.
@@ -1273,10 +1356,17 @@ impl Editor {
         let Some(target_leaf) = self.tile_root.find_leaf(new_tile) else {
             return;
         };
+        let layout_frame_viewport = target_leaf.layout_frame_viewport;
         let cached_layout = target_leaf.cached_layout.as_ref().and_then(|layout| {
             viewport
                 .map(|(cols, rows)| {
-                    leaf_cached_layout_matches_viewport(target_leaf, layout, cols, rows)
+                    leaf_cached_layout_matches_geometry(
+                        target_leaf,
+                        layout,
+                        cols,
+                        rows,
+                        layout_frame_viewport,
+                    )
                 })
                 .unwrap_or(true)
                 .then(|| layout.clone())
@@ -1287,6 +1377,8 @@ impl Editor {
         self.active_tile = new_tile;
         self.record_buffer_access_by_idx(buffer_idx);
         self.sync_runtime_context();
+        self.runtime
+            .set_layout_frame_viewport(layout_frame_viewport);
         self.restore_buffer_widget_tree_with_cached_layout(
             cached_layout,
             viewport,
@@ -1746,7 +1838,12 @@ impl Editor {
         );
         let retained = {
             let buffer = self.active_buffer();
-            self.retained_tile_layout_for_viewport(buffer, viewport.0, viewport.1)
+            self.retained_tile_layout_for_geometry(
+                buffer,
+                viewport.0,
+                viewport.1,
+                self.runtime.layout_frame_viewport(),
+            )
         };
         if let Some(retained) = retained {
             self.restore_buffer_widget_tree_with_cached_layout(
@@ -1758,8 +1855,14 @@ impl Editor {
             let (cached_layout, layout_revision) = {
                 let leaf = self.active_leaf();
                 let cached_layout = leaf.cached_layout.as_ref().and_then(|layout| {
-                    leaf_cached_layout_matches_viewport(leaf, layout, viewport.0, viewport.1)
-                        .then(|| layout.clone())
+                    leaf_cached_layout_matches_geometry(
+                        leaf,
+                        layout,
+                        viewport.0,
+                        viewport.1,
+                        self.runtime.layout_frame_viewport(),
+                    )
+                    .then(|| layout.clone())
                 });
                 (cached_layout, leaf.layout_revision)
             };
@@ -1899,7 +2002,7 @@ impl Editor {
             return;
         }
 
-        if crate::widget_render::overlay_widget_id().is_some()
+        if let Some(entry) = crate::widget_render::topmost_overlay()
             && matches!(
                 mouse.kind,
                 MouseEventKind::Moved
@@ -1908,13 +2011,29 @@ impl Editor {
                     | MouseEventKind::Up(MouseButton::Left)
             )
         {
-            let tile_id = self.active_tile;
+            let tile_id = self.overlay_owner_tile(entry).unwrap_or(self.active_tile);
             let Some((content_col, content_row, content_width, content_height)) =
                 self.tile_content_area(tile_id, border_inset)
             else {
                 return;
             };
-            self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
+            if matches!(mouse.kind, MouseEventKind::Moved) && tile_id != self.active_tile {
+                self.update_inactive_overlay_hover(
+                    entry,
+                    tile_id,
+                    content_col,
+                    content_row,
+                    precise_col,
+                    precise_row,
+                    border_inset,
+                );
+                return;
+            }
+            self.route_event_to_tile(tile_id, border_inset, false, |editor| {
+                // Switching the active runtime clears render-derived overlay
+                // state. This entry is the event's captured routing target
+                // and remains valid for the duration of this dispatch.
+                crate::widget_render::push_overlay(entry);
                 let (event_col, event_row) = editor
                     .tile_content_precise_event_position(
                         tile_id,
@@ -1935,6 +2054,11 @@ impl Editor {
                     event_row,
                 );
             });
+            if self.overlay_entry_is_open_in_tile(entry, tile_id) {
+                crate::widget_render::push_overlay(entry);
+            } else {
+                crate::widget_render::remove_overlay(entry.widget_id);
+            }
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 self.suppress_mouse_until_left_up = true;
             }
@@ -1994,11 +2118,11 @@ impl Editor {
         if matches!(
             mouse.kind,
             MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
-        ) && self.route_pointer_event_to_tile(self.active_tile, border_inset, true, |editor| {
+        ) && self.route_event_to_tile(self.active_tile, border_inset, true, |editor| {
             editor.active_layout_has_pending_patch_drag()
         }) {
             let tile_id = self.active_tile;
-            self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
+            self.route_event_to_tile(tile_id, border_inset, true, |editor| {
                 let Some((content_col, content_row, _, _)) =
                     editor.tile_content_area(tile_id, border_inset)
                 else {
@@ -2038,7 +2162,7 @@ impl Editor {
             && let Some(tile_id) =
                 self.status_toggle_tile_at_screen(mouse.column as f32, mouse.row as f32)
         {
-            self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
+            self.route_event_to_tile(tile_id, border_inset, true, |editor| {
                 editor.toggle_active_buffer_view_mode_from_indicator();
             });
             return;
@@ -2070,7 +2194,7 @@ impl Editor {
                 .tile_at_screen(screen_col, screen_row)
                 .unwrap_or(self.active_tile);
             let mut dropped = false;
-            self.route_pointer_event_to_tile(target_tile, border_inset, false, |editor| {
+            self.route_event_to_tile(target_tile, border_inset, false, |editor| {
                 let Some((content_col, content_row, _, _)) =
                     editor.tile_content_area(target_tile, border_inset)
                 else {
@@ -2204,7 +2328,7 @@ impl Editor {
             {
                 self.tile_root.clear_focus_except(tile_id);
             }
-            self.route_pointer_event_to_tile(tile_id, border_inset, persist_selection, |editor| {
+            self.route_event_to_tile(tile_id, border_inset, persist_selection, |editor| {
                 let Some((content_col, content_row, content_width, content_height)) =
                     editor.tile_content_area(tile_id, border_inset)
                 else {
@@ -2257,7 +2381,7 @@ impl Editor {
         // With a modal open, inspect the modal's own tile — the panel can
         // hang over neighbouring tiles whose layouts don't contain it.
         let Some(tile_id) = self
-            .modal_inspect_tile()
+            .modal_owner_tile()
             .or_else(|| self.tile_at_screen(precise_col, precise_row))
         else {
             if self.inspect_hover_tile_id.take().is_some()
@@ -2308,50 +2432,190 @@ impl Editor {
         true
     }
 
-    /// The tile pointer gestures must route to while a modal overlay is
-    /// open: the ACTIVE tile, whose layout owns the modal node. Routing by
-    /// the tile under the pointer would silently switch the active tile when
-    /// the panel hangs over a neighbouring tile (`route_pointer_event_to_tile`
-    /// persists the switch) — after which every modal input lookup runs
-    /// against a layout with no modal in it, consuming events with no
-    /// effect and, on a widget-id collision, dispatching to background
-    /// widgets. Mirrors `handle_tiled_mouse_precise`'s overlay routing.
-    fn modal_gesture_tile(&self) -> Option<TileId> {
-        crate::widget_render::topmost_overlay()
-            .filter(|entry| entry.kind == crate::widget_render::OverlayKind::Modal)
-            .map(|_| self.active_tile)
-    }
-
-    /// The tile whose layout actually contains the open modal — the active
-    /// tile when it mounts it, otherwise whichever tile's cached layout
-    /// does (a modal can open in a non-active tile, e.g. the sound palette
-    /// opened from a badge in the device panel). Read-only resolution for
-    /// paths that must not switch the active tile (inspect).
-    fn modal_inspect_tile(&self) -> Option<TileId> {
-        crate::widget_render::topmost_overlay()
-            .filter(|entry| entry.kind == crate::widget_render::OverlayKind::Modal)?;
-        let active_has_modal = self
+    /// Resolve a render-derived overlay entry back to the visible tile whose
+    /// layout owns it. Inspect can deliberately make a source tile active
+    /// while the modal remains mounted in an arrangement/step tile, so active
+    /// tile identity is not overlay ownership.
+    fn overlay_owner_tile(&self, entry: crate::widget_render::OverlayEntry) -> Option<TileId> {
+        let owns_entry = |layout: &crate::layout::LayoutNode| {
+            widget_focus::find_node_by_id(layout, entry.widget_id).is_some()
+                || (entry.kind == crate::widget_render::OverlayKind::Modal
+                    && widget_focus::find_open_modal_node(layout).is_some())
+        };
+        if self
             .runtime
             .current_layout
             .as_deref()
-            .and_then(widget_focus::find_open_modal_node)
-            .is_some();
-        if active_has_modal {
+            .is_some_and(owns_entry)
+        {
             return Some(self.active_tile);
         }
         self.tile_root
             .leaf_ids()
             .into_iter()
+            .filter(|tile_id| *tile_id != self.active_tile)
             .find(|tile_id| {
-                *tile_id != self.active_tile
-                    && self
-                        .tile_root
-                        .find_leaf(*tile_id)
-                        .and_then(|leaf| leaf.cached_layout.as_deref())
-                        .and_then(widget_focus::find_open_modal_node)
-                        .is_some()
+                self.tile_root
+                    .find_leaf(*tile_id)
+                    .and_then(|leaf| leaf.cached_layout.as_deref())
+                    .is_some_and(owns_entry)
             })
-            .or(Some(self.active_tile))
+    }
+
+    fn modal_owner_tile(&self) -> Option<TileId> {
+        if self
+            .runtime
+            .current_layout
+            .as_deref()
+            .and_then(widget_focus::find_open_modal_node)
+            .is_some()
+        {
+            return Some(self.active_tile);
+        }
+        self.tile_root
+            .leaf_ids()
+            .into_iter()
+            .filter(|tile_id| *tile_id != self.active_tile)
+            .find(|tile_id| {
+                self.tile_root
+                    .find_leaf(*tile_id)
+                    .and_then(|leaf| leaf.cached_layout.as_deref())
+                    .and_then(widget_focus::find_open_modal_node)
+                    .is_some()
+            })
+    }
+
+    /// True when any visible tile owns an open modal. This is the app-level
+    /// keyboard shortcut gate: modal input remains exclusive even when source
+    /// inspection temporarily makes another tile active.
+    pub fn modal_is_open(&self) -> bool {
+        self.modal_owner_tile().is_some()
+    }
+
+    /// Route keyboard input exclusively to the open modal. Returns `false`
+    /// only when no visible tile owns one.
+    fn handle_open_modal_key(&mut self, key: KeyEvent) -> bool {
+        let Some(owner_tile) = self.modal_owner_tile() else {
+            return false;
+        };
+        // Switching to an inactive owner restores that tile's widget tree and
+        // clears render-derived overlay registration. Preserve the keyboard
+        // target across the temporary switch; widget state remains canonical.
+        let topmost_overlay = crate::widget_render::topmost_overlay();
+
+        // A chord begun before the modal opened must not resume after it
+        // closes; the modal establishes a fresh keyboard context.
+        self.pending_key = None;
+        self.route_event_to_tile(owner_tile, 0, false, |editor| {
+            editor.sync_modal_focus_state();
+
+            if key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE {
+                // A dropdown inside the modal is the topmost keyboard target
+                // and closes first. The next Escape reaches the modal itself.
+                if let Some(entry) = topmost_overlay
+                    && entry.kind == crate::widget_render::OverlayKind::Dropdown
+                {
+                    if !editor.handle_focused_widget_key(key) {
+                        crate::widget_render::dropdown::close_dropdown(entry.widget_id);
+                        crate::widget_render::remove_overlay(entry.widget_id);
+                        editor.mark_needs_redraw();
+                    }
+                    return;
+                }
+
+                let modal_id = editor
+                    .runtime
+                    .current_layout
+                    .as_deref()
+                    .and_then(widget_focus::find_open_modal_node)
+                    .map(|modal| modal.widget_id);
+                if let Some(modal_id) = modal_id {
+                    editor.fire_modal_on_close(modal_id);
+                }
+                return;
+            }
+
+            // Native widget editing/navigation gets first refusal. Spatial
+            // focus movement and :on-focus-key callbacks remain available
+            // inside the modal; an unhandled key is deliberately swallowed.
+            if !editor.handle_focused_widget_key(key) {
+                let _ = editor.handle_focus_key(key);
+            }
+        });
+        true
+    }
+
+    fn modal_gesture_tile(&self) -> Option<TileId> {
+        self.modal_owner_tile()
+    }
+
+    fn overlay_entry_is_open_in_tile(
+        &self,
+        entry: crate::widget_render::OverlayEntry,
+        tile_id: TileId,
+    ) -> bool {
+        let layout = if tile_id == self.active_tile {
+            self.runtime.current_layout.as_deref()
+        } else {
+            self.tile_root
+                .find_leaf(tile_id)
+                .and_then(|leaf| leaf.cached_layout.as_deref())
+        };
+        match entry.kind {
+            crate::widget_render::OverlayKind::Modal => {
+                layout.and_then(widget_focus::find_open_modal_node).is_some()
+            }
+            crate::widget_render::OverlayKind::Dropdown => {
+                crate::widget_render::dropdown::is_dropdown_open(entry.widget_id)
+                    && layout.is_some_and(|layout| {
+                        widget_focus::find_node_by_id(layout, entry.widget_id).is_some()
+                    })
+            }
+        }
+    }
+
+    fn update_inactive_overlay_hover(
+        &mut self,
+        entry: crate::widget_render::OverlayEntry,
+        tile_id: TileId,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+        border_inset: u16,
+    ) {
+        let (event_col, event_row) = self
+            .tile_content_precise_event_position(
+                tile_id,
+                border_inset,
+                content_col,
+                content_row,
+                precise_col,
+                precise_row,
+            )
+            .unwrap_or((precise_col, precise_row));
+        let local_col = event_col - content_col as f32;
+        let local_row = event_row - content_row as f32;
+
+        if entry.kind == crate::widget_render::OverlayKind::Dropdown {
+            if crate::widget_render::dropdown::hover_overlay(entry.widget_id, local_row) {
+                self.mark_needs_redraw();
+            }
+            return;
+        }
+
+        let hovered = self.tile_root.find_leaf(tile_id).and_then(|leaf| {
+            let layout = leaf.cached_layout.as_deref()?;
+            let modal = widget_focus::find_node_by_id(layout, entry.widget_id)
+                .or_else(|| widget_focus::find_open_modal_node(layout).cloned())?;
+            let layout_col = local_col + leaf.widget_scroll_left;
+            let layout_row = local_row + leaf.widget_scroll_top;
+            crate::ui::layout::hit_test_layout(&modal, layout_row, layout_col)
+                .map(|node| node.widget_id)
+        });
+        crate::widget_render::set_pointer_hover_widget(hovered);
+        self.widget_cursor = WidgetCursor::Default;
+        self.mark_needs_redraw();
     }
 
     pub fn handle_tiled_touchpad_magnify(
@@ -2361,13 +2625,18 @@ impl Editor {
         border_inset: u16,
         delta: f64,
     ) {
+        let modal_entry = crate::widget_render::topmost_overlay()
+            .filter(|entry| entry.kind == crate::widget_render::OverlayKind::Modal);
         let Some(tile_id) = self
             .modal_gesture_tile()
             .or_else(|| self.tile_at_screen(precise_col, precise_row))
         else {
             return;
         };
-        self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
+        self.route_event_to_tile(tile_id, border_inset, modal_entry.is_none(), |editor| {
+            if let Some(entry) = modal_entry {
+                crate::widget_render::push_overlay(entry);
+            }
             let Some((content_col, content_row, _, _)) =
                 editor.tile_content_area(tile_id, border_inset)
             else {
@@ -2381,6 +2650,11 @@ impl Editor {
                 delta,
             );
         });
+        if let Some(entry) = modal_entry
+            && self.overlay_entry_is_open_in_tile(entry, tile_id)
+        {
+            crate::widget_render::push_overlay(entry);
+        }
     }
 
     pub fn handle_tiled_touchpad_scroll(
@@ -2391,32 +2665,48 @@ impl Editor {
         delta_x: f32,
         delta_y: f32,
     ) -> bool {
-        let modal_open = self.modal_gesture_tile().is_some();
+        let modal_entry = crate::widget_render::topmost_overlay()
+            .filter(|entry| entry.kind == crate::widget_render::OverlayKind::Modal);
+        let modal_open = modal_entry.is_some();
         let Some(tile_id) = self
             .modal_gesture_tile()
             .or_else(|| self.tile_at_screen(precise_col, precise_row))
         else {
             return false;
         };
-        self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
-            let Some((content_col, content_row, _, _)) =
-                editor.tile_content_area(tile_id, border_inset)
-            else {
-                // With a modal open the gesture is trapped either way: a
-                // false here would let the caller scroll the tile leaf
-                // behind the panel (see collect_modal_overlay's coherence
-                // note).
-                return modal_open;
-            };
-            editor.handle_touchpad_scroll(
-                content_col,
-                content_row,
-                precise_col,
-                precise_row,
-                delta_x,
-                delta_y,
-            )
-        })
+        let consumed = self.route_event_to_tile(
+            tile_id,
+            border_inset,
+            modal_entry.is_none(),
+            |editor| {
+                if let Some(entry) = modal_entry {
+                    crate::widget_render::push_overlay(entry);
+                }
+                let Some((content_col, content_row, _, _)) =
+                    editor.tile_content_area(tile_id, border_inset)
+                else {
+                    // With a modal open the gesture is trapped either way: a
+                    // false here would let the caller scroll the tile leaf
+                    // behind the panel (see collect_modal_overlay's coherence
+                    // note).
+                    return modal_open;
+                };
+                editor.handle_touchpad_scroll(
+                    content_col,
+                    content_row,
+                    precise_col,
+                    precise_row,
+                    delta_x,
+                    delta_y,
+                )
+            },
+        );
+        if let Some(entry) = modal_entry
+            && self.overlay_entry_is_open_in_tile(entry, tile_id)
+        {
+            crate::widget_render::push_overlay(entry);
+        }
+        consumed
     }
 
     fn tile_content_area(
@@ -2638,6 +2928,7 @@ impl Editor {
     fn invalidate_leaf_for_buffer_switch(leaf: &mut TileLeaf) {
         leaf.cached_layout = None;
         leaf.cached_layout_widget_tree_revision = 0;
+        leaf.layout_frame_viewport = None;
         leaf.cached_inactive_frame = None;
         leaf.hit_grid_cache = None;
         leaf.highlight_cache = None;
@@ -2710,7 +3001,7 @@ impl Editor {
             && precise_col < rect.col + STATUS_TOGGLE_WIDTH
     }
 
-    fn route_pointer_event_to_tile<R>(
+    fn route_event_to_tile<R>(
         &mut self,
         tile_id: TileId,
         border_inset: u16,
@@ -3917,7 +4208,12 @@ impl Editor {
         let retained = (!runtime_viewport_matches)
             .then(|| {
                 let buffer = self.active_buffer();
-                self.retained_tile_layout_for_viewport(buffer, cols, rows)
+                self.retained_tile_layout_for_geometry(
+                    buffer,
+                    cols,
+                    rows,
+                    self.runtime.layout_frame_viewport(),
+                )
             })
             .flatten();
         if let Some(retained) = retained {
@@ -3996,12 +4292,14 @@ impl Editor {
         let widget_tree_revision = self.active_buffer().widget_tree_revision;
         let viewport_width = self.runtime.layout_cols_exact();
         let viewport_height = self.runtime.layout_rows_exact();
+        let layout_frame_viewport = self.runtime.layout_frame_viewport();
         let already_synced = {
             let leaf = self.active_leaf();
             leaf.layout_revision == revision
                 && leaf.cached_layout_widget_tree_revision == widget_tree_revision
                 && leaf.widget_viewport_width.to_bits() == viewport_width.to_bits()
                 && leaf.widget_viewport_height.to_bits() == viewport_height.to_bits()
+                && frame_viewport_matches(leaf.layout_frame_viewport, layout_frame_viewport)
                 && match (&leaf.cached_layout, &layout) {
                     (Some(cached), Some(current)) => Arc::ptr_eq(cached, current),
                     (None, None) => true,
@@ -4022,6 +4320,7 @@ impl Editor {
         leaf.layout_revision = revision;
         leaf.widget_viewport_width = viewport_width;
         leaf.widget_viewport_height = viewport_height;
+        leaf.layout_frame_viewport = layout_frame_viewport;
         self.remap_focused_widget_after_layout_change();
         self.sync_reactive_bindings_for_visible_layouts();
     }
@@ -4096,6 +4395,7 @@ impl Editor {
             if let Some(leaf) = self.tile_root.find_leaf_mut(id) {
                 leaf.cached_layout = None;
                 leaf.cached_layout_widget_tree_revision = 0;
+                leaf.layout_frame_viewport = None;
                 leaf.dirty_widget_ids.clear();
                 leaf.cached_inactive_frame = None;
                 if !buf_indices.contains(&leaf.buffer_idx) {
@@ -5087,6 +5387,14 @@ impl Editor {
             self.finish_typing_undo_group();
         }
 
+        // A modal is a keyboard boundary. Route the key through the tile that
+        // owns the modal (which may be inactive while inspected source is
+        // open), and never let an unhandled modal key reach editor/global
+        // bindings. Escape and focused modal widgets are handled inside.
+        if self.handle_open_modal_key(key) {
+            return;
+        }
+
         if self.inspect_mode && key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE {
             self.exit_inspect_mode();
             return;
@@ -5135,32 +5443,6 @@ impl Editor {
                 }
             }
             return;
-        }
-
-        // Escape closes the topmost overlay first. Modal → fire :on-close (a
-        // request; the app flips the :is-open binding). Dropdown above a
-        // modal keeps precedence: when focused it closes via the
-        // focused-widget path below (preserving its focus semantics), when
-        // unfocused it is closed here — either way the next Escape reaches
-        // the modal.
-        if key.code == KeyCode::Esc
-            && key.modifiers == KeyModifiers::NONE
-            && let Some(entry) = crate::widget_render::topmost_overlay()
-        {
-            match entry.kind {
-                crate::widget_render::OverlayKind::Modal => {
-                    self.fire_modal_on_close(entry.widget_id);
-                    return;
-                }
-                crate::widget_render::OverlayKind::Dropdown => {
-                    if self.active_leaf().focused_widget_id != Some(entry.widget_id) {
-                        crate::widget_render::dropdown::close_dropdown(entry.widget_id);
-                        crate::widget_render::remove_overlay(entry.widget_id);
-                        self.mark_needs_redraw();
-                        return;
-                    }
-                }
-            }
         }
 
         // Escape is both a local cancellation key and a commonly bound global
@@ -6837,7 +7119,7 @@ impl Editor {
         let tile_ids = self.tile_root.leaf_ids();
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         // Collect tile viewports first to avoid borrow issues
-        let tiles_to_update: Vec<(TileId, f32, f32, bool)> = tile_ids
+        let tiles_to_update: Vec<(TileId, f32, f32, Option<crate::layout::Rect>, bool)> = tile_ids
             .into_iter()
             .filter(|id| *id != self.active_tile)
             .filter_map(|id| {
@@ -6869,17 +7151,24 @@ impl Editor {
                         self.runtime.layout_rows_exact(),
                     ),
                 };
-                Some((id, cols, rows, viewport_known))
+                let frame_viewport = self.tile_layout_frame_viewport(id);
+                Some((id, cols, rows, frame_viewport, viewport_known))
             })
             .collect();
 
-        for (tile_id, cols, rows, viewport_known) in tiles_to_update {
+        for (tile_id, cols, rows, frame_viewport, viewport_known) in tiles_to_update {
             let layout_started = Instant::now();
             let existing_layout = self.tile_root.find_leaf(tile_id).and_then(|leaf| {
                 let layout = leaf.cached_layout.clone()?;
                 let current_tree = leaf.cached_layout_widget_tree_revision == widget_tree_revision;
                 let current_viewport = !viewport_known
-                    || leaf_cached_layout_matches_viewport(leaf, &layout, cols, rows);
+                    || leaf_cached_layout_matches_geometry(
+                        leaf,
+                        &layout,
+                        cols,
+                        rows,
+                        frame_viewport,
+                    );
                 Some((layout, current_tree, current_viewport))
             });
             let cached_layout = existing_layout
@@ -6912,9 +7201,10 @@ impl Editor {
                 }
                 let layout = tree.as_ref().and_then(|tree| {
                     self.runtime
-                        .layout_snapshot_for_tree_with_viewport_and_offset(
+                        .layout_snapshot_for_tree_with_geometry_and_offset(
                             tree,
                             Some((cols, rows)),
+                            frame_viewport,
                             buffer_id * 100_000,
                         )
                 });
@@ -6934,6 +7224,7 @@ impl Editor {
                 };
                 leaf.widget_viewport_width = cols;
                 leaf.widget_viewport_height = rows;
+                leaf.layout_frame_viewport = frame_viewport;
                 leaf.dirty_widget_ids = dirty_widget_ids;
                 leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
                 leaf.cached_inactive_frame = None;
@@ -6978,7 +7269,7 @@ impl Editor {
         let widget_tree_revision = self.buffers[buffer_idx].widget_tree_revision;
         let tile_ids = self.tile_root.leaf_ids();
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
-        let tiles_to_update: Vec<(TileId, f32, f32)> = tile_ids
+        let tiles_to_update: Vec<(TileId, f32, f32, Option<crate::layout::Rect>)> = tile_ids
             .into_iter()
             .filter(|id| *id != self.active_tile)
             .filter_map(|id| {
@@ -7008,11 +7299,11 @@ impl Editor {
                         self.runtime.layout_rows_exact(),
                     ),
                 };
-                Some((id, cols, rows))
+                Some((id, cols, rows, self.tile_layout_frame_viewport(id)))
             })
             .collect();
 
-        for (tile_id, cols, rows) in tiles_to_update {
+        for (tile_id, cols, rows, frame_viewport) in tiles_to_update {
             let layout_started = Instant::now();
             let buffer_name = self.buffers[buffer_idx].name.clone();
             let existing_layout = self
@@ -7056,6 +7347,7 @@ impl Editor {
                             tree,
                             child_path,
                             Some((cols, rows)),
+                            frame_viewport,
                             &mut dirty_widget_ids,
                         ) {
                             Ok(updated) => updated,
@@ -7077,9 +7369,10 @@ impl Editor {
                 reuse_mode = "full";
                 let layout = self
                     .runtime
-                    .layout_snapshot_for_tree_with_viewport_and_offset(
+                    .layout_snapshot_for_tree_with_geometry_and_offset(
                         tree,
                         Some((cols, rows)),
+                        frame_viewport,
                         buffer_id * 100_000,
                     );
                 (layout, Vec::new())
@@ -7102,6 +7395,7 @@ impl Editor {
                 };
                 leaf.widget_viewport_width = cols;
                 leaf.widget_viewport_height = rows;
+                leaf.layout_frame_viewport = frame_viewport;
                 leaf.dirty_widget_ids = dirty_widget_ids;
                 leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
                 leaf.cached_inactive_frame = None;

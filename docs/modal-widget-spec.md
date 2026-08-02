@@ -15,6 +15,8 @@ Metal-only. TUI renders nothing (same posture as the dropdown popup).
   :on-close (fn () (close-sound-selector!))
   :width 80                          ; cells; optional (defaults below)
   :height 30
+  :width-px 960                      ; pixels; takes precedence over :width
+  :height-px 800
   (v-stack
     (label "Select a sound")
     (scroll
@@ -44,6 +46,7 @@ Props:
 | `:is-open` | bool, bindable | required; listed in `bindable_props` |
 | `:on-close` | handler | fired on scrim click / Escape |
 | `:width` / `:height` | number (cells) | optional; default 70% of frame viewport, clamped to content + viewport |
+| `:width-px` / `:height-px` | number (pixels) | optional; converted through the layout cell geometry, takes precedence over the cell-unit prop |
 | `:title` | string | optional convenience header; can also just use a `label` child |
 
 `is-open` must be listed in `size_affecting_props` so the subtree-relayout

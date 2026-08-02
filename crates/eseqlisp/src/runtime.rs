@@ -2328,6 +2328,10 @@ impl Runtime {
         self.force_layout_revision_bump = true;
     }
 
+    pub fn layout_frame_viewport(&self) -> Option<crate::layout::Rect> {
+        self.layout_frame_viewport
+    }
+
     /// Force a full relayout on the next render pass.
     /// Used when internal widget state (e.g. tree expand/collapse) changes
     /// the widget's size without changing the widget tree data.
@@ -2891,6 +2895,21 @@ impl Runtime {
         viewport: Option<(f32, f32)>,
         widget_id_offset: u64,
     ) -> Option<Arc<LayoutNode>> {
+        self.layout_snapshot_for_tree_with_geometry_and_offset(
+            tree,
+            viewport,
+            self.layout_frame_viewport,
+            widget_id_offset,
+        )
+    }
+
+    pub fn layout_snapshot_for_tree_with_geometry_and_offset(
+        &mut self,
+        tree: &Value,
+        viewport: Option<(f32, f32)>,
+        frame_viewport: Option<crate::layout::Rect>,
+        widget_id_offset: u64,
+    ) -> Option<Arc<LayoutNode>> {
         let saved_tree = self.current_widget_tree.clone();
         let saved_committed_snapshot = self.current_committed_ui_snapshot.clone();
         let saved_committed_snapshot_generation = self.current_committed_ui_snapshot_generation;
@@ -2903,12 +2922,14 @@ impl Runtime {
         let saved_rendered_layouts = self.rendered_layouts.clone();
         let saved_cols = self.layout_cols;
         let saved_rows = self.layout_rows;
+        let saved_frame_viewport = self.layout_frame_viewport;
         let saved_widget_id_offset = self.widget_id_offset;
 
         if let Some((cols, rows)) = viewport {
             self.layout_cols = cols;
             self.layout_rows = rows;
         }
+        self.layout_frame_viewport = frame_viewport;
         self.widget_id_offset = widget_id_offset;
 
         // Snapshotting an arbitrary buffer/tree should not try to reuse against
@@ -2939,6 +2960,7 @@ impl Runtime {
         }
         self.layout_cols = saved_cols;
         self.layout_rows = saved_rows;
+        self.layout_frame_viewport = saved_frame_viewport;
         self.widget_id_offset = saved_widget_id_offset;
         snapshot
     }
@@ -2949,6 +2971,7 @@ impl Runtime {
         tree: &Value,
         child_path: &[usize],
         viewport: Option<(f32, f32)>,
+        frame_viewport: Option<crate::layout::Rect>,
         dirty_widget_ids: &mut Vec<u64>,
     ) -> Result<LayoutNode, String> {
         let (cols, rows) = viewport.unwrap_or((self.layout_cols, self.layout_rows));
@@ -2964,7 +2987,7 @@ impl Runtime {
         } else {
             LayoutEngine::new_exact(cols, rows, self.layout_aspect)
         };
-        engine.frame_viewport = self.layout_frame_viewport;
+        engine.frame_viewport = frame_viewport;
         relayout_subtree_path_result(existing, tree, child_path, dirty_widget_ids, &engine)
     }
 
@@ -3214,6 +3237,7 @@ impl Runtime {
                         tree,
                         child_path,
                         None,
+                        self.layout_frame_viewport,
                         &mut dirty_widget_ids,
                     )
                     .map_err(|relayout_reason| {
