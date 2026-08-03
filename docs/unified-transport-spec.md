@@ -376,6 +376,16 @@ merge into latched lanes while a song is installed.
   at stop (the latch survives, take governance doesn't — stale masks
   darkened the clip grid and blocked scene claims).
 
+## 10.3 Override dimming (2026-08-03, Ableton-style, user-requested)
+
+Per-lane, not global: a latched lane's committed timeline clips render at
+35% color (`arrangement-lane-clip-color`), and the scene lane dims the same
+way while the scene identity is latched — "the arrangement is not what you
+hear here until Back to Arrangement". Driven by two new bindings published
+from the latch atomics in `sync_song_state`: `SEQ.song-track-latched`
+(per-track bool list) and `SEQ.song-scene-latched`. Provisional
+(pending-capture) items never dim — they ARE what is being recorded.
+
 ## 11. Non-goals
 
 - No change to the views themselves — the session grid (scene step

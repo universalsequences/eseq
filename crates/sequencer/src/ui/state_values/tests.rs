@@ -13338,6 +13338,8 @@
                 ("song-mode", Value::String("stopped".to_string())),
                 ("song-recording-kind", Value::String("".to_string())),
                 ("song-manual-latch", Value::Bool(false)),
+                ("song-track-latched", Value::List(vec![])),
+                ("song-scene-latched", Value::Bool(false)),
                 ("song-current-row", Value::Number(-1.0)),
                 ("song-current-row-id", Value::Number(-1.0)),
                 ("song-row-count", Value::Number(0.0)),
@@ -20421,6 +20423,33 @@
             read(&mut editor, "SEQ.song-mode"),
             Value::String("song-playback".into())
         );
+
+        // A manual launch latches (rev 4) and the per-track override list
+        // drives the arrangement's per-lane dim.
+        assert_eq!(
+            read(&mut editor, "(nth SEQ.song-track-latched 0)"),
+            Value::Bool(false)
+        );
+        test_app
+            .apply_manual_pattern_launch(
+                &sequencer::quantized_launch::PatternLaunchTarget::Scene { scene: 1 },
+            )
+            .expect("manual launch latches");
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(nth SEQ.song-track-latched 0)"),
+            Value::Bool(true)
+        );
+        assert_eq!(read(&mut editor, "SEQ.song-scene-latched"), Value::Bool(true));
+        test_app.back_to_song().expect("back to arrangement");
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        editor.runtime_mut().run_reactive_cycle();
+        assert_eq!(
+            read(&mut editor, "(nth SEQ.song-track-latched 0)"),
+            Value::Bool(false)
+        );
+        assert_eq!(read(&mut editor, "SEQ.song-scene-latched"), Value::Bool(false));
 
         // Stop returns the bindings to stopped.
         test_app.song_transport_stop().expect("stop succeeds");

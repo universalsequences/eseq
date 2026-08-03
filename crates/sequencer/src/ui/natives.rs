@@ -2184,6 +2184,8 @@ pub(crate) fn init_runtime(
                 ("song-mode", Value::String("stopped".to_string())),
                 ("song-recording-kind", Value::String("".to_string())),
                 ("song-manual-latch", Value::Bool(false)),
+                ("song-track-latched", Value::List(vec![])),
+                ("song-scene-latched", Value::Bool(false)),
                 ("song-current-row", Value::Number(-1.0)),
                 ("song-current-row-id", Value::Number(-1.0)),
                 ("song-row-count", Value::Number(0.0)),

@@ -693,15 +693,27 @@
     (sdf/fill
       (let ((p1x -0.32) (p1y -0.44) (p2x -0.32) (p2y 0.44) (p3x 0.5) (p3y 0.0))
         (let ((d1 (- (* (- p2x p1x) (- y p1y)) (* (- p2y p1y) (- x p1x))))
-              (d2 (- (* (- p3x p2x) (- y p2y)) (* (- p3y p2y) (- x p2x))))
-              (d3 (- (* (- p1x p3x) (- y p3y)) (* (- p1y p3y) (- x p3x)))))
+            (d2 (- (* (- p3x p2x) (- y p2y)) (* (- p3y p2y) (- x p2x))))
+            (d3 (- (* (- p1x p3x) (- y p3y)) (* (- p1y p3y) (- x p3x)))))
           (max (max d1 d2) d3)))
       (material :color
         (if (= take-state 1)
           (rgba 0.35 0.82 0.40 1.0)
           (if (= take-state 2)
-            (rgba 0.42 0.43 0.47 1.0)
+            (rgba 0.62 0.63 0.67 1.0)
             (rgba 0 0 0 0)))))))
+
+
+(defwidget seqv-back-to-song-bg
+  :width 1.5 :height 1.5
+  :state (take-state)
+  :bindable (take-state)
+  :shader
+        (if (= take-state 1)
+          (rgba 0.3 0.3 0.3 0.5)
+          (if (= take-state 2)
+            (rgba 0.32 0.33 0.37 0.5)
+            (rgba 0 0 0 0))))
 
 (def seqv-mute-bg (active)
   (if active
@@ -739,7 +751,8 @@
 (def seqv-track-header-body (i)
   (let ((name (nth SEQ.track-names i)))
     (box :background "seqv-track-container"
-      :padding 0.4
+      :padding 0.1
+      
       :on-click |x y r| (seqv-select-track-for-edit i)
       (h-stack :gap 0.4 :align :center
         (box
@@ -784,8 +797,8 @@
             :highlight-color :transparent
             :shadow-color :transparent
             :color (if (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i))
-                     :dark-gray
-                     :dim)
+              :dark-gray
+              :dim)
             :bg :transparent))
         (seqv-track-volume-control i)
         ;; Take-lane indicator (takes spec 10 UX): green = a take governs
@@ -793,14 +806,17 @@
         ;; latched the lane away — click returns it to the song; invisible
         ;; on pattern lanes. Always laid out — the reactive take-state only
         ;; repaints the widget, so pattern<->take flips never re-layout.
-        (box :width 2 :height 1.5
-          :background "seqv-back-to-song-icon"
-          :key (str "seqv-back-to-song-" i)
+        (box :width 2 :height :fill 
+          :background "seqv-back-to-song-bg"
           :take-state (bind-seq-nth "song-track-governed" i)
-          :on-click |x y r|
+          (box :width 2 :height 1.5
+            :background "seqv-back-to-song-icon"
+            :key (str "seqv-back-to-song-" i)
+            :take-state (bind-seq-nth "song-track-governed" i)
+            :on-click |x y r|
             (if (> (seqv-track-take-state i) 0)
               (seq-song-back-to-song-track i)
-              nil))))))
+              nil)))))))
 
 (def seqv-track-actions (i)
   (h-stack :gap 0.35 :padding 0.85
@@ -1849,7 +1865,7 @@
           (if (seqv-track-expanded? (nth SEQ.track-ids i))
             (v-stack 
               :width :fill :gap 0.2
-              (h-stack :width :fill :gap 0.6 :align :start
+              (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
                 (seqv-track-header i)
                 (seqv-expanded-track-quick-controls i (nth SEQ.track-ids i))
                 (box :flex 1 :width 0 :height 0.1 :bg :transparent)
@@ -1859,12 +1875,12 @@
               ;; Drum racks put the rack header on its own row so the slot
               ;; lanes get the full width for their per-slot gutters.
               (v-stack :width :fill :gap 0.2
-                (h-stack :width :fill :gap 0.6 :align :start
+                (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
                   (seqv-track-header i)
                   (box :flex 1 :width 0 :height 0.1 :bg :transparent)
                   (seqv-track-actions i))
                 (seqv-drum-track-grid i))
-              (h-stack :width :fill :gap 0.6 :align :start
+              (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
                 (seqv-track-header i)
                 (seqv-track-grid i)
                 (box :flex 1 :width 0 :height 0.1 :bg :transparent)

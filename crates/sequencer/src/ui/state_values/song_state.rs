@@ -50,6 +50,12 @@ pub(crate) struct SongBindingsSnapshot {
     /// (takes spec 10): the SONG indicator glows amber and the Back to Song
     /// control appears.
     pub(crate) manual_latch: bool,
+    /// Per-track manual-override latch (unified-transport rev 4): drives the
+    /// per-lane dimming of overridden timeline clips.
+    pub(crate) latched_tracks: Vec<bool>,
+    /// The scene identity is the performer's (scene latch): dims the scene
+    /// lane the same way.
+    pub(crate) scene_latched: bool,
     /// The bound clip's `(track, clip-id)` when a timeline selection holds the
     /// binding (rule 1), for the bound-clip highlight. `None` under rules 2/3.
     pub(crate) bound_clip: Option<(usize, u64)>,
@@ -667,6 +673,13 @@ pub(crate) fn build_song_bindings_snapshot(
         edit_error: app.song_edit_error.clone(),
         manual_latch: app.state.song_manual_latch_mask() != 0 || app.state.song_scene_latch(),
         take_lane_states: song_take_lane_states(app),
+        latched_tracks: {
+            let mask = app.state.song_manual_latch_mask();
+            (0..app.tracks.len())
+                .map(|track| track < 64 && mask >> track & 1 == 1)
+                .collect()
+        },
+        scene_latched: app.state.song_scene_latch(),
         bound_clip: app
             .song_clip_selection
             .map(|selection| (selection.track, selection.clip_id.0)),
@@ -964,6 +977,25 @@ pub(crate) fn sync_song_state(
             .map(|state| Rc::new(RefCell::new(Value::Number(*state as f64))))
             .collect();
         rt.set_reactive("SEQ", "song-track-governed", Value::List(items));
+    }
+    let latched_changed = prev
+        .map(|prev| prev.latched_tracks != next.latched_tracks)
+        .unwrap_or(true);
+    if latched_changed {
+        let items: Vec<Rc<RefCell<Value>>> = next
+            .latched_tracks
+            .iter()
+            .map(|latched| Rc::new(RefCell::new(Value::Bool(*latched))))
+            .collect();
+        rt.set_reactive("SEQ", "song-track-latched", Value::List(items));
+        dirty = true;
+    }
+    publish_on_change!(
+        "song-scene-latched",
+        scene_latched,
+        Value::Bool(next.scene_latched)
+    );
+    if governed_changed {
         // The take-governed dim rides the step-cell color channels (the
         // header keeps its full track color); resync them so the step
         // shells restyle live as rows enter/leave take lanes.
