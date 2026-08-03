@@ -1515,13 +1515,6 @@
 
 ;; ── Buffer composition (spec 4.1) ──────────────────────────────────────────
 
-(def arrangement-empty-banner ()
-  (box :width :fill :height 2.2 :padding 0.4
-    :background-color (rgba 0.10 0.11 0.13 1.0)
-    (label "No song yet — record an arrangement (ARR REC) or define one with def-song."
-      :key "arrangement-empty-banner-label"
-      :font-size 11 :color :dim :bg :transparent)))
-
 ;; Rows wrap their h-stack in a :width :fill box (the sequencer.lisp track-row
 ;; idiom): the box stretches to the pane, which gives the inner h-stack a
 ;; bounded width for flex distribution — without it the row collapses to its
@@ -1602,10 +1595,8 @@
       (do
         (arrangement-publish-bridge)
         (box :width 0 :height 0 :bg :transparent)))
-    (subtree :key "arr-empty-banner"
-      (if SEQ.song-exists
-        (box :width 0 :height 0 :bg :transparent)
-        (arrangement-empty-banner)))
+    ;; The "No song yet" banner is gone (empty-arrangement spec 8): the
+    ;; arrangement always exists, so there is no mode to explain.
     (subtree :key "arr-error-banner"
       (arrangement-error-banner))
     ;; Sound palette overlay (takes spec 17.6): opened from a clip via the

@@ -231,29 +231,21 @@ impl App {
             return Ok(SongTransportMode::SessionPlayback);
         }
         if record {
-            // Arrangement capture. With a committed song, recording runs ON
-            // TOP of song playback (takes spec 9.3): the song plays and
-            // keeps launch authority wherever the performer hasn't
-            // overridden it; manual launches latch (spec 10) and are
-            // captured for the splice. With no committed song, the old
-            // whole-song capture remains: transport at beat zero, the
-            // performer is the sole launch authority.
-            if self.state.committed_song().is_some() {
-                // Open-ended (spec 7.4): the song end is not a stopping
-                // point while recording. Grooving past the old song length
-                // must extend the arrangement, not cut the take off and
-                // commit it there.
-                let start_beat = self.arrangement_cursor_beat;
-                self.start_song_playback_at(start_beat, true)?;
-                self.begin_song_capture_take(
-                    self.active_song_start_beat
-                        .expect("song start records its normalized beat"),
-                );
-                self.set_song_transport_mode(SongTransportMode::ArrangementCapture);
-                return Ok(SongTransportMode::ArrangementCapture);
-            }
-            self.begin_song_capture_take(0.0);
-            self.state.start_playback();
+            // Arrangement capture: recording always runs ON TOP of song
+            // playback (takes spec 9.3, empty-arrangement spec 6) — the
+            // arrangement always exists, so there is no bootstrap mode. The
+            // song plays (an empty one plays silence) and keeps launch
+            // authority wherever the performer hasn't overridden it; manual
+            // launches latch (spec 10) and are captured for the [P, Q)
+            // splice. Open-ended (spec 7.4): the song end is not a stopping
+            // point while recording — grooving past it extends the
+            // arrangement rather than cutting the take off.
+            let start_beat = self.arrangement_cursor_beat;
+            self.start_song_playback_at(start_beat, true)?;
+            self.begin_song_capture_take(
+                self.active_song_start_beat
+                    .expect("song start records its normalized beat"),
+            );
             self.set_song_transport_mode(SongTransportMode::ArrangementCapture);
             return Ok(SongTransportMode::ArrangementCapture);
         }
@@ -270,6 +262,14 @@ impl App {
         requested_start_beat: f64,
         open_ended: bool,
     ) -> Result<(), String> {
+        // The arrangement always exists (empty-arrangement spec 4.3); a
+        // state that was never seeded installs the empty one, which plays
+        // silence.
+        if self.state.committed_arrangement().is_none() {
+            self.state
+                .set_committed_arrangement(Some(self.empty_arrangement()))
+                .map_err(|error| format!("Song playback could not start: {error}"))?;
+        }
         if !self.state.save_current_pattern_snapshot(
             self.tracks.len(),
             &self.graph.track_buffer_ids,
@@ -508,10 +508,14 @@ impl App {
     /// modes, mod routes, restored defaults).
     fn apply_song_row_control(
         &mut self,
-        scene: usize,
+        scene: Option<usize>,
         overrides: &[(usize, Option<PatternId>)],
         bump_pattern_epoch: bool,
     ) -> Result<(), String> {
+        // An unscened row (empty-arrangement spec 4.2) recalls no scene: the
+        // Seq view stays where it is, and the row's explicit overrides fully
+        // describe every lane.
+        let scene = scene.unwrap_or_else(|| self.state.current_scene_index());
         // Latched lanes stay the performer's (takes spec 10): the mirror
         // must neither restore their live state nor clear their session
         // override slot.
@@ -632,7 +636,7 @@ mod tests {
         let mut app = app_with_song();
         app.set_use_arrangement(true).expect("toggle while stopped");
         app.song_transport_play(false).expect("song playback starts");
-        app.apply_song_row_control(0, &[(0, None)], false)
+        app.apply_song_row_control(Some(0), &[(0, None)], false)
             .expect("sparse row applies");
         assert!(
             app.state.is_scene_silenced(0),
@@ -758,16 +762,23 @@ mod tests {
     }
 
     #[test]
-    fn play_with_arrangement_on_and_no_song_fails_without_starting() {
+    fn play_with_arrangement_on_and_no_song_plays_the_empty_arrangement() {
+        // Empty-arrangement spec 4.3: the arrangement always exists, so Play
+        // in arrangement mode starts even on a never-seeded project — it
+        // plays the empty arrangement (silence), Ableton-style, and installs
+        // it on the way.
         let mut app = test_app();
         app.set_use_arrangement(true).expect("toggle while stopped");
-        let error = app
-            .song_transport_play(false)
-            .expect_err("empty song must not play");
-        assert!(error.contains("no committed song"), "{error}");
-        assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
-        assert!(!app.state.is_playing());
-        assert!(!app.song_edits_locked());
+        let mode = app.song_transport_play(false).expect("empty song plays");
+        assert_eq!(mode, SongTransportMode::SongPlayback);
+        assert!(app.state.is_playing());
+        let arrangement = app
+            .state
+            .committed_arrangement()
+            .expect("play installed the empty arrangement");
+        assert!(arrangement.is_empty());
+        app.song_transport_stop().expect("stops cleanly");
+        app.state.set_scheduler_rendered_beats(0.0);
     }
 
     #[test]
@@ -1575,7 +1586,7 @@ mod tests {
             .map(|row| {
                 (
                     row.start_beat,
-                    row.scene,
+                    row.scene.expect("captured rows carry a scene"),
                     row.overrides
                         .iter()
                         .map(|over| (over.track, over.pattern_id))
@@ -1586,24 +1597,16 @@ mod tests {
     }
 
     #[test]
-    fn capture_creates_beat_zero_row_from_the_resolved_initial_state() {
-        // Whole-song capture ("record from an empty song", takes spec 9.3):
-        // with no committed song, a capture with a launch commits from the
-        // resolved beat-zero state.
+    fn capture_into_an_empty_arrangement_splices_from_the_first_launch() {
+        // Empty-arrangement spec 6: capture is one code path — a [P, Q)
+        // splice into the arrangement that exists, the empty one included.
+        // A track launch at the capture origin opens a clip there; the
+        // canvas keeps its default length and the scene lane stays empty
+        // (a track launch is not a scene change).
         let mut app = app_with_song();
-        // Resolved session state before capture: scene 2 with an override on
-        // track 0 pointing at scene 1's cell (pool id 2).
-        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 2 })
-            .expect("scene launch");
-        app.apply_manual_pattern_launch(&PatternLaunchTarget::SceneTracks {
-            scene: 1,
-            tracks: vec![0],
-        })
-        .expect("track launch");
-        app.arr_clear().expect("start from an empty song");
+        app.arr_clear().expect("start from an empty arrangement");
 
         start_capture(&mut app);
-        // A launch at the capture origin replaces the beat-zero row's state.
         app.apply_manual_pattern_launch(&PatternLaunchTarget::SceneTracks {
             scene: 1,
             tracks: vec![0],
@@ -1611,9 +1614,34 @@ mod tests {
         .expect("captured launch");
         app.state.set_scheduler_rendered_beats(8.0);
         app.song_transport_stop().expect("stop commits");
+
+        let arrangement = app
+            .state
+            .committed_arrangement()
+            .expect("capture commits an arrangement");
+        assert!(
+            arrangement.scene_lane.is_empty(),
+            "a track launch writes no scene event"
+        );
+        assert_eq!(arrangement.track_lanes[0].len(), 1);
+        let clip = arrangement.track_lanes[0][0];
+        assert_eq!(clip.start_beat, 0.0);
+        assert_eq!(clip.end_beat, 8.0);
+        assert_eq!(clip.pattern_id, Some(2), "scene 1's cell for track 0");
+        assert_eq!(
+            arrangement.end_beat,
+            crate::sequencer::DEFAULT_ARRANGEMENT_END,
+            "the empty canvas keeps its default length"
+        );
+
         let song = committed(&app);
-        assert_eq!(row_tuples(&song), vec![(0.0, 2, vec![(0, Some(2))])]);
-        assert_eq!(song.end_beat, 8.0);
+        assert_eq!(song.rows[0].start_beat, 0.0);
+        assert_eq!(song.rows[0].scene, None, "the span is unscened");
+        assert_eq!(
+            song.rows[0].overrides[0].pattern_id,
+            Some(2),
+            "the clip is the launch"
+        );
         app.state.set_scheduler_rendered_beats(0.0);
     }
 
@@ -1970,9 +1998,8 @@ mod tests {
             },
             None => {
                 let cell = app.state.with_project_scenes(|scenes| {
-                    scenes
-                        .scenes
-                        .get(row.scene)
+                    row.scene
+                        .and_then(|scene| scenes.scenes.get(scene))
                         .and_then(|scene| scene.cells.get(track))
                         .copied()
                         .flatten()
@@ -2071,7 +2098,8 @@ mod tests {
                 continue;
             };
             let cell = app.state.with_project_scenes(|scenes| {
-                scenes.scenes[row.scene].cells[1].map(|pattern| pattern.0)
+                scenes.scenes[row.scene.expect("captured rows carry a scene")].cells[1]
+                    .map(|pattern| pattern.0)
             });
             assert_eq!(
                 (over.pattern_id, over.take_id),
@@ -2679,25 +2707,29 @@ mod tests {
     }
 
     #[test]
-    fn capture_commit_validation_failure_preserves_previous_song() {
+    fn zero_length_capture_is_a_no_op_that_preserves_the_previous_song() {
+        // Stop on the very beat of the first launch: the punch region is
+        // empty, so nothing is splicable. The commit is a graceful no-op —
+        // no stray scene event, no history entry, previous song untouched
+        // (empty-arrangement spec 6).
         let mut app = app_with_song();
-        // Start from an empty song so the commit takes the whole-song path
-        // (with a committed song and no launches, stop is a documented
-        // no-op instead of a failure — takes spec 9.5).
         app.arr_clear().expect("clear song");
         let song_before = app.state.committed_song();
+        let arrangement_before = app.state.committed_arrangement();
         start_capture(&mut app);
         app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
             .expect("captured launch");
-        // Stop with the rendered clock still at the capture origin: the
-        // zero-length take fails `end_beat > last start` validation.
-        let error = app
+        let status = app
             .song_transport_stop()
-            .expect_err("zero-length capture cannot commit");
-        assert!(error.contains("could not be committed"), "{error}");
+            .expect("a zero-length capture stops cleanly");
+        assert!(
+            status.is_some_and(|status| status.contains("unchanged")),
+            "the stop reports the no-op"
+        );
         assert_eq!(app.state.committed_song(), song_before);
-        assert!(app.song_capture_failed);
-        assert!(app.song_capture_error.is_some());
+        assert_eq!(app.state.committed_arrangement(), arrangement_before);
+        assert!(!app.song_capture_failed);
+        assert!(app.song_capture_error.is_none());
         assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
     }
 

@@ -5557,7 +5557,7 @@
         crate::sequencer::ProjectSongRow {
             id: crate::sequencer::SongRowId(id),
             start_beat,
-            scene,
+            scene: Some(scene),
             overrides: overrides
                 .into_iter()
                 .map(|(track, pattern_id)| crate::sequencer::ProjectSongTrackOverride::new(track, Some(pattern_id)))

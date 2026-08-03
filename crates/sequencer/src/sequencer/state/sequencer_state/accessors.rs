@@ -1437,7 +1437,7 @@ impl SequencerState {
                 return;
             };
             for row in &mut song.rows {
-                if row.scene != scene_idx
+                if row.scene != Some(scene_idx)
                     || row.overrides.iter().any(|over| over.track == track)
                 {
                     continue;

@@ -312,7 +312,7 @@ mod tests {
         let row = |id: u64, start_beat: f64, scene: usize| ProjectSongRow {
             id: SongRowId(id),
             start_beat,
-            scene,
+            scene: Some(scene),
             overrides: Vec::new(),
         };
         ProjectSong {

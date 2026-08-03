@@ -20476,11 +20476,14 @@
         assert_eq!(read(&mut editor, "SEQ.song-capture-failed"), Value::Bool(false));
         assert_eq!(read(&mut editor, "SEQ.song-capture-error"), Value::Nil);
 
-        // Clearing the song flips song-exists and empties the lane surfaces.
+        // Clearing resets to the EMPTY arrangement (empty-arrangement spec
+        // 4.3): song-exists stays true — there is no "no song" mode — and
+        // the lane surfaces empty out (no scene spans, no clips in any
+        // lane).
         test_app.arr_clear().expect("clear succeeds");
         assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
         editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(read(&mut editor, "SEQ.song-exists"), Value::Bool(false));
+        assert_eq!(read(&mut editor, "SEQ.song-exists"), Value::Bool(true));
         let Value::List(spans) = read(&mut editor, "SEQ.scene-spans") else {
             panic!("scene-spans must be a list");
         };
@@ -20488,7 +20491,12 @@
         let Value::List(lanes) = read(&mut editor, "SEQ.song-lanes") else {
             panic!("song-lanes must be a list");
         };
-        assert!(lanes.is_empty());
+        for lane in lanes {
+            let Value::List(clips) = &*lane.borrow() else {
+                panic!("each lane must be a list");
+            };
+            assert!(clips.is_empty(), "the empty arrangement has no clips");
+        }
     }
 
     /// Note edit-through, visible half
@@ -20865,17 +20873,14 @@
         );
     }
 
-    /// Capturing over an EMPTY song is spliced from beat ZERO (the
-    /// `(None, _)` arm of the stop-commit), so the state capture STARTED in
-    /// really does become arrangement content from bar 1 — and the
-    /// provisional surface has to say so. Showing nothing until the first
-    /// scene change made a recording look like it began wherever the
-    /// performer first touched a launch button. The reverse case matters
-    /// just as much: with a committed song the splice starts at the first
-    /// launch, so seeding a beat-zero item would paint over an arrangement
-    /// the commit never touches.
+    /// Whole-song capture is gone (empty-arrangement spec 6): capture always
+    /// runs on top of song playback and splices `[P, Q)`, so the provisional
+    /// surface never seeds a beat-zero item — into an empty arrangement you
+    /// hear silence until the first launch, and the surface truthfully shows
+    /// nothing until then. Seeding a beat-zero item would paint content the
+    /// commit never writes.
     #[test]
-    fn metal_seq_song_pending_seeds_beat_zero_only_for_a_whole_song_capture() {
+    fn metal_seq_song_pending_seeds_nothing_before_the_first_launch() {
         let mut editor = full_grid_editor_for_scroll_tests();
         let mut frame = SongFrameState::default();
         let read = |editor: &mut eseqlisp::Editor, expr: &str| {
@@ -20886,7 +20891,8 @@
                 .expect("binding read returns a value")
         };
 
-        // No committed song: the performer is the sole launch authority.
+        // Into an empty arrangement: the pending surface stays blank until
+        // the performer launches something.
         let mut empty = pending_capture_test_app();
         empty.arr_clear().expect("clear the song");
         empty.song_transport_play(true).expect("capture starts");
@@ -20894,28 +20900,17 @@
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(
             read(&mut editor, "(len (get SEQ.song-pending :scene-events))"),
-            Value::Number(1.0),
-            "the initial scene is drawn before any launch is performed"
-        );
-        assert_eq!(
-            read(
-                &mut editor,
-                "(get (nth (get SEQ.song-pending :scene-events) 0) :start-beat)"
-            ),
-            Value::Number(0.0)
-        );
-        assert_eq!(
-            read(
-                &mut editor,
-                "(get (nth (get SEQ.song-pending :track-events) 0) :start-beat)"
-            ),
             Value::Number(0.0),
-            "...along with the clip it puts on the lane"
+            "silence plays before the first launch, so nothing is drawn"
+        );
+        assert_eq!(
+            read(&mut editor, "(len (get SEQ.song-pending :track-events))"),
+            Value::Number(0.0)
         );
         empty.song_capture_cancel().expect("cancel succeeds");
 
-        // With a committed song the splice starts at the first launch, so
-        // nothing is seeded at beat zero.
+        // On top of a committed song, same rule: the splice starts at the
+        // first launch, so nothing is seeded at beat zero.
         let mut over_song = pending_capture_test_app();
         let mut frame = SongFrameState::default();
         over_song.song_transport_play(true).expect("capture starts");
@@ -22028,35 +22023,10 @@
             vec![0.0, 12.0]
         );
 
-        // A rejected primitive (moving the scene change at 0.0) changes
-        // nothing and adds no history entry — the view's ghost was already
-        // discarded, so the committed song snaps the display back.
-        let song = app.state.committed_song().unwrap();
-        let arrangement = app.state.committed_arrangement().unwrap();
-        let action = map_value(vec![
-            ("type", Value::Keyword("finish-move-items".to_string())),
-            ("from-beat", Value::Number(0.0)),
-            ("start", Value::Number(4.0)),
-        ]);
-        let commands = crate::arrangement_actions::arrangement_action_song_commands(
-            &action,
-            Some(&song),
-            Some(&arrangement),
-        )
-        .expect("gesture translates");
-        let depth = app.history.undo_len();
-        let result = crate::host_commands::apply_song_edit_command(
-            &commands[0].0,
-            &commands[0].1,
-            &mut app,
-        )
-        .expect("song edit command");
-        assert!(result.is_err(), "moving the first scene change must be rejected");
-        assert_eq!(app.history.undo_len(), depth, "rejection adds no history");
-        assert_eq!(
-            app.state.committed_arrangement().unwrap().scene_lane[0].start_beat,
-            0.0
-        );
+        // (Moving the scene change at beat 0 is allowed now and re-stamps
+        // its spans — which would destroy the id-addressed fixture clip the
+        // gestures below rely on. The move-at-zero semantics are pinned in
+        // app::arr_edit::tests::scene_event_moves_freely_over_beat_zero...)
 
         // A scene drop beyond the song end lowers to extend-then-insert and
         // both primitives apply (the silent-rejection bug: inserting past
@@ -43877,7 +43847,10 @@
                 .runtime_mut()
                 .eval_str("piano-roll-lane-scroll")
                 .expect("read empty piano roll lane scroll"),
-            Some(Value::Number(40.0)),
+            // The "No song yet" banner is gone (empty-arrangement spec 8),
+            // so the lower pane is one banner-height taller and C4 centers
+            // one lane row earlier.
+            Some(Value::Number(39.0)),
             "empty piano roll should center C4 at the default lower-pane height"
         );
         assert_eq!(
@@ -43885,7 +43858,8 @@
                 .runtime_mut()
                 .eval_str("(piano-roll-max-lane-scroll)")
                 .expect("read default piano roll max lane scroll"),
-            Some(Value::Number(80.0)),
+            // Also one banner-height taller (empty-arrangement spec 8).
+            Some(Value::Number(78.0)),
             "default lower-pane height should allow scrolling below C4"
         );
         editor
@@ -44035,7 +44009,9 @@
                 .runtime_mut()
                 .eval_str("piano-roll-lane-scroll")
                 .expect("read fitted piano roll lane scroll"),
-            Some(Value::Number(32.0))
+            // One lane row earlier since the "No song yet" banner's removal
+            // made the lower pane taller (empty-arrangement spec 8).
+            Some(Value::Number(31.0))
         );
     }
 
@@ -44102,7 +44078,9 @@
             runtime
                 .eval_str("piano-roll-lane-scroll")
                 .expect("read fitted lane scroll after sync"),
-            Some(Value::Number(40.0))
+            // One lane row earlier since the "No song yet" banner's removal
+            // made the lower pane taller (empty-arrangement spec 8).
+            Some(Value::Number(39.0))
         );
     }
 

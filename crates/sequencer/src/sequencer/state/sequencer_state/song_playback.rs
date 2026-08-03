@@ -11,7 +11,8 @@ use super::super::*;
 struct RowStaging {
     id: SongRowId,
     start_beat: f64,
-    scene: usize,
+    /// `None` for an unscened row (empty-arrangement spec 4.2).
+    scene: Option<usize>,
     overrides: Vec<(usize, Option<PatternId>)>,
     resolved_pattern_ids: Vec<Option<PatternId>>,
     resolved_sources: Vec<LaneSource>,
@@ -93,13 +94,20 @@ impl SequencerState {
                 .ok_or_else(|| "could not build a placeholder track pattern".to_string())?;
             let mut staged = Vec::with_capacity(song.rows.len());
             for (row_idx, row) in song.rows.iter().enumerate() {
-                let scene = scenes.scenes.get(row.scene).ok_or_else(|| {
-                    format!(
-                        "Song row {} references scene {} which no longer exists",
-                        row_idx + 1,
-                        row.scene + 1
-                    )
-                })?;
+                // An unscened row has no scene to resolve against: absent
+                // overrides fall back to silence, and the scene-owned graph
+                // state (mod connections, networks, process chain) is empty
+                // (empty-arrangement spec 4.2).
+                let scene = match row.scene {
+                    Some(scene_idx) => Some(scenes.scenes.get(scene_idx).ok_or_else(|| {
+                        format!(
+                            "Song row {} references scene {} which no longer exists",
+                            row_idx + 1,
+                            scene_idx + 1
+                        )
+                    })?),
+                    None => None,
+                };
                 let row_end = song
                     .rows
                     .get(row_idx + 1)
@@ -117,8 +125,7 @@ impl SequencerState {
                         Some(over) => (over.source(), over.offset_steps),
                         None => (
                             scene
-                                .cells
-                                .get(track)
+                                .and_then(|scene| scene.cells.get(track))
                                 .copied()
                                 .flatten()
                                 .map(LaneSource::Pattern)
@@ -361,10 +368,18 @@ impl SequencerState {
                         lane_offsets,
                         track_data,
                         silenced,
-                        mod_connections: scene.mod_connections.clone(),
-                        neural_networks: scene.neural_networks.clone(),
-                        graph_overrides: scene.graph_overrides.clone(),
-                        project_process_chain: scene.project_process_chain.clone(),
+                        mod_connections: scene
+                            .map(|scene| scene.mod_connections.clone())
+                            .unwrap_or_default(),
+                        neural_networks: scene
+                            .map(|scene| scene.neural_networks.clone())
+                            .unwrap_or_default(),
+                        graph_overrides: scene
+                            .map(|scene| scene.graph_overrides.clone())
+                            .unwrap_or_default(),
+                        project_process_chain: scene
+                            .map(|scene| scene.project_process_chain.clone())
+                            .unwrap_or_default(),
                     });
                 }
             }
@@ -385,7 +400,11 @@ impl SequencerState {
             // is playing; stamp them so the deterministic clock treats them
             // as playing regardless of the transport state at preflight time.
             snapshot.transport.playing = true;
-            snapshot.transport.current_pattern = staging.scene;
+            // An unscened row keeps the captured live scene as its transport
+            // stamp — there is no scene to switch the display to.
+            if let Some(scene) = staging.scene {
+                snapshot.transport.current_pattern = scene;
+            }
             for (track, silenced) in staging.silenced.iter().enumerate() {
                 if *silenced {
                     let mut track_snapshot = (*snapshot.tracks[track]).clone();

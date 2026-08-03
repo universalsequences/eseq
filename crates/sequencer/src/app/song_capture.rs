@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use crate::quantized_launch::PatternLaunchTarget;
 use crate::sequencer::{
     insert_clip_sorted, occlude_span, stamped_clip_override, ArrClip, ClipId, PatternId,
-    ProjectArrangement, ProjectScenes, ProjectSongTrackOverride, SceneEvent, SongProjectContext,
+    ProjectArrangement, ProjectScenes, ProjectSongTrackOverride, SceneEvent,
 };
 
 use super::edit::finish_active_gesture;
@@ -419,8 +419,19 @@ impl App {
             .collect();
 
         let scenes = self.state.capture_project_scenes();
-        let arrangement = match (&previous, punch_in) {
-            (Some(previous), None) => {
+        // Capture is one code path (empty-arrangement spec 6): a [P, Q)
+        // splice into the arrangement that exists — including the empty one,
+        // where the splice lands on a blank timeline. A capture running past
+        // the end auto-extends it (spec 5.6).
+        let base = previous
+            .clone()
+            .unwrap_or_else(|| self.empty_arrangement());
+        // A zero-length punch region (`Q <= P` — Stop on the very beat of
+        // the first launch) captures nothing splicable; committing it would
+        // write a stray scene event with no audible span behind it.
+        let punch_in = punch_in.filter(|punch_in| end_beat > *punch_in);
+        let arrangement = match punch_in {
+            None => {
                 // No launches performed: nothing to splice; the committed
                 // arrangement is untouched (spec 9.1) — unless takes were
                 // recorded, in which case they paint onto it unchanged.
@@ -431,34 +442,17 @@ impl App {
                             .to_string(),
                     );
                 }
-                previous.clone()
+                base
             }
-            (Some(previous), Some(punch_in)) => self.spliced_arrangement(
-                previous,
-                &scenes,
-                &captured,
-                &scene_launch_beats,
-                punch_in,
-                end_beat,
-                take.timeline_start_beat,
-            )?,
-            (None, _) => {
-                let base = ProjectArrangement {
-                    scene_lane: vec![SceneEvent {
-                        start_beat: 0.0,
-                        scene: captured[0].scene,
-                    }],
-                    track_lanes: vec![Vec::new(); scenes.song_track_count()],
-                    end_beat,
-                    loop_enabled: false,
-                    next_clip_id: 0,
-                };
+            Some(punch_in) => {
+                let mut base = base;
+                base.end_beat = base.end_beat.max(end_beat);
                 self.spliced_arrangement(
                     &base,
                     &scenes,
                     &captured,
                     &scene_launch_beats,
-                    0.0,
+                    punch_in,
                     end_beat,
                     take.timeline_start_beat,
                 )?
@@ -550,11 +544,12 @@ impl App {
                 ..state.clone()
             });
         }
-        // The scene the ARRANGEMENT is playing as the region opens — the
-        // baseline the captured scene changes are measured against.
-        let baseline_scene = previous
-            .scene_at_beat(punch_in)
-            .unwrap_or(captured[governing].scene);
+        // The scene the ARRANGEMENT marks as the region opens — the baseline
+        // the captured scene changes are measured against. `None` when the
+        // region opens on an unscened span (empty-arrangement spec 4.1), so
+        // the performance's first scene launch always differs and writes its
+        // marker.
+        let baseline_scene = previous.scene_at_beat(punch_in);
 
         let mut arrangement = previous.clone();
         arrangement.end_beat = previous.end_beat.max(punch_out);
@@ -593,7 +588,7 @@ impl App {
         previous: &ProjectArrangement,
         states: &[CapturedSongState],
         scene_launch_beats: &[f64],
-        baseline_scene: usize,
+        baseline_scene: Option<usize>,
         punch_out: f64,
     ) {
         let mut captured_events: Vec<SceneEvent> = Vec::new();
@@ -602,12 +597,12 @@ impl App {
             let launched = scene_launch_beats
                 .iter()
                 .any(|beat| *beat == state.start_beat);
-            if launched && state.scene != effective {
+            if launched && Some(state.scene) != effective {
                 captured_events.push(SceneEvent {
                     start_beat: state.start_beat,
                     scene: state.scene,
                 });
-                effective = state.scene;
+                effective = Some(state.scene);
             }
         }
         let Some(splice_start) = captured_events.first().map(|event| event.start_beat) else {
@@ -631,7 +626,9 @@ impl App {
         // `restore_lane_at_punch_out` carries it on a clip instead.
         if punch_out < arrangement.end_beat {
             if let Some(scene) = restore_scene {
-                if scene != effective && !lane.iter().any(|event| event.start_beat == punch_out) {
+                if Some(scene) != effective
+                    && !lane.iter().any(|event| event.start_beat == punch_out)
+                {
                     lane.push(SceneEvent {
                         start_beat: punch_out,
                         scene,

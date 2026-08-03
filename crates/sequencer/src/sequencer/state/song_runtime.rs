@@ -30,7 +30,9 @@ const SONG_NOTICE_CAPACITY: usize = 256;
 pub struct RuntimeSongRow {
     pub id: SongRowId,
     pub start_beat: f64,
-    pub scene: usize,
+    /// `None` for an unscened row (empty-arrangement spec 4.2): the row
+    /// carries no scene identity and switches nothing when it starts.
+    pub scene: Option<usize>,
     /// The row's complete override set as live pool ids (`None` =
     /// explicit-empty: the track is silenced for the row).
     pub overrides: Vec<(usize, Option<PatternId>)>,

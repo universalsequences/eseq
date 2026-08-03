@@ -117,7 +117,12 @@ fn offset_steps_is_zero(offset: &f64) -> bool {
 pub struct ProjectSongRow {
     pub id: SongRowId,
     pub start_beat: f64,
-    pub scene: usize,
+    /// The scene *marked* over this row, or `None` for an unscened row
+    /// (empty-arrangement spec 4.2): no label, and an absent override
+    /// resolves to silence instead of a scene cell. Serde reads a legacy
+    /// bare number as `Some`, so pre-v7 rows load unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene: Option<usize>,
     #[serde(default)]
     pub overrides: Vec<ProjectSongTrackOverride>,
 }
@@ -269,13 +274,15 @@ impl ProjectSong {
             ));
         }
         for (idx, row) in self.rows.iter().enumerate() {
-            if row.scene >= ctx.song_scene_count() {
-                return Err(format!(
-                    "Song row {} references scene {} but the project has {} scene(s)",
-                    idx + 1,
-                    row.scene + 1,
-                    ctx.song_scene_count()
-                ));
+            if let Some(scene) = row.scene {
+                if scene >= ctx.song_scene_count() {
+                    return Err(format!(
+                        "Song row {} references scene {} but the project has {} scene(s)",
+                        idx + 1,
+                        scene + 1,
+                        ctx.song_scene_count()
+                    ));
+                }
             }
             for pair in row.overrides.windows(2) {
                 if pair[1].track == pair[0].track {
@@ -456,9 +463,8 @@ pub fn project_lanes(song: &ProjectSong, scenes: &ProjectScenes) -> Vec<Vec<Lane
                         // scene cell.
                         Some(over) => (over.source(), over.offset_steps, true),
                         None => (
-                            scenes
-                                .scenes
-                                .get(row.scene)
+                            row.scene
+                                .and_then(|scene| scenes.scenes.get(scene))
                                 .and_then(|scene| scene.cells.get(track))
                                 .copied()
                                 .flatten()
@@ -488,7 +494,7 @@ pub fn song_rows_referencing_scene(song: &ProjectSong, scene: usize) -> Vec<usiz
     song.rows
         .iter()
         .enumerate()
-        .filter(|(_, row)| row.scene == scene)
+        .filter(|(_, row)| row.scene == Some(scene))
         .map(|(idx, _)| idx)
         .collect()
 }
@@ -527,8 +533,10 @@ pub fn format_song_row_positions(positions: &[usize]) -> String {
 /// scene itself (spec 5.4).
 pub fn remap_song_after_scene_delete(song: &mut ProjectSong, deleted_scene: usize) {
     for row in &mut song.rows {
-        if row.scene > deleted_scene {
-            row.scene -= 1;
+        if let Some(scene) = row.scene.as_mut() {
+            if *scene > deleted_scene {
+                *scene -= 1;
+            }
         }
     }
 }
@@ -588,7 +596,7 @@ mod tests {
         ProjectSongRow {
             id: SongRowId(id),
             start_beat,
-            scene,
+            scene: Some(scene),
             overrides,
         }
     }
@@ -763,7 +771,7 @@ mod tests {
     #[test]
     fn validate_rejects_missing_scene() {
         let mut song = valid_song();
-        song.rows[1].scene = 3;
+        song.rows[1].scene = Some(3);
         let err = song.validate(&ctx()).unwrap_err();
         assert!(err.contains("references scene 4"), "{err}");
     }
@@ -801,7 +809,7 @@ mod tests {
     #[test]
     fn validate_rejects_adjacent_identical_rows() {
         let mut song = valid_song();
-        song.rows[1].scene = 0;
+        song.rows[1].scene = Some(0);
         song.rows[1].overrides = vec![over(1, 2)];
         let err = song.validate(&ctx()).unwrap_err();
         assert!(err.contains("identical launch states"), "{err}");
@@ -1041,8 +1049,8 @@ mod tests {
     fn remap_song_after_scene_delete_decrements_higher_scenes() {
         let mut song = valid_song();
         remap_song_after_scene_delete(&mut song, 1);
-        assert_eq!(song.rows[0].scene, 0);
-        assert_eq!(song.rows[2].scene, 1);
+        assert_eq!(song.rows[0].scene, Some(0));
+        assert_eq!(song.rows[2].scene, Some(1));
     }
 
     #[test]

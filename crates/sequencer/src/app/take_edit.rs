@@ -1017,10 +1017,7 @@ impl App {
                  [{start_beat}, {end_beat}))"
             ));
         }
-        let arrangement_before = self
-            .state
-            .committed_arrangement()
-            .ok_or_else(|| "The project has no song".to_string())?;
+        let arrangement_before = self.require_arrangement()?;
         if track >= arrangement_before.track_lanes.len() {
             return Err(format!("Track {} has no arrangement lane", track + 1));
         }
@@ -1134,17 +1131,17 @@ impl App {
         if !start_beat.is_finite() || !end_beat.is_finite() || start_beat < 0.0 {
             return Err("conversion region beats must be finite and non-negative".to_string());
         }
-        let arrangement = self
-            .state
-            .committed_arrangement()
-            .ok_or_else(|| "The project has no song".to_string())?;
+        let arrangement = self.require_arrangement()?;
         // The compiled song is what resolves the region's audible content
         // (backdrop included); the arrangement is what the result is written
-        // onto.
-        let song = self
-            .state
-            .committed_song()
-            .ok_or_else(|| "The project has no song".to_string())?;
+        // onto. An uncommitted (still-empty) arrangement resolves nothing,
+        // so compile the fallback rather than erroring.
+        let song = match self.state.committed_song() {
+            Some(song) => song,
+            None => self.state.with_project_scenes(|scenes| {
+                crate::sequencer::compile_arrangement(&arrangement, scenes)
+            })?,
+        };
         if start_beat >= arrangement.end_beat {
             return Err(format!(
                 "conversion region starts at beat {start_beat} but the song ends at {}",

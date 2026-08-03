@@ -56,7 +56,12 @@ const RACK_PRESETS_DIR: &str = "presets/racks";
 //       one entity pair, cells adopting their pattern's refs. `solo` left
 //       the persisted model (live-only); the field is still written (false)
 //       for wire-shape stability and ignored on load.
-const PROJECT_FILE_VERSION: u32 = 7;
+//   8 — empty arrangements by default (docs/empty-arrangement-spec.md): the
+//       arrangement always exists and is always written; the scene lane may
+//       be empty and its first event may start off beat 0 (the prefix is
+//       unscened). Files of any version with no `arrangement` load the empty
+//       one. Older builds reject v8 files (they demand a scene event at 0).
+const PROJECT_FILE_VERSION: u32 = 8;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectSoundPreset {
@@ -102,11 +107,13 @@ pub struct ProjectFile {
     pub macros: Vec<ProjectMacro>,
     #[serde(default = "default_next_macro_id")]
     pub next_macro_id: u32,
-    /// Committed arrangement (docs/arrangement-lane-model-spec.md 6); absent
-    /// in projects saved before the lane model, and in projects that never
-    /// had one. Version-4-and-earlier files carry a row-model `song` field
-    /// instead; it is parsed and discarded on load (spec 10, locked decision
-    /// "old projects' arrangements are dropped on load").
+    /// Committed arrangement (docs/arrangement-lane-model-spec.md 6). Always
+    /// written since v8 (the arrangement always exists — the empty one
+    /// included); absent only in older files, which load the empty
+    /// arrangement (docs/empty-arrangement-spec.md 7). Version-4-and-earlier
+    /// files carry a row-model `song` field instead; it is parsed and
+    /// discarded on load (spec 10, locked decision "old projects'
+    /// arrangements are dropped on load").
     #[serde(default)]
     pub arrangement: Option<ProjectArrangement>,
     /// Persisted `Use Arrangement` transport preference (docs/song-mode-spec.md

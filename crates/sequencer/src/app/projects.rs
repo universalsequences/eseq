@@ -1060,6 +1060,18 @@ impl App {
 
         self.history.reset();
         self.device_registry.clear();
+
+        // Empty-arrangement spec 4.3: the arrangement always exists. The
+        // teardown above cleared it to `None` (its lanes were indexed by the
+        // outgoing project's tracks); with the new topology in place, install
+        // the empty arrangement the project starts on.
+        if let Err(error) = self
+            .state
+            .set_committed_arrangement(Some(self.empty_arrangement()))
+        {
+            debug_assert!(false, "empty arrangement failed to install: {error}");
+        }
+
         self.editor.status_message = Some(("New project".to_string(), Instant::now()));
     }
 
@@ -2152,18 +2164,20 @@ impl App {
             },
             patterns,
             groups: self.groups.clone(),
-            arrangement: match self.state.committed_arrangement() {
-                // Serialization maps live pattern-pool ids into the
-                // deterministic ids the loader rebuilds from scene cells; a
-                // clip referencing an unpersistable pattern fails the save
-                // naming the clip and its track instead of silently dropping
-                // the reference (docs/arrangement-lane-model-spec.md 10).
-                Some(arrangement) => Some(crate::sequencer::arrangement_for_serialization(
-                    &arrangement,
-                    &self.state.capture_project_scenes(),
-                )?),
-                None => None,
-            },
+            // The arrangement always exists (empty-arrangement spec 7):
+            // every save writes one, the empty arrangement included.
+            // Serialization maps live pattern-pool ids into the
+            // deterministic ids the loader rebuilds from scene cells; a
+            // clip referencing an unpersistable pattern fails the save
+            // naming the clip and its track instead of silently dropping
+            // the reference (docs/arrangement-lane-model-spec.md 10).
+            arrangement: Some(crate::sequencer::arrangement_for_serialization(
+                &self
+                    .state
+                    .committed_arrangement()
+                    .unwrap_or_else(|| self.empty_arrangement()),
+                &self.state.capture_project_scenes(),
+            )?),
             macros: self
                 .macro_engine
                 .macros()
@@ -3332,6 +3346,9 @@ impl App {
             }
             other => other,
         };
+        // A file with no arrangement (any version) loads the empty one:
+        // the arrangement always exists (empty-arrangement spec 7).
+        let arrangement = Some(arrangement.unwrap_or_else(|| self.empty_arrangement()));
         self.state
             .set_committed_arrangement(arrangement)
             .map_err(|error| format!("Project arrangement failed to load: {error}"))?;

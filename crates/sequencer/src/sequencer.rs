@@ -33,6 +33,7 @@ pub use state::{
     lower_rows_to_arrangement, occlude_span, pattern_play_step, restamped_clip, stamp_scene_clips,
     stamped_clip_override, ArrClip, LegacyBackdropSpan, SceneSpan,
     ArrangementContext, ClipId, ProjectArrangement, SceneEvent, SongCompileContext,
+    DEFAULT_ARRANGEMENT_END,
     default_empty_effect_chain, default_rack_macros, format_song_row_positions, project_lanes,
     remap_song_after_scene_delete, song_for_serialization, song_rows_referencing_scene,
     song_rows_referencing_track_pattern, state_at_beat, BusGateSequence, BusPatternSnapshot,

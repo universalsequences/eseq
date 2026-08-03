@@ -5403,7 +5403,7 @@
         ProjectSongRow {
             id: SongRowId(id),
             start_beat,
-            scene,
+            scene: Some(scene),
             overrides: overrides
                 .iter()
                 .map(|&(track, pattern_id)| ProjectSongTrackOverride::new(track, Some(pattern_id)))
@@ -6029,8 +6029,8 @@
             .delete_pattern(1, &[-1], &[44_100], &names, &[InstrumentType::Sampler])
             .expect("unreferenced scene delete succeeds");
         let song = state.committed_song().unwrap();
-        assert_eq!(song.rows[0].scene, 0);
-        assert_eq!(song.rows[1].scene, 1);
+        assert_eq!(song.rows[0].scene, Some(0));
+        assert_eq!(song.rows[1].scene, Some(1));
     }
 
     #[test]

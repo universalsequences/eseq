@@ -249,10 +249,7 @@ impl App {
         let region = self
             .song_region_selection
             .ok_or_else(|| "No arrangement region is selected".to_string())?;
-        let arrangement = self
-            .state
-            .committed_arrangement()
-            .ok_or_else(|| "The project has no song".to_string())?;
+        let arrangement = self.require_arrangement()?;
         let start_beat = region.start_beat;
         let end_beat = region.end_beat.min(arrangement.end_beat);
         if end_beat <= start_beat {
@@ -338,9 +335,9 @@ impl App {
         }
         let dest_beat = clipboard.floor_destination(dest_beat);
         let arrangement_before = self.state.committed_arrangement();
-        let Some(existing) = arrangement_before.clone() else {
-            return Err("The project has no song".to_string());
-        };
+        let existing = arrangement_before
+            .clone()
+            .unwrap_or_else(|| self.empty_arrangement());
 
         let (scenes_before, cloned_takes) = self.clone_clipboard_takes(clipboard)?;
         let scenes = self.state.capture_project_scenes();
@@ -394,9 +391,9 @@ impl App {
             .ok_or_else(|| "No arrangement region is selected".to_string())?;
         let clipboard = self.song_region_copy()?;
         let arrangement_before = self.state.committed_arrangement();
-        let Some(existing) = arrangement_before.clone() else {
-            return Err("The project has no song".to_string());
-        };
+        let existing = arrangement_before
+            .clone()
+            .unwrap_or_else(|| self.empty_arrangement());
         let len_beats = clipboard.len_beats;
         // The duplicate lands where the region ends; the copy already clamped
         // that to the song end, so it is always inside the song.
@@ -506,9 +503,9 @@ impl App {
         }
         let clipboard = self.song_region_copy()?;
         let arrangement_before = self.state.committed_arrangement();
-        let Some(existing) = arrangement_before.clone() else {
-            return Err("The project has no song".to_string());
-        };
+        let existing = arrangement_before
+            .clone()
+            .unwrap_or_else(|| self.empty_arrangement());
         let len_beats = clipboard.len_beats;
         let source_start = region.start_beat;
         let source_end = source_start + len_beats;
@@ -719,10 +716,12 @@ impl App {
         }
     }
 
-    /// Clear the scene lane over `[start, end)` — never removing the
-    /// mandatory event at 0.0 — while preserving what governed `end`, so
-    /// everything after the region keeps playing the scene it always did.
-    /// Returns the scene that has to be restored at `end`, if any.
+    /// Clear the scene lane over `[start, end)` while preserving what
+    /// governed `end`, so everything after the region keeps playing the
+    /// scene it always did. Every event in the span goes, beat 0 included
+    /// (empty-arrangement spec 5.4): a full-span clear leaves a genuinely
+    /// blank lane. Returns the scene that has to be restored at `end`, if
+    /// any.
     fn clear_scene_lane_span(
         arrangement: &mut ProjectArrangement,
         start: f64,
@@ -731,7 +730,7 @@ impl App {
         let tail_scene = arrangement.scene_at_beat(end);
         arrangement
             .scene_lane
-            .retain(|event| event.start_beat == 0.0 || event.start_beat < start || event.start_beat >= end);
+            .retain(|event| event.start_beat < start || event.start_beat >= end);
         tail_scene
     }
 
@@ -883,9 +882,7 @@ impl App {
             .song_region_selection
             .ok_or_else(|| "No arrangement region is selected".to_string())?;
         let before = self.state.committed_arrangement();
-        let Some(existing) = before.clone() else {
-            return Err("The project has no song".to_string());
-        };
+        let existing = before.clone().unwrap_or_else(|| self.empty_arrangement());
         let start_beat = region.start_beat;
         let end_beat = region.end_beat.min(existing.end_beat);
         if end_beat <= start_beat {
@@ -2002,18 +1999,45 @@ mod tests {
         assert_eq!(scene_lane(&app), vec![(0.0, 0), (8.0, 1)]);
     }
 
-    /// The mandatory event at beat 0 can never be removed by a region op
-    /// (lane spec 8: the arrangement must start on a scene).
+    /// A region delete removes EVERY scene event it covers, beat 0 included
+    /// (empty-arrangement spec 5.4): the prefix becomes unscened, and the
+    /// tail scene is still restored at the region end so nothing after the
+    /// rectangle moves.
     #[test]
-    fn scene_lane_region_ops_never_remove_the_event_at_zero() {
+    fn scene_lane_region_delete_removes_the_event_at_zero_too() {
         let mut app = app_with_scene_change();
         app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 0.0, 12.0, true));
         app.song_region_delete().expect("delete succeeds");
         assert_eq!(
             scene_lane(&app),
-            vec![(0.0, 0), (12.0, 1)],
-            "beat 0 survives; the tail scene is restored at the region end"
+            vec![(12.0, 1)],
+            "the events at 0 and 8 are gone; the tail scene resumes at the \
+             region end"
         );
+        let song = app.state.committed_song().expect("still compiles");
+        assert_eq!(song.rows[0].scene, None, "the swept prefix is unscened");
+    }
+
+    /// A full-span scene-lane delete leaves a genuinely blank timeline —
+    /// no Scene 1 ghost stretching over the wreckage (empty-arrangement
+    /// spec 5.4, the complaint that started the spec).
+    #[test]
+    fn a_full_span_scene_lane_delete_truly_empties_the_timeline() {
+        let mut app = app_with_scene_change();
+        let end = app
+            .state
+            .committed_arrangement()
+            .expect("arrangement")
+            .end_beat;
+        app.set_song_region(SongRegionSelection::new_in_lane(0, 1, 0.0, end, true));
+        app.song_region_delete().expect("delete succeeds");
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        assert!(arrangement.scene_lane.is_empty(), "no scene events remain");
+        assert!(
+            arrangement.track_lanes.iter().all(|lane| lane.is_empty()),
+            "no clips remain"
+        );
+        assert!(arrangement.is_empty());
     }
 
     // --- move (spec 6.2) -------------------------------------------------
