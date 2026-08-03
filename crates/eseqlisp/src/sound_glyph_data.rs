@@ -61,8 +61,15 @@ pub fn sound_glyph_frame(key: &str) -> Option<Arc<SoundGlyphFrame>> {
     sound_glyph_frames().lock().unwrap().get(key).cloned()
 }
 
-pub fn retain_sound_glyph_frames(active_keys: &HashSet<String>) {
-    sound_glyph_frames().lock().unwrap().retain(|key, _| active_keys.contains(key));
+/// Prune ONE publisher's namespace: keys under `prefix` survive only when in
+/// `active_keys`; other publishers' keys are untouched. A global retain here
+/// would let the palette feed and the mixer-cell feed silently prune each
+/// other every sync.
+pub fn retain_sound_glyph_frames(prefix: &str, active_keys: &HashSet<String>) {
+    sound_glyph_frames()
+        .lock()
+        .unwrap()
+        .retain(|key, _| !key.starts_with(prefix) || active_keys.contains(key));
 }
 
 pub fn clear_sound_glyph_frames() {
@@ -92,7 +99,10 @@ mod tests {
             },
         );
         assert_eq!(sound_glyph_frame("glyph").unwrap().revision, 3);
-        retain_sound_glyph_frames(&HashSet::new());
+        // Retain is namespace-scoped: a different prefix leaves the key alone.
+        retain_sound_glyph_frames("other:", &HashSet::new());
+        assert!(sound_glyph_frame("glyph").is_some());
+        retain_sound_glyph_frames("glyph", &HashSet::new());
         assert!(sound_glyph_frame("glyph").is_none());
     }
 }

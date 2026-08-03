@@ -40,8 +40,12 @@ struct GlyphFrames {
     published: HashMap<String, u64>,
     revision: u64,
     /// AST identity branches for the delta glyph's identity tier (spec §5.1a),
-    /// cached because resolving them reads and parses the instrument's dsp.lisp.
-    identity: Option<(String, Vec<IdentityBranch>)>,
+    /// cached per track because resolving them reads and parses the
+    /// instrument's dsp.lisp.
+    identity: HashMap<usize, (String, Vec<IdentityBranch>)>,
+    /// Per-track fingerprints for the mixer pattern-cell glyph feed, which
+    /// runs every sync regardless of whether the palette is open.
+    cell_published: HashMap<usize, u64>,
 }
 
 /// The identity tier's input: branch clusters of the instrument's authored AST,
@@ -60,14 +64,17 @@ fn identity_branches<'a>(
         custom.as_deref().unwrap_or("stock"),
         descriptor.params.len()
     );
-    if glyphs.identity.as_ref().map(|(key, _)| key.as_str()) != Some(cache_key.as_str()) {
+    if glyphs.identity.get(&track).map(|(key, _)| key.as_str()) != Some(cache_key.as_str()) {
         let skeleton = custom
             .and_then(|name| sequencer::lisp_host::load_instrument_source(&name).ok())
             .map(|source| sequencer::sound_glyph::extract_skeleton(&source).skeleton)
             .unwrap_or_else(|| sequencer::sound_glyph::stock_skeleton(descriptor).skeleton);
-        glyphs.identity = Some((cache_key, sequencer::sound_glyph::identity_branches(&skeleton)));
+        glyphs.identity.insert(
+            track,
+            (cache_key, sequencer::sound_glyph::identity_branches(&skeleton)),
+        );
     }
-    glyphs.identity.as_ref().map(|(_, branches)| branches.as_slice()).unwrap_or(&[])
+    glyphs.identity.get(&track).map(|(_, branches)| branches.as_slice()).unwrap_or(&[])
 }
 
 fn glyph_key(track: usize, patch: u64) -> String {
@@ -283,8 +290,154 @@ fn sync_glyph_frames(app: &app::App, track: usize, entries: &[PaletteEntry], gly
         }
     });
     publish_sound_glyph_frames(pending);
-    retain_sound_glyph_frames(&active);
+    retain_sound_glyph_frames("sound-glyph:", &active);
     glyphs.published.retain(|key, _| active.contains(key));
+}
+
+fn pattern_cell_glyph_key(track: usize, pattern: u64) -> String {
+    format!("pattern-glyph:track:{track}:pattern:{pattern}")
+}
+
+/// Publish one glyph frame per mixer pattern-launch cell, keyed on
+/// `(track, pattern)` so the lisp side needs no extra plumbing. Cohort = the
+/// distinct patches the track's cells reference; the reference is the
+/// track's *effective* sound, so cells bound to what is currently sounding
+/// render as substrate-only (plus the anchor ring) and diverged cells grow
+/// accent pieces. Runs every sync — the per-track fingerprint keeps the
+/// steady-state cost at hashing a few value vectors.
+fn sync_pattern_cell_glyph_frames(app: &app::App, glyphs: &mut GlyphFrames) {
+    let mut active: HashSet<String> = HashSet::new();
+    let mut pending = Vec::new();
+    let mut tracks_seen: HashSet<usize> = HashSet::new();
+    for track in 0..app.tracks.len() {
+        let cells = app.state.track_pattern_cells(track);
+        if cells.is_empty() {
+            continue;
+        }
+        tracks_seen.insert(track);
+        let fallback_descriptor;
+        let descriptor = match app.graph.instrument_descriptors.get(track) {
+            Some(descriptor) => descriptor,
+            None => {
+                fallback_descriptor = sequencer::effects::EffectDescriptor::builtin_sampler();
+                &fallback_descriptor
+            }
+        };
+        let identity = identity_branches(app, track, descriptor, glyphs).to_vec();
+        let track_instrument_type = app.graph.track_instrument_types.get(track);
+        app.state.with_project_scenes(|scenes| {
+            let Some(pool) = scenes.track_pools.get(track) else { return };
+            let compatible = |patch: &sequencer::sequencer::Patch| {
+                patch.instrument_slot.defaults.len() == descriptor.params.len()
+                    && track_instrument_type
+                        .is_none_or(|instrument_type| &patch.instrument_type == instrument_type)
+            };
+            // Reference first, then each cell's patch in cell order, deduped.
+            // The reference must be SCENE-INDEPENDENT (spec §7 anchor mode):
+            // diffing against the effective sound re-shapes every cell on each
+            // scene switch. The pool's lowest patch id is stable — glyphs only
+            // change when parameters or the pool itself change.
+            let reference_patch = pool.sounds.patches.keys().min().copied();
+            let cell_patches = cells
+                .iter()
+                .map(|cell| (cell.pattern_id, pool.refs(cell.pattern_id).map(|refs| refs.patch)))
+                .collect::<Vec<_>>();
+            let mut patches = reference_patch.into_iter().collect::<Vec<_>>();
+            for (_, patch) in &cell_patches {
+                if let Some(patch) = patch {
+                    if !patches.contains(patch) {
+                        patches.push(*patch);
+                    }
+                }
+            }
+            for (pattern, _) in &cell_patches {
+                active.insert(pattern_cell_glyph_key(track, pattern.0));
+            }
+
+            let mut hasher = DefaultHasher::new();
+            descriptor.name.hash(&mut hasher);
+            descriptor.params.len().hash(&mut hasher);
+            for branch in &identity {
+                branch.name.hash(&mut hasher);
+                branch.weight.to_bits().hash(&mut hasher);
+            }
+            for (pattern, patch) in &cell_patches {
+                pattern.hash(&mut hasher);
+                patch.hash(&mut hasher);
+            }
+            for patch in &patches {
+                patch.hash(&mut hasher);
+                if let Some(patch) = pool.sounds.patches.get(patch) {
+                    for value in &patch.instrument_slot.defaults {
+                        value.to_bits().hash(&mut hasher);
+                    }
+                    compatible(patch).hash(&mut hasher);
+                }
+            }
+            let fingerprint = hasher.finish();
+            if glyphs.cell_published.get(&track) == Some(&fingerprint) {
+                return;
+            }
+            glyphs.cell_published.insert(track, fingerprint);
+
+            let schema = glyph_schema_for_descriptor(descriptor, "instrument:", 0, None);
+            let cohort = patches
+                .iter()
+                .filter_map(|id| {
+                    let patch = pool.sounds.patches.get(id)?;
+                    compatible(patch).then(|| (*id, patch_glyph_values(patch, descriptor)))
+                })
+                .collect::<Vec<_>>();
+            let values = cohort.iter().map(|(_, values)| values.clone()).collect::<Vec<_>>();
+            let reference = values.first().cloned().unwrap_or_default();
+            let model = DeltaGlyphCohort::new_with_identity(&schema, &values, &reference, &identity);
+            for (pattern, patch) in &cell_patches {
+                let Some(patch) = patch else { continue };
+                // anchor=false everywhere: the palette's anchor ring marks the
+                // reference tile, which in the cell grid is an arbitrary pool
+                // patch — the launch state already has its own indicators.
+                let built = match cohort.iter().position(|(id, _)| id == patch) {
+                    Some(index) => model.build(&values[index], false),
+                    // Incompatible patch: normalized against the reference and
+                    // ringed, exactly as the palette does.
+                    None => {
+                        let mut incompatible = model.build(&reference, false);
+                        incompatible.pieces.clear();
+                        incompatible
+                    }
+                };
+                glyphs.revision = glyphs.revision.wrapping_add(1);
+                pending.push((
+                    pattern_cell_glyph_key(track, pattern.0),
+                    SoundGlyphFrame {
+                        revision: glyphs.revision,
+                        cols: built.cols,
+                        rows: built.rows,
+                        substrate: built.substrate,
+                        pieces: built
+                            .pieces
+                            .into_iter()
+                            .map(|piece| SoundGlyphPiece {
+                                slot: piece.slot,
+                                piece: piece.piece,
+                                hue: piece.hue,
+                                magnitude: piece.magnitude,
+                                mirror: piece.mirror,
+                                negative: piece.negative,
+                            })
+                            .collect(),
+                        anchor: built.anchor,
+                        incompatible: !cohort.iter().any(|(id, _)| id == patch),
+                    },
+                ));
+            }
+        });
+    }
+    if !pending.is_empty() {
+        publish_sound_glyph_frames(pending);
+    }
+    retain_sound_glyph_frames("pattern-glyph:", &active);
+    glyphs.cell_published.retain(|track, _| tracks_seen.contains(track));
 }
 
 fn color_fields(map: &mut HashMap<String, Rc<RefCell<Value>>>, color: Option<u8>) {
@@ -471,6 +624,7 @@ pub(crate) fn sync_sound_palette(
     arrangement_visible: bool,
 ) -> bool {
     let mut dirty = false;
+    sync_pattern_cell_glyph_frames(app, &mut frame.glyphs);
     match app.sound_palette_open {
         Some((track, target)) => {
             let entries = app.sound_palette_entries(track, target);
@@ -495,7 +649,7 @@ pub(crate) fn sync_sound_palette(
                     .effects_dirty;
                 frame.cached = None;
                 frame.published_open = false;
-                retain_sound_glyph_frames(&HashSet::new());
+                retain_sound_glyph_frames("sound-glyph:", &HashSet::new());
                 frame.glyphs.published.clear();
             }
         }

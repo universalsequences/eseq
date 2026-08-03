@@ -385,30 +385,30 @@
   :bindable (active assigned override selected track-r track-g track-b)
   :shader
   (let ((track-col (rgba track-r track-g track-b 1.0))
-        (outer (if (= selected 1)
+      (track-r (if (= active 1) (* 1.10 track-r) track-r))
+      (track-g (if (= active 1) (* 1.1 track-g) track-g))
+      (track-b (if (= active 1) (* 1.1 track-b) track-b))
+      (outer (if (= selected 1)
           (rgba 0.94 0.96 1.0 1.0)
           (rgba track-r track-g track-b 1.0)))
-        (middle (rgba track-r track-g track-b 1.0))
-        (inner (if (= active 1)
+      (middle (rgba track-r track-g track-b 1.0))
+      (inner (if (= active 0)
           (rgba 0.02 0.025 0.03 1.0)
           track-col))
-        (play-col (if (= active 1)
+      (play-col (if (= active 1)
           (rgba 0.1 0.95 0.38 1.0)
           (rgba 0 0 0 0))))
     (sdf/layer
-      (sdf/fill (sdf/rounded-rect width height 0.2)
+      (sdf/fill (sdf/rounded-rect width height 0.3)
         (material :color outer))
-      (sdf/fill (sdf/rounded-rect (* width 0.84) (* height 0.84) 0.2)
+      (sdf/fill (sdf/rounded-rect (* width 0.94) (* height 0.94) 0.2)
         (material :color middle))
-      (sdf/fill (sdf/rounded-rect (* width 0.66) (* height 0.68) 0.22)
+      (sdf/fill (sdf/rounded-rect (* width 0.92) (* height 0.92) 0.22)
         (material :color inner))
-      (sdf/fill
-        (let ((p1x -0.26) (p1y -0.36) (p2x -0.26) (p2y 0.36) (p3x 0.36) (p3y 0.0))
-          (let ((d1 (- (* (- p2x p1x) (- y p1y)) (* (- p2y p1y) (- x p1x))))
-                (d2 (- (* (- p3x p2x) (- y p2y)) (* (- p3y p2y) (- x p2x))))
-                (d3 (- (* (- p1x p3x) (- y p3y)) (* (- p1y p3y) (- x p3x)))))
-            (max (max d1 d2) d3)))
-        (material :color play-col)))))
+      
+      )))
+
+
 
 (def mixer-v2-track-pattern-cells (track)
   (if (< track (len SEQ.track-pattern-cells))
@@ -432,20 +432,39 @@
       (grid :cols 8 :col-width 1.5 :row-height 0.75 :align :center
         (each cells |cell cell-idx|
           (let ((pattern-id (get cell :id)))
-          (box
-            :key (str "mixer-v2-track-pattern-cell-" track "-" pattern-id)
-            :width 1.47 :height 0.73  
-            :padding 0
-            :bg :transparent
-            :background "track-pattern-cell-bg"
-            :active (mixer-v2-track-pattern-cell-active-binding track pattern-id)
-            :assigned (mixer-v2-track-pattern-cell-assigned-binding track pattern-id)
-            :override (mixer-v2-track-pattern-cell-override-binding track pattern-id)
-            :selected (mixer-v2-track-pattern-cell-selected-binding track pattern-id)
-            :track-r (mixer-v2-track-color-r track false)
-            :track-g (mixer-v2-track-color-g track false)
-            :track-b (mixer-v2-track-color-b track false)
-            :on-click (lambda (event) (mixer-v2-launch-track-pattern track cell)))))))))
+            (box
+              :key (str "mixer-v2-track-pattern-cell-" track "-" pattern-id)
+              :width 1.45 :height 0.73
+              :padding 0.3
+              :bg :transparent
+              :background "track-pattern-cell-bg"
+              :active (mixer-v2-track-pattern-cell-active-binding track pattern-id)
+              :assigned (mixer-v2-track-pattern-cell-assigned-binding track pattern-id)
+              :override (mixer-v2-track-pattern-cell-override-binding track pattern-id)
+              :selected (mixer-v2-track-pattern-cell-selected-binding track pattern-id)
+              ;; Dimmed so the sound glyph on top carries the cell's identity;
+              ;; the launch/selection states still read through the shader.
+              :track-r (* 0.95 (mixer-v2-track-color-r track false))
+              :track-g (* 0.95 (mixer-v2-track-color-g track false))
+              :track-b (* 0.95 (mixer-v2-track-color-b track false))
+              :on-click (lambda (event) (mixer-v2-launch-track-pattern track cell))
+              ;; The pattern's bound sound, as its palette glyph (host feed:
+              ;; sync_pattern_cell_glyph_frames). The tuned shader styling is
+              ;; the widget default (TUNING_PROPS); the substrate body tints
+              ;; with the track color so cells keep their track identity.
+              (sound-glyph
+                :key (str "mixer-v2-cell-glyph-" track "-" pattern-id)
+                :source (str "pattern-glyph:track:" track ":pattern:" pattern-id)
+                :edge-soft 0.1
+                :white-damp 0
+                :height-in 0.3
+                :height-out -0.08
+                :height-amp 3
+                :diffuse 0.8
+                :rim-width 0.1
+                :tint-r (mixer-v2-track-color-r track false)
+                :tint-g (mixer-v2-track-color-g track false)
+                :tint-b (mixer-v2-track-color-b track false)))))))))
 
 (def mixer-v2-mod-output-style
   (ui/style

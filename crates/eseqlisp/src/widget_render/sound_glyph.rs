@@ -29,37 +29,47 @@ pub fn source_key(props: &HashMap<String, Value>) -> Option<String> {
 
 /// Shader tuning props: `(name, default)`, packed in order into the uniform
 /// words the glyph payload leaves free (words 10..17, then color_b/color_c).
-/// Defaults reproduce the shipped look exactly; every prop is a live knob for
-/// fine-tuning the fake-3D lighting, rim glow, and interior shading.
+/// The defaults ARE the tuned house style (ear^H^H eye-tuned in the sound
+/// palette, 2026-08-03) so every glyph surface — palette cards, mixer
+/// pattern cells — shares one look with zero props; any prop still overrides
+/// per call site for live tuning sessions.
 #[cfg(target_os = "macos")]
 const TUNING_PROPS: [(&str, f32); 16] = [
     // Height profile: the smoothstep window + power curve that turns the SDF
     // into the height field the finite-difference normals sample.
-    ("height-amp", 1.8),
-    ("height-pow", 8.0),
-    ("height-in", -0.15),
-    ("height-out", 0.14817536),
+    ("height-amp", 3.8),
+    ("height-pow", 2.0),
+    ("height-in", -0.005),
+    ("height-out", 0.148),
     // Finite-difference epsilon for the normal estimate (bigger = softer bevel).
-    ("normal-eps", 0.0001),
+    ("normal-eps", 0.001),
     // Coverage anti-aliasing width at the silhouette.
     ("edge-soft", 0.020),
     // Achromatic specular weight and tinted diffuse weight (dg_material).
     ("white-damp", 0.35),
-    ("diffuse", 0.85),
+    ("diffuse", 0.75),
     // Multiplier on both specular exponents; crease darkening multiplier.
-    ("spec-pow", 1.0),
-    ("crease-scale", 1.0),
+    ("spec-pow", 10.0),
+    ("crease-scale", 8.0),
     // Neon rim just inside the silhouette (0 gain = off).
-    ("rim-width", 0.0),
-    ("rim-gain", 0.0),
+    ("rim-width", 0.01),
+    ("rim-gain", 0.38),
     // Soft halo outside the silhouette (0 gain = off).
-    ("glow-width", 0.0),
-    ("glow-gain", 0.0),
+    ("glow-width", 0.12),
+    ("glow-gain", 0.23295),
     // SDF-depth interior shading: darkens toward the middle of a mass so the
     // fill is not one static color (0 shade = off).
-    ("interior-shade", 0.0),
-    ("interior-width", 0.35),
+    ("interior-shade", 0.18),
+    ("interior-width", 0.22),
 ];
+
+#[cfg(target_os = "macos")]
+fn tint_channel(props: &HashMap<String, Value>, name: &str, default: f32) -> f32 {
+    match props.get(name) {
+        Some(Value::Number(value)) => (*value as f32).clamp(0.0, 1.0),
+        _ => default,
+    }
+}
 
 #[cfg(target_os = "macos")]
 fn tuning(props: &HashMap<String, Value>) -> [f32; 16] {
@@ -85,11 +95,12 @@ impl WidgetDefinition for SoundGlyphWidget {
         _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
+        // Minima stay tiny: mixer pattern cells embed sub-cell glyphs.
         let width = get_prop_num(node, "width")
             .map(f64_to_f32)
             .unwrap_or(constraints.max_width)
-            .clamp(4.0, constraints.max_width.max(4.0));
-        let height = get_prop_num(node, "height").map(f64_to_f32).unwrap_or(6.0).max(2.0);
+            .clamp(0.4, constraints.max_width.max(0.4));
+        let height = get_prop_num(node, "height").map(f64_to_f32).unwrap_or(6.0).max(0.4);
         Some(Size { width, height })
     }
 
@@ -143,12 +154,13 @@ impl WidgetDefinition for SoundGlyphWidget {
             width: side / viewport.cell_w,
             height: side / viewport.cell_h,
         };
-        // Words 10..17 carry the first eight tuning props; the remaining eight
-        // ride color_b/color_c, which the payload never used.
+        // Words 10..16 carry the first seven tuning props; diffuse rides
+        // color_d.z (NOT itime — the run cache deliberately skips hashing
+        // itime for non-animated widgets, which would make :diffuse inert);
+        // the remaining eight ride color_b/color_c.
         let tune = tuning(&node.props);
         packed[10..16].copy_from_slice(&tune[0..6]);
         packed[16] = tune[6];
-        packed[17] = tune[7];
 
         let (ndc_min, ndc_max) = ndc_bounds(square, viewport);
         metal_widget_instance(widget_type, WidgetInstance {
@@ -161,12 +173,18 @@ impl WidgetDefinition for SoundGlyphWidget {
             uniform_b: packed[4..8].try_into().unwrap(),
             uniform_c: packed[8..12].try_into().unwrap(),
             uniform_d: packed[12..16].try_into().unwrap(),
-            // Substrate tint; accent hues live in the shader's DG_HUES palette so a
-            // per-piece 3-bit index costs no uniform slots.
-            color_a: [0.20, 0.34, 0.38, 1.0],
+            // Substrate tint (overridable per call site — mixer cells tint the
+            // body with the track color); accent hues live in the shader's
+            // DG_HUES palette so a per-piece 3-bit index costs no uniform slots.
+            color_a: [
+                tint_channel(&node.props, "tint-r", 0.20),
+                tint_channel(&node.props, "tint-g", 0.34),
+                tint_channel(&node.props, "tint-b", 0.38),
+                1.0,
+            ],
             color_b: tune[8..12].try_into().unwrap(),
             color_c: tune[12..16].try_into().unwrap(),
-            color_d: [frame.cols as f32, frame.rows as f32, 0.0, frame.anchor as u8 as f32],
+            color_d: [frame.cols as f32, frame.rows as f32, tune[7], frame.anchor as u8 as f32],
             corner_radius: frame.incompatible as u8 as f32,
             pixel_aspect: 1.0,
         })
@@ -383,7 +401,9 @@ float4 dg_material(float2 p, float3 n, float4 tint, bool crease, WidgetVaryings 
     // docs/sdf-blob-glyph-algorithm.md §6.4). Damped: at full strength it
     // desaturates every cell toward white, and hue is this glyph's group legend.
     float white = dg_tune(in, 16) * (scale * spec1 + spec2 + 0.293913139 * dot(l1, n));
-    float4 color = float4(white) + dg_tune(in, 17) * dot(l2, n) * tint;
+    // Diffuse rides color_d.z — itime is excluded from the run-cache hash
+    // for non-animated widgets, so data there would never invalidate.
+    float4 color = float4(white) + in.color_d.z * dot(l2, n) * tint;
     color.rgb = clamp(color.rgb, 0.0, 1.0);
     color.a = tint.a;
     return color;
