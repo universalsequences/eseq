@@ -411,11 +411,21 @@ pub(crate) fn run_event_loop(
                     if raw_key.kind == crossterm::event::KeyEventKind::Press
                         && editor.modal_is_open()
                     {
-                        // Modal keyboard ownership precedes every app-level
-                        // shortcut. Editor routing sends the key to the modal's
-                        // owning tile and consumes it there even when no modal
+                        // Transport stays global while a modal is open; the
+                        // focused-text-input guard inside keeps typed spaces
+                        // in the modal's edit fields.
+                        let key = normalize_command_shortcuts(raw_key);
+                        if should_toggle_play_on_space(&editor, &key) {
+                            let _ = editor.runtime_mut().eval_str("(seq-toggle-play)");
+                            editor.refresh_runtime_side_effects();
+                            ui_loop_stats.note_event(event_started.elapsed());
+                            continue;
+                        }
+                        // Every other app-level shortcut yields to the modal.
+                        // Editor routing sends the key to the modal's owning
+                        // tile and consumes it there even when no modal
                         // control handles it.
-                        editor.handle_key(normalize_command_shortcuts(raw_key));
+                        editor.handle_key(key);
                         ui_loop_stats.note_event(event_started.elapsed());
                         continue;
                     }

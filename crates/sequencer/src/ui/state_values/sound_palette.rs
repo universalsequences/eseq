@@ -21,9 +21,9 @@ use std::rc::Rc;
 
 #[derive(Default)]
 pub(crate) struct SoundPaletteFrameState {
-    /// `(track, target, entries)` of the last published overlay, `None` when
-    /// the last publish was Nil (closed).
-    cached: Option<(usize, PaletteTarget, Vec<PaletteEntry>)>,
+    /// `(track, target, instrument name, entries)` of the last published
+    /// overlay, `None` when the last publish was Nil (closed).
+    cached: Option<(usize, PaletteTarget, String, Vec<PaletteEntry>)>,
     /// Whether anything was ever published (so the first closed frame does
     /// not publish Nil over the registered default).
     published_open: bool,
@@ -281,11 +281,35 @@ fn color_fields(map: &mut HashMap<String, Rc<RefCell<Value>>>, color: Option<u8>
     }
 }
 
-fn build_palette_value(track: usize, target: PaletteTarget, entries: &[PaletteEntry]) -> Value {
+/// The track's instrument display name for the palette header — the same
+/// resolution the sidebar uses: samplers have no engine name, racks show the
+/// track name, and everything else the engine/custom-instrument name.
+fn palette_instrument_name(app: &app::App, track: usize) -> String {
+    match app.graph.track_instrument_types.get(track) {
+        Some(sequencer::sequencer::InstrumentType::Sampler) => "sampler".to_string(),
+        Some(sequencer::sequencer::InstrumentType::Rack) => {
+            app.tracks.get(track).cloned().unwrap_or_default()
+        }
+        _ => current_custom_instrument_name(app, track)
+            .or_else(|| app.tracks.get(track).cloned())
+            .unwrap_or_default(),
+    }
+}
+
+fn build_palette_value(
+    track: usize,
+    target: PaletteTarget,
+    instrument_name: &str,
+    entries: &[PaletteEntry],
+) -> Value {
     let mut map = HashMap::new();
     map.insert(
         "track".to_string(),
         Rc::new(RefCell::new(Value::Number(track as f64))),
+    );
+    map.insert(
+        "instrument-name".to_string(),
+        Rc::new(RefCell::new(Value::String(instrument_name.to_string()))),
     );
     let (kind, id) = match target {
         PaletteTarget::Take(id) => ("take", Some(id.0)),
@@ -327,6 +351,10 @@ fn build_palette_value(track: usize, target: PaletteTarget, entries: &[PaletteEn
                 Rc::new(RefCell::new(Value::String(entry.referents.clone()))),
             );
             row.insert(
+                "referents-short".to_string(),
+                Rc::new(RefCell::new(Value::String(entry.referents_short.clone()))),
+            );
+            row.insert(
                 "base".to_string(),
                 Rc::new(RefCell::new(Value::Bool(entry.is_base))),
             );
@@ -337,6 +365,28 @@ fn build_palette_value(track: usize, target: PaletteTarget, entries: &[PaletteEn
             row.insert(
                 "glyph-key".to_string(),
                 Rc::new(RefCell::new(Value::String(glyph_key(track, entry.patch.0)))),
+            );
+            row.insert(
+                "preset".to_string(),
+                Rc::new(RefCell::new(match &entry.preset {
+                    Some(name) => Value::String(name.clone()),
+                    None => Value::Nil,
+                })),
+            );
+            row.insert(
+                "sample".to_string(),
+                Rc::new(RefCell::new(match &entry.sample {
+                    Some(name) => Value::String(name.clone()),
+                    None => Value::Nil,
+                })),
+            );
+            row.insert(
+                "diff-up".to_string(),
+                Rc::new(RefCell::new(Value::Number(entry.params_up as f64))),
+            );
+            row.insert(
+                "diff-down".to_string(),
+                Rc::new(RefCell::new(Value::Number(entry.params_down as f64))),
             );
             color_fields(&mut row, entry.color);
             Rc::new(RefCell::new(Value::Map(row)))
@@ -389,13 +439,13 @@ pub(crate) fn sync_sound_palette(
         Some((track, target)) => {
             let entries = app.sound_palette_entries(track, target);
             sync_glyph_frames(app, track, &entries, &mut frame.glyphs);
-            let snapshot = (track, target, entries);
+            let snapshot = (track, target, palette_instrument_name(app, track), entries);
             if frame.cached.as_ref() != Some(&snapshot) {
                 dirty |= rt
                     .set_reactive(
                         "SEQ",
                         "sound-palette",
-                        build_palette_value(snapshot.0, snapshot.1, &snapshot.2),
+                        build_palette_value(snapshot.0, snapshot.1, &snapshot.2, &snapshot.3),
                     )
                     .effects_dirty;
                 frame.cached = Some(snapshot);

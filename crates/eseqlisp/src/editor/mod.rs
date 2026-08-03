@@ -5389,16 +5389,24 @@ impl Editor {
             self.finish_typing_undo_group();
         }
 
-        // A modal is a keyboard boundary. Route the key through the tile that
-        // owns the modal (which may be inactive while inspected source is
-        // open), and never let an unhandled modal key reach editor/global
-        // bindings. Escape and focused modal widgets are handled inside.
-        if self.handle_open_modal_key(key) {
+        // Inspect mode outranks the modal keyboard boundary, same as it
+        // outranks the overlay intercept for hit-testing: the toggle chord and
+        // the Esc that exits inspect must work while inspecting a modal.
+        if is_inspect_mode_toggle_key(key) {
+            self.toggle_inspect_mode();
             return;
         }
 
         if self.inspect_mode && key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE {
             self.exit_inspect_mode();
+            return;
+        }
+
+        // A modal is a keyboard boundary. Route the key through the tile that
+        // owns the modal (which may be inactive while inspected source is
+        // open), and never let an unhandled modal key reach editor/global
+        // bindings. Escape and focused modal widgets are handled inside.
+        if self.handle_open_modal_key(key) {
             return;
         }
 
@@ -5423,11 +5431,6 @@ impl Editor {
         }
 
         if self.handle_patcher_source_tab(key) {
-            return;
-        }
-
-        if is_inspect_mode_toggle_key(key) {
-            self.toggle_inspect_mode();
             return;
         }
 

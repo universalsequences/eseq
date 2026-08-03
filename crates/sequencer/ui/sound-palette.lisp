@@ -65,9 +65,6 @@
     (seq-sound-apply-with-mix (sound-palette-track)
       (get entry :patch-id) (get entry :mix-id))))
 
-(def sound-palette-fork ()
-  (seq-sound-fork (sound-palette-track)))
-
 (def sound-palette-begin-rename (entry)
   (do
     (set! sound-palette-renaming (get entry :patch-id))
@@ -80,29 +77,66 @@
     (set! sound-palette-renaming -1)
     (set! sound-palette-rename-draft "")))
 
+;; What the patch was loaded from: the sample name for a sampler patch, the
+;; preset name otherwise (the host suffixes `*` when edited since). Empty
+;; when neither is known.
+(def sound-palette-entry-source (entry)
+  (let ((sample (get entry :sample))
+      (preset (get entry :preset)))
+    (if (not (= sample nil)) sample
+      (if (not (= preset nil)) preset ""))))
+
 (def sound-palette-action-button (key-suffix entry text on-press)
   (button text
     :key (str "sound-palette-" key-suffix "-" (get entry :patch-id))
-    :width 3.4 :height 0.95 :font-size 7.5
+    :width 2.4 :height 0.85 :font-size 7.5
     :background-color :primary
     :color :white
     :on-click |x y r| (on-press entry)))
 
-;; One palette box (17.6 + sound-glyph spec §4): top-left swatch + name
-;; (inline-renameable), the plant glyph as the center region, referents +
-;; Apply / Apply-with-mix along the bottom. The gray base entry is the
+;; The preset/sample name as a chip badge (same visual family as the diff
+;; badges); collapses to nothing when the patch has no known source.
+(def sound-palette-source-badge (entry current)
+  (let ((source (sound-palette-entry-source entry)))
+    (if (= source "")
+      (box :bg :transparent)
+      (box :key (str "sound-palette-source-" (get entry :patch-id))
+        :background-color (if current (rgba 0 0 0 0.16) (rgba 1 1 1 0.07))
+        :corner-radius 4
+        :padding 0.12
+        (label (substring source 0 16)
+          :font-size 7.5 :color (if current :black :dim) :bg :transparent)))))
+
+;; Git-diff-style summary vs the current sound (17.6 amendment): "+n" params
+;; higher, "-m" params lower. Empty labels when there is nothing to say (the
+;; current entry itself, an identical patch, or an incompatible one).
+(def sound-palette-diff-badges (entry)
+  (let ((up (get entry :diff-up))
+      (down (get entry :diff-down)))
+    (h-stack :gap 0.18 :align :center
+      (label (if (and (not (= up nil)) (> up 0)) (str "+" up) "")
+        :key (str "sound-palette-diff-up-" (get entry :patch-id))
+        :font-size 8.5 :color (rgba 0.45 0.82 0.55 1.0) :bg :transparent)
+      (label (if (and (not (= down nil)) (> down 0)) (str "-" down) "")
+        :key (str "sound-palette-diff-down-" (get entry :patch-id))
+        :font-size 8.5 :color (rgba 0.91 0.45 0.45 1.0) :bg :transparent))))
+
+;; One palette box (17.6 + sound-glyph spec §4): a compact card — one line
+;; of name (inline-renameable), diff badges and referents above the glyph,
+;; the preset/sample badge below it. Half the original card size so far
+;; more sounds fit on screen at once. The gray base entry is the
 ;; scene-effective sound: outlined swatch, not filled — exactly the p-lock
 ;; "def" chip treatment. Boxes tile in a responsive grid (see
-;; sound-palette-panel) so the glyph gets real area instead of a row sliver.
+;; sound-palette-panel).
 (def sound-palette-entry-row (entry)
   (let ((c (sound-palette-entry-color entry))
       (base (get entry :base))
       (current (get entry :current)))
     (box :key (str "sound-palette-entry-" (get entry :patch-id))
       :width :fill
-      :height 8
-      :padding 0.5
-      :on-click |x y r| (sound-palette-apply entry) 
+      :height 8.8
+      :padding 0.35
+      :on-click |x y r| (sound-palette-apply entry)
       :corner-radius 12
       :border-width 1
       :background-color (if current
@@ -111,14 +145,15 @@
       :border-width (if current 0.75 0.35)
       :border-color (if current c (rgba 1 1 1 0.10))
       (v-stack :gap 0.12 :width :fill
-        (h-stack :gap 0.28 :align :center
-          
+        ;; Name + diff badges, then the "where it is used" line — both above
+        ;; the glyph, on their own lines.
+        (h-stack :gap 0.24 :align :center
           (if (= sound-palette-renaming (get entry :patch-id))
             ;; Draft-buffered rename: :on-change only edits the draft (it
             ;; fires per keystroke); the "ok" button commits.
             (h-stack :gap 0.2 :align :center
               (text-input :key (str "sound-palette-rename-" (get entry :patch-id))
-                :width 6.0 :height 0.9 :font-size 8.5
+                :width 4.6 :height 0.85 :font-size 8
                 :value sound-palette-rename-draft
                 :on-change |name| (set! sound-palette-rename-draft name))
               (sound-palette-action-button "rename-ok" entry "ok"
@@ -126,55 +161,56 @@
             (box :key (str "sound-palette-name-" (get entry :patch-id))
               :bg :transparent
               :on-click |x y r| (sound-palette-begin-rename entry)
-              (label (str (substring (get entry :name) 0 26) (if base " (scene)" ""))
-                :font-size 9 :color (if current :black :dim) :bg :transparent))
+              (label (substring (str (get entry :name) (if base " (scene)" "")) 0 15)
+                :font-size 8.5 :color (if current :black :dim) :bg :transparent))
             )
-          (label 
-            (substring (get entry :referents) 0 16)
-            :font-size 9
-            :color (if current :black :dim) :bg :transparent           
-            )
+          (sound-palette-diff-badges entry)
           (box :flex 1 :bg :transparent)
           )
-        
-        (box :height 0.05)
-        (box :width 17.65 :height 0.2
+        (let ((refs (get entry :referents-short)))
+          (label (substring (if (= refs nil) (get entry :referents) refs) 0 16)
+            :font-size 7 :color (if current :black :dim) :bg :transparent))
+        (box :width :fill :height 0.15
           :corner-radius 2
           :background-color (if base :transparent c)
           :border-width (if base 1 0)
-          :border-color c)  
+          :border-color c)
         ;; Center glyph region (sound-glyph spec §4/P2): the plant rendered
         ;; from a host-published frame; the widget only knows the key.
-        (box :background-color :bg :padding 1
+        (box :background-color :bg :padding 0.25 :width :fill
           (sound-glyph :key (str "sound-palette-glyph-" (get entry :patch-id))
             :source (get entry :glyph-key)
-            :height 6.5)
+            :height 4.4)
           )
-        
+        ;; What the sound is (preset / sample name), below the glyph.
+        (h-stack :gap 0.24 :align :center
+          (sound-palette-source-badge entry current)
+          (box :flex 1 :bg :transparent)
+          )
         )
       )
     )
   )
 
+;; "SOUNDS - Track 5 (ultrakick) - Pattern 4": the header names the track
+;; and its instrument so the overlay is never ambiguous about what it edits.
+;; The closed guard matters: the modal's children still evaluate while
+;; closed, and arithmetic on a nil track would kill the whole re-render.
+(def sound-palette-header-title ()
+  (if (sound-palette-open?)
+    (let ((inst (get SEQ.sound-palette :instrument-name)))
+      (str "SOUNDS - Track " (+ (sound-palette-track) 1)
+        (if (or (= inst nil) (= inst "")) "" (str " (" inst ")"))
+        " - " (sound-palette-target-label)))
+    "SOUNDS"))
+
 (def sound-palette-header ()
   (box :width :fill :bg :transparent
     (h-stack :gap 0.3 :align :baseline
-      (label (str "SOUNDS - " (sound-palette-target-label))
+      (label (sound-palette-header-title)
         :key "sound-palette-header-label"
         :font-size 12 :color :dim :bg :transparent)
       (box :flex 1 :bg :transparent)
-      (button "fork"
-        :key "sound-palette-fork"
-         :font-size 12
-        :background-color (rgba 1 1 1 0.05)
-        :border-color (rgba 1 1 1 0.14) :color :dim
-        :on-click |x y r| (sound-palette-fork))
-      (button "clean"
-        :key "sound-palette-cleanup"
-        :font-size 12
-        :background-color (rgba 1 1 1 0.05)
-        :border-color (rgba 1 1 1 0.14) :color :dim
-        :on-click |x y r| (seq-sound-cleanup-unused (sound-palette-track)))
       (button "x"
         :key "sound-palette-close"
         :font-size 12
@@ -229,10 +265,10 @@
         (scroll :width :fill :flex 1
           ;; Grid of §4 boxes (not a row list): each cell gets enough area
           ;; for a legible plant glyph; the grid reflows with the panel.
-          (responsive-grid :width :fill :gap 0.35
-            :min-item-width 14 :min-columns 2 :max-columns 4
+          (responsive-grid :width :fill :gap 0.3
+            :min-item-width 10 :min-columns 3 :max-columns 6
             ;; Explicit row height: without it the grid falls back to
             ;; slot-width * row-aspect and cells balloon to near-square.
-            :row-height 9.2
+            :row-height 9.3
             (each (sound-palette-entries) |entry idx|
               (sound-palette-entry-row entry))))))))

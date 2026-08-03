@@ -19719,6 +19719,10 @@
             ("target-kind", Value::String("take".to_string())),
             ("target-id", Value::Number(1.0)),
             (
+                "instrument-name",
+                Value::String("ultrakick".to_string()),
+            ),
+            (
                 "entries",
                 test_list(vec![
                     map_value([
@@ -19729,6 +19733,10 @@
                         ("base", Value::Bool(true)),
                         ("current", Value::Bool(false)),
                         ("color", Value::Nil),
+                        ("preset", Value::Nil),
+                        ("sample", Value::Nil),
+                        ("diff-up", Value::Number(3.0)),
+                        ("diff-down", Value::Number(1.0)),
                     ]),
                     map_value([
                         ("patch-id", Value::Number(3.0)),
@@ -19745,6 +19753,10 @@
                             "glyph-key",
                             Value::String("sound-glyph:track:0:patch:3".to_string()),
                         ),
+                        ("preset", Value::String("Warm Keys.json".to_string())),
+                        ("sample", Value::Nil),
+                        ("diff-up", Value::Number(0.0)),
+                        ("diff-down", Value::Number(0.0)),
                     ]),
                 ]),
             ),
@@ -19752,8 +19764,9 @@
     }
 
     /// Takes spec 18.3 exit criterion: the palette overlay renders — header,
-    /// both entry rows (gray base + colored current), and the per-entry
-    /// action buttons — all inside the panel; closed (Nil) it collapses.
+    /// both entry rows (gray base + colored current), the preset/sample
+    /// source line, and the param diff badges — all inside the panel;
+    /// closed (Nil) it collapses. Apply is the row click itself.
     #[test]
     fn metal_seq_sound_palette_overlay_layout() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -19783,19 +19796,18 @@
             .expect("gray base entry should render");
         let current_row = find_layout_node_by_stable_key(&layout, "sound-palette-entry-3")
             .expect("current entry should render");
-        let apply = find_layout_node_by_stable_key(&layout, "sound-palette-apply-3")
-            .expect("apply button should render");
-        let apply_mix = find_layout_node_by_stable_key(&layout, "sound-palette-apply-mix-3")
-            .expect("apply-with-mix button should render");
+        let source = find_layout_node_by_stable_key(&layout, "sound-palette-source-3")
+            .expect("preset/sample source label should render");
+        let diff_up = find_layout_node_by_stable_key(&layout, "sound-palette-diff-up-0")
+            .expect("diff badge should render");
         assert_finite_nonzero_rect(panel, "sound palette panel");
         assert_finite_nonzero_rect(base_row, "gray base entry");
         assert_finite_nonzero_rect(current_row, "current entry");
-        assert_finite_nonzero_rect(apply, "apply button");
         assert_layout_inside(header, panel, "palette header");
         assert_layout_inside(base_row, panel, "gray base entry");
         assert_layout_inside(current_row, panel, "current entry");
-        assert_layout_inside(apply, current_row, "apply button");
-        assert_layout_inside(apply_mix, current_row, "apply-with-mix button");
+        assert_layout_inside(source, current_row, "preset/sample source label");
+        assert_layout_inside(diff_up, base_row, "diff badge");
 
         // Sound-glyph spec P2: each box carries the plant glyph as its
         // center region, fed by the host-published frame key.

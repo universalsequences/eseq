@@ -12506,3 +12506,40 @@ fn modal_traps_focus_while_open_and_restores_it_after_close() {
         "closing the modal must restore the previous focus"
     );
 }
+
+/// Inspect mode outranks the modal keyboard boundary: the toggle chord and
+/// the Esc that exits inspect must work while a modal is open, without
+/// disturbing the modal itself.
+#[cfg(target_os = "macos")]
+#[test]
+fn inspect_toggle_and_escape_outrank_an_open_modal() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = modal_two_tile_editor(MODAL_PANEL_BODY);
+    assert!(editor.modal_is_open());
+
+    editor.handle_key(KeyEvent::new(
+        KeyCode::Char('I'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert!(
+        editor.inspect_mode,
+        "ctrl+shift+i must reach the inspect toggle over an open modal"
+    );
+    assert!(
+        eval_bool(&mut editor, "modal-open"),
+        "toggling inspect must not disturb the modal"
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!editor.inspect_mode, "Esc must exit inspect mode first");
+    assert!(
+        eval_bool(&mut editor, "modal-open"),
+        "the modal stays open until the next Esc"
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        !eval_bool(&mut editor, "modal-open"),
+        "with inspect closed, Esc closes the modal"
+    );
+}
