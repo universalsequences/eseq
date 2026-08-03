@@ -99,6 +99,18 @@ impl SnapshotSequencerClock {
         }
     }
 
+    /// Forget one track's step-dedup memory: the next derived step fires
+    /// even if its index matches the last one derived. Used at song row
+    /// boundaries where the lane's SOURCE changes — a new clip is a fresh
+    /// trigger domain, and without this a silenced lane whose clock wrapped
+    /// into step 0 just before the boundary (fractional captured row
+    /// starts make this common) swallows the new clip's downbeat.
+    pub(super) fn reset_track_step_memory(&mut self, track: usize) {
+        if let Some(clock) = self.track_clocks.get_mut(track) {
+            clock.last_local_step = u32::MAX;
+        }
+    }
+
     /// Clear one track's anchor (manual-override latch, takes spec 10): the
     /// latched track free-runs against the clock like session playback while
     /// every other lane keeps its song-row anchor.

@@ -114,7 +114,9 @@ impl ArrClip {
 /// end, the loop flag, and the monotonic clip-id allocator.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectArrangement {
-    /// Sorted by `start_beat`, strictly increasing, first event at 0.0.
+    /// Sorted by `start_beat`, strictly increasing. May be empty, and the
+    /// first event may start anywhere (empty-arrangement spec 4.1): beats
+    /// before the first event are unscened.
     pub scene_lane: Vec<SceneEvent>,
     /// Outer index is the track; each lane is sorted and non-overlapping.
     #[serde(default)]
@@ -125,6 +127,11 @@ pub struct ProjectArrangement {
     /// Monotonic allocator for `ClipId`; never reused within a project.
     pub next_clip_id: u64,
 }
+
+/// The stored length of a brand-new empty arrangement (empty-arrangement
+/// spec 5.6). Edits and captures landing past the end auto-extend it, so
+/// this is a starting canvas size, not a limit.
+pub const DEFAULT_ARRANGEMENT_END: f64 = 64.0;
 
 impl ProjectArrangement {
     /// An arrangement holding scene 0 from beat 0 and no clips.
@@ -141,6 +148,25 @@ impl ProjectArrangement {
         }
     }
 
+    /// The empty arrangement every project starts with (empty-arrangement
+    /// spec 3): no scene events, no clips, the default length. Valid and
+    /// compilable — it plays silence.
+    pub fn empty(track_count: usize) -> Self {
+        Self {
+            scene_lane: Vec::new(),
+            track_lanes: vec![Vec::new(); track_count],
+            end_beat: DEFAULT_ARRANGEMENT_END,
+            loop_enabled: false,
+            next_clip_id: 0,
+        }
+    }
+
+    /// `true` when nothing is authored: no scene events and no clips. The
+    /// length and loop flag are canvas state, not content.
+    pub fn is_empty(&self) -> bool {
+        self.scene_lane.is_empty() && self.track_lanes.iter().all(|lane| lane.is_empty())
+    }
+
     /// Allocate a fresh `ClipId`. Ids are monotonic and never reused within a
     /// project; exhaustion is an error, mirroring `allocate_row_id`.
     pub fn allocate_clip_id(&mut self) -> Result<ClipId, String> {
@@ -154,9 +180,8 @@ impl ProjectArrangement {
 
     /// The scene *marked* at `beat` — the last scene event at or before it.
     /// This is the scene the transport and session UI call "current"; it does
-    /// NOT decide what any lane plays (spec 6.2: only clips do). `None` only
-    /// for a beat before the first event (which validation forbids) or an
-    /// empty lane.
+    /// NOT decide what any lane plays (spec 6.2: only clips do). `None` for a
+    /// beat before the first event or an empty lane — an unscened beat.
     pub fn scene_at_beat(&self, beat: f64) -> Option<usize> {
         self.scene_event_at_beat(beat).map(|event| event.scene)
     }
@@ -197,9 +222,10 @@ impl ProjectArrangement {
     /// philosophy).
     pub fn validate(&self, ctx: &dyn SongProjectContext) -> Result<(), String> {
         // --- scene lane -------------------------------------------------
-        if self.scene_lane.is_empty() {
-            return Err("Arrangement must contain at least one scene event".to_string());
-        }
+        // The lane may be empty and its first event may start anywhere
+        // (empty-arrangement spec 4.1): a scene event is an authoring
+        // gesture, not a playback requirement. Beats before the first event
+        // are unscened.
         for (idx, event) in self.scene_lane.iter().enumerate() {
             if !event.start_beat.is_finite() || event.start_beat < 0.0 {
                 return Err(format!(
@@ -208,12 +234,6 @@ impl ProjectArrangement {
                     event.start_beat
                 ));
             }
-        }
-        let first = self.scene_lane[0].start_beat;
-        if first != 0.0 {
-            return Err(format!(
-                "Scene event 1 must start at beat 0.0, found {first}"
-            ));
         }
         for (idx, pair) in self.scene_lane.windows(2).enumerate() {
             if pair[1].start_beat <= pair[0].start_beat {
@@ -248,19 +268,20 @@ impl ProjectArrangement {
 
         // --- end beat (checked before clips so a nonsense end reports
         // itself rather than blaming the first clip that overruns it) -----
-        let last_scene_start = self.scene_lane[self.scene_lane.len() - 1].start_beat;
         if !self.end_beat.is_finite() || self.end_beat <= 0.0 {
             return Err(format!(
                 "Arrangement end beat {} must be finite and greater than zero",
                 self.end_beat
             ));
         }
-        if self.end_beat <= last_scene_start {
-            return Err(format!(
-                "Arrangement end beat {} must be greater than the last scene event's start \
-                 beat {}",
-                self.end_beat, last_scene_start
-            ));
+        if let Some(last) = self.scene_lane.last() {
+            if self.end_beat <= last.start_beat {
+                return Err(format!(
+                    "Arrangement end beat {} must be greater than the last scene event's start \
+                     beat {}",
+                    self.end_beat, last.start_beat
+                ));
+            }
         }
 
         // --- clips ------------------------------------------------------
@@ -1006,8 +1027,11 @@ pub fn compile_arrangement<C: ArrangementContext>(
 ) -> Result<ProjectSong, String> {
     arr.validate(ctx)?;
 
-    // 1. Boundary set.
-    let mut boundaries: Vec<f64> = Vec::new();
+    // 1. Boundary set. Beat 0 is always a boundary: the runtime contract
+    // (rows non-empty, tiling from 0) is a compile-output guarantee, not a
+    // user-facing rule (empty-arrangement spec 4.2). When nothing is
+    // authored at 0, the synthesized row is unscened and all-silent.
+    let mut boundaries: Vec<f64> = vec![0.0];
     for event in &arr.scene_lane {
         if event.start_beat < arr.end_beat {
             boundaries.push(event.start_beat);
@@ -1031,10 +1055,9 @@ pub fn compile_arrangement<C: ArrangementContext>(
     let mut rows: Vec<ProjectSongRow> = Vec::with_capacity(boundaries.len());
     let mut cursors = vec![0usize; arr.track_lanes.len()];
     for beat in boundaries {
-        let event = arr
-            .scene_event_at_beat(beat)
-            .ok_or_else(|| format!("Arrangement has no scene governing beat {beat}"))?;
-        let scene = event.scene;
+        // No governing event means the boundary is unscened, not an error
+        // (empty-arrangement spec 4.2).
+        let scene = arr.scene_event_at_beat(beat).map(|event| event.scene);
         let mut overrides = Vec::new();
         for (track, lane) in arr.track_lanes.iter().enumerate() {
             let cursor = &mut cursors[track];
@@ -1143,16 +1166,23 @@ pub fn lower_rows_to_arrangement<C: ArrangementContext>(
         next_clip_id,
     };
 
-    // Scene lane: one event per *change*.
+    // Scene lane: one event per *change*. An unscened row (`scene: None`)
+    // contributes no event — and does not end the previous event's span, so
+    // it only round-trips to unscened when nothing precedes it. Rows a
+    // lowering caller produces always carry scenes; None appears only in
+    // compiled output fed back through here.
     for row in rows {
+        let Some(scene) = row.scene else {
+            continue;
+        };
         let changed = match arrangement.scene_lane.last() {
-            Some(event) => event.scene != row.scene,
+            Some(event) => event.scene != scene,
             None => true,
         };
         if changed {
             arrangement.scene_lane.push(SceneEvent {
                 start_beat: row.start_beat,
-                scene: row.scene,
+                scene,
             });
         }
     }
@@ -1333,7 +1363,7 @@ mod tests {
         ProjectSongRow {
             id: SongRowId(id),
             start_beat,
-            scene,
+            scene: Some(scene),
             overrides,
         }
     }
@@ -1443,19 +1473,58 @@ mod tests {
     // --- validation (spec 6.1) ------------------------------------------
 
     #[test]
-    fn validate_rejects_empty_scene_lane() {
+    fn validate_accepts_an_empty_scene_lane_and_an_off_zero_first_event() {
+        // Empty-arrangement spec 4.1: scene events are authoring gestures.
+        // The lane may be empty, and the first event may start anywhere;
+        // beats before it are unscened.
         let mut arr = valid_arrangement();
         arr.scene_lane.clear();
-        let err = arr.validate(&test_scenes()).unwrap_err();
-        assert!(err.contains("at least one scene event"), "{err}");
+        arr.validate(&test_scenes())
+            .expect("an arrangement with no scene events is valid");
+
+        let mut arr = valid_arrangement();
+        arr.scene_lane[0].start_beat = 1.0;
+        arr.validate(&test_scenes())
+            .expect("a first scene event off beat 0 is valid");
     }
 
     #[test]
-    fn validate_rejects_first_scene_event_off_zero() {
-        let mut arr = valid_arrangement();
-        arr.scene_lane[0].start_beat = 1.0;
-        let err = arr.validate(&test_scenes()).unwrap_err();
-        assert!(err.contains("must start at beat 0.0"), "{err}");
+    fn the_empty_arrangement_validates_and_compiles_to_one_silent_row() {
+        // Empty-arrangement spec 3/4.2: the canvas every project starts
+        // with — no events, no clips — compiles to exactly one unscened,
+        // all-silent row spanning the default length.
+        let scenes = test_scenes();
+        let arr = ProjectArrangement::empty(2);
+        assert!(arr.is_empty());
+        let song = compile_ok(&arr, &scenes);
+        assert_eq!(song.rows.len(), 1);
+        assert_eq!(song.rows[0].start_beat, 0.0);
+        assert_eq!(song.rows[0].scene, None);
+        assert_eq!(
+            song.rows[0].overrides,
+            vec![empty_over(0), empty_over(1)],
+            "every lane states silence explicitly"
+        );
+        assert_eq!(song.end_beat, DEFAULT_ARRANGEMENT_END);
+    }
+
+    #[test]
+    fn compile_synthesizes_an_unscened_row_before_an_off_zero_first_event() {
+        // A scene event at beat 4 with nothing before it: the span [0, 4)
+        // is unscened silence, and the runtime contract (rows tile from 0)
+        // holds by synthesis, not by validation.
+        let scenes = test_scenes();
+        let arr = arrangement(
+            vec![ev(4.0, 1)],
+            vec![vec![clip(0, 4.0, 8.0, 2)], vec![]],
+            16.0,
+        );
+        let song = compile_ok(&arr, &scenes);
+        assert_eq!(song.rows[0].start_beat, 0.0);
+        assert_eq!(song.rows[0].scene, None);
+        assert_eq!(song.rows[0].overrides, vec![empty_over(0), empty_over(1)]);
+        assert_eq!(song.rows[1].start_beat, 4.0);
+        assert_eq!(song.rows[1].scene, Some(1));
     }
 
     #[test]
@@ -2158,9 +2227,9 @@ mod tests {
     fn compile_propagates_validation_errors() {
         let scenes = test_scenes();
         let mut arr = valid_arrangement();
-        arr.scene_lane[0].start_beat = 4.0;
+        arr.scene_lane[1].start_beat = arr.scene_lane[0].start_beat;
         let err = compile_arrangement(&arr, &scenes).unwrap_err();
-        assert!(err.contains("must start at beat 0.0"), "{err}");
+        assert!(err.contains("strictly ordered"), "{err}");
     }
 
     #[test]
@@ -2688,7 +2757,7 @@ mod tests {
             .expect("a row governs every beat");
         let (pattern_id, offset) = match row.overrides.iter().find(|over| over.track == track) {
             Some(over) => (over.pattern_id?, over.offset_steps),
-            None => (ctx.song_scene_cell(row.scene, track)?, 0.0),
+            None => (ctx.song_scene_cell(row.scene?, track)?, 0.0),
         };
         Some((
             pattern_id,

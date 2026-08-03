@@ -41,14 +41,33 @@ fn finite_beat(name: &str, beat: f64) -> Result<f64, String> {
     Ok(beat)
 }
 
+/// The next bar boundary strictly after `beat` — what a scene event landing
+/// at or past the arrangement end auto-extends `end_beat` to
+/// (empty-arrangement spec 5.6/5.7). Strictly after, because the end must be
+/// greater than the last scene event's start.
+fn next_bar_end(beat: f64) -> f64 {
+    (beat / 4.0).floor() * 4.0 + 4.0
+}
+
 impl App {
-    /// The committed arrangement, or the standard "nothing to edit" error.
-    fn require_arrangement(&self) -> Result<ProjectArrangement, String> {
+    /// The arrangement being edited. The arrangement conceptually always
+    /// exists (empty-arrangement spec 4.3); a project whose committed slot is
+    /// still unset edits the empty one, which the commit tail then installs.
+    pub(crate) fn require_arrangement(&self) -> Result<ProjectArrangement, String> {
         self.state
             .reconcile_committed_arrangement_track_lanes()?;
-        self.state
+        Ok(self
+            .state
             .committed_arrangement()
-            .ok_or_else(|| "The project has no arrangement".to_string())
+            .unwrap_or_else(|| self.empty_arrangement()))
+    }
+
+    /// The empty arrangement shaped for this project's track topology.
+    pub(crate) fn empty_arrangement(&self) -> ProjectArrangement {
+        ProjectArrangement::empty(
+            self.state
+                .with_project_scenes(|scenes| scenes.track_pools.len()),
+        )
     }
 
     /// Locate a clip by id, or report it missing (a stale gesture must never
@@ -208,6 +227,9 @@ impl App {
             occlude_span(&mut after, scenes, track, start_beat, end_beat)
         })?;
         insert_clip_sorted(&mut after, track, clip);
+        // A clip landing past the end auto-extends it (empty-arrangement
+        // spec 5.6), matching move/resize.
+        after.end_beat = after.end_beat.max(end_beat);
         self.commit_arrangement_edit("Create clip", Some(before), Some(after))?;
         Ok(id)
     }
@@ -717,45 +739,57 @@ impl App {
     /// across its whole span (spec 6.2/8), truncating whatever was there —
     /// the Ableton truncation rule, one undo entry. A track whose cell in
     /// that scene is empty gets no clip and is silent.
+    ///
+    /// Landing at or past the arrangement end auto-extends it
+    /// (empty-arrangement spec 5.7) — the ordering problem is the model's to
+    /// solve, not the user's. Landing on an occupied beat REPLACES that
+    /// event (spec 5.3): it becomes a set, which re-stamps the span with the
+    /// dropped scene's cells.
     pub fn arr_scene_event_insert(&mut self, beat: f64, scene: usize) -> Result<(), String> {
         let beat = finite_beat("Scene event beat", beat)?;
         self.edit_arrangement("Insert scene event", move |arrangement, scenes| {
             if beat >= arrangement.end_beat {
-                return Err(format!(
-                    "Cannot insert a scene change at beat {beat}: the arrangement ends at beat \
-                     {}; extend it first",
-                    arrangement.end_beat
-                ));
+                arrangement.end_beat = next_bar_end(beat);
             }
-            if arrangement
+            let position = match arrangement
                 .scene_lane
                 .iter()
-                .any(|event| event.start_beat == beat)
+                .position(|event| event.start_beat == beat)
             {
-                return Err(format!(
-                    "A scene change already starts at beat {beat}; set or move it instead"
-                ));
-            }
-            let position = arrangement
-                .scene_lane
-                .iter()
-                .position(|event| event.start_beat > beat)
-                .unwrap_or(arrangement.scene_lane.len());
-            arrangement.scene_lane.insert(
-                position,
-                crate::sequencer::SceneEvent {
-                    start_beat: beat,
-                    scene,
-                },
-            );
+                Some(existing) => {
+                    arrangement.scene_lane[existing].scene = scene;
+                    existing
+                }
+                None => {
+                    let position = arrangement
+                        .scene_lane
+                        .iter()
+                        .position(|event| event.start_beat > beat)
+                        .unwrap_or(arrangement.scene_lane.len());
+                    arrangement.scene_lane.insert(
+                        position,
+                        crate::sequencer::SceneEvent {
+                            start_beat: beat,
+                            scene,
+                        },
+                    );
+                    position
+                }
+            };
             let (start, end) = Self::scene_event_span(arrangement, position);
             stamp_scene_clips(arrangement, scenes, start, end)
         })
     }
 
     /// Move the scene change at `from_beat` to `to_beat`, re-stamping both the
-    /// span it vacates (now the predecessor's) and the one it lands on. The
-    /// event at 0.0 cannot move: an arrangement always starts on a scene.
+    /// span it vacates (now the predecessor's — or unscened, where stamping
+    /// writes nothing and the clips it stamped simply stay) and the one it
+    /// lands on.
+    ///
+    /// Any event may move, beat 0 included (empty-arrangement spec 5.2).
+    /// Landing at or past the end auto-extends it (spec 5.7); landing on
+    /// another event REPLACES it (spec 5.3): the moved marker's scene wins
+    /// and its old slot vacates.
     pub fn arr_scene_event_move(&mut self, from_beat: f64, to_beat: f64) -> Result<(), String> {
         let from_beat = finite_beat("Scene event beat", from_beat)?;
         let to_beat = finite_beat("Scene event beat", to_beat)?;
@@ -764,46 +798,38 @@ impl App {
             if from_beat == to_beat {
                 return Ok(());
             }
-            if index == 0 {
-                return Err(
-                    "Moving the first scene change away from beat 0.0 is rejected: the \
-                     arrangement must start on a scene"
-                        .to_string(),
-                );
-            }
-            if to_beat <= 0.0 {
-                return Err(
-                    "Cannot move a scene change onto beat 0.0: the first scene change already \
-                     starts there"
-                        .to_string(),
-                );
-            }
             if to_beat >= arrangement.end_beat {
-                return Err(format!(
-                    "Cannot move the scene change to beat {to_beat}: the arrangement ends at \
-                     beat {}; extend it first",
-                    arrangement.end_beat
-                ));
+                arrangement.end_beat = next_bar_end(to_beat);
             }
-            if arrangement
+            // The window the move vacates, resolved before the lane changes
+            // so the stretch is re-stamped with whatever governs it after.
+            let (vacated_start, vacated_end) = Self::scene_event_span(arrangement, index);
+            let scene = arrangement.scene_lane[index].scene;
+            match arrangement
                 .scene_lane
                 .iter()
-                .any(|event| event.start_beat == to_beat)
+                .position(|event| event.start_beat == to_beat)
             {
-                return Err(format!(
-                    "Cannot move the scene change to beat {to_beat}: another scene change \
-                     already starts there"
-                ));
+                Some(_) => {
+                    // Landing on an occupied beat: the moved marker replaces
+                    // the target event and its own slot vacates.
+                    arrangement.scene_lane.remove(index);
+                    let target = arrangement
+                        .scene_lane
+                        .iter()
+                        .position(|event| event.start_beat == to_beat)
+                        .expect("the target event survives removing the moved one");
+                    arrangement.scene_lane[target].scene = scene;
+                }
+                None => {
+                    arrangement.scene_lane[index].start_beat = to_beat;
+                    arrangement.scene_lane.sort_by(|a, b| {
+                        a.start_beat
+                            .partial_cmp(&b.start_beat)
+                            .expect("scene event beats are finite")
+                    });
+                }
             }
-            // The window both spans live in, resolved before the move so the
-            // vacated stretch is re-stamped with whatever now governs it.
-            let (vacated_start, vacated_end) = Self::scene_event_span(arrangement, index);
-            arrangement.scene_lane[index].start_beat = to_beat;
-            arrangement.scene_lane.sort_by(|a, b| {
-                a.start_beat
-                    .partial_cmp(&b.start_beat)
-                    .expect("scene event beats are finite")
-            });
             let moved = arrangement
                 .scene_lane
                 .iter()
@@ -844,18 +870,12 @@ impl App {
     /// predecessor's label spanning clips that a since-removed scene stamped.
     /// That reads honestly: what plays is the clips.
     ///
-    /// Removing the event at 0.0 is rejected, exactly as removing row zero was.
+    /// Any event may be removed, the first included (empty-arrangement spec
+    /// 5.1): its former span joins the unscened prefix.
     pub fn arr_scene_event_remove(&mut self, beat: f64) -> Result<(), String> {
         let beat = finite_beat("Scene event beat", beat)?;
         self.edit_arrangement("Remove scene event", move |arrangement, _scenes| {
             let index = Self::scene_event_index(arrangement, beat)?;
-            if index == 0 {
-                return Err(
-                    "Removing the first scene change is rejected: the arrangement must start on \
-                     a scene at beat 0.0"
-                        .to_string(),
-                );
-            }
             arrangement.scene_lane.remove(index);
             Ok(())
         })
@@ -980,15 +1000,21 @@ impl App {
         self.commit_arrangement_edit("Replace arrangement", before, Some(arrangement))
     }
 
-    /// Remove the committed arrangement (and with it the compiled song)
-    /// entirely.
+    /// Reset the arrangement to empty (empty-arrangement spec 4.3): no scene
+    /// events, no clips, the default length. The clip-id allocator is
+    /// preserved — ids are never reused within a project. Clearing an
+    /// already-empty arrangement is a no-op.
     pub fn arr_clear(&mut self) -> Result<(), String> {
         self.require_song_edit_unlocked()?;
         let before = self.state.committed_arrangement();
-        if before.is_none() {
-            return Err("The project has no arrangement to clear".to_string());
+        let mut empty = self.empty_arrangement();
+        if let Some(before) = &before {
+            empty.next_clip_id = before.next_clip_id;
         }
-        self.commit_arrangement_edit("Clear arrangement", before, None)
+        if before.as_ref().is_none_or(|before| *before == empty) {
+            return Ok(());
+        }
+        self.commit_arrangement_edit("Clear arrangement", before, Some(empty))
     }
 
     /// Lower a declarative row list (`def-song`, spec 8 last paragraph) to an
@@ -1088,7 +1114,7 @@ fn lower_row_specs_to_arrangement<C: crate::sequencer::ArrangementContext>(
         .map(|spec| ProjectSongRow {
             id: SongRowId(0),
             start_beat: spec.start_beat,
-            scene: spec.scene,
+            scene: Some(spec.scene),
             overrides: spec.overrides,
         })
         .collect();
@@ -1288,7 +1314,7 @@ mod tests {
             rows: vec![ProjectSongRow {
                 id: SongRowId(0),
                 start_beat: 0.0,
-                scene: 0,
+                scene: Some(0),
                 overrides: vec![ov(0, 2)],
             }],
             end_beat: 16.0,
@@ -1334,8 +1360,15 @@ mod tests {
         assert_song_matches_arrangement(&app);
 
         app.arr_clear().expect("arr_clear");
-        assert_eq!(app.state.committed_arrangement(), None);
-        assert_eq!(app.state.committed_song(), None);
+        // Clearing resets to the EMPTY arrangement, never to "no
+        // arrangement" (empty-arrangement spec 4.3). The clip-id allocator
+        // survives the clear: ids are never reused within a project.
+        let mut cleared = ProjectArrangement::empty(2);
+        cleared.next_clip_id = 1;
+        assert_eq!(app.state.committed_arrangement(), Some(cleared.clone()));
+        let cleared_song = app.state.committed_song().expect("empty still compiles");
+        assert_eq!(cleared_song.rows.len(), 1, "one silent row");
+        assert_eq!(cleared_song.rows[0].scene, None);
 
         assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)), "undo the clear");
         assert_eq!(app.state.committed_arrangement(), Some(arrangement.clone()));
@@ -1351,16 +1384,14 @@ mod tests {
         assert_song_matches_arrangement(&app);
 
         assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)), "redo the clear");
-        assert_eq!(app.state.committed_arrangement(), None);
-        assert_eq!(app.state.committed_song(), None);
+        assert_eq!(app.state.committed_arrangement(), Some(cleared));
     }
 
     #[test]
-    fn arr_clear_on_an_empty_project_is_rejected_without_a_history_entry() {
+    fn arr_clear_on_an_empty_project_is_a_no_op_without_a_history_entry() {
         let mut app = test_app();
         let depth = app.history.undo_len();
-        let error = app.arr_clear().expect_err("nothing to clear");
-        assert!(error.contains("no arrangement"), "{error}");
+        app.arr_clear().expect("clearing nothing is a no-op");
         assert_eq!(app.history.undo_len(), depth);
     }
 
@@ -1411,7 +1442,7 @@ mod tests {
                     ProjectSongRow {
                         id: SongRowId(idx as u64),
                         start_beat: spec.start_beat,
-                        scene: spec.scene,
+                        scene: Some(spec.scene),
                         overrides,
                     }
                 })
@@ -1434,10 +1465,14 @@ mod tests {
             (0..track_count)
                 .map(|track| match row.overrides.iter().find(|over| over.track == track) {
                     Some(over) => over.pattern_id.map(|id| (id, over.offset_steps)),
-                    None => crate::sequencer::SongCompileContext::song_scene_cell(
-                        scenes, row.scene, track,
-                    )
-                    .map(|id| (id, 0.0)),
+                    None => row
+                        .scene
+                        .and_then(|scene| {
+                            crate::sequencer::SongCompileContext::song_scene_cell(
+                                scenes, scene, track,
+                            )
+                        })
+                        .map(|id| (id, 0.0)),
                 })
                 .collect()
         })
@@ -2056,10 +2091,17 @@ mod tests {
              the clips, and only the marker was deleted"
         );
 
-        let depth = app.history.undo_len();
-        let error = app.arr_scene_event_remove(0.0).expect_err("row zero rule");
-        assert!(error.contains("must start on a scene"), "{error}");
-        assert_eq!(app.history.undo_len(), depth, "a rejection commits nothing");
+        // The first scene event removes like any other (empty-arrangement
+        // spec 5.1): its span joins the unscened prefix and the clips stay.
+        app.arr_scene_event_remove(0.0).expect("event zero removes");
+        assert_eq!(scene_lane(&app), vec![], "the lane is genuinely empty");
+        assert_eq!(
+            lane(&app, 0),
+            clips_before,
+            "removing the last marker leaves the clips playing unscened"
+        );
+        let song = app.state.committed_song().expect("still compiles");
+        assert_eq!(song.rows[0].scene, None, "the rows are unscened");
     }
 
     /// The user's gesture, end to end: "when i resize the end of a scene to
@@ -2114,22 +2156,64 @@ mod tests {
     }
 
     #[test]
-    fn scene_event_ops_reject_collisions_and_missing_events() {
+    fn scene_event_insert_onto_an_occupied_beat_replaces_and_restamps() {
+        // Empty-arrangement spec 5.3: dropping a scene onto an occupied beat
+        // is a set — the event repoints and the span re-stamps with the
+        // dropped scene's effective patterns.
+        let mut app = app_with_clips();
+        app.arr_scene_event_insert(8.0, 1).expect("insert");
+        assert_eq!(scene_lane(&app), vec![(0.0, 0), (8.0, 1)]);
+
+        app.arr_scene_event_insert(8.0, 2).expect("replace");
+        assert_eq!(scene_lane(&app), vec![(0.0, 0), (8.0, 2)]);
+        // Scene 2's cell for track 0 is pool pattern 3, stamped over the
+        // event's whole span.
+        assert_eq!(
+            lane(&app, 0),
+            vec![(0.0, 4.0, Some(1), 0.0), (8.0, 32.0, Some(3), 0.0)]
+        );
+    }
+
+    #[test]
+    fn scene_event_moves_freely_over_beat_zero_and_replaces_on_landing() {
+        // Empty-arrangement spec 5.2/5.3: beat 0 is an ordinary beat — the
+        // first event may move away (its span becomes unscened), and landing
+        // on another event replaces it with the moved marker's scene.
         let mut app = app_with_clips();
         app.arr_scene_event_insert(8.0, 1).expect("insert");
 
-        let error = app.arr_scene_event_insert(8.0, 2).expect_err("collision");
-        assert!(error.contains("already starts at beat 8"), "{error}");
-        let error = app.arr_scene_event_move(8.0, 0.0).expect_err("onto zero");
-        assert!(error.contains("beat 0.0"), "{error}");
-        let error = app.arr_scene_event_move(0.0, 4.0).expect_err("event zero");
-        assert!(error.contains("must start on a scene"), "{error}");
+        app.arr_scene_event_move(0.0, 4.0).expect("event zero moves");
+        assert_eq!(scene_lane(&app), vec![(4.0, 0), (8.0, 1)]);
+        let song = app.state.committed_song().expect("compiles");
+        assert_eq!(song.rows[0].scene, None, "the vacated prefix is unscened");
+
+        app.arr_scene_event_move(8.0, 4.0).expect("lands on the other");
+        assert_eq!(
+            scene_lane(&app),
+            vec![(4.0, 1)],
+            "the moved marker's scene replaces the target; its slot vacates"
+        );
+    }
+
+    #[test]
+    fn scene_event_ops_reject_missing_events_and_auto_extend_past_the_end() {
+        let mut app = app_with_clips();
+        app.arr_scene_event_insert(8.0, 1).expect("insert");
+
         let error = app.arr_scene_event_set(9.0, 1).expect_err("no event there");
         assert!(error.contains("No scene change starts at beat 9"), "{error}");
-        let error = app
-            .arr_scene_event_insert(64.0, 1)
-            .expect_err("past the end");
-        assert!(error.contains("ends at beat 32"), "{error}");
+
+        // Landing past the end auto-extends to the next bar strictly after
+        // the beat (empty-arrangement spec 5.7) — never "extend it first".
+        app.arr_scene_event_insert(64.0, 1).expect("past the end");
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        assert_eq!(arrangement.end_beat, 68.0);
+        assert_eq!(scene_lane(&app).last(), Some(&(64.0, 1)));
+
+        app.arr_scene_event_move(64.0, 70.0).expect("move past the end");
+        let arrangement = app.state.committed_arrangement().expect("arrangement");
+        assert_eq!(arrangement.end_beat, 72.0);
+        assert_eq!(scene_lane(&app).last(), Some(&(70.0, 1)));
     }
 
     // --- whole-arrangement ops ------------------------------------------
@@ -2217,20 +2301,28 @@ mod tests {
         assert_eq!(app.history.undo_len(), depth);
     }
 
-    /// Without an arrangement there is nothing to edit, and saying so must
-    /// not create history.
+    /// The arrangement always exists (empty-arrangement spec 4.3): a project
+    /// whose committed slot was never seeded edits the empty one, and the
+    /// first successful primitive installs it.
     #[test]
-    fn primitives_report_a_missing_arrangement() {
+    fn primitives_edit_the_empty_arrangement_when_none_was_committed() {
         let mut app = test_app();
-        let depth = app.history.undo_len();
-        let error = app
-            .arr_clip_create(0, 0.0, 4.0, LaneSource::Empty, 0.0)
-            .expect_err("no arrangement");
-        assert!(error.contains("no arrangement"), "{error}");
-        let error = app.arr_scene_event_insert(4.0, 1).expect_err("no arrangement");
-        assert!(error.contains("no arrangement"), "{error}");
-        let error = app.arr_set_end(64.0).expect_err("no arrangement");
-        assert!(error.contains("no arrangement"), "{error}");
-        assert_eq!(app.history.undo_len(), depth);
+        assert_eq!(app.state.committed_arrangement(), None, "never seeded");
+
+        app.arr_scene_event_insert(4.0, 1).expect("first edit works");
+        let arrangement = app
+            .state
+            .committed_arrangement()
+            .expect("the edit installed the arrangement");
+        assert_eq!(arrangement.scene_lane.len(), 1);
+        assert_eq!(arrangement.scene_lane[0].start_beat, 4.0);
+        assert_eq!(
+            arrangement.end_beat,
+            crate::sequencer::DEFAULT_ARRANGEMENT_END
+        );
+
+        app.arr_clip_create(0, 0.0, 4.0, LaneSource::Pattern(PatternId(1)), 0.0)
+            .expect("clip lands on the unscened prefix");
+        assert_eq!(lane(&app, 0)[0], (0.0, 4.0, Some(1), 0.0));
     }
 }

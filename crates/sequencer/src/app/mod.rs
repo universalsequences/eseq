@@ -897,9 +897,11 @@ pub struct App {
     /// The single active launch authority (docs/song-mode-spec.md 13); all
     /// transitions go through the methods in `song_transport.rs`.
     pub song_transport_mode: song_transport::SongTransportMode,
-    /// Persisted `Use Arrangement` project preference (spec 7.1): selects
-    /// what the next Play does; never alters audio by itself.
-    pub use_arrangement: bool,
+    /// What the engaged recording writes (docs/unified-transport-spec.md 5):
+    /// stamped from the active view when recording engages, cleared at Stop.
+    /// `Capture` accompanies `ArrangementCapture`; `Overdub` rides
+    /// `SongPlayback` and routes armed notes into the looping live pattern.
+    pub recording_kind: Option<song_transport::RecordingKind>,
     /// Armed state for arrangement capture at the next Play (spec 7.4/7.5;
     /// `seq-song-capture-arm`).
     pub song_capture_armed: bool,
@@ -1655,25 +1657,33 @@ impl App {
             self.graph_controller().sync_current_pattern_mod_routes();
         }
         self.push_all_restored_defaults();
-        // Manual-override latch (takes spec 10): a manual launch while the
-        // committed song is the playback authority suspends the song's
-        // launch authority for its scope — globally for a scene launch,
-        // per-track for a track launch. Cleared by Back to Song, transport
-        // stop, or the capture punch-out.
-        if self.song_playback_authority_active() {
+        // Manual-override latch (takes spec 10, unified-transport rev 3):
+        // EVERY manual launch is an override of the arrangement — playing or
+        // stopped, empty arrangement included (user-decided: one gesture,
+        // one meaning, always the lit indicator). Cleared only by Back to
+        // Arrangement, a capture punch-out, or a project switch.
+        {
             match target {
                 PatternLaunchTarget::Scene { .. } => {
-                    // A scene launch claims every lane EXCEPT those playing
-                    // takes right now: scene changes are pattern-lane
-                    // gestures — the song keeps playing the takes underneath
-                    // until the performer intentionally clip-launches such a
-                    // lane (takes spec 10, refined). The capture stores the
-                    // same exclusion so the commit matches what was heard.
-                    let take_lanes = self.state.song_take_lane_mask();
-                    self.state.latch_song_manual_override(
-                        (0..num_tracks.min(64))
-                            .filter(|track| take_lanes >> *track & 1 == 0),
-                    );
+                    // During CAPTURE a scene launch claims every lane EXCEPT
+                    // those playing takes right now — a recorded scene
+                    // change must not steal the take the performer just
+                    // played (takes spec 10, refined; the capture stores the
+                    // same exclusion so the commit matches what was heard).
+                    // Outside capture a scene launch claims EVERY lane,
+                    // takes included: "everyone play this scene".
+                    let take_lanes = if self.song_transport_mode
+                        == song_transport::SongTransportMode::ArrangementCapture
+                    {
+                        self.state.song_take_lane_mask()
+                    } else {
+                        0
+                    };
+                    let claimed: Vec<usize> = (0..num_tracks.min(64))
+                        .filter(|track| take_lanes >> *track & 1 == 0)
+                        .collect();
+                    self.state
+                        .latch_song_manual_override(claimed.iter().copied());
                     // The scene identity (current scene, `current_pattern`
                     // atomic, bus pattern) is the performer's too: a later
                     // row mirror re-applying the row's scene there would
@@ -1681,8 +1691,19 @@ impl App {
                     // scene-indexed reactive binding while the latched lanes
                     // keep playing the performer's patterns.
                     self.state.latch_song_scene_override();
+                    // Pin each claimed lane's override to the pattern it now
+                    // plays (the launched scene's cell): the masked scene
+                    // save-backs treat latched lanes as stale UNLESS the
+                    // override pins a self-write, so without the pin,
+                    // session-style editing on a stopped-but-latched scene
+                    // would silently stop persisting.
+                    for track in claimed {
+                        self.state.pin_track_override_to_effective(track);
+                    }
                 }
                 PatternLaunchTarget::SceneTracks { tracks, .. } => {
+                    // `launch_scene_tracks` already pinned these lanes'
+                    // overrides to the launched pattern ids.
                     self.state.latch_song_manual_override(tracks.iter().copied());
                 }
             }
@@ -2379,7 +2400,7 @@ impl App {
             pending_recording_take: None,
             recording_history: None,
             song_transport_mode: song_transport::SongTransportMode::Stopped,
-            use_arrangement: false,
+            recording_kind: None,
             song_capture_armed: false,
             active_runtime_song: None,
             active_song_start_beat: None,

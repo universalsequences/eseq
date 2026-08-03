@@ -1558,13 +1558,17 @@ pub(crate) fn handle_recording_key(
                     let quantize = sequencer::record_quantize::RecordQuantize::from_atomic(
                         state.transport.record_quantize.load(Ordering::Relaxed) as u8,
                     );
-                    // Recording engaged mid-song-playback: promote into
-                    // arrangement capture so this performance records as a
-                    // take instead of into the looping live pattern.
+                    // Recording engaged mid-playback: stamp the recording
+                    // kind from the active view (unified-transport spec 5) —
+                    // arrangement view promotes into arrangement capture so
+                    // this performance records as a take; the session view
+                    // stamps loop overdub into the looping live pattern.
                     if !note.positions.is_empty() {
-                        app.promote_song_playback_to_capture();
+                        app.stamp_recording_kind_for_note();
                     }
                     let song_authority = app.song_playback_authority_active();
+                    let overdub = app.recording_kind
+                        == Some(sequencer::app::song_transport::RecordingKind::Overdub);
                     for (track, position) in &note.positions {
                         // Song-mode take recording (takes spec 8.4): while
                         // arrangement capture is active, an armed track's
@@ -1572,22 +1576,34 @@ pub(crate) fn handle_recording_key(
                         // clip-relative positions stamped on the
                         // latency-compensated record clock — the live
                         // pattern is NOT written.
-                        if app.take_record_note(
-                            *track,
-                            note.press_time,
-                            note.transpose,
-                            duration_steps,
-                        ) {
+                        if !overdub
+                            && app.take_record_note(
+                                *track,
+                                note.press_time,
+                                note.transpose,
+                                duration_steps,
+                            )
+                        {
                             recorded_take = true;
                             continue;
                         }
                         if song_authority {
-                            // The song owns playback for this lane: a note
-                            // that could not be staged as a take (no record
-                            // clock anchor yet) is dropped rather than
-                            // folded — modulo the clip length — into the
-                            // scene's looping pattern.
-                            continue;
+                            if !overdub {
+                                // The song owns playback for this lane: a
+                                // note that could not be staged as a take
+                                // (no record clock anchor yet) is dropped
+                                // rather than folded — modulo the clip
+                                // length — into the scene's looping pattern.
+                                continue;
+                            }
+                            // Loop overdub claims the armed lane (spec 5.1):
+                            // latch it so the target pattern is stable
+                            // across row boundaries and the layered notes
+                            // are audible. A lane currently playing a take
+                            // refuses overdub — its note is dropped.
+                            if !app.claim_overdub_lane(*track) {
+                                continue;
+                            }
                         }
                         let num_steps = state.pattern.track_params[*track].get_num_steps();
                         let (local_step, delay) = quantized_record_position(

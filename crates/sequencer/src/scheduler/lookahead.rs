@@ -318,6 +318,25 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                 current,
                                 pending_accum_reset,
                             );
+                            // A source change is also a fresh TRIGGER
+                            // domain: drop the step-dedup memory so the new
+                            // clip's first step fires even when the
+                            // previous row's clock wrapped into the same
+                            // step index just before the boundary (silenced
+                            // lanes update the memory too; fractional
+                            // captured row starts make that wrap common).
+                            // Latched lanes free-run and keep their memory.
+                            let latch = state.song_manual_latch_mask();
+                            for track in 0..MAX_TRACKS.min(64) {
+                                if latch >> track & 1 == 1 {
+                                    continue;
+                                }
+                                if previous.resolved_sources.get(track)
+                                    != current.resolved_sources.get(track)
+                                {
+                                    clock.reset_track_step_memory(track);
+                                }
+                            }
                         }
                     }
                     if wrapped {

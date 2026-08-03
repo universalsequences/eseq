@@ -162,7 +162,7 @@
 ;; Fixed width for the composed seqv-track-header column so every lane's time
 ;; axis starts at the same x; the scene lane leads with a spacer of the same
 ;; width (spec 4.2: the per-track sidebar role is played by the header).
-(def arrangement-header-width 26.5)
+(def arrangement-header-width 27.4)
 
 (def arrangement-event-num (event key fallback)
   (let ((value (get event key)))
@@ -177,7 +177,12 @@
 ;; honest extent for as long as the recording is the content; it reads 0 when
 ;; no capture is running, so nothing else changes.
 (def arrangement-scroll-extent ()
-  (max SEQ.song-end-beat (arrangement-pending-head)))
+  (max SEQ.song-end-beat
+    (max (arrangement-pending-head)
+      ;; Open-ended playback runs PAST the end (jam room, unified-transport
+      ;; spec 4.2); the playhead is the honest extent out there. Reads 0
+      ;; while stopped, so the parked view is unchanged.
+      (if (= SEQ.song-mode "stopped") 0 SEQ.song-position-beats))))
 
 (def arrangement-max-view-start (duration)
   (max 0 (- (+ (arrangement-scroll-extent) arrangement-view-padding) duration)))
@@ -298,7 +303,11 @@
             :label (arrangement-scene-name (get span :scene))
             :kind :scene
             :selected (arrangement-row-selected? start)
-            :color (list 0.52 0.56 0.62)))))
+            ;; The scene identity is the performer's while scene-latched:
+            ;; dim the lane like any overridden track (rev 4).
+            :color (if SEQ.song-scene-latched
+                     (arrangement-override-dim (list 0.52 0.56 0.62))
+                     (list 0.52 0.56 0.62))))))
     (range 0 (len SEQ.scene-spans))))
 
 (def arrangement-scene-items ()
@@ -588,8 +597,30 @@
           (if (get entry :dot)
             (if (= (get entry :color) nil)
               true
-              (list (get entry :color-r) (get entry :color-g) (get entry :color-b)))
+              ;; The dot dims with its lane (rev 4 override dim): a bright
+              ;; sound square on a darkened overridden clip reads as lit.
+              (let ((color (list (get entry :color-r)
+                                 (get entry :color-g)
+                                 (get entry :color-b))))
+                (if (arrangement-lane-latched? i)
+                  (arrangement-override-dim color)
+                  color)))
             nil))))))
+
+;; ── Per-lane override dim (unified-transport rev 4, Ableton-style) ────────
+;; A latched lane's committed clips darken: the arrangement is NOT what you
+;; hear on that lane until Back to Arrangement. Per-track, not global —
+;; un-latched lanes keep playing (and showing) the arrangement at full color.
+(def arrangement-lane-latched? (i)
+  (= true (nth SEQ.song-track-latched i)))
+
+(def arrangement-override-dim (color)
+  (list (* 0.35 (nth color 0)) (* 0.35 (nth color 1)) (* 0.35 (nth color 2))))
+
+(def arrangement-lane-clip-color (i)
+  (if (arrangement-lane-latched? i)
+    (arrangement-override-dim (arrangement-clip-color i))
+    (arrangement-clip-color i)))
 
 (def arrangement-track-clip-items (i)
   (map
@@ -611,7 +642,7 @@
           :kind :midi
           :label (arrangement-track-clip-label clip)
           :content (arrangement-clip-content i clip)
-          :color (arrangement-clip-color i)
+          :color (arrangement-lane-clip-color i)
           :sound-dot (arrangement-clip-sound-dot i (get clip :clip-id)))))
     (arrangement-track-clips i)))
 
@@ -1515,13 +1546,6 @@
 
 ;; ── Buffer composition (spec 4.1) ──────────────────────────────────────────
 
-(def arrangement-empty-banner ()
-  (box :width :fill :height 2.2 :padding 0.4
-    :background-color (rgba 0.10 0.11 0.13 1.0)
-    (label "No song yet — record an arrangement (ARR REC) or define one with def-song."
-      :key "arrangement-empty-banner-label"
-      :font-size 11 :color :dim :bg :transparent)))
-
 ;; Rows wrap their h-stack in a :width :fill box (the sequencer.lisp track-row
 ;; idiom): the box stretches to the pane, which gives the inner h-stack a
 ;; bounded width for flex distribution — without it the row collapses to its
@@ -1602,10 +1626,8 @@
       (do
         (arrangement-publish-bridge)
         (box :width 0 :height 0 :bg :transparent)))
-    (subtree :key "arr-empty-banner"
-      (if SEQ.song-exists
-        (box :width 0 :height 0 :bg :transparent)
-        (arrangement-empty-banner)))
+    ;; The "No song yet" banner is gone (empty-arrangement spec 8): the
+    ;; arrangement always exists, so there is no mode to explain.
     (subtree :key "arr-error-banner"
       (arrangement-error-banner))
     ;; Sound palette overlay (takes spec 17.6): opened from a clip via the
@@ -1618,7 +1640,7 @@
         (h-stack :width :fill :align :start
           (box :key "arrangement-scene-header-spacer"
             :width arrangement-header-width :height arrangement-scene-lane-height
-            :bg :transparent)
+            )
           (arrangement-scene-lane))))
     (box :width :fill :height 0.1 :background-color :bg)
     (scroll :key "arrangement-track-scroll" :width :fill :flex 1

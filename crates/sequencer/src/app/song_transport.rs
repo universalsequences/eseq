@@ -1,7 +1,7 @@
 //! Song-mode transport authority state machine (docs/song-mode-spec.md 7/13).
 //!
 //! Exactly one launch authority is active at a time: `Stopped`,
-//! `SessionPlayback`, `SongPlayback`, or `ArrangementCapture`. The mode lives
+//! `SongPlayback`, or `ArrangementCapture` (docs/unified-transport-spec.md). The mode lives
 //! on `App` (the control thread orchestrates transport start/stop and mirrors
 //! scheduler-authoritative row transitions); Play/Stop/Record from UI, Lisp,
 //! and keyboard all route through the methods here rather than toggling the
@@ -24,44 +24,45 @@ use crate::sequencer::{AudibleSongRowApplied, PatternId};
 
 use super::App;
 
-/// The single active launch authority (docs/song-mode-spec.md 13).
+/// The single active launch authority (docs/unified-transport-spec.md 4.3).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SongTransportMode {
     #[default]
     Stopped,
-    SessionPlayback,
     SongPlayback,
     ArrangementCapture,
 }
 
 impl SongTransportMode {
-    /// Reactive-binding string (docs/song-mode-spec.md 12): `Stopped` and
-    /// `SessionPlayback` both read "session" — the binding reports the launch
-    /// authority the next/current playback uses, not the play state (that is
-    /// `SEQ.playing`).
+    /// Reactive-binding string (docs/song-mode-spec.md 12, amended by
+    /// docs/unified-transport-spec.md 4.3).
     pub fn binding_str(self) -> &'static str {
         match self {
-            SongTransportMode::Stopped | SongTransportMode::SessionPlayback => "session",
+            SongTransportMode::Stopped => "stopped",
             SongTransportMode::SongPlayback => "song-playback",
             SongTransportMode::ArrangementCapture => "arrangement-capture",
         }
     }
 }
 
-/// Rejection for manual scene/track-pattern launches during song playback
-/// (docs/song-mode-spec.md 7.3).
-pub const MANUAL_LAUNCH_DURING_SONG_ERROR: &str =
-    "Manual launches are unavailable during song playback: stop the transport, disable \
-     Use Arrangement, or enter arrangement recording";
-
-/// Rejection for toggling `Use Arrangement` while the transport is playing
-/// (docs/song-mode-spec.md 7.1).
-pub const USE_ARRANGEMENT_WHILE_PLAYING_ERROR: &str =
-    "Use Arrangement cannot change while the transport is playing; stop the transport first";
+/// What an engaged recording writes (docs/unified-transport-spec.md 5):
+/// stamped once when recording engages from the view under the performer —
+/// arrangement view records a take, the session/Seq view overdubs into the
+/// looping pattern clips. Switching views mid-recording never reroutes notes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordingKind {
+    Capture,
+    Overdub,
+}
 
 impl App {
     fn set_song_transport_mode(&mut self, mode: SongTransportMode) {
         self.song_transport_mode = mode;
+        // The recording kind is transport-scoped (unified-transport spec 5):
+        // it survives view switches but never a stop.
+        if mode == SongTransportMode::Stopped {
+            self.recording_kind = None;
+        }
     }
 
     /// Whether the transport is playing from the state machine's viewpoint:
@@ -107,11 +108,56 @@ impl App {
     pub fn promote_song_playback_to_capture(&mut self) -> bool {
         if self.song_transport_mode != SongTransportMode::SongPlayback
             || self.song_capture_take.is_some()
+            || self.recording_kind.is_some()
         {
             return false;
         }
         self.begin_song_capture_take(self.active_song_start_beat.unwrap_or(0.0));
         self.set_song_transport_mode(SongTransportMode::ArrangementCapture);
+        self.recording_kind = Some(RecordingKind::Capture);
+        true
+    }
+
+    /// Stamp the recording kind from the view under the performer at the
+    /// first armed note of a recording engaged mid-playback
+    /// (unified-transport spec 5): the arrangement view promotes into
+    /// arrangement capture; the session/Seq view stamps loop overdub. A
+    /// recording that already stamped its kind is never re-routed.
+    pub fn stamp_recording_kind_for_note(&mut self) {
+        if self.recording_kind.is_some() {
+            return;
+        }
+        if self.arrangement_view_visible {
+            self.promote_song_playback_to_capture();
+        } else if self.state.is_playing() {
+            self.recording_kind = Some(RecordingKind::Overdub);
+        }
+    }
+
+    /// Claim one lane for loop overdub (unified-transport spec 5.1): while
+    /// the song is the playback authority, the armed lane is latched so the
+    /// pattern being overdubbed is stable across row boundaries and the
+    /// layered notes are audible (latched lanes merge the live snapshot per
+    /// chunk). Returns false when the lane refuses overdub — a lane whose
+    /// row currently plays a take is never silently overwritten.
+    pub fn claim_overdub_lane(&mut self, track: usize) -> bool {
+        if !self.song_playback_authority_active() {
+            return true;
+        }
+        let bit = 1u64 << track.min(63);
+        if self.state.song_manual_latch_mask() & bit == 0 {
+            if self.state.song_take_lane_mask() & bit != 0 {
+                return false;
+            }
+            self.state.latch_song_manual_override(std::iter::once(track));
+            self.song_row_mirror_epoch += 1;
+        }
+        // Pin the lane's override to the pattern it is playing — even when
+        // the silent-start auto-latch already latched it. The pin makes
+        // every masked save-back (row mirror, scene switch, transport stop)
+        // a SELF-WRITE, so the live-recorded content persists into the pool
+        // instead of being skipped as stale and lost at the stop resync.
+        self.state.pin_track_override_to_effective(track);
         true
     }
 
@@ -120,15 +166,21 @@ impl App {
     /// current beat with anchored phase. Audible on the next scheduled
     /// chunk; the control-side mirror re-applies the current row here.
     pub fn back_to_song(&mut self) -> Result<String, String> {
-        if !self.song_playback_authority_active() {
-            return Err("Back to Song is only available during song playback".to_string());
-        }
         if self.state.song_manual_latch_mask() == 0 && !self.state.song_scene_latch() {
             return Ok("No manual overrides are latched".to_string());
         }
         // Pending quantized manual launches must not fire after the return.
         let _ = self.state.quantized_launches().cancel_all();
         self.state.clear_song_manual_latch();
+        if !self.song_playback_authority_active() {
+            // The latch survives transport stop (Ableton's Back to
+            // Arrangement): clearing it while stopped hands the latched
+            // lanes' live grid back to the scene so the next Play is fully
+            // arrangement-governed.
+            self.state.resync_live_grid_to_current_scene();
+            self.sync_track_sound_bindings();
+            return Ok("Back to arrangement: manual overrides cleared".to_string());
+        }
         if let Some(song) = self.active_runtime_song.clone() {
             let ordinal = self
                 .state
@@ -182,26 +234,6 @@ impl App {
         Ok(format!("Track {}: back to song", track + 1))
     }
 
-    /// Set the persisted `Use Arrangement` preference (spec 7.1). Rejected
-    /// while playing; changing it while stopped only selects what the next
-    /// Play does.
-    pub fn set_use_arrangement(&mut self, enabled: bool) -> Result<(), String> {
-        if self.use_arrangement == enabled {
-            return Ok(());
-        }
-        if self.transport_engaged() {
-            return Err(USE_ARRANGEMENT_WHILE_PLAYING_ERROR.to_string());
-        }
-        self.use_arrangement = enabled;
-        if !enabled {
-            // Leaving song mode entirely: the timeline selection has no
-            // surface left to explain itself, so it is dropped rather than
-            // left binding the device panel to a take (takes spec 16.6).
-            self.set_song_clip_selection(None);
-        }
-        Ok(())
-    }
-
     /// Arm/disarm arrangement capture for the next Play (spec 7.4). Only
     /// meaningful while stopped: capture cannot begin or be armed mid-play.
     pub fn set_song_capture_armed(&mut self, armed: bool) -> Result<(), String> {
@@ -218,58 +250,124 @@ impl App {
         Ok(())
     }
 
-    /// Play, routed through the mode table in docs/song-mode-spec.md section
-    /// 1. `record` is the transport record signal at Play time (pattern/note
-    /// record toggle or `seq-song-capture-arm`). Returns the entered mode.
+    /// Play (docs/unified-transport-spec.md 4.1): the arrangement is the only
+    /// transport — playback always starts from the arrangement cursor,
+    /// open-ended. `record` is the transport record signal at Play time
+    /// (pattern/note record toggle or `seq-song-capture-arm`); the active
+    /// view picks what it records (spec 5): arrangement view → arrangement
+    /// capture, session view → loop overdub. Returns the entered mode.
     pub fn song_transport_play(&mut self, record: bool) -> Result<SongTransportMode, String> {
         if self.transport_engaged() {
             return Err("Transport is already playing".to_string());
         }
-        if !self.use_arrangement {
-            self.state.start_playback();
-            self.set_song_transport_mode(SongTransportMode::SessionPlayback);
-            return Ok(SongTransportMode::SessionPlayback);
-        }
-        if record {
-            // Arrangement capture. With a committed song, recording runs ON
-            // TOP of song playback (takes spec 9.3): the song plays and
-            // keeps launch authority wherever the performer hasn't
-            // overridden it; manual launches latch (spec 10) and are
-            // captured for the splice. With no committed song, the old
-            // whole-song capture remains: transport at beat zero, the
-            // performer is the sole launch authority.
-            if self.state.committed_song().is_some() {
-                // Open-ended (spec 7.4): the song end is not a stopping
-                // point while recording. Grooving past the old song length
-                // must extend the arrangement, not cut the take off and
-                // commit it there.
-                let start_beat = self.arrangement_cursor_beat;
-                self.start_song_playback_at(start_beat, true)?;
-                self.begin_song_capture_take(
-                    self.active_song_start_beat
-                        .expect("song start records its normalized beat"),
-                );
-                self.set_song_transport_mode(SongTransportMode::ArrangementCapture);
-                return Ok(SongTransportMode::ArrangementCapture);
-            }
-            self.begin_song_capture_take(0.0);
-            self.state.start_playback();
+        let start_beat = self.arrangement_cursor_beat;
+        if record && self.arrangement_view_visible {
+            // Arrangement capture: recording always runs ON TOP of song
+            // playback (takes spec 9.3, empty-arrangement spec 6) — the
+            // arrangement always exists, so there is no bootstrap mode. The
+            // song plays (an empty one plays silence) and keeps launch
+            // authority wherever the performer hasn't overridden it; manual
+            // launches latch (spec 10) and are captured for the [P, Q)
+            // splice. Open-ended (spec 7.4): the song end is not a stopping
+            // point while recording — grooving past it extends the
+            // arrangement rather than cutting the take off.
+            self.prepare_song_playback_at(start_beat)?;
+            self.begin_song_capture_take(
+                self.active_song_start_beat
+                    .expect("song start records its normalized beat"),
+            );
             self.set_song_transport_mode(SongTransportMode::ArrangementCapture);
+            self.recording_kind = Some(RecordingKind::Capture);
+            // Auto-latch AFTER the take opens (so the launch is captured as
+            // the pass's initial state, spec 4.1) but BEFORE the transport
+            // starts — the scheduler fills its first lookahead window the
+            // moment the transport flips, and a latch applied after that
+            // misses every step-1 event on the first pass.
+            self.auto_latch_selected_scene_on_silent_start();
+            self.state.start_playback();
             return Ok(SongTransportMode::ArrangementCapture);
         }
-        self.start_song_playback_at(self.arrangement_cursor_beat, false)?;
+        self.prepare_song_playback_at(start_beat)?;
+        if record {
+            self.recording_kind = Some(RecordingKind::Overdub);
+        }
+        // Same ordering rule as the capture branch: latch first, then start.
+        self.auto_latch_selected_scene_on_silent_start();
+        self.state.start_playback();
         Ok(SongTransportMode::SongPlayback)
     }
 
-    /// Start the song at an arrangement-timeline beat: save the live session,
-    /// preflight, apply the row governing that beat (with an epoch bump — the
-    /// transport is stopped), hand the song and beat to the scheduler, then
-    /// start the transport.
-    fn start_song_playback_at(
-        &mut self,
-        requested_start_beat: f64,
-        open_ended: bool,
-    ) -> Result<(), String> {
+    /// Auto-latch on a silent start (unified-transport spec 4.1): when the
+    /// row governing the Play position is an unscened row that resolves
+    /// every lane to silence (empty arrangement, unscened gap, past the
+    /// content), fire the currently selected scene as a latched manual
+    /// launch — Play always makes the sound the performer is looking at,
+    /// and `->SONG` lights to show the transport is overridden. An authored
+    /// gap (a SCENED row whose lanes are all explicit-empty) is intentional
+    /// silence and is never overridden.
+    fn auto_latch_selected_scene_on_silent_start(&mut self) {
+        let silent_start = self
+            .active_runtime_song
+            .as_ref()
+            .zip(self.active_song_start_beat)
+            .is_some_and(|(song, start_beat)| {
+                // Past the arrangement end nothing can be authored: always
+                // jam space (the "play after the arrangement" gesture).
+                if start_beat >= song.end_beat {
+                    return true;
+                }
+                song.row_index_at_beat(start_beat)
+                    .and_then(|ordinal| song.rows.get(ordinal))
+                    .is_some_and(|row| {
+                        row.scene.is_none()
+                            && row.resolved_pattern_ids.iter().all(Option::is_none)
+                    })
+            });
+        if !silent_start {
+            return;
+        }
+        let scene = self.state.current_scene_index();
+        // Manual-launch preamble (mirrors `apply_manual_pattern_launch`).
+        let _ = self.state.quantized_launches().cancel_all();
+        self.scene_macro_runtime.clear();
+        let mut touched = self.macro_engine.release_all_scene_macros();
+        touched.extend(self.macro_engine.end_scene_push());
+        self.send_macro_targets(touched);
+        // The transport has NOT started yet (the latch-before-start ordering
+        // rule), so the record clock still extrapolates from the PREVIOUS
+        // run's anchor — a wall-time-stale read that once stamped this
+        // launch tens of beats late, dropping the initial scene from the
+        // capture and committing a sliver event near the stop boundary. The
+        // capture stamp is the explicit raw start beat 0.
+        //
+        // Best-effort: a scene that cannot launch (no cells yet) leaves the
+        // silent arrangement playing, which is the pre-latch state anyway.
+        let _ = self.apply_pattern_launch_at(
+            &crate::quantized_launch::PatternLaunchTarget::Scene { scene },
+            Some(0.0),
+            false,
+        );
+    }
+
+    /// Prepare song playback at an arrangement-timeline beat: save the live
+    /// session, preflight, apply the row governing that beat (with an epoch
+    /// bump — the transport is stopped), hand the song and beat to the
+    /// scheduler, and enter `SongPlayback`. Deliberately does NOT start the
+    /// transport: the caller starts it after any silent-start auto-latch so
+    /// the first lookahead window already sees the latched lanes
+    /// (unified-transport spec 10). Always open-ended (spec 4.2): reaching
+    /// `end_beat` without looping never stops the transport — the last row
+    /// keeps sounding past the end and a latched jam is never cut off by an
+    /// arrangement the performer is ignoring.
+    fn prepare_song_playback_at(&mut self, requested_start_beat: f64) -> Result<(), String> {
+        // The arrangement always exists (empty-arrangement spec 4.3); a
+        // state that was never seeded installs the empty one, which plays
+        // silence.
+        if self.state.committed_arrangement().is_none() {
+            self.state
+                .set_committed_arrangement(Some(self.empty_arrangement()))
+                .map_err(|error| format!("Song playback could not start: {error}"))?;
+        }
         if !self.state.save_current_pattern_snapshot(
             self.tracks.len(),
             &self.graph.track_buffer_ids,
@@ -291,6 +389,12 @@ impl App {
             .map_err(|error| format!("Song playback could not start: {error}"))?;
         let row_ordinal = song
             .row_index_at_beat(start_beat)
+            .or_else(|| {
+                // Past-end starts are governed by the last row (open-ended
+                // jam room, spec 4.2); the silent-start auto-latch then owns
+                // what actually sounds.
+                (start_beat >= song.end_beat).then(|| song.rows.len().saturating_sub(1))
+            })
             .ok_or_else(|| {
                 format!("Song playback could not start: no row governs beat {start_beat}")
             })?;
@@ -302,12 +406,11 @@ impl App {
         let _ = self.state.quantized_launches().cancel_all();
         self.apply_song_row_control(row.scene, &row.overrides, true)?;
         self.state
-            .start_song_playback(Arc::clone(&song), start_beat, open_ended)
+            .start_song_playback(Arc::clone(&song), start_beat, true)
             .map_err(|error| format!("Song playback could not start: {error}"))?;
         self.active_runtime_song = Some(song);
         self.active_song_start_beat = Some(start_beat);
         self.song_mirrored_row = Some(row_ordinal);
-        self.state.start_playback();
         self.set_song_transport_mode(SongTransportMode::SongPlayback);
         // The row apply above pushed the row's launch state over the engine.
         // Re-resolve the sound bindings NOW (takes spec 16.2/16.7) instead of
@@ -329,23 +432,40 @@ impl App {
                 }
                 Ok(None)
             }
-            SongTransportMode::SessionPlayback => {
-                self.state.stop_playback();
-                self.set_song_transport_mode(SongTransportMode::Stopped);
-                Ok(None)
-            }
             SongTransportMode::SongPlayback => {
                 let teardown = self.state.stop_song_playback();
                 self.active_runtime_song = None;
                 self.active_song_start_beat = None;
                 self.song_mirrored_row = None;
-                // The latch is transient transport state (takes spec 10).
-                self.state.clear_song_manual_latch();
+                // Persist the live grid BEFORE the latch clears and the
+                // resync below re-launches from the pool: overdub-claimed
+                // lanes (override-pinned) self-write their recorded content
+                // into the pattern they play; every other stale lane is
+                // skipped by the mask, exactly like the row mirror's
+                // save-backs. Skipping this save discards live recordings.
+                let _ = self.state.save_current_pattern_snapshot(
+                    self.tracks.len(),
+                    &self.graph.track_buffer_ids,
+                    &self.graph.track_sample_rates,
+                    &self.tracks,
+                    &self.graph.track_instrument_types,
+                );
+                // The latch SURVIVES the stop (Ableton's Back to Arrangement
+                // semantics): pausing and playing again keeps the performer's
+                // overrides; only the explicit Back-to-Arrangement gesture
+                // (or a capture punch-out) hands the lanes back. The TAKE
+                // governance mask does NOT survive — nothing plays a take
+                // while stopped, and a stale mask keeps suppressing the clip
+                // grid's cell lights and blocks scene launches from claiming
+                // the lane (regression the user caught: stopped clip clicks
+                // "did nothing" on a lane that had played a take).
+                self.state.set_song_take_lane_mask(0);
                 self.state.stop_playback();
                 self.set_song_transport_mode(SongTransportMode::Stopped);
-                // Hand the live grid back to the scene: the last row played
-                // may have silenced lanes it resolved nothing for, and that
-                // silencing belongs to the song, not to session mode.
+                // Hand NON-latched lanes back to the scene: the last row
+                // played may have silenced lanes it resolved nothing for,
+                // and that silencing belongs to the song, not to session
+                // mode. Latched lanes keep the performer's live content.
                 self.state.resync_live_grid_to_current_scene();
                 teardown.map_err(|error| format!("Song playback teardown failed: {error}"))?;
                 Ok(Some("Song playback stopped".to_string()))
@@ -508,10 +628,14 @@ impl App {
     /// modes, mod routes, restored defaults).
     fn apply_song_row_control(
         &mut self,
-        scene: usize,
+        scene: Option<usize>,
         overrides: &[(usize, Option<PatternId>)],
         bump_pattern_epoch: bool,
     ) -> Result<(), String> {
+        // An unscened row (empty-arrangement spec 4.2) recalls no scene: the
+        // Seq view stays where it is, and the row's explicit overrides fully
+        // describe every lane.
+        let scene = scene.unwrap_or_else(|| self.state.current_scene_index());
         // Latched lanes stay the performer's (takes spec 10): the mirror
         // must neither restore their live state nor clear their session
         // override slot.
@@ -630,9 +754,8 @@ mod tests {
     #[test]
     fn stopping_song_playback_unsilences_lanes_the_last_row_left_empty() {
         let mut app = app_with_song();
-        app.set_use_arrangement(true).expect("toggle while stopped");
         app.song_transport_play(false).expect("song playback starts");
-        app.apply_song_row_control(0, &[(0, None)], false)
+        app.apply_song_row_control(Some(0), &[(0, None)], false)
             .expect("sparse row applies");
         assert!(
             app.state.is_scene_silenced(0),
@@ -648,33 +771,115 @@ mod tests {
     }
 
     #[test]
-    fn play_with_arrangement_off_enters_session_playback() {
-        let mut app = test_app();
-        let mode = app.song_transport_play(false).expect("play succeeds");
-        assert_eq!(mode, SongTransportMode::SessionPlayback);
-        assert_eq!(app.song_transport_mode, SongTransportMode::SessionPlayback);
-        assert!(app.state.is_playing());
-        assert!(!app.song_edits_locked());
-        assert_eq!(app.song_transport_mode.binding_str(), "session");
-
-        app.song_transport_stop().expect("stop succeeds");
-        assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
-        assert!(!app.state.is_playing());
-    }
-
-    #[test]
-    fn play_with_arrangement_off_and_record_stays_session_playback() {
-        // Section 1 table: arrangement off + record on = existing
-        // pattern/note recording behavior (session playback authority).
-        let mut app = test_app();
-        let mode = app.song_transport_play(true).expect("play succeeds");
-        assert_eq!(mode, SongTransportMode::SessionPlayback);
-    }
-
-    #[test]
-    fn play_with_arrangement_on_enters_song_playback() {
+    fn record_in_session_view_stamps_loop_overdub() {
+        // Unified-transport spec 5: the session view records loop overdub —
+        // song playback mode, no staging take, no song-edit lock; armed
+        // notes fall through to the live-pattern write.
         let mut app = app_with_song();
-        app.set_use_arrangement(true).expect("toggle while stopped");
+        let mode = app.song_transport_play(true).expect("play succeeds");
+        assert_eq!(mode, SongTransportMode::SongPlayback);
+        assert_eq!(app.recording_kind, Some(RecordingKind::Overdub));
+        assert!(!app.take_recording_active());
+        assert!(!app.song_edits_locked());
+        assert!(app.song_capture_take.is_none());
+        app.song_transport_stop().expect("stop succeeds");
+        assert_eq!(
+            app.recording_kind, None,
+            "the recording kind is transport-scoped"
+        );
+    }
+
+    #[test]
+    fn overdub_claims_the_armed_lane_with_a_latch() {
+        // Unified-transport spec 5.1: the first overdubbed note latches its
+        // lane so the target pattern is stable across row boundaries and
+        // the layered notes are audible.
+        let mut app = app_with_song();
+        app.song_transport_play(true).expect("overdub playback");
+        assert_eq!(app.state.song_manual_latch_mask(), 0);
+        assert!(app.claim_overdub_lane(0));
+        assert_eq!(app.state.song_manual_latch_mask(), 1);
+        assert!(
+            app.claim_overdub_lane(0),
+            "an already-latched lane stays claimable"
+        );
+        app.song_transport_stop().expect("stop succeeds");
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            1,
+            "the overdub claim survives the stop (back-to-arrangement model)"
+        );
+        app.back_to_song().expect("clear the latch");
+    }
+
+    #[test]
+    fn stopped_manual_launches_latch_as_overrides() {
+        // Unified-transport rev 3 (user-decided): a manual launch is an
+        // override of the arrangement EVEN WHILE STOPPED — the gesture
+        // always means the same thing and always lights the
+        // back-to-arrangement indicator; Play then plays the override.
+        let mut app = app_with_song();
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("stopped scene launch");
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            1,
+            "a stopped launch latches when an arrangement exists"
+        );
+        assert!(app.state.song_scene_latch());
+
+        app.song_transport_play(false).expect("play keeps the override");
+        assert_eq!(app.state.song_manual_latch_mask(), 1);
+        assert_eq!(
+            app.state.current_scene_index(),
+            1,
+            "the scene latch keeps the launched scene as current"
+        );
+        app.song_transport_stop().expect("stop succeeds");
+        app.back_to_song().expect("back to arrangement");
+        assert_eq!(app.state.song_manual_latch_mask(), 0);
+
+        // Empty arrangements latch too (user-decided: one gesture, one
+        // meaning — the indicator being lit on fresh projects is fine).
+        let mut fresh = app_with_song();
+        fresh.arr_clear().expect("empty the arrangement");
+        fresh
+            .apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("stopped scene launch on the empty arrangement");
+        assert_eq!(
+            fresh.state.song_manual_latch_mask(),
+            1,
+            "the launch gesture always latches"
+        );
+    }
+
+    #[test]
+    fn latch_survives_stop_and_the_next_play() {
+        // Ableton's Back to Arrangement: pausing and playing again keeps
+        // the performer's overrides; only the explicit gesture clears them.
+        let mut app = app_with_song();
+        app.song_transport_play(false).expect("song playback");
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
+            .expect("manual launch latches");
+        assert_eq!(app.state.song_manual_latch_mask(), 1);
+        app.song_transport_stop().expect("stop succeeds");
+        assert_eq!(app.state.song_manual_latch_mask(), 1, "latch survives stop");
+
+        app.song_transport_play(false).expect("play again");
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            1,
+            "the restarted transport keeps the performer's overrides"
+        );
+        app.song_transport_stop().expect("stop succeeds");
+        app.back_to_song().expect("back to arrangement while stopped");
+        assert_eq!(app.state.song_manual_latch_mask(), 0);
+        assert!(!app.state.song_scene_latch(), "the scene latch clears too");
+    }
+
+    #[test]
+    fn play_enters_song_playback() {
+        let mut app = app_with_song();
         let mode = app.song_transport_play(false).expect("play succeeds");
         assert_eq!(mode, SongTransportMode::SongPlayback);
         assert!(app.state.is_playing());
@@ -698,9 +903,6 @@ mod tests {
     #[test]
     fn arrangement_cursor_starts_playback_and_capture_at_that_song_beat() {
         let mut playback = app_with_song();
-        playback
-            .set_use_arrangement(true)
-            .expect("toggle while stopped");
         playback.set_arrangement_cursor(9.0, 0);
         playback
             .song_transport_play(false)
@@ -721,9 +923,7 @@ mod tests {
         assert_eq!(playback.active_song_start_beat, None);
 
         let mut capture = app_with_song();
-        capture
-            .set_use_arrangement(true)
-            .expect("toggle while stopped");
+        capture.set_arrangement_view_visible(true);
         capture.set_arrangement_cursor(9.0, 0);
         capture
             .song_transport_play(true)
@@ -758,22 +958,134 @@ mod tests {
     }
 
     #[test]
-    fn play_with_arrangement_on_and_no_song_fails_without_starting() {
+    fn play_on_an_empty_arrangement_auto_latches_the_selected_scene() {
+        // Unified-transport spec 4.1: the arrangement always exists and Play
+        // always starts it — and on a SILENT start (the empty arrangement
+        // resolves every lane to silence) the currently selected scene is
+        // fired as a latched manual launch, so Play always makes the sound
+        // the performer is looking at.
         let mut app = test_app();
-        app.set_use_arrangement(true).expect("toggle while stopped");
-        let error = app
-            .song_transport_play(false)
-            .expect_err("empty song must not play");
-        assert!(error.contains("no committed song"), "{error}");
-        assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
-        assert!(!app.state.is_playing());
-        assert!(!app.song_edits_locked());
+        let mode = app.song_transport_play(false).expect("empty song plays");
+        assert_eq!(mode, SongTransportMode::SongPlayback);
+        assert!(app.state.is_playing());
+        let arrangement = app
+            .state
+            .committed_arrangement()
+            .expect("play installed the empty arrangement");
+        assert!(arrangement.is_empty());
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            1,
+            "the silent start latched the selected scene over the song"
+        );
+        assert!(
+            !app.state.is_scene_silenced(0),
+            "the latched scene's clip is audible, not the silent row"
+        );
+        app.song_transport_stop().expect("stops cleanly");
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            1,
+            "the auto-latch survives the stop like any manual latch"
+        );
+        app.back_to_song().expect("clear the latch");
+        app.state.set_scheduler_rendered_beats(0.0);
+    }
+
+    #[test]
+    fn overdubbed_steps_survive_transport_stop() {
+        // The blank-project repro: Seq view, arm a track, play+record, tap
+        // some trigs, stop — the steps must NOT vanish. Overdub writes only
+        // the live grid; the stop resync re-launches the scene from the
+        // pool, so the claim's override pin + the stop save-back are what
+        // carry the recording into the pool pattern.
+        let mut app = test_app();
+        app.song_transport_play(true).expect("overdub playback");
+        assert_eq!(app.recording_kind, Some(RecordingKind::Overdub));
+        assert!(app.claim_overdub_lane(0), "the armed lane claims");
+        // The live keyboard write the input path performs on a recorded note.
+        app.state.pattern.patterns[0].toggle_step(3);
+        assert!(app.state.pattern.patterns[0].is_active(3));
+
+        app.song_transport_stop().expect("stop succeeds");
+
+        assert!(
+            app.state.pattern.patterns[0].is_active(3),
+            "the recorded step survives the stop resync"
+        );
+        // And it reached the pool: clearing the latch re-launches the lane
+        // from the scene, which must still hold the recording.
+        app.back_to_song().expect("back to arrangement");
+        assert!(
+            app.state.pattern.patterns[0].is_active(3),
+            "the recording persisted into the scene's pool pattern"
+        );
+    }
+
+    #[test]
+    fn play_past_the_arrangement_end_is_jam_space() {
+        // Unified-transport spec 4.2: the cursor may park past `end_beat`
+        // and Play must start there (open-ended), auto-latching the
+        // selected scene — the "play after the arrangement like hardware"
+        // gesture. This used to be rejected by `normalize_start_beat`.
+        let mut app = app_with_song();
+        app.set_arrangement_cursor(24.0, 0);
+        app.song_transport_play(false).expect("past-end play starts");
+        assert!(app.state.is_playing());
+        assert_eq!(app.active_song_start_beat, Some(24.0));
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            1,
+            "a past-end start is a silent start: the selected scene latches"
+        );
+        app.song_transport_stop().expect("stop succeeds");
+    }
+
+    #[test]
+    fn auto_latch_capture_stamp_ignores_the_stale_record_clock() {
+        // The record clock extrapolates from the PREVIOUS run's anchor and
+        // grows with wall time while stopped. The auto-latch fires BEFORE
+        // the transport starts, so reading the clock stamped the initial
+        // scene tens of beats late — the capture committed with no scene at
+        // beat 0 and a sliver event near the stop boundary. The stamp must
+        // be the explicit raw start beat 0.
+        let mut app = test_app();
+        // A stale anchor from a "previous run", far in the past wall-time.
+        let now = std::time::Instant::now();
+        app.state.transport.record_clock.publish(0.0, now);
+        app.state.transport.record_clock.publish(
+            40.0,
+            now.checked_add(std::time::Duration::from_millis(1))
+                .expect("anchor instant"),
+        );
+        app.set_arrangement_view_visible(true);
+        app.song_transport_play(true).expect("capture starts");
+        let take = app.song_capture_take.as_ref().expect("capture take");
+        assert_eq!(take.event_count(), 1, "the auto-latch launch is captured");
+        assert!(
+            take.events()[0].beat.abs() < 1e-9,
+            "the initial scene is stamped at beat 0, not at the stale \
+             clock read (got {})",
+            take.events()[0].beat
+        );
+        let _ = app.song_capture_cancel();
+    }
+
+    #[test]
+    fn play_on_arranged_content_never_auto_latches() {
+        // The auto-latch is for SILENT starts only (unified-transport spec
+        // 4.1): a start on a row that resolves content plays the
+        // arrangement untouched.
+        let mut app = app_with_song();
+        app.song_transport_play(false).expect("song playback");
+        assert_eq!(app.state.song_manual_latch_mask(), 0);
+        app.song_transport_stop().expect("stop succeeds");
     }
 
     #[test]
     fn play_with_arrangement_and_record_enters_capture_on_top_of_playback() {
         let mut app = app_with_song();
-        app.set_use_arrangement(true).expect("toggle while stopped");
+        app.set_arrangement_view_visible(true);
         let song_before = app.state.committed_song();
         let mode = app.song_transport_play(true).expect("capture starts");
         assert_eq!(mode, SongTransportMode::ArrangementCapture);
@@ -824,11 +1136,11 @@ mod tests {
         // playing must record into a take, not into the scene's looping
         // pattern — so the note path promotes the mode first.
         let mut app = app_with_song();
-        app.set_use_arrangement(true).unwrap();
         app.song_transport_play(false).expect("song playback");
         assert!(!app.take_recording_active());
         assert!(app.promote_song_playback_to_capture(), "promotion happens");
         assert_eq!(app.song_transport_mode, SongTransportMode::ArrangementCapture);
+        assert_eq!(app.recording_kind, Some(RecordingKind::Capture));
         assert!(app.song_capture_take.is_some());
         assert!(
             app.take_recording_active(),
@@ -849,21 +1161,46 @@ mod tests {
     }
 
     #[test]
-    fn session_playback_recording_is_left_alone() {
-        // Arrangement off: record + play is ordinary live pattern recording.
+    fn overdub_recording_never_promotes_into_capture() {
+        // The kind is stamped for the whole recording (unified-transport
+        // spec 5): an overdub engaged in the session view never reroutes
+        // into a take, even via the promotion path.
         let mut app = app_with_song();
-        app.song_transport_play(true).expect("session playback");
+        app.song_transport_play(true).expect("overdub playback");
+        assert_eq!(app.recording_kind, Some(RecordingKind::Overdub));
         assert!(!app.promote_song_playback_to_capture());
-        assert_eq!(app.song_transport_mode, SongTransportMode::SessionPlayback);
+        assert_eq!(app.song_transport_mode, SongTransportMode::SongPlayback);
         assert!(!app.take_recording_active());
+        app.song_transport_stop().unwrap();
+    }
+
+    #[test]
+    fn note_stamp_routes_by_the_active_view() {
+        // stamp_recording_kind_for_note (unified-transport spec 5): the view
+        // under the performer at the first armed note picks the kind.
+        let mut app = app_with_song();
+        app.song_transport_play(false).expect("song playback");
+        app.set_arrangement_view_visible(true);
+        app.stamp_recording_kind_for_note();
+        assert_eq!(app.recording_kind, Some(RecordingKind::Capture));
+        assert_eq!(app.song_transport_mode, SongTransportMode::ArrangementCapture);
+        app.state.set_scheduler_rendered_beats(8.0);
+        app.song_transport_stop().expect("capture stop-commits");
+        app.state.set_scheduler_rendered_beats(0.0);
+
+        let mut app = app_with_song();
+        app.song_transport_play(false).expect("song playback");
+        app.stamp_recording_kind_for_note();
+        assert_eq!(app.recording_kind, Some(RecordingKind::Overdub));
+        assert_eq!(app.song_transport_mode, SongTransportMode::SongPlayback);
         app.song_transport_stop().unwrap();
     }
 
     #[test]
     fn play_while_playing_is_rejected_in_every_mode() {
         let mut app = app_with_song();
-        for (use_arrangement, record) in [(false, false), (true, false), (true, true)] {
-            app.set_use_arrangement(use_arrangement).unwrap();
+        for (arrangement_view, record) in [(false, false), (false, true), (true, true)] {
+            app.set_arrangement_view_visible(arrangement_view);
             let mode = app.song_transport_play(record).expect("play succeeds");
             let error = app
                 .song_transport_play(record)
@@ -878,30 +1215,9 @@ mod tests {
     }
 
     #[test]
-    fn use_arrangement_toggle_is_rejected_while_playing() {
-        let mut app = app_with_song();
-        for (use_arrangement, record) in [(false, false), (true, false), (true, true)] {
-            app.set_use_arrangement(use_arrangement).unwrap();
-            app.song_transport_play(record).expect("play succeeds");
-            let error = app
-                .set_use_arrangement(!use_arrangement)
-                .expect_err("toggle while playing must fail");
-            assert_eq!(error, USE_ARRANGEMENT_WHILE_PLAYING_ERROR);
-            assert_eq!(app.use_arrangement, use_arrangement, "state unchanged");
-            // Zero-length capture commits fail; the transport still stops.
-            let _ = app.song_transport_stop();
-            assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
-        }
-        // While stopped the toggle works and selects the next Play.
-        app.set_use_arrangement(true).expect("toggle while stopped");
-        assert!(app.use_arrangement);
-    }
-
-    #[test]
     fn manual_launches_latch_during_song_playback_and_back_to_song_clears() {
         let mut app = app_with_song();
         assert!(app.manual_launch_rejection().is_none());
-        app.set_use_arrangement(true).unwrap();
         app.song_transport_play(false).expect("song playback");
         // Takes spec 10 (supersedes song-mode spec 7.3): a manual launch is
         // audible and latches its scope instead of being rejected.
@@ -925,8 +1241,16 @@ mod tests {
         })
         .expect("track launch latches its track");
         assert_eq!(app.state.song_manual_latch_mask(), 1);
-        // The latch is transient transport state: stop clears it.
+        // The latch SURVIVES the stop (Ableton back-to-arrangement): only
+        // the explicit gesture clears it, and it works while stopped too.
         app.song_transport_stop().expect("stop succeeds");
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            1,
+            "stopping keeps the performer's overrides latched"
+        );
+        let status = app.back_to_song().expect("clear latch while stopped");
+        assert!(status.contains("Back to arrangement"), "{status}");
         assert_eq!(app.state.song_manual_latch_mask(), 0);
         assert!(app.manual_launch_rejection().is_none());
         app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
@@ -953,7 +1277,6 @@ mod tests {
         snapshots[2].track_bits[0][0] = 0b111;
         app.state.replace_pattern_repository(snapshots, 0);
         app.state.resync_live_grid_to_current_scene();
-        app.set_use_arrangement(true).unwrap();
         app.song_transport_play(false).expect("song playback");
         let song = app.active_runtime_song.clone().expect("active song");
 
@@ -1031,7 +1354,6 @@ mod tests {
             false,
         )
         .expect("song committed");
-        app.set_use_arrangement(true).unwrap();
         app.song_transport_play(false).expect("song playback");
         let song = app.active_runtime_song.clone().expect("active song");
 
@@ -1076,7 +1398,6 @@ mod tests {
         assert!(app
             .back_to_song_track(0)
             .is_err(), "only valid during song playback");
-        app.set_use_arrangement(true).unwrap();
         app.song_transport_play(false).expect("song playback");
         app.apply_manual_pattern_launch(&PatternLaunchTarget::SceneTracks {
             scene: 1,
@@ -1105,16 +1426,16 @@ mod tests {
         assert!(error.contains("only valid during arrangement capture"), "{error}");
         assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
 
-        app.song_transport_play(false).expect("session playback");
+        app.song_transport_play(false).expect("song playback");
         let error = app
             .song_capture_cancel()
-            .expect_err("cancel during session playback must fail");
+            .expect_err("cancel during song playback must fail");
         assert!(error.contains("only valid during arrangement capture"), "{error}");
-        assert_eq!(app.song_transport_mode, SongTransportMode::SessionPlayback);
+        assert_eq!(app.song_transport_mode, SongTransportMode::SongPlayback);
         app.song_transport_stop().unwrap();
 
-        app.set_use_arrangement(true).unwrap();
         let song_before = app.state.committed_song();
+        app.set_arrangement_view_visible(true);
         app.song_transport_play(true).expect("capture starts");
         // Record something into the take: cancel must still discard it all.
         app.state.set_scheduler_rendered_beats(2.0);
@@ -1152,7 +1473,6 @@ mod tests {
     #[test]
     fn toggle_play_routes_play_and_stop_through_the_machine() {
         let mut app = app_with_song();
-        app.set_use_arrangement(true).unwrap();
         app.song_transport_toggle_play(false).expect("toggle starts");
         assert_eq!(app.song_transport_mode, SongTransportMode::SongPlayback);
         app.song_transport_toggle_play(false).expect("toggle stops");
@@ -1163,12 +1483,12 @@ mod tests {
     #[test]
     fn song_edit_primitives_are_available_in_playback_but_locked_during_capture() {
         let mut app = app_with_song();
-        app.set_use_arrangement(true).unwrap();
         app.song_transport_play(false).expect("play succeeds");
         app.arr_set_loop(true)
             .expect("song playback allows arrangement edits");
         let _ = app.song_transport_stop();
 
+        app.set_arrangement_view_visible(true);
         app.song_transport_play(true).expect("capture starts");
         let error = app
             .arr_set_loop(false)
@@ -1185,7 +1505,6 @@ mod tests {
     #[test]
     fn mirror_applies_later_rows_and_skips_the_duplicate_initial_row() {
         let mut app = app_with_song();
-        app.set_use_arrangement(true).unwrap();
         app.song_transport_play(false).expect("song playback");
         assert_eq!(app.state.current_scene_index(), 0);
         let song = app.active_runtime_song.clone().expect("active song");
@@ -1232,7 +1551,6 @@ mod tests {
     #[test]
     fn scheduler_end_notice_stops_through_the_machine() {
         let mut app = app_with_song();
-        app.set_use_arrangement(true).unwrap();
         app.song_transport_play(false).expect("song playback");
         let status = app
             .handle_song_playback_ended()
@@ -1246,7 +1564,6 @@ mod tests {
     #[test]
     fn start_failed_notice_unwinds_to_stopped() {
         let mut app = app_with_song();
-        app.set_use_arrangement(true).unwrap();
         app.song_transport_play(false).expect("song playback");
         let message = app.handle_song_playback_start_failed("boom");
         assert!(message.contains("boom"), "{message}");
@@ -1257,7 +1574,6 @@ mod tests {
     #[test]
     fn song_start_flow_sends_the_scheduler_start_command() {
         let mut app = app_with_song();
-        app.set_use_arrangement(true).unwrap();
         app.song_transport_play(false).expect("song playback");
         let commands = app.state.song_playback().drain_commands();
         assert!(
@@ -1311,7 +1627,6 @@ mod tests {
     }
 
     fn playing_song_app(mut app: App) -> App {
-        app.set_use_arrangement(true).expect("toggle while stopped");
         app.song_transport_play(false).expect("song playback starts");
         // Drop the Start command so later drains see only edit-through work.
         app.state.song_playback().drain_commands();
@@ -1557,8 +1872,8 @@ mod tests {
 
     /// Start arrangement capture on an app whose rendered-beat clock is 0.
     fn start_capture(app: &mut App) {
-        app.set_use_arrangement(true).expect("toggle while stopped");
         app.state.set_scheduler_rendered_beats(0.0);
+        app.set_arrangement_view_visible(true);
         let mode = app.song_transport_play(true).expect("capture starts");
         assert_eq!(mode, SongTransportMode::ArrangementCapture);
     }
@@ -1575,7 +1890,7 @@ mod tests {
             .map(|row| {
                 (
                     row.start_beat,
-                    row.scene,
+                    row.scene.expect("captured rows carry a scene"),
                     row.overrides
                         .iter()
                         .map(|over| (over.track, over.pattern_id))
@@ -1586,24 +1901,22 @@ mod tests {
     }
 
     #[test]
-    fn capture_creates_beat_zero_row_from_the_resolved_initial_state() {
-        // Whole-song capture ("record from an empty song", takes spec 9.3):
-        // with no committed song, a capture with a launch commits from the
-        // resolved beat-zero state.
+    fn capture_into_an_empty_arrangement_captures_the_auto_latched_scene() {
+        // Empty-arrangement spec 6 + unified-transport spec 4.1: capture is
+        // one code path — a [P, Q) splice into the arrangement that exists,
+        // the empty one included. A SILENT start auto-latches the selected
+        // scene inside the capture, so what commits is what was HEARD: the
+        // scene from beat 0, with the performer's track launch layered as
+        // an override. The canvas keeps its default length.
         let mut app = app_with_song();
-        // Resolved session state before capture: scene 2 with an override on
-        // track 0 pointing at scene 1's cell (pool id 2).
-        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 2 })
-            .expect("scene launch");
-        app.apply_manual_pattern_launch(&PatternLaunchTarget::SceneTracks {
-            scene: 1,
-            tracks: vec![0],
-        })
-        .expect("track launch");
-        app.arr_clear().expect("start from an empty song");
+        app.arr_clear().expect("start from an empty arrangement");
 
         start_capture(&mut app);
-        // A launch at the capture origin replaces the beat-zero row's state.
+        assert_eq!(
+            app.state.song_manual_latch_mask(),
+            1,
+            "the silent start latched the selected scene into the capture"
+        );
         app.apply_manual_pattern_launch(&PatternLaunchTarget::SceneTracks {
             scene: 1,
             tracks: vec![0],
@@ -1611,9 +1924,45 @@ mod tests {
         .expect("captured launch");
         app.state.set_scheduler_rendered_beats(8.0);
         app.song_transport_stop().expect("stop commits");
+
+        let arrangement = app
+            .state
+            .committed_arrangement()
+            .expect("capture commits an arrangement");
+        assert_eq!(
+            arrangement.scene_lane.len(),
+            1,
+            "the auto-latched scene is the captured initial state"
+        );
+        assert_eq!(arrangement.scene_lane[0].scene, 0);
+        assert_eq!(arrangement.scene_lane[0].start_beat, 0.0);
+        assert_eq!(arrangement.track_lanes[0].len(), 1);
+        let clip = arrangement.track_lanes[0][0];
+        assert_eq!(clip.start_beat, 0.0);
+        assert_eq!(clip.end_beat, 8.0);
+        assert_eq!(
+            clip.pattern_id,
+            Some(2),
+            "the track launch's pattern (scene 1's cell) wins the lane"
+        );
+        assert_eq!(
+            arrangement.end_beat,
+            crate::sequencer::DEFAULT_ARRANGEMENT_END,
+            "the empty canvas keeps its default length"
+        );
+
         let song = committed(&app);
-        assert_eq!(row_tuples(&song), vec![(0.0, 2, vec![(0, Some(2))])]);
-        assert_eq!(song.end_beat, 8.0);
+        assert_eq!(song.rows[0].start_beat, 0.0);
+        assert_eq!(
+            song.rows[0].scene,
+            Some(0),
+            "the captured pass is governed by the auto-latched scene"
+        );
+        assert_eq!(
+            song.rows[0].overrides[0].pattern_id,
+            Some(2),
+            "the clip is the launch"
+        );
         app.state.set_scheduler_rendered_beats(0.0);
     }
 
@@ -1970,9 +2319,8 @@ mod tests {
             },
             None => {
                 let cell = app.state.with_project_scenes(|scenes| {
-                    scenes
-                        .scenes
-                        .get(row.scene)
+                    row.scene
+                        .and_then(|scene| scenes.scenes.get(scene))
                         .and_then(|scene| scene.cells.get(track))
                         .copied()
                         .flatten()
@@ -2071,7 +2419,8 @@ mod tests {
                 continue;
             };
             let cell = app.state.with_project_scenes(|scenes| {
-                scenes.scenes[row.scene].cells[1].map(|pattern| pattern.0)
+                scenes.scenes[row.scene.expect("captured rows carry a scene")].cells[1]
+                    .map(|pattern| pattern.0)
             });
             assert_eq!(
                 (over.pattern_id, over.take_id),
@@ -2237,8 +2586,8 @@ mod tests {
         // Record from bar 2: cursor at beat 4.0. The record clock's zero is
         // the cursor, so a launch at raw beat 1.3 is timeline beat 5.3.
         app.arrangement_cursor_beat = 4.0;
-        app.set_use_arrangement(true).expect("toggle while stopped");
         app.state.set_scheduler_rendered_beats(0.0);
+        app.set_arrangement_view_visible(true);
         let mode = app.song_transport_play(true).expect("capture starts");
         assert_eq!(mode, SongTransportMode::ArrangementCapture);
         app.state.set_scheduler_rendered_beats(1.3);
@@ -2679,32 +3028,35 @@ mod tests {
     }
 
     #[test]
-    fn capture_commit_validation_failure_preserves_previous_song() {
+    fn zero_length_capture_is_a_no_op_that_preserves_the_previous_song() {
+        // Stop on the very beat of the first launch: the punch region is
+        // empty, so nothing is splicable. The commit is a graceful no-op —
+        // no stray scene event, no history entry, previous song untouched
+        // (empty-arrangement spec 6).
         let mut app = app_with_song();
-        // Start from an empty song so the commit takes the whole-song path
-        // (with a committed song and no launches, stop is a documented
-        // no-op instead of a failure — takes spec 9.5).
         app.arr_clear().expect("clear song");
         let song_before = app.state.committed_song();
+        let arrangement_before = app.state.committed_arrangement();
         start_capture(&mut app);
         app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 })
             .expect("captured launch");
-        // Stop with the rendered clock still at the capture origin: the
-        // zero-length take fails `end_beat > last start` validation.
-        let error = app
+        let status = app
             .song_transport_stop()
-            .expect_err("zero-length capture cannot commit");
-        assert!(error.contains("could not be committed"), "{error}");
+            .expect("a zero-length capture stops cleanly");
+        assert!(
+            status.is_some_and(|status| status.contains("unchanged")),
+            "the stop reports the no-op"
+        );
         assert_eq!(app.state.committed_song(), song_before);
-        assert!(app.song_capture_failed);
-        assert!(app.song_capture_error.is_some());
+        assert_eq!(app.state.committed_arrangement(), arrangement_before);
+        assert!(!app.song_capture_failed);
+        assert!(app.song_capture_error.is_none());
         assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
     }
 
     #[test]
     fn binding_strings_cover_every_mode() {
-        assert_eq!(SongTransportMode::Stopped.binding_str(), "session");
-        assert_eq!(SongTransportMode::SessionPlayback.binding_str(), "session");
+        assert_eq!(SongTransportMode::Stopped.binding_str(), "stopped");
         assert_eq!(SongTransportMode::SongPlayback.binding_str(), "song-playback");
         assert_eq!(
             SongTransportMode::ArrangementCapture.binding_str(),

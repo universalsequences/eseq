@@ -955,14 +955,19 @@
         app.state
             .set_committed_arrangement(Some(ProjectArrangement::new(1, 16.0)))
             .expect("install source-project arrangement");
-        app.use_arrangement = true;
 
         app.start_new_project();
 
         assert!(app.tracks.is_empty());
-        assert!(app.state.committed_arrangement().is_none());
-        assert!(app.state.committed_song().is_none());
-        assert!(!app.use_arrangement);
+        // The old project's arrangement is gone; the new project starts on
+        // the EMPTY arrangement (empty-arrangement spec 4.3), never on
+        // "no arrangement".
+        let arrangement = app
+            .state
+            .committed_arrangement()
+            .expect("new projects start with the empty arrangement");
+        assert!(arrangement.is_empty());
+        assert!(app.state.committed_song().is_some());
         graph.process_block();
     }
 
