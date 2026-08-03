@@ -41,40 +41,61 @@ struct GlyphFrames {
     revision: u64,
     /// AST identity branches for the delta glyph's identity tier (spec §5.1a),
     /// cached per track because resolving them reads and parses the
-    /// instrument's dsp.lisp.
-    identity: HashMap<usize, (String, Vec<IdentityBranch>)>,
+    /// instrument's dsp.lisp (~0.5–0.7ms per extraction).
+    identity: HashMap<usize, IdentityCacheEntry>,
     /// Per-track fingerprints for the mixer pattern-cell glyph feed, which
     /// runs every sync regardless of whether the palette is open.
     cell_published: HashMap<usize, u64>,
+}
+
+struct IdentityCacheEntry {
+    cache_key: String,
+    branches: Vec<IdentityBranch>,
+    /// Hash of the branches, precomputed at fill so the per-frame dirty
+    /// check never re-hashes (or clones) up to ~76 branch names.
+    fingerprint: u64,
+}
+
+/// FNV-1a over a value vector: the per-frame dirty checks fold each patch's
+/// ~110 floats into one u64 before it reaches the (much slower per-write)
+/// SipHash fingerprint hasher.
+fn values_fingerprint(values: impl IntoIterator<Item = f32>) -> u64 {
+    values.into_iter().fold(0xcbf29ce484222325u64, |hash, value| {
+        (hash ^ value.to_bits() as u64).wrapping_mul(0x100000001b3)
+    })
 }
 
 /// The identity tier's input: branch clusters of the instrument's authored AST,
 /// via `extract_skeleton` for custom instruments and the stock skeleton for
 /// builtins/samplers. Cached on the instrument name + descriptor param count so
 /// an instrument reload with a changed surface refreshes it.
-fn identity_branches<'a>(
+fn ensure_identity_cached<'a>(
     app: &app::App,
     track: usize,
     descriptor: &sequencer::effects::EffectDescriptor,
-    glyphs: &'a mut GlyphFrames,
-) -> &'a [IdentityBranch] {
+    cache: &'a mut HashMap<usize, IdentityCacheEntry>,
+) -> &'a IdentityCacheEntry {
     let custom = current_custom_instrument_name(app, track);
     let cache_key = format!(
         "{}:{}",
         custom.as_deref().unwrap_or("stock"),
         descriptor.params.len()
     );
-    if glyphs.identity.get(&track).map(|(key, _)| key.as_str()) != Some(cache_key.as_str()) {
+    if cache.get(&track).map(|entry| entry.cache_key.as_str()) != Some(cache_key.as_str()) {
         let skeleton = custom
             .and_then(|name| sequencer::lisp_host::load_instrument_source(&name).ok())
             .map(|source| sequencer::sound_glyph::extract_skeleton(&source).skeleton)
             .unwrap_or_else(|| sequencer::sound_glyph::stock_skeleton(descriptor).skeleton);
-        glyphs.identity.insert(
-            track,
-            (cache_key, sequencer::sound_glyph::identity_branches(&skeleton)),
-        );
+        let branches = sequencer::sound_glyph::identity_branches(&skeleton);
+        let mut hasher = DefaultHasher::new();
+        for branch in &branches {
+            branch.name.hash(&mut hasher);
+            branch.weight.to_bits().hash(&mut hasher);
+        }
+        let fingerprint = hasher.finish();
+        cache.insert(track, IdentityCacheEntry { cache_key, branches, fingerprint });
     }
-    glyphs.identity.get(&track).map(|(_, branches)| branches.as_slice()).unwrap_or(&[])
+    cache.get(&track).expect("just inserted")
 }
 
 fn glyph_key(track: usize, patch: u64) -> String {
@@ -190,8 +211,13 @@ fn sync_glyph_frames(app: &app::App, track: usize, entries: &[PaletteEntry], gly
             &fallback_descriptor
         }
     };
-    let schema = glyph_schema_for_descriptor(descriptor, "instrument:", 0, None);
-    let identity = identity_branches(app, track, descriptor, glyphs).to_vec();
+    let identity_entry = ensure_identity_cached(app, track, descriptor, &mut glyphs.identity);
+    let identity_fingerprint = identity_entry.fingerprint;
+    // Disjoint reborrows so the cached branches stay borrowed while the
+    // closure below writes the sibling fields.
+    let identity = &identity_entry.branches;
+    let published = &mut glyphs.published;
+    let revision = &mut glyphs.revision;
     let track_instrument_type = app.graph.track_instrument_types.get(track);
     let mut active = HashSet::new();
     let mut pending = Vec::new();
@@ -205,15 +231,11 @@ fn sync_glyph_frames(app: &app::App, track: usize, entries: &[PaletteEntry], gly
             let patch = pool.sounds.patches.get(&entry.patch)?;
             compatible(patch).then(|| (entry.patch, patch_glyph_values(patch, descriptor)))
         }).collect::<Vec<_>>();
-        let cohort = cohort_entries.iter().map(|(_, values)| values.clone()).collect::<Vec<_>>();
         // Anchor mode (spec §7): the reference is the FIRST patch in palette order,
         // not the selection. Diffing against the selection made every tile change
         // shape on every click, which is disorienting exactly while scanning — and
         // it forced a full cohort re-stat on each selection change.
         let anchor_patch = cohort_entries.first().map(|(patch, _)| *patch);
-        let reference = cohort.first().cloned().unwrap_or_default();
-        let cohort_model =
-            DeltaGlyphCohort::new_with_identity(&schema, &cohort, &reference, &identity);
 
         let mut cohort_hasher = DefaultHasher::new();
         for descriptor in std::iter::once(descriptor) {
@@ -235,16 +257,24 @@ fn sync_glyph_frames(app: &app::App, track: usize, entries: &[PaletteEntry], gly
         }
         for (patch, values) in &cohort_entries {
             patch.hash(&mut cohort_hasher);
-            for value in values { value.to_bits().hash(&mut cohort_hasher); }
+            values_fingerprint(values.iter().copied()).hash(&mut cohort_hasher);
         }
-        for branch in &identity {
-            branch.name.hash(&mut cohort_hasher);
-            branch.weight.to_bits().hash(&mut cohort_hasher);
-        }
+        identity_fingerprint.hash(&mut cohort_hasher);
         // The anchor is cohort_entries[0], already hashed above, so nothing extra
         // is needed here — and notably the selection is NOT part of the key.
         let cohort_fingerprint = cohort_hasher.finish();
 
+        // Pass 1: fingerprint every tile and collect the misses, so the
+        // steady state (palette open, nothing changing) never constructs the
+        // schema or re-runs the cohort statistics.
+        struct Miss {
+            key: String,
+            fingerprint: u64,
+            values: Vec<f32>,
+            is_anchor: bool,
+            is_compatible: bool,
+        }
+        let mut misses = Vec::new();
         for entry in entries {
             let Some(patch) = pool.sounds.patches.get(&entry.patch) else { continue };
             let key = glyph_key(track, entry.patch.0);
@@ -257,21 +287,32 @@ fn sync_glyph_frames(app: &app::App, track: usize, entries: &[PaletteEntry], gly
             entry.patch.hash(&mut hasher);
             is_anchor.hash(&mut hasher);
             is_compatible.hash(&mut hasher);
-            for value in &values { value.to_bits().hash(&mut hasher); }
+            values_fingerprint(values.iter().copied()).hash(&mut hasher);
             let fingerprint = hasher.finish();
-            if glyphs.published.get(&key) == Some(&fingerprint) { continue; }
+            if published.get(&key) == Some(&fingerprint) { continue; }
+            misses.push(Miss { key, fingerprint, values, is_anchor, is_compatible });
+        }
+        if misses.is_empty() {
+            return;
+        }
 
+        let schema = glyph_schema_for_descriptor(descriptor, "instrument:", 0, None);
+        let cohort = cohort_entries.iter().map(|(_, values)| values.clone()).collect::<Vec<_>>();
+        let reference = cohort.first().cloned().unwrap_or_default();
+        let cohort_model =
+            DeltaGlyphCohort::new_with_identity(&schema, &cohort, &reference, identity);
+        for miss in misses {
             // An incompatible patch is normalized against itself, so it renders as
             // the bare grid plus the incompatible ring; it is also excluded from the
             // cohort statistics so it cannot poison anyone else's scale.
-            let delta = if is_compatible {
-                cohort_model.build(&values, is_anchor)
+            let delta = if miss.is_compatible {
+                cohort_model.build(&miss.values, miss.is_anchor)
             } else {
                 cohort_model.build(&reference, false)
             };
-            glyphs.revision = glyphs.revision.wrapping_add(1);
-            pending.push((key.clone(), SoundGlyphFrame {
-                revision: glyphs.revision,
+            *revision = revision.wrapping_add(1);
+            pending.push((miss.key.clone(), SoundGlyphFrame {
+                revision: *revision,
                 cols: delta.cols,
                 rows: delta.rows,
                 substrate: delta.substrate,
@@ -284,9 +325,9 @@ fn sync_glyph_frames(app: &app::App, track: usize, entries: &[PaletteEntry], gly
                     negative: piece.negative,
                 }).collect(),
                 anchor: delta.anchor,
-                incompatible: !is_compatible,
+                incompatible: !miss.is_compatible,
             }));
-            glyphs.published.insert(key, fingerprint);
+            published.insert(miss.key, miss.fingerprint);
         }
     });
     publish_sound_glyph_frames(pending);
@@ -309,21 +350,26 @@ fn sync_pattern_cell_glyph_frames(app: &app::App, glyphs: &mut GlyphFrames) {
     let mut active: HashSet<String> = HashSet::new();
     let mut pending = Vec::new();
     let mut tracks_seen: HashSet<usize> = HashSet::new();
+    // One fallback for the whole sweep — building a builtin-sampler
+    // descriptor per sampler track per frame is pure allocation churn.
+    let fallback_descriptor = sequencer::effects::EffectDescriptor::builtin_sampler();
+    // Disjoint field reborrows: the identity cache is read (borrowed) per
+    // track while the closure writes the sibling bookkeeping fields.
+    let GlyphFrames { identity: identity_cache, cell_published, revision, .. } = glyphs;
     for track in 0..app.tracks.len() {
         let cells = app.state.track_pattern_cells(track);
         if cells.is_empty() {
             continue;
         }
         tracks_seen.insert(track);
-        let fallback_descriptor;
-        let descriptor = match app.graph.instrument_descriptors.get(track) {
-            Some(descriptor) => descriptor,
-            None => {
-                fallback_descriptor = sequencer::effects::EffectDescriptor::builtin_sampler();
-                &fallback_descriptor
-            }
-        };
-        let identity = identity_branches(app, track, descriptor, glyphs).to_vec();
+        let descriptor = app
+            .graph
+            .instrument_descriptors
+            .get(track)
+            .unwrap_or(&fallback_descriptor);
+        let identity_entry = ensure_identity_cached(app, track, descriptor, identity_cache);
+        let identity_fingerprint = identity_entry.fingerprint;
+        let identity = &identity_entry.branches;
         let track_instrument_type = app.graph.track_instrument_types.get(track);
         app.state.with_project_scenes(|scenes| {
             let Some(pool) = scenes.track_pools.get(track) else { return };
@@ -357,10 +403,7 @@ fn sync_pattern_cell_glyph_frames(app: &app::App, glyphs: &mut GlyphFrames) {
             let mut hasher = DefaultHasher::new();
             descriptor.name.hash(&mut hasher);
             descriptor.params.len().hash(&mut hasher);
-            for branch in &identity {
-                branch.name.hash(&mut hasher);
-                branch.weight.to_bits().hash(&mut hasher);
-            }
+            identity_fingerprint.hash(&mut hasher);
             for (pattern, patch) in &cell_patches {
                 pattern.hash(&mut hasher);
                 patch.hash(&mut hasher);
@@ -368,17 +411,16 @@ fn sync_pattern_cell_glyph_frames(app: &app::App, glyphs: &mut GlyphFrames) {
             for patch in &patches {
                 patch.hash(&mut hasher);
                 if let Some(patch) = pool.sounds.patches.get(patch) {
-                    for value in &patch.instrument_slot.defaults {
-                        value.to_bits().hash(&mut hasher);
-                    }
+                    values_fingerprint(patch.instrument_slot.defaults.iter().copied())
+                        .hash(&mut hasher);
                     compatible(patch).hash(&mut hasher);
                 }
             }
             let fingerprint = hasher.finish();
-            if glyphs.cell_published.get(&track) == Some(&fingerprint) {
+            if cell_published.get(&track) == Some(&fingerprint) {
                 return;
             }
-            glyphs.cell_published.insert(track, fingerprint);
+            cell_published.insert(track, fingerprint);
 
             let schema = glyph_schema_for_descriptor(descriptor, "instrument:", 0, None);
             let cohort = patches
@@ -390,7 +432,7 @@ fn sync_pattern_cell_glyph_frames(app: &app::App, glyphs: &mut GlyphFrames) {
                 .collect::<Vec<_>>();
             let values = cohort.iter().map(|(_, values)| values.clone()).collect::<Vec<_>>();
             let reference = values.first().cloned().unwrap_or_default();
-            let model = DeltaGlyphCohort::new_with_identity(&schema, &values, &reference, &identity);
+            let model = DeltaGlyphCohort::new_with_identity(&schema, &values, &reference, identity);
             for (pattern, patch) in &cell_patches {
                 let Some(patch) = patch else { continue };
                 // anchor=false everywhere: the palette's anchor ring marks the
@@ -406,11 +448,11 @@ fn sync_pattern_cell_glyph_frames(app: &app::App, glyphs: &mut GlyphFrames) {
                         incompatible
                     }
                 };
-                glyphs.revision = glyphs.revision.wrapping_add(1);
+                *revision = revision.wrapping_add(1);
                 pending.push((
                     pattern_cell_glyph_key(track, pattern.0),
                     SoundGlyphFrame {
-                        revision: glyphs.revision,
+                        revision: *revision,
                         cols: built.cols,
                         rows: built.rows,
                         substrate: built.substrate,
@@ -437,7 +479,7 @@ fn sync_pattern_cell_glyph_frames(app: &app::App, glyphs: &mut GlyphFrames) {
         publish_sound_glyph_frames(pending);
     }
     retain_sound_glyph_frames("pattern-glyph:", &active);
-    glyphs.cell_published.retain(|track, _| tracks_seen.contains(track));
+    cell_published.retain(|track, _| tracks_seen.contains(track));
 }
 
 fn color_fields(map: &mut HashMap<String, Rc<RefCell<Value>>>, color: Option<u8>) {

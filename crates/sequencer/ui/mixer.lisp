@@ -393,7 +393,7 @@
           (rgba track-r track-g track-b 1.0)))
       (middle (rgba track-r track-g track-b 1.0))
       (inner (if (= active 0)
-          (rgba 0.02 0.025 0.03 1.0)
+          (rgba 0.02 0.025 0.03 0.7)
           track-col))
       (play-col (if (= active 1)
           (rgba 0.1 0.95 0.38 1.0)
@@ -429,13 +429,13 @@
 (def mixer-v2-track-pattern-grid (track)
   (let ((cells (mixer-v2-track-pattern-cells track)))
     (box :width :fill :height 3.02 :align :top :bg :black :background-color :buffer-bg
-      (grid :cols 8 :col-width 1.5 :row-height 0.75 :align :center
+      (grid :cols 6 :col-width 2.0 :row-height 1.0 :align :center
         (each cells |cell cell-idx|
           (let ((pattern-id (get cell :id)))
             (box
               :key (str "mixer-v2-track-pattern-cell-" track "-" pattern-id)
-              :width 1.45 :height 0.73
-              :padding 0.3
+              :width 1.90 :height 0.95
+              :padding 0.35
               :bg :transparent
               :background "track-pattern-cell-bg"
               :active (mixer-v2-track-pattern-cell-active-binding track pattern-id)
@@ -452,19 +452,19 @@
               ;; sync_pattern_cell_glyph_frames). The tuned shader styling is
               ;; the widget default (TUNING_PROPS); the substrate body tints
               ;; with the track color so cells keep their track identity.
-              (sound-glyph
-                :key (str "mixer-v2-cell-glyph-" track "-" pattern-id)
-                :source (str "pattern-glyph:track:" track ":pattern:" pattern-id)
-                :edge-soft 0.1
-                :white-damp 0
-                :height-in 0.3
-                :height-out -0.08
-                :height-amp 3
-                :diffuse 0.8
-                :rim-width 0.1
-                :tint-r (mixer-v2-track-color-r track false)
-                :tint-g (mixer-v2-track-color-g track false)
-                :tint-b (mixer-v2-track-color-b track false)))))))))
+                (sound-glyph
+                  :key (str "mixer-v2-cell-glyph-" track "-" pattern-id)
+                  :source (str "pattern-glyph:track:" track ":pattern:" pattern-id)
+                  :edge-soft 0.1
+                  :white-damp 0
+                  :height-in 0.3
+                  :height-out -0.08
+                  :height-amp 3
+                  :diffuse 0.6
+                  :rim-width 0.1
+                  :tint-r (mixer-v2-track-color-r track false)
+                  :tint-g (mixer-v2-track-color-g track false)
+                  :tint-b (mixer-v2-track-color-b track false)))))))))
 
 (def mixer-v2-mod-output-style
   (ui/style
