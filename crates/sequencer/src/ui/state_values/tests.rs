@@ -23478,8 +23478,11 @@
         let header_content = header_body.children.first().expect("track header content");
         let header_body_bottom = header_body.rect.row + header_body.rect.height;
         let header_content_bottom = header_content.rect.row + header_content.rect.height;
+        // The header body's padding is a taste decision (tightened to 0.1);
+        // the behavior under test only needs SOME body surface below the
+        // compact controls to click, however thin.
         assert!(
-            header_content_bottom < header_body_bottom - 0.1,
+            header_content_bottom < header_body_bottom - 0.01,
             "fixture needs exposed header-body space below the compact controls"
         );
         let lane = find_layout_node_by_widget_type(
