@@ -1,52 +1,35 @@
-//! `sound-glyph` widget (sound-glyph spec P2): renders a sound's plant glyph
-//! from a host-published [`SoundGlyphFrame`](crate::sound_glyph_data).
-//!
-//! The widget is deliberately dumb: its `:source` prop is an opaque frame
-//! key (the host mints one per sound, e.g. `sound-glyph:track:0:patch:3`);
-//! geometry lives in the frame in glyph unit space (0..1 square, y = 0 at
-//! the top) and is scaled here into the largest centered square that fits
-//! the layout rect, working in pixel space because cells are not square.
-//! Monochrome for now — P3 adds per-branch diff tints to the frame. Inert:
-//! no input handlers, no animation frames, nothing in the TUI.
+//! `sound-glyph`: GPU SDF renderer for cohort-relative delta glyph frames.
 
 use std::collections::HashMap;
 
-use super::{resolve_named_color, CellBuffer, WidgetDefinition};
-use crate::backend::Color;
+use super::{CellBuffer, WidgetDefinition};
 use crate::layout::{f64_to_f32, get_prop_num, Constraints, MeasureCtx, Size};
 use crate::vm::Value;
 
 #[cfg(target_os = "macos")]
-use super::{
-    MetalCirclePrimitive, MetalCircleVisibleHalf, MetalPrimitive, MetalRectPrimitive,
-    MetalTrianglePrimitive, WidgetViewport,
-};
+use super::{metal_widget_instance, ndc_bounds, MetalPrimitive, WidgetInstance, WidgetViewport};
 #[cfg(target_os = "macos")]
-use crate::layout::LayoutNode;
+use crate::layout::{LayoutNode, Rect};
 
 pub struct SoundGlyphWidget;
-
 pub static SOUND_GLYPH_WIDGET: SoundGlyphWidget = SoundGlyphWidget;
 
-/// Tip stroke width as a fraction of the root width (taper).
-#[cfg(target_os = "macos")]
-const TIP_TAPER: f32 = 0.35;
+/// Accent pieces per glyph. Each is its own shaded layer with its own normal
+/// estimate, so this bounds shader cost; mirrors `delta_glyph::MAX_LIT`.
+const MAX_PIECES: usize = 5;
+/// First uniform word holding a piece record; words 0..4 are the substrate.
+const SHADER_PIECE_WORD: usize = 5;
 
 pub fn source_key(props: &HashMap<String, Value>) -> Option<String> {
     match props.get("source") {
-        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(Value::String(source)) if !source.is_empty() => Some(source.clone()),
         _ => None,
     }
 }
 
 impl WidgetDefinition for SoundGlyphWidget {
-    fn names(&self) -> &'static [&'static str] {
-        &["sound-glyph"]
-    }
-
-    fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["width", "height"]
-    }
+    fn names(&self) -> &'static [&'static str] { &["sound-glyph"] }
+    fn size_affecting_props(&self) -> &'static [&'static str] { &["width", "height"] }
 
     fn measure(
         &self,
@@ -60,168 +43,336 @@ impl WidgetDefinition for SoundGlyphWidget {
             .map(f64_to_f32)
             .unwrap_or(constraints.max_width)
             .clamp(4.0, constraints.max_width.max(4.0));
-        let height = get_prop_num(node, "height")
-            .map(f64_to_f32)
-            .unwrap_or(6.0)
-            .max(2.0);
+        let height = get_prop_num(node, "height").map(f64_to_f32).unwrap_or(6.0).max(2.0);
         Some(Size { width, height })
     }
 
-    fn tui_render(
-        &self,
-        _props: &HashMap<String, Value>,
-        _rect: crate::layout::Rect,
-        _buf: &mut CellBuffer,
-    ) {
-        // Nothing in the TUI (spec P2).
+    fn tui_render(&self, _props: &HashMap<String, Value>, _rect: crate::layout::Rect, _buf: &mut CellBuffer) {}
+
+    #[cfg(target_os = "macos")]
+    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
+        Some(DELTA_GLYPH_SHADER)
     }
 
     #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
-        _widget_type: &str,
+        widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
     ) -> Vec<MetalPrimitive> {
-        let mut primitives = Vec::new();
-        let background = resolve_named_color(
-            &node.props,
-            "background-color",
-            Color::rgba(0.0, 0.0, 0.0, 0.0),
-        );
-        if background.a > 0.001 {
-            primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
-                rect: node.rect,
-                color: background,
-            }));
-        }
-        let Some(frame) =
-            source_key(&node.props).and_then(|k| crate::sound_glyph_data::sound_glyph_frame(&k))
+        let Some(frame) = source_key(&node.props)
+            .and_then(|source| crate::sound_glyph_data::sound_glyph_frame(&source))
         else {
-            return primitives;
+            return Vec::new();
         };
-        let stroke_color =
-            resolve_named_color(&node.props, "color", Color::rgba(0.66, 0.70, 0.66, 0.95));
-        let mark_color = Color::rgba(
-            stroke_color.r,
-            stroke_color.g,
-            stroke_color.b,
-            stroke_color.a * 0.75,
-        );
 
-        // Largest centered square inside the rect, in pixel space.
-        let (cell_w, cell_h) = (viewport.cell_w.max(1.0), viewport.cell_h.max(1.0));
-        let px_w = node.rect.width * cell_w;
-        let px_h = node.rect.height * cell_h;
+        // Pack only exact 24-bit integers into float uniforms; depending on NaN
+        // payload bits would be unsafe across GPU drivers.
+        //   words 0..4  — substrate, five 4-bit slot radii each (25 slots)
+        //   words 5..9  — up to MAX_PIECES accent piece records, 18 bits each
+        let mut packed = [0.0f32; 18];
+        for (word, slots) in frame.substrate.chunks(5).take(5).enumerate() {
+            packed[word] = slots.iter().enumerate().fold(0u32, |bits, (offset, radius)| {
+                bits | ((*radius as u32 & 15) << (offset * 4))
+            }) as f32;
+        }
+        for (index, piece) in frame.pieces.iter().take(MAX_PIECES).enumerate() {
+            packed[SHADER_PIECE_WORD + index] = (piece.slot.min(24) as u32
+                | ((piece.piece.min(14) as u32) << 5)
+                | ((piece.hue.min(6) as u32) << 9)
+                | ((piece.magnitude.min(7) as u32) << 12)
+                | ((piece.mirror as u32) << 15)
+                | ((piece.negative as u32) << 16)
+                | (1 << 17)) as f32; // present bit
+        }
+
+        let px_w = node.rect.width * viewport.cell_w;
+        let px_h = node.rect.height * viewport.cell_h;
         let side = px_w.min(px_h);
-        if side < 4.0 {
-            return primitives;
-        }
-        let origin_px = [
-            node.rect.col * cell_w + (px_w - side) * 0.5,
-            node.rect.row * cell_h + (px_h - side) * 0.5,
-        ];
-        let to_px =
-            |p: [f32; 2]| -> [f32; 2] { [origin_px[0] + p[0] * side, origin_px[1] + p[1] * side] };
-        let to_cells = |p: [f32; 2]| -> [f32; 2] { [p[0] / cell_w, p[1] / cell_h] };
-
-        for stroke in &frame.strokes {
-            if stroke.points.len() < 2 {
-                continue;
-            }
-            let points_px: Vec<[f32; 2]> = stroke.points.iter().map(|&p| to_px(p)).collect();
-            let root_half = (stroke.width * side * 0.5).max(0.5);
-            emit_tapered_stroke(
-                &points_px,
-                root_half,
-                root_half * TIP_TAPER,
-                stroke_color,
-                &to_cells,
-                &mut primitives,
-            );
-        }
-        for mark in &frame.marks {
-            let center_px = to_px(mark.pos);
-            primitives.push(MetalPrimitive::Circle(MetalCirclePrimitive {
-                center: to_cells(center_px),
-                radius_px: (mark.radius * side).max(1.0),
-                color: mark_color,
-                visible_half: MetalCircleVisibleHalf::Full,
-            }));
-        }
-        primitives
+        if side < 4.0 { return Vec::new(); }
+        let square = Rect {
+            col: node.rect.col + (px_w - side) * 0.5 / viewport.cell_w,
+            row: node.rect.row + (px_h - side) * 0.5 / viewport.cell_h,
+            width: side / viewport.cell_w,
+            height: side / viewport.cell_h,
+        };
+        let (ndc_min, ndc_max) = ndc_bounds(square, viewport);
+        metal_widget_instance(widget_type, WidgetInstance {
+            ndc_min,
+            ndc_max,
+            value_t: packed[16],
+            orientation: 0.0,
+            itime: packed[17],
+            uniform_a: packed[0..4].try_into().unwrap(),
+            uniform_b: packed[4..8].try_into().unwrap(),
+            uniform_c: packed[8..12].try_into().unwrap(),
+            uniform_d: packed[12..16].try_into().unwrap(),
+            // Substrate tint; accent hues live in the shader's DG_HUES palette so a
+            // per-piece 3-bit index costs no uniform slots.
+            color_a: [0.20, 0.34, 0.38, 1.0],
+            color_b: [0.0, 0.0, 0.0, 0.0],
+            color_c: [0.0, 0.0, 0.0, 0.0],
+            color_d: [frame.cols as f32, frame.rows as f32, 0.0, frame.anchor as u8 as f32],
+            corner_radius: frame.incompatible as u8 as f32,
+            pixel_aspect: 1.0,
+        })
     }
 }
 
-/// Miter-joined tapered stroke (same construction as the compressor
-/// gain-reduction trace): offset each vertex along its joined normal by a
-/// half-width interpolated root→tip, emit shared-vertex triangles, and cap
-/// joints with small circles so bends stay smooth at glyph scale.
 #[cfg(target_os = "macos")]
-fn emit_tapered_stroke(
-    points_px: &[[f32; 2]],
-    root_half: f32,
-    tip_half: f32,
-    color: Color,
-    to_cells: &dyn Fn([f32; 2]) -> [f32; 2],
-    primitives: &mut Vec<MetalPrimitive>,
-) {
-    let n = points_px.len();
-    let normalize = |v: [f32; 2]| -> [f32; 2] {
-        let len = (v[0] * v[0] + v[1] * v[1]).sqrt();
-        if len > 1.0e-6 {
-            [v[0] / len, v[1] / len]
-        } else {
-            [1.0, 0.0]
-        }
-    };
-    let mut left = Vec::with_capacity(n);
-    let mut right = Vec::with_capacity(n);
-    for i in 0..n {
-        let dir_prev = if i > 0 {
-            normalize([
-                points_px[i][0] - points_px[i - 1][0],
-                points_px[i][1] - points_px[i - 1][1],
-            ])
-        } else {
-            normalize([
-                points_px[i + 1][0] - points_px[i][0],
-                points_px[i + 1][1] - points_px[i][1],
-            ])
-        };
-        let dir_next = if i + 1 < n {
-            normalize([
-                points_px[i + 1][0] - points_px[i][0],
-                points_px[i + 1][1] - points_px[i][1],
-            ])
-        } else {
-            dir_prev
-        };
-        let n0 = [-dir_prev[1], dir_prev[0]];
-        let n1 = [-dir_next[1], dir_next[0]];
-        let miter = normalize([n0[0] + n1[0], n0[1] + n1[1]]);
-        // Miter limit 3: sharp corners widen at most 3x before beveling.
-        let denom = (miter[0] * n1[0] + miter[1] * n1[1]).max(1.0 / 3.0);
-        let t = i as f32 / (n - 1) as f32;
-        let half = root_half + (tip_half - root_half) * t;
-        let reach = half / denom;
-        left.push(to_cells([
-            points_px[i][0] + miter[0] * reach,
-            points_px[i][1] + miter[1] * reach,
-        ]));
-        right.push(to_cells([
-            points_px[i][0] - miter[0] * reach,
-            points_px[i][1] - miter[1] * reach,
-        ]));
-    }
-    for i in 1..n {
-        primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
-            points: [left[i - 1], left[i], right[i]],
-            color,
-        }));
-        primitives.push(MetalPrimitive::Triangle(MetalTrianglePrimitive {
-            points: [left[i - 1], right[i], right[i - 1]],
-            color,
-        }));
+const DELTA_GLYPH_SHADER: &str = r#"
+// Geometry constants mirror sequencer::delta_glyph (spec §6). Radius and k are
+// FIXED: magnitude rides occupancy (which cells a piece claims) and luminance.
+// Two equal discs weld iff their surface gap is within 0.6452*k, and all three
+// lattice adjacencies (0.3672 / 0.40572 / 0.40896) clear that at R = 0.18.
+constant float DG_K = 0.155;
+constant float DG_R = 0.18;
+constant float DG_STEP_X = 0.3672;
+constant float DG_STEP_Y = 0.3636;
+constant float DG_STAGGER = 0.09;
+constant float DG_SUB_MIN = 0.155;
+constant float DG_SUB_MAX = 0.185;
+constant int DG_PIECE_WORD = 5;
+constant int DG_MAX_PIECES = 5;
+
+// Dual-maintained with delta_glyph::GROUP_PALETTE. Index 6 is the deliberately
+// un-hued "unclassified" tone.
+constant float3 DG_HUES[7] = {
+    float3(0.98, 0.72, 0.22), float3(0.95, 0.30, 0.62), float3(0.55, 0.95, 0.30),
+    float3(0.25, 0.80, 0.95), float3(0.62, 0.45, 0.98), float3(0.96, 0.46, 0.28),
+    float3(0.56, 0.57, 0.60),
+};
+
+float dg_packed(WidgetVaryings in, int index) {
+    switch (index) {
+        case 0: return in.uniform_a.x; case 1: return in.uniform_a.y;
+        case 2: return in.uniform_a.z; case 3: return in.uniform_a.w;
+        case 4: return in.uniform_b.x; case 5: return in.uniform_b.y;
+        case 6: return in.uniform_b.z; case 7: return in.uniform_b.w;
+        case 8: return in.uniform_c.x; case 9: return in.uniform_c.y;
+        case 10: return in.uniform_c.z; case 11: return in.uniform_c.w;
+        case 12: return in.uniform_d.x; case 13: return in.uniform_d.y;
+        case 14: return in.uniform_d.z; case 15: return in.uniform_d.w;
+        case 16: return in.value_t; default: return in.itime;
     }
 }
+
+int dg_cols(WidgetVaryings in) { return clamp(int(round(in.color_d.x)), 1, 5); }
+int dg_rows(WidgetVaryings in) { return clamp(int(round(in.color_d.y)), 1, 5); }
+
+// 0 = unassigned slot, else 1..15 across the substrate radius band.
+uint dg_substrate(WidgetVaryings in, int slot) {
+    uint word = uint(round(dg_packed(in, slot / 5)));
+    return (word >> (4 * (slot % 5))) & 15u;
+}
+
+uint dg_piece(WidgetVaryings in, int index) {
+    return uint(round(dg_packed(in, DG_PIECE_WORD + index)));
+}
+
+float dg_smin(float a, float b, float k) {
+    float h = max(k - abs(a - b), 0.0) / max(k, 0.0001);
+    return min(a, b) - pow(h, 1.55) * 0.5 * k / 1.55;
+}
+
+// Plain column-major: slot = col*rows + row. Rev 2 reversed odd columns, which
+// broke horizontal adjacency and therefore every piece built from it.
+float2 dg_center(int col, int row, int cols, int rows) {
+    float x = (float(col) - 0.5 * float(cols - 1)) * DG_STEP_X
+            + ((row & 1) == 1 ? DG_STAGGER : -DG_STAGGER);
+    float y = (float(row) - 0.5 * float(rows - 1)) * DG_STEP_Y;
+    return float2(x, y);
+}
+
+float dg_fit(WidgetVaryings in) {
+    float extentX = float(dg_cols(in) - 1) * DG_STEP_X + 2.0 * DG_STAGGER + 2.0 * DG_R + 0.06;
+    float extentY = float(dg_rows(in) - 1) * DG_STEP_Y + 2.0 * DG_R + 0.06;
+    return 2.0 / max(extentX, extentY);
+}
+
+// The substrate: one disc per assigned slot, radius from the patch's ABSOLUTE
+// parameter values, over a band that lies entirely inside the fusion zone — so
+// this is always one molten mass whose silhouette varies with the whole vector.
+float dg_substrate_field(float2 p, WidgetVaryings in) {
+    int cols = dg_cols(in), rows = dg_rows(in);
+    float fit = dg_fit(in);
+    p /= fit;
+    float scene = 1000.0;
+    for (int slot = 0; slot < 25; ++slot) {
+        if (slot >= cols * rows) break;
+        uint level = dg_substrate(in, slot);
+        if (level == 0u) continue;
+        float radius = mix(DG_SUB_MIN, DG_SUB_MAX, float(level - 1u) / 14.0);
+        float2 c = dg_center(slot / rows, slot % rows, cols, rows);
+        scene = dg_smin(scene, length(p - c) - radius, DG_K);
+    }
+    return scene * fit;
+}
+
+// One accent piece: a contiguous polyomino of 1..5 cells, welded at fixed radius.
+// The table mirrors delta_glyph::PIECES (tier*3 + variant).
+float dg_piece_field(float2 p, WidgetVaryings in, uint record) {
+    int cols = dg_cols(in), rows = dg_rows(in);
+    float fit = dg_fit(in);
+    p /= fit;
+    int slot = int(record & 31u);
+    int id = int((record >> 5) & 15u);
+    float mirror = ((record >> 15) & 1u) != 0u ? -1.0 : 1.0;
+    int anchorCol = slot / rows;
+    int anchorRow = slot % rows;
+
+    float scene = 1000.0;
+    for (int prim = 0; prim < 5; ++prim) {
+        int dcol = 0, drow = 0;
+        bool capsule = false, present = false;
+        // tier 0: 1 cell
+        if (id <= 2) {
+            present = prim == 0;
+        } else if (id == 3) {                 // capsule
+            present = prim == 0; capsule = true;
+        } else if (id == 4) {                 // vertical pair
+            present = prim < 2; drow = prim;
+        } else if (id == 5) {                 // diagonal pair
+            present = prim < 2; dcol = prim; drow = prim;
+        } else if (id == 6) {                 // capsule + disc
+            present = prim < 2; capsule = prim == 0; drow = prim;
+        } else if (id == 7) {                 // L
+            present = prim < 3; drow = min(prim, 1); dcol = prim == 2 ? 1 : 0;
+        } else if (id == 8) {                 // vertical run
+            present = prim < 3; drow = prim;
+        } else if (id == 9) {                 // stacked capsules
+            present = prim < 2; capsule = true; drow = prim;
+        } else if (id == 10) {                // 2x2
+            present = prim < 4; dcol = prim / 2; drow = prim % 2;
+        } else if (id == 11) {                // capsule + 2 discs
+            present = prim < 3; capsule = prim == 0;
+            drow = prim == 0 ? 0 : 1; dcol = prim == 2 ? 1 : 0;
+        } else if (id == 12) {                // 2 capsules + disc
+            present = prim < 3; capsule = prim < 2; drow = prim;
+        } else if (id == 13) {                // P-pentomino
+            present = prim < 5; dcol = prim / 3; drow = prim % 3;
+        } else {                              // capsule + 3 discs
+            present = prim < 4; capsule = prim == 0;
+            dcol = prim >= 2 ? 1 : 0; drow = prim == 0 ? 0 : (prim == 1 ? 1 : prim - 1);
+        }
+        if (!present) continue;
+
+        int col = anchorCol + int(mirror) * dcol;
+        int row = anchorRow + drow;
+        if (col < 0 || col >= cols || row < 0 || row >= rows) continue;
+        float2 c = dg_center(col, row, cols, rows);
+        float sdf;
+        if (capsule) {
+            // A stadium welding this cell to its horizontal neighbour: the
+            // two-cell pair as one CONVEX primitive, no waist. This is where the
+            // elongated lobes come from.
+            int farCol = col + int(mirror);
+            if (farCol < 0 || farCol >= cols) {
+                sdf = length(p - c) - DG_R;
+            } else {
+                float2 far = dg_center(farCol, row, cols, rows);
+                float2 seg = far - c;
+                float t = clamp(dot(p - c, seg) / max(dot(seg, seg), 0.0001), 0.0, 1.0);
+                sdf = length(p - c - seg * t) - DG_R;
+            }
+        } else {
+            sdf = length(p - c) - DG_R;
+        }
+        scene = dg_smin(scene, sdf, DG_K);
+    }
+    return scene * fit;
+}
+
+float dg_height(float sdf, float fit) {
+    return 1.8 * pow(smoothstep(-0.15 * fit, 0.14817536 * fit, sdf), 8.0);
+}
+
+float3 dg_normal_substrate(float2 p, WidgetVaryings in) {
+    float fit = dg_fit(in);
+    float e = 0.0001 * fit;
+    float x = dg_height(dg_substrate_field(p + float2(e, 0.0), in), fit)
+            - dg_height(dg_substrate_field(p - float2(e, 0.0), in), fit);
+    float y = dg_height(dg_substrate_field(p + float2(0.0, e), in), fit)
+            - dg_height(dg_substrate_field(p - float2(0.0, e), in), fit);
+    return normalize(float3(x, y, 2.0 * e));
+}
+
+float3 dg_normal_piece(float2 p, WidgetVaryings in, uint record) {
+    float fit = dg_fit(in);
+    float e = 0.0001 * fit;
+    float x = dg_height(dg_piece_field(p + float2(e, 0.0), in, record), fit)
+            - dg_height(dg_piece_field(p - float2(e, 0.0), in, record), fit);
+    float y = dg_height(dg_piece_field(p + float2(0.0, e), in, record), fit)
+            - dg_height(dg_piece_field(p - float2(0.0, e), in, record), fit);
+    return normalize(float3(x, y, 2.0 * e));
+}
+
+float4 dg_material(float2 p, float3 n, float4 tint, bool crease) {
+    float3 l1 = float3(-0.11, -0.8138, 0.3);
+    float3 l2 = float3(-0.5238, 0.3, 1.4);
+    float3 viewer = float3(p, 1.0) - float3(-0.81891595, 1.39159394, 0.87441919);
+    float spec1 = pow(max(0.0, 0.99 * dot(n, normalize(l1 + viewer))), 24.0);
+    float spec2 = pow(max(0.0, 0.969 * dot(n, normalize(l2 + viewer))), 22.0);
+    float scale = crease ? 0.321513593 : 0.51513593;
+    // The original adds this achromatically (a precedence artifact there — see
+    // docs/sdf-blob-glyph-algorithm.md §6.4). Damped: at full strength it
+    // desaturates every cell toward white, and hue is this glyph's group legend.
+    float white = 0.35 * (scale * spec1 + spec2 + 0.293913139 * dot(l1, n));
+    float4 color = float4(white) + 0.85 * dot(l2, n) * tint;
+    color.rgb = clamp(color.rgb, 0.0, 1.0);
+    color.a = tint.a;
+    return color;
+}
+
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) {
+    // Centered uv, +y upward, as required by the delta-glyph lattice.
+    float2 p = float2(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
+    float fit = dg_fit(in);
+    float4 color = float4(0.0);
+
+    float substrate = dg_substrate_field(p, in);
+    color = mix(color,
+                dg_material(p, dg_normal_substrate(p, in), in.color_a, false),
+                1.0 - smoothstep(0.0, 0.020 * fit, substrate));
+
+    // One layer per lit parameter, all anchored into the SHARED lattice so they
+    // interpenetrate — the original's second tier of richness, which rev 2's
+    // per-slot layer encoding made structurally impossible.
+    float unionSoFar = substrate;
+    for (int index = 0; index < DG_MAX_PIECES; ++index) {
+        uint record = dg_piece(in, index);
+        if (((record >> 17) & 1u) == 0u) continue;
+        float sdf = dg_piece_field(p, in, record);
+        float3 n = dg_normal_piece(p, in, record);
+
+        float3 hue = DG_HUES[min((record >> 9) & 7u, 6u)];
+        float magnitude = float((record >> 12) & 7u) / 7.0;
+        // Sign rides hue temperature, not position: a positional offset large
+        // enough to read is larger than the entire fusion budget (spec §6.2).
+        hue *= ((record >> 16) & 1u) != 0u ? float3(0.92, 1.00, 1.10)
+                                           : float3(1.08, 1.00, 0.92);
+        float4 tint = float4(clamp(hue * (0.5 + 0.5 * magnitude), 0.0, 1.0), 1.0);
+
+        color = mix(color, dg_material(p, n, tint, false),
+                    1.0 - smoothstep(0.0, 0.020 * fit, sdf));
+        float intersection = max(unionSoFar, sdf + 0.05 * fit);
+        color = mix(color, dg_material(p, n, tint, true),
+                    1.0 - smoothstep(0.0, 0.020 * fit, intersection + 0.001 * fit));
+        unionSoFar = min(unionSoFar, sdf);
+    }
+
+    // The anchor tile carries no accents by definition; ring it so it reads as
+    // the zero point rather than as an empty patch.
+    if (in.color_d.w > 0.5) {
+        float ring = 1.0 - smoothstep(0.008, 0.017, abs(length(p) - 0.055));
+        color = mix(color, float4(0.85, 0.87, 0.85, 0.8), ring);
+    }
+    if (in.corner_radius > 0.5) {
+        float ring = 1.0 - smoothstep(0.010, 0.022, abs(length(p) - 0.91));
+        color = mix(color, float4(0.96, 0.50, 0.24, 0.9), ring);
+    }
+    if (color.a <= 0.002) discard_fragment();
+    return color;
+}
+"#;

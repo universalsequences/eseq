@@ -2535,11 +2535,13 @@ impl Editor {
                 return;
             }
 
-            // Native widget editing/navigation gets first refusal. Spatial
-            // focus movement and :on-focus-key callbacks remain available
-            // inside the modal; an unhandled key is deliberately swallowed.
+            // Native widget editing/navigation gets first refusal, followed
+            // only by an explicit :on-focus-key callback on that control.
+            // Do not call the editor's generic focus navigation here: its
+            // edge behavior scrolls the owning tile, which is under the modal.
+            // Anything the modal focus does not define is swallowed.
             if !editor.handle_focused_widget_key(key) {
-                let _ = editor.handle_focus_key(key);
+                let _ = editor.dispatch_focus_key(key);
             }
         });
         true

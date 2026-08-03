@@ -12228,6 +12228,11 @@ fn inactive_modal_routes_focused_keys_and_blocks_global_bindings() {
         .expect("second tile");
     editor.switch_active_tile(source_tile);
     assert!(editor.modal_is_open());
+    let panel_scroll_before = editor
+        .tile_root
+        .find_leaf(panel_tile)
+        .expect("panel tile")
+        .widget_scroll_top;
 
     editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(
@@ -12241,6 +12246,15 @@ fn inactive_modal_routes_focused_keys_and_blocks_global_bindings() {
     assert_eq!(
         editor.active_tile, source_tile,
         "modal key routing must preserve the inspected source tile"
+    );
+    assert_eq!(
+        editor
+            .tile_root
+            .find_leaf(panel_tile)
+            .expect("panel tile")
+            .widget_scroll_top,
+        panel_scroll_before,
+        "an unhandled modal arrow key must not scroll its owning tile"
     );
 
     editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

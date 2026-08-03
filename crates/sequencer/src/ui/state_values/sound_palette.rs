@@ -8,18 +8,16 @@
 use super::*;
 use crate::app::sound_palette::{PaletteEntry, PaletteTarget, SOUND_PALETTE_RGB};
 use eseqlisp::sound_glyph_data::{
-    publish_sound_glyph_frame, retain_sound_glyph_frames, SoundGlyphFrame, SoundGlyphMark,
-    SoundGlyphStroke,
+    publish_sound_glyph_frames, retain_sound_glyph_frames, SoundGlyphFrame, SoundGlyphPiece,
 };
-use sequencer::sound_glyph::{
-    extract_skeleton, resolve_geometry, stock_skeleton, ExtractedSkeleton,
+use sequencer::delta_glyph::{
+    DeltaGlyphCohort, ParamGroup, ParamKind as GlyphParamKind, ParamSchema, ParamTaper,
 };
+use sequencer::effects::{ParamKind, ParamScaling};
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
-use std::sync::Arc;
 
 #[derive(Default)]
 pub(crate) struct SoundPaletteFrameState {
@@ -33,22 +31,11 @@ pub(crate) struct SoundPaletteFrameState {
     glyphs: GlyphFrames,
 }
 
-/// Per-frame state for the sound-glyph feed (sound-glyph spec P2): the host
-/// resolves each palette entry's plant geometry once and publishes it as an
-/// eseqlisp `SoundGlyphFrame` keyed `sound-glyph:track:{t}:patch:{id}`; the
-/// `sound-glyph` widget reads the frame by that key and stays dumb. P3 will
-/// extend the published frame with per-branch divergence tints computed
-/// here (host side), never in the widget.
+/// Per-frame cache for cohort-relative glyph frames. The fingerprint includes
+/// the whole ordered cohort and reference patch, because either can change
+/// every tile's normalized deviation vector.
 #[derive(Default)]
 struct GlyphFrames {
-    /// Skeletons cached per instrument identity (engine name, or
-    /// `builtin:<descriptor name>` for tracks without lisp source). A
-    /// re-saved instrument goes stale until the app restarts — acceptable
-    /// for P2; topology edits are rare mid-session.
-    skeletons: HashMap<String, Arc<ExtractedSkeleton>>,
-    /// key → fingerprint of the (skeleton, defaults) last published, so an
-    /// unchanged sound never republishes (publish bumps the global widget
-    /// state generation and would otherwise repaint every frame).
     published: HashMap<String, u64>,
     revision: u64,
 }
@@ -57,116 +44,209 @@ fn glyph_key(track: usize, patch: u64) -> String {
     format!("sound-glyph:track:{track}:patch:{patch}")
 }
 
-/// Resolve + publish glyph frames for the open palette's entries. Runs every
-/// sync frame while open (like the entries build itself); the fingerprint
-/// gate makes the steady-state cost a hash per entry.
-fn sync_glyph_frames(
-    app: &app::App,
-    track: usize,
-    entries: &[PaletteEntry],
-    glyphs: &mut GlyphFrames,
-) {
+/// Group a parameter for the delta glyph's localization channel.
+///
+/// Authored `ui_metadata.group` wins, but no instrument in the repo sets it yet, so
+/// the fallback matters more than the primary path. It keys off the param name's
+/// **leading snake_case token** rather than a substring search over the whole name:
+/// substring matching classifies `opa_level_db` as Mix (it contains "level") when it
+/// is plainly operator A, and one misfiled parameter miscolors a whole lobe.
+fn glyph_group(raw: Option<&str>, param_name: &str) -> ParamGroup {
+    if let Some(group) = raw {
+        return named_group(&group.trim_start_matches(':').to_ascii_lowercase());
+    }
+    let name = param_name.to_ascii_lowercase();
+    let token = name.split(['_', '.', ' ']).next().unwrap_or(&name);
+    named_group(token)
+}
+
+fn named_group(token: &str) -> ParamGroup {
+    // `opa`/`op1`-style operator prefixes are oscillators, not "other".
+    let operator = token.starts_with("op") && token.len() <= 4;
+    if operator || matches!(token, "osc" | "voice" | "source" | "carrier" | "tone" | "wave") {
+        ParamGroup::Osc
+    } else if matches!(token, "filter" | "filt" | "vcf" | "lpf" | "hpf" | "svf" | "cutoff") {
+        ParamGroup::Filter
+    } else if token.ends_with("env") || matches!(token, "env" | "eg" | "adsr" | "amp" | "attack" | "decay") {
+        ParamGroup::Env
+    } else if matches!(token, "lfo" | "mod" | "modulation" | "macro") {
+        ParamGroup::Mod
+    } else if matches!(token, "fx" | "effect" | "delay" | "reverb" | "shaper" | "drive" | "dist" | "chorus") {
+        ParamGroup::Fx
+    } else if matches!(token, "mix" | "out" | "output" | "master" | "level" | "gain" | "pan" | "volume") {
+        ParamGroup::Mix
+    } else {
+        ParamGroup::Other(token.to_string())
+    }
+}
+
+fn glyph_schema_for_descriptor(
+    descriptor: &sequencer::effects::EffectDescriptor,
+    id_prefix: &str,
+    order_offset: usize,
+    forced_group: Option<ParamGroup>,
+) -> Vec<ParamSchema> {
+    descriptor.params.iter().enumerate().map(|(order, param)| {
+        let metadata = param.ui_metadata.as_ref();
+        let modulation_plumbing = param.name.starts_with("__dgen_mod_active__")
+            || (param.name.starts_with("mod ") && param.name.contains(" slot ") && param.name.ends_with(" amt"));
+        let hidden = modulation_plumbing || metadata.is_some_and(|metadata| {
+            metadata.tags.iter().any(|tag| matches!(tag.as_str(), "hidden" | "ui" | "non-audio"))
+        });
+        let (kind, taper) = match &param.kind {
+            ParamKind::Continuous { unit } => {
+                let inferred_log = unit.as_deref().is_some_and(|unit| {
+                    matches!(unit.to_ascii_lowercase().as_str(), "hz" | "khz" | "ms" | "s")
+                }) && param.min > 0.0 && param.max / param.min >= 50.0;
+                (
+                    GlyphParamKind::Continuous,
+                    match param.scaling {
+                        ParamScaling::Exponential => ParamTaper::Exponential(2.0),
+                        ParamScaling::Linear if inferred_log => ParamTaper::Log,
+                        ParamScaling::Linear => ParamTaper::Linear,
+                    },
+                )
+            }
+            ParamKind::Boolean => (GlyphParamKind::Boolean, ParamTaper::Stepped(2)),
+            ParamKind::Enum { labels } => (GlyphParamKind::Discrete, ParamTaper::Stepped(labels.len().max(2) as u32)),
+        };
+        ParamSchema {
+            id: format!("{id_prefix}{}", param.name),
+            kind,
+            range: (param.min, param.max),
+            taper,
+            group: forced_group.clone().unwrap_or_else(|| {
+                glyph_group(metadata.and_then(|metadata| metadata.group.as_deref()), &param.name)
+            }),
+            order: order_offset + order,
+            link: metadata.and_then(|metadata| {
+                metadata.env.as_ref().map(|env| format!("env:{env}"))
+                    .or_else(|| metadata.role.as_ref().map(|role| {
+                        format!("role:{}:{role}", metadata.group.as_deref().unwrap_or("other"))
+                    }))
+            }),
+            visible: !hidden,
+            audio: !hidden,
+            default: param.default,
+            weight: 1.0,
+        }
+    }).collect()
+}
+
+fn patch_glyph_values(
+    patch: &sequencer::sequencer::Patch,
+    instrument: &sequencer::effects::EffectDescriptor,
+) -> Vec<f32> {
+    instrument.params.iter().enumerate().map(|(index, param)| {
+        patch.instrument_slot.defaults.get(index).copied().unwrap_or(param.default)
+    }).collect()
+}
+
+/// Resolve cohort statistics once and publish every palette tile from the
+/// same reference/cohort snapshot.
+fn sync_glyph_frames(app: &app::App, track: usize, entries: &[PaletteEntry], glyphs: &mut GlyphFrames) {
     let fallback_descriptor;
     let descriptor = match app.graph.instrument_descriptors.get(track) {
-        Some(desc) => desc,
+        Some(descriptor) => descriptor,
         None => {
             fallback_descriptor = sequencer::effects::EffectDescriptor::builtin_sampler();
             &fallback_descriptor
         }
     };
-
-    // Skeleton per instrument identity: authored source for custom
-    // instruments, stock (descriptor param groups) otherwise.
-    let custom_name = super::project_state::current_custom_instrument_name(app, track);
-    let identity = match &custom_name {
-        Some(name) => name.clone(),
-        None => format!("builtin:{}", descriptor.name),
-    };
-    let extracted = match glyphs.skeletons.get(&identity) {
-        Some(cached) => Arc::clone(cached),
-        None => {
-            let extracted = custom_name
-                .as_deref()
-                .and_then(|name| sequencer::lisp_host::load_instrument_source(name).ok())
-                .map(|source| extract_skeleton(&source))
-                .unwrap_or_else(|| stock_skeleton(descriptor));
-            let extracted = Arc::new(extracted);
-            glyphs
-                .skeletons
-                .insert(identity.clone(), Arc::clone(&extracted));
-            extracted
-        }
-    };
-
-    let mut active: HashSet<String> = HashSet::new();
+    let schema = glyph_schema_for_descriptor(descriptor, "instrument:", 0, None);
+    let track_instrument_type = app.graph.track_instrument_types.get(track);
+    let mut active = HashSet::new();
+    let mut pending = Vec::new();
     app.state.with_project_scenes(|scenes| {
-        let Some(pool) = scenes.track_pools.get(track) else {
-            return;
+        let Some(pool) = scenes.track_pools.get(track) else { return };
+        let compatible = |patch: &sequencer::sequencer::Patch| {
+            patch.instrument_slot.defaults.len() == descriptor.params.len()
+                && track_instrument_type.is_none_or(|instrument_type| &patch.instrument_type == instrument_type)
         };
+        let cohort_entries = entries.iter().filter_map(|entry| {
+            let patch = pool.sounds.patches.get(&entry.patch)?;
+            compatible(patch).then(|| (entry.patch, patch_glyph_values(patch, descriptor)))
+        }).collect::<Vec<_>>();
+        let cohort = cohort_entries.iter().map(|(_, values)| values.clone()).collect::<Vec<_>>();
+        // Anchor mode (spec §7): the reference is the FIRST patch in palette order,
+        // not the selection. Diffing against the selection made every tile change
+        // shape on every click, which is disorienting exactly while scanning — and
+        // it forced a full cohort re-stat on each selection change.
+        let anchor_patch = cohort_entries.first().map(|(patch, _)| *patch);
+        let reference = cohort.first().cloned().unwrap_or_default();
+        let cohort_model = DeltaGlyphCohort::new(&schema, &cohort, &reference);
+
+        let mut cohort_hasher = DefaultHasher::new();
+        for descriptor in std::iter::once(descriptor) {
+            descriptor.name.hash(&mut cohort_hasher);
+            for param in &descriptor.params {
+                param.name.hash(&mut cohort_hasher);
+                param.min.to_bits().hash(&mut cohort_hasher);
+                param.max.to_bits().hash(&mut cohort_hasher);
+                param.default.to_bits().hash(&mut cohort_hasher);
+                std::mem::discriminant(&param.kind).hash(&mut cohort_hasher);
+                std::mem::discriminant(&param.scaling).hash(&mut cohort_hasher);
+                if let Some(metadata) = &param.ui_metadata {
+                    metadata.group.hash(&mut cohort_hasher);
+                    metadata.env.hash(&mut cohort_hasher);
+                    metadata.role.hash(&mut cohort_hasher);
+                    metadata.tags.hash(&mut cohort_hasher);
+                }
+            }
+        }
+        for (patch, values) in &cohort_entries {
+            patch.hash(&mut cohort_hasher);
+            for value in values { value.to_bits().hash(&mut cohort_hasher); }
+        }
+        // The anchor is cohort_entries[0], already hashed above, so nothing extra
+        // is needed here — and notably the selection is NOT part of the key.
+        let cohort_fingerprint = cohort_hasher.finish();
+
         for entry in entries {
-            let Some(patch) = pool.sounds.patches.get(&entry.patch) else {
-                continue;
-            };
+            let Some(patch) = pool.sounds.patches.get(&entry.patch) else { continue };
             let key = glyph_key(track, entry.patch.0);
-
-            let mut hasher = DefaultHasher::new();
-            identity.hash(&mut hasher);
-            for value in &patch.instrument_slot.defaults {
-                value.to_bits().hash(&mut hasher);
-            }
-            let fingerprint = hasher.finish();
             active.insert(key.clone());
-            if glyphs.published.get(&key) == Some(&fingerprint) {
-                continue;
-            }
+            let values = patch_glyph_values(patch, descriptor);
+            let is_compatible = compatible(patch);
+            let is_anchor = anchor_patch == Some(entry.patch);
+            let mut hasher = DefaultHasher::new();
+            cohort_fingerprint.hash(&mut hasher);
+            entry.patch.hash(&mut hasher);
+            is_anchor.hash(&mut hasher);
+            is_compatible.hash(&mut hasher);
+            for value in &values { value.to_bits().hash(&mut hasher); }
+            let fingerprint = hasher.finish();
+            if glyphs.published.get(&key) == Some(&fingerprint) { continue; }
 
-            // Normalize the patch's authoring values to 0..1 via the
-            // descriptor's min/max; descriptor params are index-aligned
-            // with the slot defaults vector.
-            let mut values: BTreeMap<String, f32> = BTreeMap::new();
-            for (idx, param) in descriptor.params.iter().enumerate() {
-                let raw = patch
-                    .instrument_slot
-                    .defaults
-                    .get(idx)
-                    .copied()
-                    .unwrap_or(param.default);
-                let range = param.max - param.min;
-                let norm = if range.abs() > f32::EPSILON {
-                    ((raw - param.min) / range).clamp(0.0, 1.0)
-                } else {
-                    0.5
-                };
-                values.insert(param.name.clone(), norm);
-            }
-
-            let geometry = resolve_geometry(&extracted, &values);
+            // An incompatible patch is normalized against itself, so it renders as
+            // the bare grid plus the incompatible ring; it is also excluded from the
+            // cohort statistics so it cannot poison anyone else's scale.
+            let delta = if is_compatible {
+                cohort_model.build(&values, is_anchor)
+            } else {
+                cohort_model.build(&reference, false)
+            };
             glyphs.revision = glyphs.revision.wrapping_add(1);
-            publish_sound_glyph_frame(
-                key.clone(),
-                SoundGlyphFrame {
-                    revision: glyphs.revision,
-                    strokes: geometry
-                        .strokes
-                        .into_iter()
-                        .map(|stroke| SoundGlyphStroke {
-                            points: stroke.points,
-                            width: stroke.width,
-                        })
-                        .collect(),
-                    marks: geometry
-                        .marks
-                        .into_iter()
-                        .map(|mark| SoundGlyphMark {
-                            pos: mark.pos,
-                            radius: mark.radius,
-                        })
-                        .collect(),
-                },
-            );
+            pending.push((key.clone(), SoundGlyphFrame {
+                revision: glyphs.revision,
+                cols: delta.cols,
+                rows: delta.rows,
+                substrate: delta.substrate,
+                pieces: delta.pieces.into_iter().map(|piece| SoundGlyphPiece {
+                    slot: piece.slot,
+                    piece: piece.piece,
+                    hue: piece.hue,
+                    magnitude: piece.magnitude,
+                    mirror: piece.mirror,
+                    negative: piece.negative,
+                }).collect(),
+                anchor: delta.anchor,
+                incompatible: !is_compatible,
+            }));
             glyphs.published.insert(key, fingerprint);
         }
     });
+    publish_sound_glyph_frames(pending);
     retain_sound_glyph_frames(&active);
     glyphs.published.retain(|key, _| active.contains(key));
 }

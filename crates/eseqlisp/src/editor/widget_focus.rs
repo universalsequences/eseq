@@ -337,7 +337,7 @@ impl Editor {
 
     /// Dispatch a key event to the focused widget's :on-focus-key callback.
     /// Returns true if the widget handled the key.
-    fn dispatch_focus_key(&mut self, key: KeyEvent) -> bool {
+    pub(super) fn dispatch_focus_key(&mut self, key: KeyEvent) -> bool {
         let Some(focused_id) = self.active_leaf().focused_widget_id else {
             return false;
         };

@@ -76,3 +76,4 @@ pub mod sequencer;
 pub mod sound_glyph;
 pub mod track_color;
 pub mod app;
+pub mod delta_glyph;

@@ -221,7 +221,7 @@
          ;; Stable screen-space size: resizing or opening an inspect source
          ;; pane must not stretch the palette. The modal clamps these bounds
          ;; to smaller windows while preserving its centered placement.
-         :width-px 960 :height-px 800
+         :width-px 1260 :height-px 1000
     (box :debug-name "sound-palette-panel"
       :width :fill :height :fill :bg :transparent
       (v-stack :width :fill :gap 0.22

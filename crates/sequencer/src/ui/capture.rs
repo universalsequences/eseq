@@ -627,89 +627,82 @@ fn apply_capture_macro_host_commands(
     Ok(applied)
 }
 
-/// Optional `(def capture-sound-glyphs (list (dict :key "..." :instrument
-/// "core/operator" :params (dict "filter_freq" 12000)) ...))` in a capture
-/// script: publish a sound-glyph frame per entry so fixtures can render the
-/// `sound-glyph` widget at arbitrary param settings without app plumbing
-/// (sound-glyph spec §6 P2 visual iteration). `:params` holds raw (declared
-/// unit) overrides; unlisted params sit at their `@default`.
+/// Optional standalone delta-glyph gallery feed. Entries sharing an
+/// instrument form a cohort; the first entry is its reference. Thin source
+/// metadata degrades exactly as the spec requires: linear taper, one group.
 fn publish_capture_sound_glyphs(editor: &mut Editor) -> Result<(), String> {
     use eseqlisp::vm::Value;
+    use sequencer::delta_glyph::{build_delta_glyph, ParamGroup, ParamKind, ParamSchema, ParamTaper};
 
-    let Ok(Some(Value::List(entries))) =
-        editor.runtime_mut().eval_str("capture-sound-glyphs")
-    else {
+    let Ok(Some(Value::List(entries))) = editor.runtime_mut().eval_str("capture-sound-glyphs") else {
         return Ok(());
     };
-    let get_string = |map: &std::collections::HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>,
-                      key: &str|
-     -> Option<String> {
+    let get_string = |map: &std::collections::HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>, key: &str| {
         map.get(key).and_then(|value| match &*value.borrow() {
-            Value::String(s) => Some(s.clone()),
+            Value::String(value) => Some(value.clone()),
             _ => None,
         })
     };
+    struct Captured { key: String, instrument: String, schema: Vec<ParamSchema>, values: Vec<f32> }
+    let mut captured = Vec::new();
     for entry in &entries {
         let entry = entry.borrow();
-        let Value::Map(map) = &*entry else {
-            return Err("capture-sound-glyphs expects dict entries".to_string());
-        };
+        let Value::Map(map) = &*entry else { return Err("capture-sound-glyphs expects dict entries".to_string()) };
         let key = get_string(map, "key").ok_or("capture-sound-glyphs entry missing :key")?;
-        let instrument = get_string(map, "instrument")
-            .ok_or("capture-sound-glyphs entry missing :instrument")?;
+        let instrument = get_string(map, "instrument").ok_or("capture-sound-glyphs entry missing :instrument")?;
         let source = sequencer::lisp_host::load_instrument_source(&instrument)
             .map_err(|error| format!("capture-sound-glyphs: load {instrument}: {error}"))?;
-        let extracted = sequencer::sound_glyph::extract_skeleton(&source);
         let specs = sequencer::sound_glyph::param_specs(&source);
-
-        let mut raw: std::collections::BTreeMap<String, f32> = specs
-            .iter()
-            .map(|(name, spec)| (name.clone(), spec.default))
-            .collect();
+        let mut schema = specs.iter().enumerate().map(|(order, (name, spec))| {
+            let lower = name.to_ascii_lowercase();
+            let group = if lower.contains("osc") || lower.contains("wave") || lower.contains("pitch") {
+                ParamGroup::Osc
+            } else if lower.contains("filter") || lower.contains("cutoff") || lower.contains("reson") {
+                ParamGroup::Filter
+            } else if lower.contains("env") || lower.contains("attack") || lower.contains("decay") || lower.contains("release") {
+                ParamGroup::Env
+            } else if lower.contains("mod") || lower.contains("lfo") {
+                ParamGroup::Mod
+            } else if lower.contains("delay") || lower.contains("reverb") || lower.contains("fx") {
+                ParamGroup::Fx
+            } else if lower.contains("level") || lower.contains("gain") || lower.contains("pan") || lower.contains("mix") {
+                ParamGroup::Mix
+            } else {
+                ParamGroup::Other("other".to_string())
+            };
+            ParamSchema {
+            id: name.clone(), kind: ParamKind::Continuous, range: (spec.min, spec.max),
+            taper: ParamTaper::Linear, group,
+            order, link: None, visible: true, audio: true, default: spec.default, weight: 1.0,
+        }}).collect::<Vec<_>>();
+        schema.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut values = schema.iter().map(|param| param.default).collect::<Vec<_>>();
         if let Some(params) = map.get("params") {
             if let Value::Map(params) = &*params.borrow() {
                 for (name, value) in params {
-                    if let Value::Number(number) = &*value.borrow() {
-                        raw.insert(name.clone(), *number as f32);
-                    }
+                    if let (Some(index), Value::Number(number)) = (
+                        schema.iter().position(|param| &param.id == name), &*value.borrow()
+                    ) { values[index] = *number as f32; }
                 }
             }
         }
-        let values: std::collections::BTreeMap<String, f32> = raw
-            .into_iter()
-            .map(|(name, value)| {
-                let norm = match specs.get(&name) {
-                    Some(spec) if (spec.max - spec.min).abs() > f32::EPSILON => {
-                        ((value - spec.min) / (spec.max - spec.min)).clamp(0.0, 1.0)
-                    }
-                    _ => 0.5,
-                };
-                (name, norm)
-            })
-            .collect();
-        let geometry = sequencer::sound_glyph::resolve_geometry(&extracted, &values);
-        eseqlisp::sound_glyph_data::publish_sound_glyph_frame(
-            key,
-            eseqlisp::sound_glyph_data::SoundGlyphFrame {
-                revision: 1,
-                strokes: geometry
-                    .strokes
-                    .into_iter()
-                    .map(|stroke| eseqlisp::sound_glyph_data::SoundGlyphStroke {
-                        points: stroke.points,
-                        width: stroke.width,
-                    })
-                    .collect(),
-                marks: geometry
-                    .marks
-                    .into_iter()
-                    .map(|mark| eseqlisp::sound_glyph_data::SoundGlyphMark {
-                        pos: mark.pos,
-                        radius: mark.radius,
-                    })
-                    .collect(),
-            },
-        );
+        captured.push(Captured { key, instrument, schema, values });
+    }
+    for item in &captured {
+        let cohort = captured.iter().filter(|other| other.instrument == item.instrument)
+            .map(|other| other.values.clone()).collect::<Vec<_>>();
+        let reference = cohort.first().cloned().unwrap_or_default();
+        let delta = build_delta_glyph(&item.schema, &item.values, &reference, &cohort, item.values == reference);
+        eseqlisp::sound_glyph_data::publish_sound_glyph_frame(item.key.clone(), eseqlisp::sound_glyph_data::SoundGlyphFrame {
+            revision: 1, cols: delta.cols, rows: delta.rows,
+            substrate: delta.substrate,
+            pieces: delta.pieces.into_iter().map(|piece| eseqlisp::sound_glyph_data::SoundGlyphPiece {
+                slot: piece.slot, piece: piece.piece, hue: piece.hue,
+                magnitude: piece.magnitude, mirror: piece.mirror, negative: piece.negative,
+            }).collect(),
+            anchor: delta.anchor,
+            incompatible: false,
+        });
     }
     Ok(())
 }
