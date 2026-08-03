@@ -101,10 +101,10 @@
     (if (= source "")
       (box :bg :transparent)
       (box :key (str "sound-palette-source-" (get entry :patch-id))
-        :background-color (if current (rgba 0 0 0 0.16) (rgba 1 1 1 0.07))
         :corner-radius 4
         :padding 0.12
-        (label (substring source 0 16)
+        (label (substring source 0 22)
+          :bg-color :transparent
           :font-size 7.5 :color (if current :black :dim) :bg :transparent)))))
 
 ;; Git-diff-style summary vs the current sound (17.6 amendment): "+n" params
@@ -134,7 +134,7 @@
       (current (get entry :current)))
     (box :key (str "sound-palette-entry-" (get entry :patch-id))
       :width :fill
-      :height 8.8
+      :height 6.8
       :padding 0.35
       :on-click |x y r| (sound-palette-apply entry)
       :corner-radius 12
@@ -170,6 +170,7 @@
         (let ((refs (get entry :referents-short)))
           (label (substring (if (= refs nil) (get entry :referents) refs) 0 16)
             :font-size 7 :color (if current :black :dim) :bg :transparent))
+        (box :height 0.1)
         (box :width :fill :height 0.15
           :corner-radius 2
           :background-color (if base :transparent c)
@@ -269,6 +270,6 @@
             :min-item-width 10 :min-columns 3 :max-columns 6
             ;; Explicit row height: without it the grid falls back to
             ;; slot-width * row-aspect and cells balloon to near-square.
-            :row-height 9.3
+            :row-height 8.0
             (each (sound-palette-entries) |entry idx|
               (sound-palette-entry-row entry))))))))
