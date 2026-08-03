@@ -386,6 +386,37 @@ from the latch atomics in `sync_song_state`: `SEQ.song-track-latched`
 (per-track bool list) and `SEQ.song-scene-latched`. Provisional
 (pending-capture) items never dim — they ARE what is being recorded.
 
+## 10.4 A latched lane owns its sound (2026-08-03, user-reported bug)
+
+Symptom: with takes (each carrying its own Sound) in the timeline and a
+lane overridden by a looping clip, the clip's notes flipped to the TAKE's
+timbre whenever the playhead crossed a take region. The clip must own its
+own sound; an overridden arrangement is never the sound authority for the
+lane.
+
+Root cause: the timeline clip selection (takes spec 16.3 rule 1) won the
+sound binding even on a latched lane — `select_committed_take` leaves the
+just-recorded take bound, so this is the normal post-recording state. The
+binding sync then BORROWED the take's device state into the live mirror
+(`borrow_track_device_state`), which is safe display-plumbing for a
+non-latched lane (the scheduler plays those from prebuilt row snapshots)
+but not for a latched one: the lookahead schedules latched lanes from the
+PUBLISHED live snapshot, so the borrowed take devices became the lane's
+per-note sound the moment anything republished the scheduler snapshot.
+The 16.7 "display + edit only" monitor gate only suppresses direct engine
+pushes; it cannot make a mirror borrow silent on a lane that schedules
+from the mirror.
+
+Fix (`selected_bound_source`, app/sound_binding.rs): the selection goes
+DORMANT for a lane that is latched while song playback is sounding — the
+same dormancy the arrangement view's visibility already uses. While the
+override holds, the lane's audible sound, device panel, and edit target
+are all the performer's clip (rule 3); the selection re-binds when the
+latch clears or the transport stops (stopped selections stay audible for
+sound design, 16.2). Tests:
+`a_latched_lane_keeps_the_overriding_clips_sound_across_take_rows`,
+`a_selected_take_does_not_resound_a_latched_lane` (sound_binding.rs).
+
 ## 11. Non-goals
 
 - No change to the views themselves — the session grid (scene step

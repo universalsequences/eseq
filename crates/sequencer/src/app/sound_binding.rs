@@ -143,6 +143,21 @@ impl App {
         if !self.arrangement_view_visible {
             return None;
         }
+        // Dormant on a latched lane while the song sounds (takes spec 10):
+        // the scheduler plays a latched lane from the LIVE mirror (the
+        // lookahead merges base-snapshot tracks for latched lanes), so a
+        // selection borrow here is not display-only — it would audibly stamp
+        // the selected take's devices onto the performer's clip the moment
+        // the mirror is published. While the override holds, the lane's
+        // sound, panel, and edit target are all the performer's clip; the
+        // selection re-binds when the latch clears or the transport stops.
+        if self.song_playback_authority_active()
+            && self.state.is_playing()
+            && track < 64
+            && self.state.song_manual_latch_mask() >> track & 1 == 1
+        {
+            return None;
+        }
         let selection = self.song_clip_selection?;
         if selection.track != track {
             return None;
@@ -1324,6 +1339,139 @@ pub(crate) mod tests {
             app.state.pattern.instrument_slots[0].defaults.get(0),
             0.125,
             "the live mirror carries the selected clip's devices"
+        );
+    }
+
+    /// A latched lane's sound belongs to the performer's clip, not the
+    /// arrangement: when the playhead crosses a take region on an overridden
+    /// track, the take's sound must NOT be pushed onto the lane — the
+    /// overriding clip owns the sound until Back to Arrangement.
+    #[test]
+    fn a_latched_lane_keeps_the_overriding_clips_sound_across_take_rows() {
+        let (mut app, _take, scene_pattern, chunks) = app_with_take();
+        // Give the take a sound of its own so a leak is observable.
+        app.state.with_scenes_mut(|scenes| {
+            for chunk in &chunks {
+                assert!(scenes.track_pools[0].edit(*chunk, |data| {
+                    data.instrument_slot.defaults[0] = 0.75;
+                }));
+            }
+        });
+        let scene_value = instrument_default(&app, scene_pattern);
+        assert_ne!(scene_value, 0.75);
+
+        app.song_transport_play(false).expect("song playback starts");
+        app.sync_track_sound_bindings();
+        assert_eq!(
+            app.state.pattern.instrument_slots[0].defaults.get(0),
+            0.75,
+            "row 0 audibly plays the take"
+        );
+
+        // The performer overrides the lane: a manual launch always latches.
+        app.apply_manual_pattern_launch(&crate::quantized_launch::PatternLaunchTarget::Scene {
+            scene: 0,
+        })
+        .expect("manual launch");
+        assert_eq!(app.state.song_manual_latch_mask() & 1, 1);
+        app.sync_track_sound_bindings();
+        assert!(
+            app.track_sound_binding(0).is_scene(),
+            "a latched lane binds its own clip"
+        );
+        assert_eq!(
+            app.state.pattern.instrument_slots[0].defaults.get(0),
+            scene_value,
+            "the override's clip owns the audible sound"
+        );
+
+        // The playhead re-enters the take's row while the latch holds (loop
+        // wrap): the row mirror must leave the latched lane's sound alone.
+        let row_id = app.active_runtime_song.as_ref().expect("runtime song").rows[0].id;
+        app.mirror_song_row_applied(&crate::sequencer::AudibleSongRowApplied {
+            row_id,
+            row_ordinal: 0,
+            effective_beat: 0.0,
+            effective_sample: 0,
+            wrapped: true,
+        })
+        .expect("row mirror");
+        assert!(app.track_sound_binding(0).is_scene());
+        assert_eq!(
+            app.state.pattern.instrument_slots[0].defaults.get(0),
+            scene_value,
+            "crossing a take region must not steal the latched lane's sound"
+        );
+        app.song_transport_stop().expect("stop succeeds");
+    }
+
+    /// Same guarantee with a take clip SELECTED in the timeline (the state
+    /// right after recording takes — `select_committed_take` leaves the take
+    /// bound): overriding the lane must not let the selection's device
+    /// borrow become the lane's audible sound. The scheduler schedules a
+    /// latched lane from the PUBLISHED live snapshot, so whatever device
+    /// state sits in the mirror at publish time IS the per-note sound.
+    #[test]
+    fn a_selected_take_does_not_resound_a_latched_lane() {
+        let (mut app, take, scene_pattern, chunks) = app_with_take();
+        app.state.with_scenes_mut(|scenes| {
+            for chunk in &chunks {
+                assert!(scenes.track_pools[0].edit(*chunk, |data| {
+                    data.instrument_slot.defaults[0] = 0.75;
+                }));
+            }
+        });
+        let scene_value = instrument_default(&app, scene_pattern);
+        assert_ne!(scene_value, 0.75);
+
+        // The take clip is selected/bound — the post-recording state.
+        app.select_song_clip(0, ClipId(0)).expect("clip selects");
+        app.song_transport_play(false).expect("song playback starts");
+        app.sync_track_sound_bindings();
+
+        // The performer overrides the lane.
+        app.apply_manual_pattern_launch(&crate::quantized_launch::PatternLaunchTarget::Scene {
+            scene: 0,
+        })
+        .expect("manual launch");
+        assert_eq!(app.state.song_manual_latch_mask() & 1, 1);
+        app.sync_track_sound_bindings();
+
+        // The playhead crosses the take's row while the latch holds.
+        let row_id = app.active_runtime_song.as_ref().expect("runtime song").rows[0].id;
+        app.mirror_song_row_applied(&crate::sequencer::AudibleSongRowApplied {
+            row_id,
+            row_ordinal: 0,
+            effective_beat: 0.0,
+            effective_sample: 0,
+            wrapped: true,
+        })
+        .expect("row mirror");
+
+        assert_eq!(
+            app.state.pattern.instrument_slots[0].defaults.get(0),
+            scene_value,
+            "the latched lane's mirror must keep the clip's sound"
+        );
+        // The published snapshot is what the scheduler stamps per note on a
+        // latched lane — it must carry the clip's device state.
+        app.state.publish_scheduler_snapshot();
+        let published = app.state.latest_scheduler_snapshot();
+        assert_eq!(
+            published.tracks[0].instrument_slot.defaults.first().copied(),
+            Some(scene_value),
+            "the scheduler must stamp the clip's sound on the latched lane"
+        );
+        assert!(
+            app.track_sound_binding(0).is_scene(),
+            "while the override sounds, the lane's panel is the clip too"
+        );
+        app.song_transport_stop().expect("stop succeeds");
+        app.sync_track_sound_bindings();
+        assert_eq!(
+            app.track_sound_binding(0).source,
+            Some(BoundSource::Take(take)),
+            "stopping re-binds the dormant selection for tuning"
         );
     }
 
