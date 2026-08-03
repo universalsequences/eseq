@@ -178,10 +178,20 @@
           :border-color c)
         ;; Center glyph region (sound-glyph spec §4/P2): the plant rendered
         ;; from a host-published frame; the widget only knows the key.
+        ;; Every prop below is a live shader knob (defaults in TUNING_PROPS,
+        ;; widget_render/sound_glyph.rs). height-* shape the fake-3D relief the
+        ;; finite-difference normals read; rim/glow/interior are the neon edge
+        ;; light and SDF-depth fill shading.
         (box :background-color :bg :padding 0.25 :width :fill
           (sound-glyph :key (str "sound-palette-glyph-" (get entry :patch-id))
             :source (get entry :glyph-key)
-            :height 4.4)
+            :height 4.4
+            :height-amp 3.8 :height-pow 2 :height-in -0.005 :height-out 0.148
+            :normal-eps 0.001 :edge-soft 0.02
+            :white-damp 0.35 :diffuse 0.75 :spec-pow 10 :crease-scale 8
+            :rim-width 0.01 :rim-gain 0.38
+            :glow-width 0.12 :glow-gain 0.23295
+            :interior-shade 0.18 :interior-width 0.22)
           )
         ;; What the sound is (preset / sample name), below the glyph.
         (h-stack :gap 0.24 :align :center
@@ -200,10 +210,10 @@
 (def sound-palette-header-title ()
   (if (sound-palette-open?)
     (let ((inst (get SEQ.sound-palette :instrument-name)))
-      (str "SOUNDS - Track " (+ (sound-palette-track) 1)
+      (str "Sound Pool - Track " (+ (sound-palette-track) 1)
         (if (or (= inst nil) (= inst "")) "" (str " (" inst ")"))
         " - " (sound-palette-target-label)))
-    "SOUNDS"))
+    "Sound Pool"))
 
 (def sound-palette-header ()
   (box :width :fill :bg :transparent
@@ -212,6 +222,14 @@
         :key "sound-palette-header-label"
         :font-size 12 :color :dim :bg :transparent)
       (box :flex 1 :bg :transparent)
+      ;; Fork the current sound (takes spec 17.3): clone the target's
+      ;; Patch+Mix and repoint at the clones — the scene-strip "+" gesture.
+      (button "+"
+        :key "sound-palette-fork"
+        :font-size 12
+        :background-color :primary
+        :color :white
+        :on-click |x y r| (seq-sound-fork (sound-palette-track)))
       (button "x"
         :key "sound-palette-close"
         :font-size 12

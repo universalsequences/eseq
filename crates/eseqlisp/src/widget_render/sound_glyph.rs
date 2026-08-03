@@ -27,6 +27,52 @@ pub fn source_key(props: &HashMap<String, Value>) -> Option<String> {
     }
 }
 
+/// Shader tuning props: `(name, default)`, packed in order into the uniform
+/// words the glyph payload leaves free (words 10..17, then color_b/color_c).
+/// Defaults reproduce the shipped look exactly; every prop is a live knob for
+/// fine-tuning the fake-3D lighting, rim glow, and interior shading.
+#[cfg(target_os = "macos")]
+const TUNING_PROPS: [(&str, f32); 16] = [
+    // Height profile: the smoothstep window + power curve that turns the SDF
+    // into the height field the finite-difference normals sample.
+    ("height-amp", 1.8),
+    ("height-pow", 8.0),
+    ("height-in", -0.15),
+    ("height-out", 0.14817536),
+    // Finite-difference epsilon for the normal estimate (bigger = softer bevel).
+    ("normal-eps", 0.0001),
+    // Coverage anti-aliasing width at the silhouette.
+    ("edge-soft", 0.020),
+    // Achromatic specular weight and tinted diffuse weight (dg_material).
+    ("white-damp", 0.35),
+    ("diffuse", 0.85),
+    // Multiplier on both specular exponents; crease darkening multiplier.
+    ("spec-pow", 1.0),
+    ("crease-scale", 1.0),
+    // Neon rim just inside the silhouette (0 gain = off).
+    ("rim-width", 0.0),
+    ("rim-gain", 0.0),
+    // Soft halo outside the silhouette (0 gain = off).
+    ("glow-width", 0.0),
+    ("glow-gain", 0.0),
+    // SDF-depth interior shading: darkens toward the middle of a mass so the
+    // fill is not one static color (0 shade = off).
+    ("interior-shade", 0.0),
+    ("interior-width", 0.35),
+];
+
+#[cfg(target_os = "macos")]
+fn tuning(props: &HashMap<String, Value>) -> [f32; 16] {
+    let mut packed = [0.0f32; 16];
+    for (slot, (name, default)) in TUNING_PROPS.iter().enumerate() {
+        packed[slot] = match props.get(*name) {
+            Some(Value::Number(value)) => *value as f32,
+            _ => *default,
+        };
+    }
+    packed
+}
+
 impl WidgetDefinition for SoundGlyphWidget {
     fn names(&self) -> &'static [&'static str] { &["sound-glyph"] }
     fn size_affecting_props(&self) -> &'static [&'static str] { &["width", "height"] }
@@ -97,6 +143,13 @@ impl WidgetDefinition for SoundGlyphWidget {
             width: side / viewport.cell_w,
             height: side / viewport.cell_h,
         };
+        // Words 10..17 carry the first eight tuning props; the remaining eight
+        // ride color_b/color_c, which the payload never used.
+        let tune = tuning(&node.props);
+        packed[10..16].copy_from_slice(&tune[0..6]);
+        packed[16] = tune[6];
+        packed[17] = tune[7];
+
         let (ndc_min, ndc_max) = ndc_bounds(square, viewport);
         metal_widget_instance(widget_type, WidgetInstance {
             ndc_min,
@@ -111,8 +164,8 @@ impl WidgetDefinition for SoundGlyphWidget {
             // Substrate tint; accent hues live in the shader's DG_HUES palette so a
             // per-piece 3-bit index costs no uniform slots.
             color_a: [0.20, 0.34, 0.38, 1.0],
-            color_b: [0.0, 0.0, 0.0, 0.0],
-            color_c: [0.0, 0.0, 0.0, 0.0],
+            color_b: tune[8..12].try_into().unwrap(),
+            color_c: tune[12..16].try_into().unwrap(),
             color_d: [frame.cols as f32, frame.rows as f32, 0.0, frame.anchor as u8 as f32],
             corner_radius: frame.incompatible as u8 as f32,
             pixel_aspect: 1.0,
@@ -284,44 +337,85 @@ float dg_piece_field(float2 p, WidgetVaryings in, uint record) {
     return scene * fit;
 }
 
-float dg_height(float sdf, float fit) {
-    return 1.8 * pow(smoothstep(-0.15 * fit, 0.14817536 * fit, sdf), 8.0);
+// ── tuning uniforms ──
+// Live-tunable from lisp via widget props (see TUNING_PROPS on the Rust side).
+// Words 10..17 and color_b/color_c; every default reproduces the shipped look.
+float dg_tune(WidgetVaryings in, int word) { return dg_packed(in, word); }
+
+// The fake-3D height profile: a smoothstep window over the SDF raised to a
+// power. :height-in/:height-out move the window, :height-pow shapes the
+// shoulder, :height-amp scales the relief the normals read.
+float dg_height(float sdf, float fit, WidgetVaryings in) {
+    float lo = dg_tune(in, 12) * fit;
+    float hi = max(dg_tune(in, 13) * fit, lo + 1e-5);
+    return dg_tune(in, 10) * pow(smoothstep(lo, hi, sdf), max(dg_tune(in, 11), 0.01));
 }
 
 float3 dg_normal_substrate(float2 p, WidgetVaryings in) {
     float fit = dg_fit(in);
-    float e = 0.0001 * fit;
-    float x = dg_height(dg_substrate_field(p + float2(e, 0.0), in), fit)
-            - dg_height(dg_substrate_field(p - float2(e, 0.0), in), fit);
-    float y = dg_height(dg_substrate_field(p + float2(0.0, e), in), fit)
-            - dg_height(dg_substrate_field(p - float2(0.0, e), in), fit);
+    float e = max(dg_tune(in, 14), 1e-6) * fit;
+    float x = dg_height(dg_substrate_field(p + float2(e, 0.0), in), fit, in)
+            - dg_height(dg_substrate_field(p - float2(e, 0.0), in), fit, in);
+    float y = dg_height(dg_substrate_field(p + float2(0.0, e), in), fit, in)
+            - dg_height(dg_substrate_field(p - float2(0.0, e), in), fit, in);
     return normalize(float3(x, y, 2.0 * e));
 }
 
 float3 dg_normal_piece(float2 p, WidgetVaryings in, uint record) {
     float fit = dg_fit(in);
-    float e = 0.0001 * fit;
-    float x = dg_height(dg_piece_field(p + float2(e, 0.0), in, record), fit)
-            - dg_height(dg_piece_field(p - float2(e, 0.0), in, record), fit);
-    float y = dg_height(dg_piece_field(p + float2(0.0, e), in, record), fit)
-            - dg_height(dg_piece_field(p - float2(0.0, e), in, record), fit);
+    float e = max(dg_tune(in, 14), 1e-6) * fit;
+    float x = dg_height(dg_piece_field(p + float2(e, 0.0), in, record), fit, in)
+            - dg_height(dg_piece_field(p - float2(e, 0.0), in, record), fit, in);
+    float y = dg_height(dg_piece_field(p + float2(0.0, e), in, record), fit, in)
+            - dg_height(dg_piece_field(p - float2(0.0, e), in, record), fit, in);
     return normalize(float3(x, y, 2.0 * e));
 }
 
-float4 dg_material(float2 p, float3 n, float4 tint, bool crease) {
+float4 dg_material(float2 p, float3 n, float4 tint, bool crease, WidgetVaryings in) {
     float3 l1 = float3(-0.11, -0.8138, 0.3);
     float3 l2 = float3(-0.5238, 0.3, 1.4);
+    float specPow = max(in.color_b.x, 0.05);
     float3 viewer = float3(p, 1.0) - float3(-0.81891595, 1.39159394, 0.87441919);
-    float spec1 = pow(max(0.0, 0.99 * dot(n, normalize(l1 + viewer))), 24.0);
-    float spec2 = pow(max(0.0, 0.969 * dot(n, normalize(l2 + viewer))), 22.0);
-    float scale = crease ? 0.321513593 : 0.51513593;
+    float spec1 = pow(max(0.0, 0.99 * dot(n, normalize(l1 + viewer))), 24.0 * specPow);
+    float spec2 = pow(max(0.0, 0.969 * dot(n, normalize(l2 + viewer))), 22.0 * specPow);
+    float scale = crease ? 0.321513593 * max(in.color_b.y, 0.0) : 0.51513593;
     // The original adds this achromatically (a precedence artifact there — see
     // docs/sdf-blob-glyph-algorithm.md §6.4). Damped: at full strength it
     // desaturates every cell toward white, and hue is this glyph's group legend.
-    float white = 0.35 * (scale * spec1 + spec2 + 0.293913139 * dot(l1, n));
-    float4 color = float4(white) + 0.85 * dot(l2, n) * tint;
+    float white = dg_tune(in, 16) * (scale * spec1 + spec2 + 0.293913139 * dot(l1, n));
+    float4 color = float4(white) + dg_tune(in, 17) * dot(l2, n) * tint;
     color.rgb = clamp(color.rgb, 0.0, 1.0);
     color.a = tint.a;
+    return color;
+}
+
+// Composite one layer over the running color: interior shading inside the
+// surface, coverage AA at the silhouette, then the optional neon rim hugging
+// the inside edge and the optional emissive halo falling off outside it.
+float4 dg_compose(float4 color, float4 material, float sdf, float fit, float3 tint,
+                  WidgetVaryings in) {
+    float edge = max(dg_tune(in, 15), 0.0005) * fit;
+    float shade = clamp(in.color_c.z, 0.0, 1.0);
+    if (shade > 0.0) {
+        // SDF-depth shading: the fill darkens toward the middle of the mass, so
+        // it reads as lit volume rather than one static color.
+        float width = max(in.color_c.w, 0.01) * fit;
+        material.rgb *= 1.0 - shade * smoothstep(0.0, width, -sdf);
+    }
+    color = mix(color, material, 1.0 - smoothstep(0.0, edge, sdf));
+    float rimGain = in.color_b.w;
+    if (rimGain > 0.0) {
+        float band = max(in.color_b.z, 0.005) * fit;
+        float rim = rimGain * (1.0 - smoothstep(0.0, band, abs(sdf + 0.5 * band)));
+        color.rgb += rim * mix(tint, float3(1.0), 0.6);
+        color.a = max(color.a, min(rim, 1.0));
+    }
+    float glowGain = in.color_c.y;
+    if (glowGain > 0.0 && sdf > 0.0) {
+        float glow = glowGain * exp(-sdf / max(in.color_c.x * fit, 0.001));
+        color.rgb += glow * tint;
+        color.a = max(color.a, min(glow, 1.0));
+    }
     return color;
 }
 
@@ -331,10 +425,11 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) {
     float fit = dg_fit(in);
     float4 color = float4(0.0);
 
+    float edge = max(dg_tune(in, 15), 0.0005) * fit;
     float substrate = dg_substrate_field(p, in);
-    color = mix(color,
-                dg_material(p, dg_normal_substrate(p, in), in.color_a, false),
-                1.0 - smoothstep(0.0, 0.020 * fit, substrate));
+    color = dg_compose(color,
+                       dg_material(p, dg_normal_substrate(p, in), in.color_a, false, in),
+                       substrate, fit, in.color_a.rgb, in);
 
     // One layer per lit parameter, all anchored into the SHARED lattice so they
     // interpenetrate — the original's second tier of richness, which rev 2's
@@ -354,13 +449,14 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) {
                                            : float3(1.08, 1.00, 0.92);
         float4 tint = float4(clamp(hue * (0.5 + 0.5 * magnitude), 0.0, 1.0), 1.0);
 
-        color = mix(color, dg_material(p, n, tint, false),
-                    1.0 - smoothstep(0.0, 0.020 * fit, sdf));
+        color = dg_compose(color, dg_material(p, n, tint, false, in),
+                           sdf, fit, tint.rgb, in);
         float intersection = max(unionSoFar, sdf + 0.05 * fit);
-        color = mix(color, dg_material(p, n, tint, true),
-                    1.0 - smoothstep(0.0, 0.020 * fit, intersection + 0.001 * fit));
+        color = mix(color, dg_material(p, n, tint, true, in),
+                    1.0 - smoothstep(0.0, edge, intersection + 0.001 * fit));
         unionSoFar = min(unionSoFar, sdf);
     }
+    color.rgb = clamp(color.rgb, 0.0, 1.0);
 
     // The anchor tile carries no accents by definition; ring it so it reads as
     // the zero point rather than as an empty patch.

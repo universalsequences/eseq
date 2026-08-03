@@ -31,6 +31,50 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use crate::delta_glyph::IdentityBranch;
+
+/// Flatten a skeleton into the delta glyph's identity tier (delta-glyph spec
+/// §5.1a). Prefix clustering can collapse an instrument whose params share no
+/// prefixes into a single `global` branch — one slot renders as one giant
+/// disc — so thin skeletons expand into their collapsed def-chain children,
+/// which carry the AST's actual dataflow structure at low resolution.
+pub fn identity_branches(skeleton: &Skeleton) -> Vec<IdentityBranch> {
+    const THIN: usize = 6;
+    let direct = skeleton
+        .branches
+        .iter()
+        .map(|branch| IdentityBranch {
+            name: branch.cluster.clone(),
+            weight: branch.weight.max(1) as f32,
+        })
+        .collect::<Vec<_>>();
+    if direct.len() >= THIN {
+        return direct;
+    }
+    let expanded = skeleton
+        .branches
+        .iter()
+        .flat_map(|branch| {
+            if branch.children.is_empty() {
+                vec![IdentityBranch {
+                    name: branch.cluster.clone(),
+                    weight: branch.weight.max(1) as f32,
+                }]
+            } else {
+                branch
+                    .children
+                    .iter()
+                    .map(|child| IdentityBranch {
+                        name: format!("{}/{}", branch.cluster, child.cluster),
+                        weight: child.weight.max(1) as f32,
+                    })
+                    .collect()
+            }
+        })
+        .collect::<Vec<_>>();
+    if expanded.len() > direct.len() { expanded } else { direct }
+}
+
 /// Cache key for a skeleton: hash of the raw instrument source.
 pub fn source_hash(source: &str) -> u64 {
     let mut hasher = DefaultHasher::new();

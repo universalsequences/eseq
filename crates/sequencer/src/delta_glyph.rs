@@ -25,6 +25,10 @@ pub const DEV_GAMMA: f32 = 0.65;
 /// Ink cap: at most this many lit parameters, i.e. accent pieces, per glyph
 /// (spec §4.6). Each becomes its own shaded layer, so this also bounds shader cost.
 pub const MAX_LIT: usize = 5;
+/// Below this many live slots the lattice pads itself with identity-tier slots
+/// derived from the instrument's AST (spec §5.1a): an all-identical cohort must
+/// still render a characteristic mass, not a void.
+pub const MIN_IDENTITY_SLOTS: usize = 8;
 
 /// Lattice steps, shared with the renderer.
 pub const STEP_X: f32 = 0.3672;
@@ -246,6 +250,15 @@ pub struct DeltaGlyph {
     pub anchor: bool,
 }
 
+/// One branch cluster of the instrument's authored dgenlisp AST (or a stock
+/// skeleton for builtins): the identity tier's input. `weight` is the cluster's
+/// visual heft — params + defs owned — normalized inside the cohort model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IdentityBranch {
+    pub name: String,
+    pub weight: f32,
+}
+
 /// One lattice slot's plan: which schema parameters it draws, fixed for the cohort.
 #[derive(Clone, Debug)]
 struct SlotPlan {
@@ -253,6 +266,9 @@ struct SlotPlan {
     group: ParamGroup,
     aggregate: bool,
     link: Option<String>,
+    /// Identity-tier slot: normalized AST branch weight. Carries substrate mass
+    /// only — it has no members, no deviation, and never lights a piece.
+    identity: Option<f32>,
 }
 
 /// Cohort-level model: deviation scales, lattice layout, and accent colors, all
@@ -275,6 +291,21 @@ impl<'a> DeltaGlyphCohort<'a> {
     /// `cohort` is every compatible patch's value vector, in stable palette order.
     /// `reference` is the anchor (spec §7) — normally `cohort[0]`.
     pub fn new(schema: &'a [ParamSchema], cohort: &[Vec<f32>], reference: &[f32]) -> Self {
+        Self::new_with_identity(schema, cohort, reference, &[])
+    }
+
+    /// Like [`Self::new`], with an identity tier from the instrument's AST: when
+    /// the cohort's live parameters can't fill the lattice — in the limit, an
+    /// all-identical all-default cohort has *zero* — branch-cluster slots pad it
+    /// so the glyph degrades to the instrument's own low-resolution silhouette
+    /// instead of a void. Identity slots carry substrate only, so an identical
+    /// cohort still (correctly) draws no accent pieces.
+    pub fn new_with_identity(
+        schema: &'a [ParamSchema],
+        cohort: &[Vec<f32>],
+        reference: &[f32],
+        identity: &[IdentityBranch],
+    ) -> Self {
         let reference = reference.to_vec();
         let scales = schema
             .iter()
@@ -295,6 +326,7 @@ impl<'a> DeltaGlyphCohort<'a> {
                 group: param.group.clone(),
                 aggregate: false,
                 link: param.link.clone(),
+                identity: None,
             })
             .collect::<Vec<_>>();
         visible.sort_by(|left, right| {
@@ -306,14 +338,67 @@ impl<'a> DeltaGlyphCohort<'a> {
                 .then_with(|| a.order.cmp(&b.order))
                 .then_with(|| a.id.cmp(&b.id))
         });
-        let plans = aggregate_tail(visible);
+        let mut plans = aggregate_tail(visible);
+        // Identity tier (spec §5.1a). A cohort with no live parameters at all
+        // takes every branch (the pure-AST glyph); a merely thin one pads up to
+        // MIN_IDENTITY_SLOTS so tiny lattices don't render as one giant blob.
+        let pad = if plans.is_empty() {
+            identity.len().min(MAX_SLOTS)
+        } else {
+            MIN_IDENTITY_SLOTS.saturating_sub(plans.len()).min(identity.len())
+        };
+        if pad > 0 {
+            let heaviest =
+                identity.iter().map(|branch| branch.weight).fold(f32::EPSILON, f32::max);
+            let mut ranked = identity.iter().collect::<Vec<_>>();
+            ranked.sort_by(|a, b| {
+                b.weight
+                    .partial_cmp(&a.weight)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+            // Selection is by weight; PLACEMENT is by name hash. Substrate
+            // occupancy takes the highest-valued SUBSTRATE_FILL of the slots,
+            // and in weight order that is a contiguous lattice run — a
+            // featureless filled block (the §5.1 trap). Hash-scattering the
+            // slots turns the occupied set into an irregular, per-instrument
+            // silhouette while staying fully deterministic.
+            ranked.truncate(pad);
+            let scatter = |name: &str| {
+                name.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
+                    (hash ^ byte as u64).wrapping_mul(0x100000001b3)
+                })
+            };
+            ranked.sort_by_key(|branch| (scatter(&branch.name), branch.name.clone()));
+            // One shared group: assign_lattice inserts negative-space gaps at
+            // group boundaries, and per-branch groups would shed identity slots
+            // off the lattice's capacity.
+            plans.extend(ranked.into_iter().map(|branch| SlotPlan {
+                members: Vec::new(),
+                group: ParamGroup::Other("ast-identity".to_string()),
+                aggregate: false,
+                link: None,
+                // Weight-biased hash jitter: with many near-equal branches a
+                // pure weight rank ties, and ties resolve to a contiguous slot
+                // run. The jitter spreads occupancy while heavy branches still
+                // reliably win their slots.
+                identity: Some(
+                    (0.55 * (branch.weight / heaviest)
+                        + 0.45 * (scatter(&branch.name) % 1024) as f32 / 1023.0)
+                        .clamp(0.0, 1.0),
+                ),
+            }));
+        }
         let (cols, rows, layout) = assign_lattice(plans);
 
         // Hue is per group and resolved cohort-wide, so it is a legend rather than
         // decoration (spec §5.3).
+        // Identity slots never light a piece, so their synthetic groups must not
+        // shift the free-form hue positions of real parameter groups.
         let distinct = layout
             .iter()
             .flatten()
+            .filter(|plan| plan.identity.is_none())
             .map(|plan| plan.group.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
@@ -463,7 +548,12 @@ fn plan_deviation(
 }
 
 /// Mean absolute taper value over a slot's members — the substrate's input.
+/// Identity slots substitute their normalized AST branch weight, floored so a
+/// light branch that wins occupancy still renders at a visible radius.
 fn plan_absolute(schema: &[ParamSchema], plan: &SlotPlan, subject: &[f32]) -> f32 {
+    if let Some(weight) = plan.identity {
+        return 0.25 + 0.75 * weight;
+    }
     let sum: f32 = plan
         .members
         .iter()
@@ -602,6 +692,7 @@ fn aggregate_tail(mut plans: Vec<SlotPlan>) -> Vec<SlotPlan> {
                 group: group.clone(),
                 aggregate: true,
                 link: None,
+                identity: None,
             });
         }
     }
@@ -676,6 +767,68 @@ mod tests {
 
     fn magnitude(glyph: &DeltaGlyph, slot: usize) -> Option<u8> {
         glyph.pieces.iter().find(|piece| piece.slot == slot).map(|piece| piece.magnitude)
+    }
+
+    fn branches(weights: &[(&str, f32)]) -> Vec<IdentityBranch> {
+        weights
+            .iter()
+            .map(|(name, weight)| IdentityBranch { name: name.to_string(), weight: *weight })
+            .collect()
+    }
+
+    /// Spec §5.1a: an all-default, all-identical cohort has zero live parameters,
+    /// and previously rendered as a literal void. With an identity tier the glyph
+    /// degrades to the instrument's AST silhouette instead.
+    #[test]
+    fn identical_default_cohort_falls_back_to_ast_identity() {
+        let schema = vec![
+            param("cutoff", ParamKind::Continuous, ParamGroup::Filter),
+            param("res", ParamKind::Continuous, ParamGroup::Filter),
+        ];
+        let cohort = vec![vec![0.0, 0.0], vec![0.0, 0.0], vec![0.0, 0.0]];
+        let bare = DeltaGlyphCohort::new(&schema, &cohort, &cohort[0]);
+        assert_eq!(bare.assigned().iter().filter(|a| **a).count(), 0, "precondition: all dead");
+
+        let identity =
+            branches(&[("opa", 16.0), ("filter", 12.0), ("lfo", 10.0), ("env", 6.0)]);
+        let model = DeltaGlyphCohort::new_with_identity(&schema, &cohort, &cohort[0], &identity);
+        assert_eq!(model.assigned().iter().filter(|a| **a).count(), 4);
+        let glyph = model.build(&cohort[0], false);
+        assert!(glyph.substrate.iter().any(|level| *level > 0), "identity substrate draws");
+        assert!(glyph.pieces.is_empty(), "identity slots must never light accent pieces");
+        // Heavier branches occupy at larger radii, so the mass has texture.
+        let occupied = glyph.substrate.iter().filter(|level| **level > 0).count();
+        assert!(occupied >= 2, "SUBSTRATE_FILL over 4 slots occupies at least 2: {occupied}");
+    }
+
+    /// The identity tier pads a thin lattice, and its slots stay substrate-only
+    /// while real parameter slots still light pieces on top.
+    #[test]
+    fn identity_pads_thin_lattices_without_stealing_accents() {
+        let schema = vec![param("cutoff", ParamKind::Continuous, ParamGroup::Filter)];
+        let cohort = vec![vec![0.1], vec![0.9]];
+        let identity = branches(&[("osc", 10.0), ("filter", 8.0), ("fx", 4.0)]);
+        let model = DeltaGlyphCohort::new_with_identity(&schema, &cohort, &cohort[0], &identity);
+        // 1 live + 3 identity (< MIN_IDENTITY_SLOTS available).
+        assert_eq!(model.assigned().iter().filter(|a| **a).count(), 4);
+        let glyph = model.build(&cohort[1], false);
+        assert_eq!(glyph.pieces.len(), 1, "the live parameter still lights exactly one piece");
+        assert_eq!(glyph.pieces[0].slot, 0, "the live slot precedes identity padding");
+    }
+
+    /// A rich lattice must be untouched by the identity tier: same layout and
+    /// hues with or without branches supplied.
+    #[test]
+    fn identity_is_absent_when_the_lattice_is_rich() {
+        let schema = (0..10)
+            .map(|index| param(&format!("p{index}"), ParamKind::Continuous, ParamGroup::Osc))
+            .collect::<Vec<_>>();
+        let cohort = vec![vec![0.0; 10], vec![0.9; 10]];
+        let identity = branches(&[("osc", 10.0), ("filter", 8.0)]);
+        let bare = DeltaGlyphCohort::new(&schema, &cohort, &cohort[0]);
+        let with = DeltaGlyphCohort::new_with_identity(&schema, &cohort, &cohort[0], &identity);
+        assert_eq!(bare.assigned(), with.assigned());
+        assert_eq!(bare.build(&cohort[1], false), with.build(&cohort[1], false));
     }
 
     #[test]

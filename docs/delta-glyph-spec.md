@@ -572,6 +572,39 @@ without hashing or quantization pop.
 Unassigned lattice positions draw nothing. The lattice's extent is legible from the
 substrate itself.
 
+### 5.1a The identity tier — AST slots when the lattice starves **[rev 4]**
+
+§3.3's dead-parameter rule has a degenerate limit rev 3 shipped: a cohort where every
+patch sits at the instrument default drops *every* parameter, the lattice has zero
+slots, and the tile renders as a literal void. §8 called that "correct behaviour";
+on screen it reads as broken (drums/ultrasnare, five identical patches, five empty
+boxes).
+
+The fix pads the lattice from the instrument's **AST** — the P1 skeleton extraction
+(`sound_glyph::extract_skeleton`, stock skeletons for builtins) that the delta glyph
+had otherwise abandoned. When live slots number fewer than `MIN_IDENTITY_SLOTS = 8`
+(in the limit, zero — then every branch up to `MAX_SLOTS` is taken), branch clusters
+become **identity slots**: substrate-only, no members, no deviation, never a piece.
+An identical cohort therefore still draws no accents — correct — but each tile now
+carries the instrument's own low-resolution silhouette instead of nothing.
+
+Mechanics, each learned the hard way in one render pass:
+
+- **Thin skeletons expand into def-chain children.** Prefix clustering collapses an
+  instrument whose params share no prefixes (ultrasnare: 108 params, all `global`)
+  into one branch — one slot renders as one giant disc. Below 6 branches, each
+  branch is replaced by its collapsed def chains (`sound_glyph::identity_branches`),
+  which carry the dataflow structure at exactly the "really low resolution" wanted.
+- **Selection is by weight; occupancy needs hash jitter.** Substrate occupancy takes
+  the top `SUBSTRATE_FILL` by value, and with near-equal branch weights the ties
+  resolve to a contiguous slot run — the §5.1 featureless-block trap again. The
+  identity value is `0.55·(w/w_max) + 0.45·hash(name)`, and slots are also
+  hash-ordered on the lattice, so the mass is an irregular per-instrument polyomino,
+  fully deterministic.
+- **One shared group, excluded from hue resolution.** `assign_lattice` inserts gaps
+  at group boundaries (per-branch groups shed slots off capacity), and synthetic
+  groups must not shift real free-form groups' palette positions.
+
 ### 5.2 Layers 1..n — one per lit parameter
 
 Each lit parameter (§4.6, at most `MAX_LIT`) becomes **its own layer**: a contiguous
@@ -776,8 +809,10 @@ What is actually available, per §2.1, and what to do when it isn't:
 | `weight` | never | uniform weighting (§12) |
 
 Cohort of size 1, or all patches identical: every spread hits the floor, every deviation
-is 0, all glyphs are base-layer only. Correct behaviour — there is nothing to
-differentiate, and the glyph should say so rather than manufacture contrast.
+is 0, all glyphs are base-layer only — and when the dead-parameter rule empties the
+lattice entirely, the identity tier (§5.1a) substitutes the instrument's AST silhouette.
+There is still nothing to differentiate and the glyph still says so (every tile
+identical, no accents); it just says so with a shape instead of a void.
 
 ---
 
@@ -840,6 +875,19 @@ Piece record layout: `slot(5) | piece(4) | hue(3) | magnitude(3) | mirror(1) |
 negative(1) | present(1)`. The hue palette is a shader constant (`DG_HUES`,
 dual-maintained with `delta_glyph::GROUP_PALETTE`) rather than a uniform, which is what
 lets every piece carry its own group's hue instead of rev 2's two tint slots.
+
+**[rev 4] Tuning props.** The payload leaves words 10–17 plus `color_b`/`color_c`
+free; they now carry sixteen live shading knobs set as widget props on the lisp call
+site (`TUNING_PROPS` in `widget_render/sound_glyph.rs` is the authority for names and
+defaults, and every default reproduces the rev 3 look bit-for-bit). Groups: the
+fake-3D **height profile** (`:height-in/-out/-pow/-amp` — the smoothstep window over
+the SDF whose finite differences become the normals, `:normal-eps`), **lighting**
+(`:white-damp`, `:diffuse`, `:spec-pow`, `:crease-scale`, `:edge-soft`), the **neon
+rim** hugging the inside of each silhouette (`:rim-width/-gain`), the **outer halo**
+(`:glow-width/-gain`), and **SDF-depth interior shading** so fills read as lit volume
+rather than flat color (`:interior-shade/-width`). Rim, glow, and interior shading are
+per-layer (substrate and every piece), so overlapping pieces keep their own edge light
+through the crease pass.
 
 Cost: one substrate field plus up to five piece fields, each with a 4-tap central
 difference for its normal. That is ~5× rev 2's shader work and is the reason `MAX_LIT`

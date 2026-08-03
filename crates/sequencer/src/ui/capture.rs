@@ -632,7 +632,9 @@ fn apply_capture_macro_host_commands(
 /// metadata degrades exactly as the spec requires: linear taper, one group.
 fn publish_capture_sound_glyphs(editor: &mut Editor) -> Result<(), String> {
     use eseqlisp::vm::Value;
-    use sequencer::delta_glyph::{build_delta_glyph, ParamGroup, ParamKind, ParamSchema, ParamTaper};
+    use sequencer::delta_glyph::{
+        DeltaGlyphCohort, IdentityBranch, ParamGroup, ParamKind, ParamSchema, ParamTaper,
+    };
 
     let Ok(Some(Value::List(entries))) = editor.runtime_mut().eval_str("capture-sound-glyphs") else {
         return Ok(());
@@ -643,7 +645,13 @@ fn publish_capture_sound_glyphs(editor: &mut Editor) -> Result<(), String> {
             _ => None,
         })
     };
-    struct Captured { key: String, instrument: String, schema: Vec<ParamSchema>, values: Vec<f32> }
+    struct Captured {
+        key: String,
+        instrument: String,
+        schema: Vec<ParamSchema>,
+        values: Vec<f32>,
+        identity: Vec<IdentityBranch>,
+    }
     let mut captured = Vec::new();
     for entry in &entries {
         let entry = entry.borrow();
@@ -686,13 +694,20 @@ fn publish_capture_sound_glyphs(editor: &mut Editor) -> Result<(), String> {
                 }
             }
         }
-        captured.push(Captured { key, instrument, schema, values });
+        // Identity tier (spec §5.1a): an all-identical fixture cohort still
+        // renders the instrument's AST silhouette instead of a void.
+        let identity = sequencer::sound_glyph::identity_branches(
+            &sequencer::sound_glyph::extract_skeleton(&source).skeleton,
+        );
+        captured.push(Captured { key, instrument, schema, values, identity });
     }
     for item in &captured {
         let cohort = captured.iter().filter(|other| other.instrument == item.instrument)
             .map(|other| other.values.clone()).collect::<Vec<_>>();
         let reference = cohort.first().cloned().unwrap_or_default();
-        let delta = build_delta_glyph(&item.schema, &item.values, &reference, &cohort, item.values == reference);
+        let delta =
+            DeltaGlyphCohort::new_with_identity(&item.schema, &cohort, &reference, &item.identity)
+                .build(&item.values, item.values == reference);
         eseqlisp::sound_glyph_data::publish_sound_glyph_frame(item.key.clone(), eseqlisp::sound_glyph_data::SoundGlyphFrame {
             revision: 1, cols: delta.cols, rows: delta.rows,
             substrate: delta.substrate,

@@ -11,7 +11,8 @@ use eseqlisp::sound_glyph_data::{
     publish_sound_glyph_frames, retain_sound_glyph_frames, SoundGlyphFrame, SoundGlyphPiece,
 };
 use sequencer::delta_glyph::{
-    DeltaGlyphCohort, ParamGroup, ParamKind as GlyphParamKind, ParamSchema, ParamTaper,
+    DeltaGlyphCohort, IdentityBranch, ParamGroup, ParamKind as GlyphParamKind, ParamSchema,
+    ParamTaper,
 };
 use sequencer::effects::{ParamKind, ParamScaling};
 use std::cell::RefCell;
@@ -38,6 +39,35 @@ pub(crate) struct SoundPaletteFrameState {
 struct GlyphFrames {
     published: HashMap<String, u64>,
     revision: u64,
+    /// AST identity branches for the delta glyph's identity tier (spec §5.1a),
+    /// cached because resolving them reads and parses the instrument's dsp.lisp.
+    identity: Option<(String, Vec<IdentityBranch>)>,
+}
+
+/// The identity tier's input: branch clusters of the instrument's authored AST,
+/// via `extract_skeleton` for custom instruments and the stock skeleton for
+/// builtins/samplers. Cached on the instrument name + descriptor param count so
+/// an instrument reload with a changed surface refreshes it.
+fn identity_branches<'a>(
+    app: &app::App,
+    track: usize,
+    descriptor: &sequencer::effects::EffectDescriptor,
+    glyphs: &'a mut GlyphFrames,
+) -> &'a [IdentityBranch] {
+    let custom = current_custom_instrument_name(app, track);
+    let cache_key = format!(
+        "{}:{}",
+        custom.as_deref().unwrap_or("stock"),
+        descriptor.params.len()
+    );
+    if glyphs.identity.as_ref().map(|(key, _)| key.as_str()) != Some(cache_key.as_str()) {
+        let skeleton = custom
+            .and_then(|name| sequencer::lisp_host::load_instrument_source(&name).ok())
+            .map(|source| sequencer::sound_glyph::extract_skeleton(&source).skeleton)
+            .unwrap_or_else(|| sequencer::sound_glyph::stock_skeleton(descriptor).skeleton);
+        glyphs.identity = Some((cache_key, sequencer::sound_glyph::identity_branches(&skeleton)));
+    }
+    glyphs.identity.as_ref().map(|(_, branches)| branches.as_slice()).unwrap_or(&[])
 }
 
 fn glyph_key(track: usize, patch: u64) -> String {
@@ -154,6 +184,7 @@ fn sync_glyph_frames(app: &app::App, track: usize, entries: &[PaletteEntry], gly
         }
     };
     let schema = glyph_schema_for_descriptor(descriptor, "instrument:", 0, None);
+    let identity = identity_branches(app, track, descriptor, glyphs).to_vec();
     let track_instrument_type = app.graph.track_instrument_types.get(track);
     let mut active = HashSet::new();
     let mut pending = Vec::new();
@@ -174,7 +205,8 @@ fn sync_glyph_frames(app: &app::App, track: usize, entries: &[PaletteEntry], gly
         // it forced a full cohort re-stat on each selection change.
         let anchor_patch = cohort_entries.first().map(|(patch, _)| *patch);
         let reference = cohort.first().cloned().unwrap_or_default();
-        let cohort_model = DeltaGlyphCohort::new(&schema, &cohort, &reference);
+        let cohort_model =
+            DeltaGlyphCohort::new_with_identity(&schema, &cohort, &reference, &identity);
 
         let mut cohort_hasher = DefaultHasher::new();
         for descriptor in std::iter::once(descriptor) {
@@ -197,6 +229,10 @@ fn sync_glyph_frames(app: &app::App, track: usize, entries: &[PaletteEntry], gly
         for (patch, values) in &cohort_entries {
             patch.hash(&mut cohort_hasher);
             for value in values { value.to_bits().hash(&mut cohort_hasher); }
+        }
+        for branch in &identity {
+            branch.name.hash(&mut cohort_hasher);
+            branch.weight.to_bits().hash(&mut cohort_hasher);
         }
         // The anchor is cohort_entries[0], already hashed above, so nothing extra
         // is needed here — and notably the selection is NOT part of the key.
