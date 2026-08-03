@@ -116,8 +116,8 @@ pub struct ProjectFile {
     /// arrangements are dropped on load").
     #[serde(default)]
     pub arrangement: Option<ProjectArrangement>,
-    /// Persisted `Use Arrangement` transport preference (docs/song-mode-spec.md
-    /// 7.1): selects session vs song behavior for the next Play.
+    /// Vestigial (docs/unified-transport-spec.md 7): the SESSION/SONG mode
+    /// is gone — kept on the wire for parse tolerance, never read back.
     #[serde(default)]
     pub use_arrangement: bool,
     /// Per-track record-arm flags (takes spec 8.1), persisted like
@@ -3367,9 +3367,9 @@ mod tests {
         }
     }
 
-    /// `use_arrangement` is a persisted project preference
-    /// (docs/song-mode-spec.md 7.1): it round-trips, and projects saved
-    /// before song mode load with it off.
+    /// `use_arrangement` is vestigial (docs/unified-transport-spec.md 7):
+    /// the wire field still parses in both directions so files written by
+    /// older builds and by this one stay mutually tolerant.
     #[test]
     fn use_arrangement_preference_round_trips_and_defaults_off() {
         let mut project = sample_project();

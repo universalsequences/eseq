@@ -43,7 +43,6 @@ pub(super) const COMMANDS: &[&str] = &[
     // state machine in app/song_transport.rs.
     "song-transport-toggle-play",
     "song-transport-play",
-    "song-use-arrangement",
     "song-capture-arm",
     "song-capture-cancel",
     "song-back-to-song",
@@ -618,15 +617,6 @@ fn run_transport(
                 _ => None,
             })
         }
-        "song-use-arrangement" => {
-            let map = payload_map(payload)?;
-            let enabled = map_bool(map, "enabled");
-            app.set_use_arrangement(enabled)?;
-            Ok(Some(format!(
-                "Use Arrangement {}",
-                if enabled { "on" } else { "off" }
-            )))
-        }
         "song-capture-arm" => {
             let map = payload_map(payload)?;
             let armed = map_bool(map, "armed");
@@ -793,15 +783,14 @@ fn run_transport(
 /// Status-line summary for `seq-song-status` (docs/song-mode-spec.md 12).
 fn song_status_summary(app: &app::App) -> String {
     let mode = app.song_transport_mode.binding_str();
-    let arrangement = if app.use_arrangement { "on" } else { "off" };
     match app.state.committed_song() {
         Some(song) => format!(
-            "Song: {} row(s), end beat {}, loop {} — mode {mode}, Use Arrangement {arrangement}",
+            "Song: {} row(s), end beat {}, loop {} — mode {mode}",
             song.rows.len(),
             song.end_beat,
             if song.loop_enabled { "on" } else { "off" },
         ),
-        None => format!("No committed song — mode {mode}, Use Arrangement {arrangement}"),
+        None => format!("No committed song — mode {mode}"),
     }
 }
 
@@ -852,7 +841,6 @@ pub(crate) fn apply_sound_palette_view_command(
 const TRANSPORT_COMMANDS: &[&str] = &[
     "song-transport-toggle-play",
     "song-transport-play",
-    "song-use-arrangement",
     "song-capture-arm",
     "song-capture-cancel",
     "song-back-to-song",

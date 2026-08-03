@@ -718,7 +718,6 @@ mod tests {
 
         // Play the song from beat 0 (row 0 plays the scene's pattern clip;
         // the take starts at beat 4).
-        app.set_use_arrangement(true).expect("arrangement mode");
         app.song_transport_play(false).expect("song playback");
         let song = app.active_runtime_song.clone().expect("active song");
         app.sync_track_sound_bindings();

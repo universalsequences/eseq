@@ -400,6 +400,177 @@ mod tests {
     /// so the committed take references the scene's Patch/Mix pair instead
     /// of minting a private clone — and an entity edit made through either
     /// referent is heard by both.
+    /// Two-track app mirroring `capture_app`'s song shape.
+    fn two_track_app() -> App {
+        let state = SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        );
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(2, &[]),
+                PatternSnapshot::new_default(2, &[]),
+            ],
+            0,
+        );
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = App::new(
+            Arc::new(state),
+            LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string(), "Track 2".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(2).unwrap();
+        app.arr_replace_rows(
+            vec![
+                SongRowSpec {
+                    start_beat: 0.0,
+                    scene: 0,
+                    overrides: Vec::new(),
+                },
+                SongRowSpec {
+                    start_beat: 8.0,
+                    scene: 1,
+                    overrides: Vec::new(),
+                },
+            ],
+            16.0,
+            false,
+        )
+        .expect("arr_replace_rows succeeds");
+        app.state.transport.record_quantize.store(
+            crate::record_quantize::RecordQuantize::Off as u32,
+            Ordering::Relaxed,
+        );
+        app
+    }
+
+    /// User repro: record a take on track 2, stop-commit, restart, record a
+    /// take on track 1, stop-commit. The committed arrangement and take
+    /// pools must stay mutually consistent — the field failure was "Track 1
+    /// clip 1 references take 0 which is not in track 1's take pool", which
+    /// bricks the transport (preflight validation fails on every Play).
+    #[test]
+    fn sequential_single_track_captures_keep_take_references_valid() {
+        let mut app = two_track_app();
+
+        // Capture session 1: take on track index 1.
+        app.begin_song_capture_take(0.0);
+        app.song_transport_mode = SongTransportMode::ArrangementCapture;
+        let now = Instant::now();
+        app.state.transport.record_clock.publish(0.0, now);
+        let anchor = now
+            .checked_add(Duration::from_millis(1))
+            .expect("anchor instant");
+        app.state.transport.record_clock.publish(0.0, anchor);
+        assert!(app.take_record_note(1, press_at_beats(anchor, 5.0), 60.0, 2.0));
+        app.song_transport_mode = SongTransportMode::Stopped;
+        app.finish_song_capture_take(12.0).expect("commit 1");
+        assert_eq!(app.state.track_takes(1).len(), 1);
+
+        // Capture session 2: take on track index 0, with a splice window
+        // [1, 14) that spans the FIRST take's clip — the untouched-lane
+        // inheritance must re-materialize track 2's take inside the splice.
+        app.begin_song_capture_take(0.0);
+        app.song_transport_mode = SongTransportMode::ArrangementCapture;
+        assert!(app.take_record_note(0, press_at_beats(anchor, 1.0), 60.0, 2.0));
+        app.song_transport_mode = SongTransportMode::Stopped;
+        app.finish_song_capture_take(14.0).expect("commit 2");
+
+        // Both takes exist in their own pools and every reference resolves:
+        // the state must preflight (this is what Play runs) and the
+        // committed arrangement must validate.
+        assert_eq!(app.state.track_takes(0).len(), 1, "track 1's take pool");
+        assert_eq!(app.state.track_takes(1).len(), 1, "track 2's take pool");
+        app.state
+            .preflight_runtime_song()
+            .expect("the committed state must stay playable");
+    }
+
+    /// The same repro through the FULL transport path — the arrangement is
+    /// itself created by a first capture (with the silent-start auto-latch),
+    /// and both take sessions run on top of live song playback with the
+    /// stop boundary read from the record clock, exactly as in the app.
+    #[test]
+    fn full_transport_sequential_take_captures_stay_playable() {
+        let mut app = two_track_app();
+        app.arr_clear().expect("start from an empty arrangement");
+        app.set_arrangement_view_visible(true);
+
+        let clock_zero = Instant::now();
+        app.state.transport.record_clock.publish(0.0, clock_zero);
+        let mut anchor = clock_zero
+            .checked_add(Duration::from_millis(1))
+            .expect("anchor instant");
+
+        // Capture A: creates the short arrangement (the auto-latched scene
+        // is the captured initial state; no other launches).
+        app.state.transport.record_clock.publish(0.0, anchor);
+        app.song_transport_play(true).expect("capture A starts");
+        app.state
+            .transport
+            .record_clock
+            .publish(8.0, press_at_beats(anchor, 8.0));
+        app.song_transport_stop().expect("capture A commits");
+
+        // Capture B: restart playback from the parked cursor at beat 5, then
+        // engage recording MID-PLAYBACK (the promote path), take on track
+        // index 1. Raw record-clock beats are transport-relative; the
+        // timeline offset is the mid-song start.
+        anchor = anchor
+            .checked_add(Duration::from_secs(10))
+            .expect("anchor instant");
+        app.state.transport.record_clock.publish(0.0, anchor);
+        app.set_arrangement_cursor(5.0, 0);
+        app.song_transport_play(false).expect("playback restarts");
+        app.stamp_recording_kind_for_note();
+        assert_eq!(
+            app.song_transport_mode,
+            SongTransportMode::ArrangementCapture,
+            "recording engaged mid-playback promotes into capture"
+        );
+        assert!(app.take_record_note(1, press_at_beats(anchor, 0.5), 60.0, 2.0));
+        app.state
+            .transport
+            .record_clock
+            .publish(7.0, press_at_beats(anchor, 7.0));
+        app.song_transport_stop().expect("capture B commits");
+        assert_eq!(app.state.track_takes(1).len(), 1);
+
+        // Capture C: restart from beat 0 the same way, take on track index
+        // 0, splice spanning B's clip.
+        anchor = anchor
+            .checked_add(Duration::from_secs(10))
+            .expect("anchor instant");
+        app.state.transport.record_clock.publish(0.0, anchor);
+        app.set_arrangement_cursor(0.0, 0);
+        app.song_transport_play(false).expect("playback restarts");
+        app.stamp_recording_kind_for_note();
+        assert!(app.take_record_note(0, press_at_beats(anchor, 1.0), 60.0, 2.0));
+        app.state
+            .transport
+            .record_clock
+            .publish(14.0, press_at_beats(anchor, 14.0));
+        app.song_transport_stop().expect("capture C commits");
+
+        assert_eq!(app.state.track_takes(0).len(), 1, "track 1's take pool");
+        assert_eq!(app.state.track_takes(1).len(), 1, "track 2's take pool");
+        app.state
+            .preflight_runtime_song()
+            .expect("the committed state must stay playable");
+    }
+
     #[test]
     fn punch_in_shares_the_bound_cells_sound_refs() {
         let (mut app, anchor) = capture_app();

@@ -10092,7 +10092,10 @@ mod tests {
             Ok(EditOutcome::AppliedUnrecorded)
         );
         assert_eq!(app.history.undo_len(), 1);
-        assert_eq!(app.state.scheduler_snapshot_version(), version + 1);
+        // Play now starts unified song playback (row apply + silent-start
+        // auto-latch), which publishes more than one snapshot; the invariant
+        // is that it published and recorded nothing, not the exact count.
+        assert!(app.state.scheduler_snapshot_version() > version);
 
         let version = app.state.scheduler_snapshot_version();
         assert!(matches!(

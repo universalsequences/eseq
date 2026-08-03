@@ -949,8 +949,11 @@ impl App {
     /// must never see lanes from the project being replaced.
     fn clear_project_arrangement_state(&mut self) {
         self.state.clear_committed_arrangement();
-        self.use_arrangement = false;
         self.song_capture_armed = false;
+        self.recording_kind = None;
+        // The manual-override latch now survives transport stop; a project
+        // switch is the one boundary it must never cross.
+        self.state.clear_song_manual_latch();
         self.song_clip_selection = None;
         self.song_region_selection = None;
         self.song_edit_error = None;
@@ -2185,7 +2188,9 @@ impl App {
                 .map(ProjectMacro::from)
                 .collect(),
             next_macro_id: self.macro_engine.next_id(),
-            use_arrangement: self.use_arrangement,
+            // Vestigial since docs/unified-transport-spec.md 7: kept on the
+            // wire for parse tolerance, never read back.
+            use_arrangement: true,
             record_armed: if self.graph.record_armed.iter().any(|armed| *armed) {
                 self.graph.record_armed.clone()
             } else {
@@ -3196,7 +3201,7 @@ impl App {
             arrangement,
             macros,
             next_macro_id,
-            use_arrangement,
+            use_arrangement: _,
             record_armed,
             scene_cell_presence,
             take_pools,
@@ -3352,9 +3357,6 @@ impl App {
         self.state
             .set_committed_arrangement(arrangement)
             .map_err(|error| format!("Project arrangement failed to load: {error}"))?;
-        // Persisted transport preference (docs/song-mode-spec.md 7.1); loads
-        // happen with the transport stopped, so setting it directly is safe.
-        self.use_arrangement = use_arrangement;
         self.state
             .transport
             .pattern_epoch

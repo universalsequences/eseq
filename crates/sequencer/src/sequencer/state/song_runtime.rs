@@ -87,12 +87,11 @@ impl RuntimeSong {
             } else {
                 Err("song end beat must be positive".to_string())
             }
-        } else if start_beat >= self.end_beat {
-            Err(format!(
-                "song start beat {start_beat} is at or past the song end {}",
-                self.end_beat
-            ))
         } else {
+            // A start at or past the end is legal (unified-transport spec
+            // 4.2): playback is open-ended, so the space after the
+            // arrangement is playable jam room — the transport auto-latches
+            // the selected scene there (silent start).
             Ok(start_beat)
         }
     }
@@ -423,8 +422,13 @@ impl SongPlaybackRuntime {
             ));
         }
         let start_beat = song.normalize_start_beat(start_beat)?;
+        // Past-end starts (open-ended jam room) are governed by the last
+        // row, matching the planner's past-end branch.
         let initial_row = song
             .row_index_at_beat(start_beat)
+            .or_else(|| {
+                (start_beat >= song.end_beat).then(|| song.rows.len().saturating_sub(1))
+            })
             .ok_or_else(|| format!("no song row governs start beat {start_beat}"))?;
         let row_anchor_beat = song.rows[initial_row].start_beat;
         Ok(Self {

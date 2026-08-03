@@ -177,7 +177,12 @@
 ;; honest extent for as long as the recording is the content; it reads 0 when
 ;; no capture is running, so nothing else changes.
 (def arrangement-scroll-extent ()
-  (max SEQ.song-end-beat (arrangement-pending-head)))
+  (max SEQ.song-end-beat
+    (max (arrangement-pending-head)
+      ;; Open-ended playback runs PAST the end (jam room, unified-transport
+      ;; spec 4.2); the playhead is the honest extent out there. Reads 0
+      ;; while stopped, so the parked view is unchanged.
+      (if (= SEQ.song-mode "stopped") 0 SEQ.song-position-beats))))
 
 (def arrangement-max-view-start (duration)
   (max 0 (- (+ (arrangement-scroll-extent) arrangement-view-padding) duration)))

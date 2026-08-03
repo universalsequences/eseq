@@ -1118,7 +1118,6 @@ pub(crate) mod tests {
                 .clone();
             scenes.track_pools[0].insert(data)
         });
-        app.set_use_arrangement(true).expect("song mode on");
         app.song_transport_play(false).expect("song playback starts");
         // Row zero plays the take; nothing selected -> the take is audible
         // AND monitored.
@@ -1167,22 +1166,6 @@ pub(crate) mod tests {
             Some(BoundSource::Take(take))
         );
         assert!(!app.sound_binding_is_silent(0));
-    }
-
-    /// Leaving song mode outright has no timeline left to explain a binding,
-    /// so the selection is dropped rather than left dormant.
-    #[test]
-    fn turning_off_use_arrangement_clears_the_selection() {
-        let (mut app, _take, scene_pattern, _chunks) = app_with_take();
-        app.set_use_arrangement(true).expect("song mode on");
-        app.select_song_clip(0, ClipId(0))
-            .expect("clip selects");
-        app.set_use_arrangement(false).expect("back to session mode");
-        assert_eq!(app.song_clip_selection, None);
-        assert_eq!(
-            app.track_sound_binding(0).source,
-            Some(BoundSource::Pattern(scene_pattern))
-        );
     }
 
     /// 16.5: Push to pattern promotes the bound take's sound to the current
@@ -1251,7 +1234,6 @@ pub(crate) mod tests {
             .set_committed_arrangement(Some(arrangement))
             .expect("arrangement installs");
 
-        app.set_use_arrangement(true).expect("song mode on");
         app.song_transport_play(false).expect("song playback starts");
         app.sync_track_sound_bindings();
         assert_eq!(
@@ -1361,7 +1343,6 @@ pub(crate) mod tests {
                 }));
             }
         });
-        app.set_use_arrangement(true).expect("song mode on");
         app.song_transport_play(false).expect("song playback starts");
         app.sync_track_sound_bindings();
         assert_eq!(

@@ -1236,9 +1236,6 @@ mod tests {
     fn region_edits_are_allowed_during_song_playback_and_locked_during_capture() {
         let mut playback = app_with_song();
         playback
-            .set_use_arrangement(true)
-            .expect("enable arrangement");
-        playback
             .song_transport_play(false)
             .expect("song playback starts");
         playback.state.song_playback().drain_commands();
@@ -1261,9 +1258,7 @@ mod tests {
         assert_eq!(rebuilds, 1, "one region commit sends one Rebuild");
 
         let mut capture = app_with_song();
-        capture
-            .set_use_arrangement(true)
-            .expect("enable arrangement");
+        capture.set_arrangement_view_visible(true);
         capture
             .song_transport_play(true)
             .expect("arrangement capture starts");

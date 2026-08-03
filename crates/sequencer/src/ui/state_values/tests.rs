@@ -13335,8 +13335,9 @@
                 // Song-mode bindings (docs/song-mode-spec.md 12), mirroring
                 // the real registration in natives.rs.
                 ("song-exists", Value::Bool(false)),
-                ("use-arrangement", Value::Bool(false)),
-                ("song-mode", Value::String("session".to_string())),
+                ("song-mode", Value::String("stopped".to_string())),
+                ("song-recording-kind", Value::String("".to_string())),
+                ("song-manual-latch", Value::Bool(false)),
                 ("song-current-row", Value::Number(-1.0)),
                 ("song-current-row-id", Value::Number(-1.0)),
                 ("song-row-count", Value::Number(0.0)),
@@ -20025,22 +20026,8 @@
         editor.runtime_mut().set_reactive(
             "SEQ",
             "song-mode",
-            Value::String("session".to_string()),
+            Value::String("stopped".to_string()),
         );
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        let layout = editor.widget_layout().expect("updated transport layout");
-        let clock = find_layout_node_by_widget_type(&layout, "transport-clock")
-            .expect("updated transport clock");
-        assert_eq!(
-            layout_prop_bool(clock, "use-song-position"),
-            Some(false),
-            "session playback must retain the elapsed pattern clock"
-        );
-
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "use-arrangement", Value::Bool(true));
         editor
             .runtime_mut()
             .set_reactive("SEQ", "song-cursor-beats", Value::Number(512.0));
@@ -20060,7 +20047,7 @@
         assert_eq!(
             layout_prop_bool(clock, "use-song-position"),
             Some(true),
-            "stopped SONG mode must display the parked arrangement cursor"
+            "stopped transport must display the parked arrangement cursor"
         );
     }
 
@@ -20179,12 +20166,12 @@
         }
     }
 
-    /// Song-mode transport controls (docs/song-mode-spec.md 11/14.5): the
-    /// Use Arrangement toggle and song status indicator have finite nonzero
-    /// rects, and the toggle's active state is a `ReactiveRef` bound to
-    /// `SEQ.use-arrangement` (not a literal).
+    /// Back to Arrangement button (unified-transport spec; Ableton
+    /// semantics): the box is always laid out, the icon lights (active=1)
+    /// the moment the manual-override latch engages, and goes transparent
+    /// (active=0) when it clears.
     #[test]
-    fn metal_seq_transport_use_arrangement_toggle_binds_reactive_active_state() {
+    fn metal_seq_transport_back_to_arrangement_button_follows_the_latch() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
             .runtime_mut()
@@ -20192,54 +20179,36 @@
             .expect("switch to transport buffer");
         editor.refresh_runtime_side_effects();
 
-        let layout = editor.widget_layout().expect("transport layout");
-        let toggle =
-            find_layout_node_by_debug_name(&layout, "transport-use-arrangement-toggle")
-                .expect("use arrangement toggle");
-        assert_finite_nonzero_rect(toggle, "transport-use-arrangement-toggle");
-        assert!(
-            matches!(toggle.props.get("active"), Some(Value::ReactiveRef { .. })),
-            "the toggle's active state must bind SEQ.use-arrangement as a ReactiveRef, got {:?}",
-            toggle.props.get("active")
-        );
-        assert_eq!(layout_prop_number(toggle, "active"), Some(0.0));
-        let session_label = toggle
-            .children
-            .iter()
-            .find_map(|child| find_layout_node_by_widget_type(child, "label"))
-            .expect("toggle label");
-        assert!(
-            matches!(session_label.props.get("text"), Some(Value::String(text)) if text == "SESSION"),
-            "arrangement off must read SESSION: {:?}",
-            session_label.props.get("text")
-        );
+        let icon_active = |editor: &mut eseqlisp::Editor| {
+            let layout = editor.widget_layout().expect("transport layout");
+            let button =
+                find_layout_node_by_debug_name(&layout, "transport-back-to-arrangement")
+                    .expect("the back-to-arrangement box is always laid out");
+            assert_finite_nonzero_rect(button, "transport-back-to-arrangement");
+            let icon = button
+                .children
+                .iter()
+                .find_map(|child| {
+                    find_layout_node_by_widget_type(child, "back-to-arrangement-icon")
+                })
+                .expect("latch icon");
+            layout_prop_number(icon, "active")
+        };
+        assert_eq!(icon_active(&mut editor), Some(0.0), "unlit while unlatched");
 
-        // Setting the reactive drives the bound slot; the redundant subtree
-        // rerun also flips the label to SONG.
         editor
             .runtime_mut()
-            .set_reactive("SEQ", "use-arrangement", Value::Bool(true));
+            .set_reactive("SEQ", "song-manual-latch", Value::Bool(true));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
-        let layout = editor.widget_layout().expect("transport layout");
-        let toggle =
-            find_layout_node_by_debug_name(&layout, "transport-use-arrangement-toggle")
-                .expect("use arrangement toggle");
-        assert_eq!(
-            layout_prop_number(toggle, "active"),
-            Some(1.0),
-            "the ReactiveRef slot must read the updated use-arrangement value"
-        );
-        let song_label = toggle
-            .children
-            .iter()
-            .find_map(|child| find_layout_node_by_widget_type(child, "label"))
-            .expect("toggle label");
-        assert!(
-            matches!(song_label.props.get("text"), Some(Value::String(text)) if text == "SONG"),
-            "arrangement on must read SONG: {:?}",
-            song_label.props.get("text")
-        );
+        assert_eq!(icon_active(&mut editor), Some(1.0), "lit while latched");
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "song-manual-latch", Value::Bool(false));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(icon_active(&mut editor), Some(0.0), "unlit again after clearing");
     }
 
     /// The transport Play controls route through the song transport state
@@ -20263,7 +20232,6 @@
         for (expr, expected) in [
             ("(seq-toggle-play)", "song-transport-toggle-play"),
             ("(seq-song-play)", "song-transport-play"),
-            ("(seq-use-arrangement true)", "song-use-arrangement"),
             ("(seq-song-capture-arm true)", "song-capture-arm"),
             ("(seq-song-capture-cancel)", "song-capture-cancel"),
             ("(seq-song-status)", "song-status"),
@@ -20357,7 +20325,7 @@
     /// `sync_song_state` seam the event loop calls each frame: after entering
     /// song playback the mode binding reads "song-playback", the derived
     /// lane surfaces rebuild when the committed revision changes, and stop
-    /// returns the bindings to "session". The exact `song-current-row`
+    /// returns the bindings to "stopped". The exact `song-current-row`
     /// display value needs the scheduler's position atomics, which stay
     /// inactive in this headless test, so it must read -1 here.
     #[test]
@@ -20420,8 +20388,11 @@
                 .expect("binding read returns a value")
         };
         assert_eq!(read(&mut editor, "SEQ.song-exists"), Value::Bool(true));
-        assert_eq!(read(&mut editor, "SEQ.song-mode"), Value::String("session".into()));
-        assert_eq!(read(&mut editor, "SEQ.use-arrangement"), Value::Bool(false));
+        assert_eq!(read(&mut editor, "SEQ.song-mode"), Value::String("stopped".into()));
+        assert_eq!(
+            read(&mut editor, "SEQ.song-recording-kind"),
+            Value::String("".into())
+        );
         assert_eq!(read(&mut editor, "SEQ.song-row-count"), Value::Number(3.0));
         assert_eq!(
             read(&mut editor, "SEQ.song-cursor-beats"),
@@ -20443,7 +20414,6 @@
         );
 
         // Enter song playback through the state machine.
-        test_app.set_use_arrangement(true).expect("toggle while stopped");
         test_app.song_transport_play(false).expect("song playback starts");
         assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
         editor.runtime_mut().run_reactive_cycle();
@@ -20451,13 +20421,12 @@
             read(&mut editor, "SEQ.song-mode"),
             Value::String("song-playback".into())
         );
-        assert_eq!(read(&mut editor, "SEQ.use-arrangement"), Value::Bool(true));
 
-        // Stop returns the bindings to session.
+        // Stop returns the bindings to stopped.
         test_app.song_transport_stop().expect("stop succeeds");
         assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
         editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(read(&mut editor, "SEQ.song-mode"), Value::String("session".into()));
+        assert_eq!(read(&mut editor, "SEQ.song-mode"), Value::String("stopped".into()));
 
         // A latched capture failure publishes both failure bindings.
         test_app.song_capture_failed = true;
@@ -20696,7 +20665,6 @@
                 false,
             )
             .expect("song committed");
-        test_app.set_use_arrangement(true).expect("toggle while stopped");
         test_app
     }
 
@@ -20749,6 +20717,7 @@
         );
 
         // ── Stop ──────────────────────────────────────────────────────────
+        test_app.set_arrangement_view_visible(true);
         test_app.song_transport_play(true).expect("capture starts");
         assert!(test_app.pending_capture_active());
         assert!(
@@ -20826,6 +20795,7 @@
         );
 
         // ── Cancel ────────────────────────────────────────────────────────
+        test_app.set_arrangement_view_visible(true);
         test_app.song_transport_play(true).expect("capture restarts");
         let anchor = anchor_record_clock(&test_app);
         assert!(test_app.take_record_note(0, press_at_beats(anchor, 2.0), 60.0, 2.0));
@@ -20844,6 +20814,7 @@
         // ── Failure ───────────────────────────────────────────────────────
         // A lost notice fails the stop-commit (spec 10.3): the take is
         // discarded, so the surface must clear on this path too.
+        test_app.set_arrangement_view_visible(true);
         test_app.song_transport_play(true).expect("capture restarts");
         let anchor = anchor_record_clock(&test_app);
         assert!(test_app.take_record_note(0, press_at_beats(anchor, 2.0), 60.0, 2.0));
@@ -20875,10 +20846,10 @@
 
     /// Whole-song capture is gone (empty-arrangement spec 6): capture always
     /// runs on top of song playback and splices `[P, Q)`, so the provisional
-    /// surface never seeds a beat-zero item — into an empty arrangement you
-    /// hear silence until the first launch, and the surface truthfully shows
-    /// nothing until then. Seeding a beat-zero item would paint content the
-    /// commit never writes.
+    /// surface only ever shows real captured launches. Into an empty
+    /// arrangement the silent-start auto-latch is such a launch (drawn from
+    /// beat zero, because it is heard from beat zero); on top of committed
+    /// content nothing is seeded until the performer launches something.
     #[test]
     fn metal_seq_song_pending_seeds_nothing_before_the_first_launch() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -20891,21 +20862,20 @@
                 .expect("binding read returns a value")
         };
 
-        // Into an empty arrangement: the pending surface stays blank until
-        // the performer launches something.
+        // Into an empty arrangement: the SILENT start auto-latches the
+        // selected scene (unified-transport spec 4.1), and that launch IS
+        // captured — the performer hears the scene from beat zero, so the
+        // pending surface truthfully draws it from beat zero.
         let mut empty = pending_capture_test_app();
         empty.arr_clear().expect("clear the song");
+        empty.set_arrangement_view_visible(true);
         empty.song_transport_play(true).expect("capture starts");
         assert!(sync_song_state(editor.runtime_mut(), &empty, &mut frame, true));
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(
             read(&mut editor, "(len (get SEQ.song-pending :scene-events))"),
-            Value::Number(0.0),
-            "silence plays before the first launch, so nothing is drawn"
-        );
-        assert_eq!(
-            read(&mut editor, "(len (get SEQ.song-pending :track-events))"),
-            Value::Number(0.0)
+            Value::Number(1.0),
+            "the auto-latched scene is the audible-and-captured initial state"
         );
         empty.song_capture_cancel().expect("cancel succeeds");
 
@@ -20913,6 +20883,7 @@
         // first launch, so nothing is seeded at beat zero.
         let mut over_song = pending_capture_test_app();
         let mut frame = SongFrameState::default();
+        over_song.set_arrangement_view_visible(true);
         over_song.song_transport_play(true).expect("capture starts");
         assert!(sync_song_state(
             editor.runtime_mut(),
@@ -20950,6 +20921,7 @@
                 .expect("binding read returns a value")
         };
 
+        test_app.set_arrangement_view_visible(true);
         test_app.song_transport_play(true).expect("capture starts");
         let anchor = anchor_record_clock(&test_app);
         // Punch in at beat 4, last note at beat 6 running 4 steps (1 beat).

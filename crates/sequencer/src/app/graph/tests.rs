@@ -955,7 +955,6 @@
         app.state
             .set_committed_arrangement(Some(ProjectArrangement::new(1, 16.0)))
             .expect("install source-project arrangement");
-        app.use_arrangement = true;
 
         app.start_new_project();
 
@@ -969,7 +968,6 @@
             .expect("new projects start with the empty arrangement");
         assert!(arrangement.is_empty());
         assert!(app.state.committed_song().is_some());
-        assert!(!app.use_arrangement);
         graph.process_block();
     }
 

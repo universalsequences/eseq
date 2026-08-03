@@ -481,6 +481,41 @@
             (max (max d1 d2) d3)))
         (material :color fg-col)))))
 
+;; Back to Arrangement (Ableton-style): an orange tile with a play triangle
+;; and three arrangement lanes beside it. Lights the moment a manual launch
+;; overrides the arrangement; fully transparent while nothing is latched.
+(defwidget back-to-arrangement-icon
+  :width 2.5 :height 1.8
+  :paint-margin 0.5
+  :state (active)
+  :shader
+  (if (= active 1)
+    (sdf/layer
+      (sdf/fill (sdf/rounded-rect (* 0.75 height) (* 0.75 height) 0.4)
+        (material
+          :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
+            :light (vec3 -0.31 -0.851 1.3) :shininess 51.0)
+          :color
+          (let ((lit (+ 0.04 (* 0.10 diffuse)))
+                (shine (* 0.20 specular)))
+            (+ (rgba 0.80 0.38 0.16 1.0)
+               (rgba lit (* 0.6 lit) (* 0.3 lit) 1)
+               (rgba shine shine shine 0)))))
+      (sdf/fill
+        (let ((p1x -0.62) (p1y -0.34) (p2x -0.62) (p2y 0.34) (p3x -0.10) (p3y 0.0))
+          (let ((d1 (- (* (- p2x p1x) (- y p1y)) (* (- p2y p1y) (- x p1x))))
+                (d2 (- (* (- p3x p2x) (- y p2y)) (* (- p3y p2y) (- x p2x))))
+                (d3 (- (* (- p1x p3x) (- y p3y)) (* (- p1y p3y) (- x p3x)))))
+            (max (max d1 d2) d3)))
+        (material :color (rgba 0.10 0.045 0.02 1.0)))
+      (sdf/fill (sdf/translate 0.38 -0.28 (sdf/rounded-rect 0.28 0.055 0.03))
+        (material :color (rgba 0.10 0.045 0.02 1.0)))
+      (sdf/fill (sdf/translate 0.38 0.0 (sdf/rounded-rect 0.28 0.055 0.03))
+        (material :color (rgba 0.10 0.045 0.02 1.0)))
+      (sdf/fill (sdf/translate 0.38 0.28 (sdf/rounded-rect 0.28 0.055 0.03))
+        (material :color (rgba 0.10 0.045 0.02 1.0))))
+    (rgba 0 0 0 0)))
+
 (defwidget rec-icon
   :width 2.5 :height 1.8
   :paint-margin 0.5
@@ -640,45 +675,20 @@
                 :color (if SEQ.master-recording :white :gray)
                 :hover-color :white
                 :bg :transparent))))
-        ;; Use Arrangement (docs/song-mode-spec.md 7.1/11): SESSION vs SONG
-        ;; launch authority for the next Play. Active state binds the
-        ;; SEQ.use-arrangement reactive directly (ReactiveRef, not a literal).
-        (subtree :key "transport-use-arrangement-toggle"
-          (box :debug-name "transport-use-arrangement-toggle"
-            :width 6.2 :height 1.1
-            :background "pattern-pill-bg"
-            :active (bind-seq "use-arrangement")
+        ;; Back to Arrangement (unified-transport spec; Ableton semantics):
+        ;; lights the moment a manual launch overrides the arrangement,
+        ;; SURVIVES transport stop, and clicking hands the latched lanes
+        ;; back to the arrangement. The box is ALWAYS laid out (state flips
+        ;; repaint reactively; conditional layout is a re-layout per flip
+        ;; and misses reruns from nil); the icon is transparent while
+        ;; nothing is latched, and the click guards at event time.
+        (subtree :key "transport-back-to-arrangement"
+          (box :debug-name "transport-back-to-arrangement"
+            :width 2.5 :height 1.4
             :style transport-icon-style
-            :on-click |x y r| (seq-use-arrangement (not SEQ.use-arrangement))
-            (v-stack :align :center
-              (label (if SEQ.use-arrangement "SONG" "SESSION")
-                :font-size 9
-                ;; Amber while a manual launch has latched over the song
-                ;; (takes spec 10) — the song's launch authority is
-                ;; suspended for the latched lanes.
-                :color (if SEQ.song-manual-latch
-                         '(rgba 0.98 0.72 0.25 1)
-                         (if SEQ.use-arrangement :white :gray))
-                :hover-color :white
-                :bg :transparent))))
-        ;; Back to Song (takes spec 10): visible only while latched; clears
-        ;; the latch so latched lanes snap back to the song's resolution
-        ;; with anchored phase.
-        (subtree :key "transport-back-to-song"
-          (if SEQ.song-manual-latch
-            (box :debug-name "transport-back-to-song"
-              :width 3.4 :height 1.1
-              :background "pattern-pill-bg"
-              :active 1
-              :style transport-icon-style
-              :on-click |x y r| (seq-song-back-to-song)
-              (v-stack :align :center
-                (label "->SONG"
-                  :font-size 9
-                  :color '(rgba 0.98 0.72 0.25 1)
-                  :hover-color :white
-                  :bg :transparent)))
-            nil))))
+            :on-click |x y r| (if SEQ.song-manual-latch (seq-song-back-to-song) nil)
+            (back-to-arrangement-icon
+              :active (if SEQ.song-manual-latch 1 0))))))
 
     ;; Single continuous LED panel
     (box :background "transport-led-bg" :height 1.4 :width 56
@@ -686,16 +696,15 @@
         (subtree :key "transport-clock"
           (h-stack :gap 0 :align :center :padding 0.5
             (transport-clock
-              ;; Session playback uses the reset-on-Play pattern clock. SONG
-              ;; mode shows the parked cursor while stopped, then the live
-              ;; absolute arrangement clock during playback/capture.
+              ;; One transport (docs/unified-transport-spec.md 4/8): the
+              ;; parked arrangement cursor while stopped, the live absolute
+              ;; arrangement clock during playback/capture.
               :playhead (bind-seq "transport-playhead")
               :song-position-beats
-                (if (= SEQ.song-mode "session")
+                (if (= SEQ.song-mode "stopped")
                   (bind-seq "song-cursor-beats")
                   (bind-seq "song-position-beats"))
-              :use-song-position
-                (or SEQ.use-arrangement (not (= SEQ.song-mode "session")))
+              :use-song-position true
               :font-size 15 :width 10 :height 1.2
               :color '(rgba 0.85 0.85 0.85 1)
               :bg :transparent)

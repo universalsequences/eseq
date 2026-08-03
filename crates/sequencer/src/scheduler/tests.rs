@@ -5679,6 +5679,111 @@
         runtime
     }
 
+    /// User repro (unified-transport rev 3): a lane silent for a gap row
+    /// re-enters on the next row with a note on step 1 — that boundary
+    /// trigger must fire, on the first pass, at the boundary sample.
+    #[test]
+    fn row_boundary_step_zero_trigger_fires_when_a_lane_re_enters() {
+        std::thread::Builder::new()
+            .name("row-boundary-harness".to_string())
+            .stack_size(super::SCHEDULER_THREAD_STACK_SIZE)
+            .spawn(row_boundary_step_zero_trigger_body)
+            .expect("harness thread")
+            .join()
+            .expect("harness thread joins");
+    }
+
+    fn row_boundary_step_zero_trigger_body() {
+        let (state, _) = song_mode_fixture();
+        // Row 0 [0, 4): track 0 explicitly empty (the gap), track 1 plays.
+        // Row 1 [4, 8): scene 1 — every step active on both tracks.
+        let mut gap_row = song_mode_row(10, 0.0, 0, Vec::new());
+        gap_row.overrides = vec![crate::sequencer::ProjectSongTrackOverride::new(0, None)];
+        song_mode_commit(
+            &state,
+            vec![gap_row, song_mode_row(11, 4.0, 1, Vec::new())],
+            8.0,
+            false,
+        );
+        let runtime = state.preflight_runtime_song().expect("preflight");
+        // 8 beats at 24_000 samples/quarter = 192_000 samples; one default
+        // 16th step is 6_000 samples. Row 1 starts at sample 96_000.
+        let (triggers, _notices) = drive_song_lookahead(&state, runtime, 128, 192_000);
+        let track0: Vec<_> = triggers
+            .iter()
+            .filter(|trigger| trigger.track == 0)
+            .collect();
+        assert!(
+            !track0.is_empty(),
+            "track 0 must sound once its row re-enters"
+        );
+        let first = track0[0];
+        // The boundary split floors fractional samples, so the boundary
+        // chunk can start one sample early — the trigger may land at
+        // boundary-1. Anything later than a couple hundred samples is a
+        // missed downbeat.
+        assert!(
+            first.sample_time + 2 >= 96_000 && first.sample_time < 96_000 + 256,
+            "the re-entry row's STEP 1 must fire at the boundary (sample \
+             96000), got sample {}",
+            first.sample_time
+        );
+        // Every step of the 16-step row must fire across [4, 8): 16 steps.
+        assert_eq!(
+            track0.len(),
+            16,
+            "all 16 steps of the re-entry row must sound on the first pass"
+        );
+    }
+
+    /// The fractional variant — captured arrangements stamp UNQUANTIZED row
+    /// boundaries. A gap running a hair past an exact cycle multiple wraps
+    /// the silenced lane's clock into step 0 just before the boundary
+    /// (trigger suppressed, dedup memory updated), and without the
+    /// source-change step-memory reset the re-entry row's step-0 downbeat
+    /// is swallowed — the user's "drums skip the first kick" bug.
+    #[test]
+    fn fractional_row_boundary_does_not_swallow_the_downbeat() {
+        std::thread::Builder::new()
+            .name("fractional-row-boundary-harness".to_string())
+            .stack_size(super::SCHEDULER_THREAD_STACK_SIZE)
+            .spawn(fractional_row_boundary_body)
+            .expect("harness thread")
+            .join()
+            .expect("harness thread joins");
+    }
+
+    fn fractional_row_boundary_body() {
+        let (state, _) = song_mode_fixture();
+        // The gap row spans [0, 4.003): one full 4-beat cycle plus a hair,
+        // so the silenced lane derives step 0 again just before the
+        // boundary. Row 1 re-enters at the fractional beat 4.003.
+        let mut gap_row = song_mode_row(10, 0.0, 0, Vec::new());
+        gap_row.overrides = vec![crate::sequencer::ProjectSongTrackOverride::new(0, None)];
+        song_mode_commit(
+            &state,
+            vec![gap_row, song_mode_row(11, 4.003, 1, Vec::new())],
+            8.0,
+            false,
+        );
+        let runtime = state.preflight_runtime_song().expect("preflight");
+        let boundary_sample = (4.003 * 24_000.0) as u64;
+        let (triggers, _notices) = drive_song_lookahead(&state, runtime, 128, 192_000);
+        let track0: Vec<_> = triggers
+            .iter()
+            .filter(|trigger| trigger.track == 0)
+            .collect();
+        assert!(!track0.is_empty(), "track 0 must sound after the boundary");
+        let first = track0[0];
+        assert!(
+            first.sample_time + 2 >= boundary_sample
+                && first.sample_time < boundary_sample + 256,
+            "the fractional re-entry's step-0 downbeat must fire at the \
+             boundary (sample {boundary_sample}), got sample {}",
+            first.sample_time
+        );
+    }
+
     #[test]
     fn song_rebuild_remaps_from_clock_beat_and_preserves_the_sounding_anchor() {
         let (state, _) = song_mode_fixture();

@@ -1221,25 +1221,6 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
     // song transport state machine in app/song_transport.rs via the host
     // command handler; rejections surface on the status line there.
     runtime.register_native_with_docs(
-        "seq-use-arrangement",
-        "(seq-use-arrangement enabled)",
-        "Set the persisted Use Arrangement transport preference (session vs \
-         song behavior for the next Play). Rejected while playing.",
-        move |args, ctx| {
-            let enabled = match args.first() {
-                Some(value) => def_song_bool(value)
-                    .map_err(|_| "seq-use-arrangement: expected true/false".to_string())?,
-                None => return Err("seq-use-arrangement: expected true/false".into()),
-            };
-            ctx.enqueue_command(HostCommand::Custom {
-                name: "song-use-arrangement".to_string(),
-                payload: song_payload(vec![("enabled", Value::Bool(enabled))]),
-            });
-            Ok(Value::Bool(enabled))
-        },
-    );
-
-    runtime.register_native_with_docs(
         "seq-song-play",
         "(seq-song-play)",
         "Play through the song transport state machine: session playback, \
@@ -2200,8 +2181,9 @@ pub(crate) fn init_runtime(
                 ("queued-scene", Value::Number(-1.0)),
                 // Song mode observability (docs/song-mode-spec.md 12).
                 ("song-exists", Value::Bool(false)),
-                ("use-arrangement", Value::Bool(false)),
-                ("song-mode", Value::String("session".to_string())),
+                ("song-mode", Value::String("stopped".to_string())),
+                ("song-recording-kind", Value::String("".to_string())),
+                ("song-manual-latch", Value::Bool(false)),
                 ("song-current-row", Value::Number(-1.0)),
                 ("song-current-row-id", Value::Number(-1.0)),
                 ("song-row-count", Value::Number(0.0)),

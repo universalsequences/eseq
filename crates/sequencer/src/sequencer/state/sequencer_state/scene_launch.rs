@@ -51,11 +51,18 @@ impl SequencerState {
         // The App rebinds on its next tick.
         self.release_bound_device_state();
         let scene_idx = self.current_scene_index();
+        // Latched lanes are the performer's (Ableton back-to-arrangement
+        // semantics: the latch survives transport stop) — their live grid
+        // must not be re-launched from the scene until the latch clears.
+        let latched = self.song_manual_latch_mask();
         let mut scenes = self.pattern.scenes.lock().unwrap();
         let Some(launched) = scenes.launch_scene(scene_idx) else {
             return;
         };
         for (track, data) in launched.into_iter().enumerate() {
+            if latched >> track.min(63) & 1 == 1 {
+                continue;
+            }
             match data {
                 Some(data) => {
                     data.restore_to(self, track);

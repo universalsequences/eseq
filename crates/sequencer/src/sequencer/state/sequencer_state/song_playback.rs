@@ -458,6 +458,22 @@ impl SequencerState {
         mask
     }
 
+    /// Pin `track`'s session override to the pattern the lane currently
+    /// resolves (override, else the scene cell). Loop overdub claims a lane
+    /// this way (unified-transport spec 5.1): a latched lane is skipped by
+    /// every masked scene save-back as stale — UNLESS its override pins the
+    /// pattern it is actually playing, which turns the save into a
+    /// self-write. Without the pin, live-recorded content exists only in
+    /// the live grid and the stop resync re-launches the scene from the
+    /// pool, silently discarding the recording.
+    pub fn pin_track_override_to_effective(&self, track: usize) -> bool {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(id) = scenes.effective_pattern_id(track) else {
+            return false;
+        };
+        scenes.launch_track_pattern(track, id).is_some()
+    }
+
     /// Latch specific tracks (a manual track launch during song playback).
     pub fn latch_song_manual_override(&self, tracks: impl IntoIterator<Item = usize>) {
         let mut bits = 0u64;

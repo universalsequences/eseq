@@ -1,5 +1,5 @@
 //! Song-mode reactive bindings (docs/song-mode-spec.md section 12): builds
-//! and diff-publishes the `SEQ.song-*` / `SEQ.use-arrangement` values each
+//! and diff-publishes the `SEQ.song-*` values each
 //! frame from `App` transport state plus the committed song.
 
 use super::*;
@@ -15,7 +15,9 @@ use sequencer::sequencer::{
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SongBindingsSnapshot {
     pub(crate) exists: bool,
-    pub(crate) use_arrangement: bool,
+    /// "" while not recording, else "take" / "dub"
+    /// (docs/unified-transport-spec.md 8).
+    pub(crate) recording_kind: &'static str,
     pub(crate) mode: &'static str,
     /// Current row ordinal during song playback, else -1.
     pub(crate) current_row: f64,
@@ -644,7 +646,11 @@ pub(crate) fn build_song_bindings_snapshot(
     };
     SongBindingsSnapshot {
         exists: song.is_some(),
-        use_arrangement: app.use_arrangement,
+        recording_kind: match app.recording_kind {
+            Some(sequencer::app::song_transport::RecordingKind::Capture) => "take",
+            Some(sequencer::app::song_transport::RecordingKind::Overdub) => "dub",
+            None => "",
+        },
         mode,
         current_row,
         current_row_id,
@@ -899,9 +905,9 @@ pub(crate) fn sync_song_state(
     }
     publish_on_change!("song-exists", exists, Value::Bool(next.exists));
     publish_on_change!(
-        "use-arrangement",
-        use_arrangement,
-        Value::Bool(next.use_arrangement)
+        "song-recording-kind",
+        recording_kind,
+        Value::String(next.recording_kind.to_string())
     );
     publish_on_change!("song-mode", mode, Value::String(next.mode.to_string()));
     publish_on_change!("song-current-row", current_row, Value::Number(next.current_row));
