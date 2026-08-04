@@ -415,13 +415,8 @@
   :shader
   (sdf/layer
     (sdf/fill (sdf/rounded-rect width height 0.28)
-      (material
-        :lighting (lighting :edge-min -0.38 :edge-max 0.45
-          :light (vec3 0.0 -1.1 2.8) :shininess 54.0)
-        :color
-          (aqua-color
-            (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 1.0)
-            (rgba track-r track-g track-b 1.0))))))
+      (rgba track-r track-g track-b 1.0)))
+  )
 
 (defwidget seqv-track-volume-meter
   :width 8.2 :height 1.05
