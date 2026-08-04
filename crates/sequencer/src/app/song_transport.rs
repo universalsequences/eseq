@@ -3054,6 +3054,52 @@ mod tests {
         assert_eq!(app.song_transport_mode, SongTransportMode::Stopped);
     }
 
+    /// Repro for the "latched lane loses device edits at Play" bug: empty
+    /// arrangement → Play auto-latches the scene → Stop (latch survives) →
+    /// add an effect while stopped → Play again. The second Play's scene
+    /// launch must NOT restore a pre-effect pool snapshot over the live
+    /// effect chain (num_params dropping to 0 makes every param edit fail
+    /// validation with "effect parameter does not exist").
+    #[test]
+    fn effect_added_while_stopped_and_latched_survives_the_next_play() {
+        let mut app = test_app();
+        // Play #1 on the empty arrangement: silent start auto-latches the
+        // selected scene; the latch survives the stop.
+        app.song_transport_play(false).expect("play #1");
+        app.song_transport_stop().expect("stop");
+        assert_ne!(
+            app.state.song_manual_latch_mask(),
+            0,
+            "precondition: the auto-latch survives the stop"
+        );
+        // "Add a builtin effect" while stopped: stamp the descriptor onto the
+        // live slot and run the same pool sync the add path runs
+        // (apply_builtin_effect_to_slot_with_modulator).
+        let desc = crate::effects::EffectDescriptor::builtin_insert("Space Echo")
+            .expect("Space Echo is a builtin");
+        let slot_idx = crate::effects::BUILTIN_SLOT_COUNT;
+        app.state.pattern.effect_chains[0][slot_idx].apply_descriptor_with_modulator(
+            &desc, 7, 0,
+        );
+        app.state
+            .sync_effect_slot_with_modulator_in_track_patterns(0, slot_idx, &desc, 7, 0);
+        let params_before = app.state.pattern.effect_chains[0][slot_idx]
+            .num_params
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(params_before > 0, "the live slot holds the effect");
+
+        // Play #2: the scene re-launch must keep the effect.
+        app.song_transport_play(false).expect("play #2");
+        let params_after = app.state.pattern.effect_chains[0][slot_idx]
+            .num_params
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            params_after, params_before,
+            "play clobbered the freshly added effect slot from a stale pool snapshot"
+        );
+        app.song_transport_stop().expect("stop #2");
+    }
+
     #[test]
     fn binding_strings_cover_every_mode() {
         assert_eq!(SongTransportMode::Stopped.binding_str(), "stopped");
