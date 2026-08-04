@@ -26,11 +26,6 @@ pub use geometry::{
 };
 pub use stock::stock_skeleton;
 
-use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
-use std::sync::Arc;
-
 use crate::delta_glyph::IdentityBranch;
 
 /// Flatten a skeleton into the delta glyph's identity tier (delta-glyph spec
@@ -73,45 +68,4 @@ pub fn identity_branches(skeleton: &Skeleton) -> Vec<IdentityBranch> {
         })
         .collect::<Vec<_>>();
     if expanded.len() > direct.len() { expanded } else { direct }
-}
-
-/// Cache key for a skeleton: hash of the raw instrument source.
-pub fn source_hash(source: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    source.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Memoizes skeleton extraction per instrument source hash; recompute only
-/// happens when the instrument source changes.
-#[derive(Default)]
-pub struct SkeletonCache {
-    entries: HashMap<u64, Arc<ExtractedSkeleton>>,
-}
-
-impl SkeletonCache {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn get_or_extract(&mut self, source: &str) -> Arc<ExtractedSkeleton> {
-        let key = source_hash(source);
-        Arc::clone(
-            self.entries
-                .entry(key)
-                .or_insert_with(|| Arc::new(extract_skeleton(source))),
-        )
-    }
-
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    pub fn clear(&mut self) {
-        self.entries.clear();
-    }
 }

@@ -8,7 +8,8 @@
 use super::*;
 use crate::app::sound_palette::{PaletteEntry, PaletteTarget, SOUND_PALETTE_RGB};
 use eseqlisp::sound_glyph_data::{
-    publish_sound_glyph_frames, retain_sound_glyph_frames, SoundGlyphFrame, SoundGlyphPiece,
+    publish_sound_glyph_frames, retain_sound_glyph_frames, set_sound_glyph_play_keys,
+    SoundGlyphFrame, SoundGlyphPiece,
 };
 use sequencer::delta_glyph::{
     DeltaGlyphCohort, IdentityBranch, ParamGroup, ParamKind as GlyphParamKind, ParamSchema,
@@ -46,6 +47,19 @@ struct GlyphFrames {
     /// Per-track fingerprints for the mixer pattern-cell glyph feed, which
     /// runs every sync regardless of whether the palette is open.
     cell_published: HashMap<usize, u64>,
+    /// Per-track cache of `hash_descriptor_glyph_inputs` (SipHash over every
+    /// param's name/range/kind/taper/ui metadata — ~110ms/s across a scroll
+    /// profile when recomputed per tick). See `cached_descriptor_glyph_hash`
+    /// for why the probe is sufficient.
+    descriptor_hashes: HashMap<usize, DescriptorGlyphHashEntry>,
+}
+
+struct DescriptorGlyphHashEntry {
+    engine_id: Option<usize>,
+    registry_epoch: u64,
+    name: String,
+    param_count: usize,
+    hash: u64,
 }
 
 struct IdentityCacheEntry {
@@ -65,10 +79,38 @@ fn values_fingerprint(values: impl IntoIterator<Item = f32>) -> u64 {
     })
 }
 
+/// Cache key for the identity tier: instrument name, descriptor param count,
+/// the track's engine id, and the engine-registry epoch. The epoch bumps on
+/// every compile/reload registration, so any reload — including ones that
+/// restructure branch clusters without touching the param surface — changes
+/// the key and refreshes the cached silhouette, without touching the source
+/// text (or the filesystem) on the per-tick probe.
+fn identity_cache_key(
+    custom: Option<&str>,
+    param_count: usize,
+    engine_id: Option<usize>,
+    registry_epoch: u64,
+) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        custom.unwrap_or("stock"),
+        param_count,
+        engine_id.map_or(-1i64, |id| id as i64),
+        registry_epoch
+    )
+}
+
 /// The identity tier's input: branch clusters of the instrument's authored AST,
 /// via `extract_skeleton` for custom instruments and the stock skeleton for
-/// builtins/samplers. Cached on the instrument name + descriptor param count so
-/// an instrument reload with a changed surface refreshes it.
+/// builtins/samplers. Cached on the instrument name + descriptor param count +
+/// engine id + registry epoch, so any instrument reload — even one that
+/// leaves the param surface unchanged — refreshes it (a reload re-registers
+/// the engine, which bumps the epoch). The per-call freshness probe is a few
+/// in-memory reads; the ~0.5–0.7ms skeleton extraction — and, for tracks
+/// whose engine isn't registered, a disk read of the dsp.lisp — only run on
+/// a key miss. The glyph deliberately mirrors what's COMPILED, not what's on
+/// disk: an external dsp.lisp edit doesn't change the sound (or the
+/// silhouette) until it's reloaded through the app.
 fn ensure_identity_cached<'a>(
     app: &app::App,
     track: usize,
@@ -76,14 +118,27 @@ fn ensure_identity_cached<'a>(
     cache: &'a mut HashMap<usize, IdentityCacheEntry>,
 ) -> &'a IdentityCacheEntry {
     let custom = current_custom_instrument_name(app, track);
-    let cache_key = format!(
-        "{}:{}",
-        custom.as_deref().unwrap_or("stock"),
-        descriptor.params.len()
+    let engine_id = app
+        .graph
+        .track_engine_ids
+        .get(track)
+        .and_then(|engine_id| *engine_id);
+    let cache_key = identity_cache_key(
+        custom.as_deref(),
+        descriptor.params.len(),
+        engine_id,
+        app.editor.engine_registry.epoch(),
     );
     if cache.get(&track).map(|entry| entry.cache_key.as_str()) != Some(cache_key.as_str()) {
-        let skeleton = custom
-            .and_then(|name| sequencer::lisp_host::load_instrument_source(&name).ok())
+        let source = engine_id
+            .and_then(|engine_id| app.editor.engine_registry.get(engine_id))
+            .map(|engine| engine.source.clone())
+            .or_else(|| {
+                custom
+                    .as_deref()
+                    .and_then(|name| sequencer::lisp_host::load_instrument_source(name).ok())
+            });
+        let skeleton = source
             .map(|source| sequencer::sound_glyph::extract_skeleton(&source).skeleton)
             .unwrap_or_else(|| sequencer::sound_glyph::stock_skeleton(descriptor).skeleton);
         let branches = sequencer::sound_glyph::identity_branches(&skeleton);
@@ -96,6 +151,80 @@ fn ensure_identity_cached<'a>(
         cache.insert(track, IdentityCacheEntry { cache_key, branches, fingerprint });
     }
     cache.get(&track).expect("just inserted")
+}
+
+/// Hash every descriptor field that feeds `glyph_schema_for_descriptor`.
+/// Both glyph feeds — the palette tiles and the mixer pattern cells — MUST
+/// fingerprint the descriptor with this one helper (via
+/// `cached_descriptor_glyph_hash`): an instrument reload that
+/// keeps the param names/count but changes a range, default, kind, taper, or
+/// ui metadata reshapes the glyph schema, so it has to invalidate both feeds
+/// identically.
+fn hash_descriptor_glyph_inputs(
+    descriptor: &sequencer::effects::EffectDescriptor,
+    hasher: &mut impl Hasher,
+) {
+    descriptor.name.hash(hasher);
+    descriptor.params.len().hash(hasher);
+    for param in &descriptor.params {
+        param.name.hash(hasher);
+        param.min.to_bits().hash(hasher);
+        param.max.to_bits().hash(hasher);
+        param.default.to_bits().hash(hasher);
+        std::mem::discriminant(&param.kind).hash(hasher);
+        std::mem::discriminant(&param.scaling).hash(hasher);
+        if let Some(metadata) = &param.ui_metadata {
+            metadata.group.hash(hasher);
+            metadata.env.hash(hasher);
+            metadata.role.hash(hasher);
+            metadata.tags.hash(hasher);
+        }
+    }
+}
+
+/// `hash_descriptor_glyph_inputs`, memoized per track. The probe —
+/// (engine id, registry epoch, descriptor name, param count) — is sufficient
+/// because every path that reshapes a descriptor's glyph inputs either
+/// recompiles/re-registers an engine (registry epoch bump), rebinds the track
+/// to a different engine (engine id change), or swaps the descriptor for one
+/// with a different name/param surface (teardown to the empty slot, sampler
+/// fallback). A descriptor NEVER mutates in place with all four probes
+/// unchanged.
+fn cached_descriptor_glyph_hash(
+    app: &app::App,
+    track: usize,
+    descriptor: &sequencer::effects::EffectDescriptor,
+    cache: &mut HashMap<usize, DescriptorGlyphHashEntry>,
+) -> u64 {
+    let engine_id = app
+        .graph
+        .track_engine_ids
+        .get(track)
+        .and_then(|engine_id| *engine_id);
+    let registry_epoch = app.editor.engine_registry.epoch();
+    if let Some(entry) = cache.get(&track) {
+        if entry.engine_id == engine_id
+            && entry.registry_epoch == registry_epoch
+            && entry.name == descriptor.name
+            && entry.param_count == descriptor.params.len()
+        {
+            return entry.hash;
+        }
+    }
+    let mut hasher = DefaultHasher::new();
+    hash_descriptor_glyph_inputs(descriptor, &mut hasher);
+    let hash = hasher.finish();
+    cache.insert(
+        track,
+        DescriptorGlyphHashEntry {
+            engine_id,
+            registry_epoch,
+            name: descriptor.name.clone(),
+            param_count: descriptor.params.len(),
+            hash,
+        },
+    );
+    hash
 }
 
 fn glyph_key(track: usize, patch: u64) -> String {
@@ -211,6 +340,8 @@ fn sync_glyph_frames(app: &app::App, track: usize, entries: &[PaletteEntry], gly
             &fallback_descriptor
         }
     };
+    let descriptor_hash =
+        cached_descriptor_glyph_hash(app, track, descriptor, &mut glyphs.descriptor_hashes);
     let identity_entry = ensure_identity_cached(app, track, descriptor, &mut glyphs.identity);
     let identity_fingerprint = identity_entry.fingerprint;
     // Disjoint reborrows so the cached branches stay borrowed while the
@@ -238,23 +369,7 @@ fn sync_glyph_frames(app: &app::App, track: usize, entries: &[PaletteEntry], gly
         let anchor_patch = cohort_entries.first().map(|(patch, _)| *patch);
 
         let mut cohort_hasher = DefaultHasher::new();
-        for descriptor in std::iter::once(descriptor) {
-            descriptor.name.hash(&mut cohort_hasher);
-            for param in &descriptor.params {
-                param.name.hash(&mut cohort_hasher);
-                param.min.to_bits().hash(&mut cohort_hasher);
-                param.max.to_bits().hash(&mut cohort_hasher);
-                param.default.to_bits().hash(&mut cohort_hasher);
-                std::mem::discriminant(&param.kind).hash(&mut cohort_hasher);
-                std::mem::discriminant(&param.scaling).hash(&mut cohort_hasher);
-                if let Some(metadata) = &param.ui_metadata {
-                    metadata.group.hash(&mut cohort_hasher);
-                    metadata.env.hash(&mut cohort_hasher);
-                    metadata.role.hash(&mut cohort_hasher);
-                    metadata.tags.hash(&mut cohort_hasher);
-                }
-            }
-        }
+        descriptor_hash.hash(&mut cohort_hasher);
         for (patch, values) in &cohort_entries {
             patch.hash(&mut cohort_hasher);
             values_fingerprint(values.iter().copied()).hash(&mut cohort_hasher);
@@ -348,6 +463,7 @@ fn pattern_cell_glyph_key(track: usize, pattern: u64) -> String {
 /// steady-state cost at hashing a few value vectors.
 fn sync_pattern_cell_glyph_frames(app: &app::App, glyphs: &mut GlyphFrames) {
     let mut active: HashSet<String> = HashSet::new();
+    let mut play_keys: HashSet<String> = HashSet::new();
     let mut pending = Vec::new();
     let mut tracks_seen: HashSet<usize> = HashSet::new();
     // One fallback for the whole sweep — building a builtin-sampler
@@ -355,18 +471,34 @@ fn sync_pattern_cell_glyph_frames(app: &app::App, glyphs: &mut GlyphFrames) {
     let fallback_descriptor = sequencer::effects::EffectDescriptor::builtin_sampler();
     // Disjoint field reborrows: the identity cache is read (borrowed) per
     // track while the closure writes the sibling bookkeeping fields.
-    let GlyphFrames { identity: identity_cache, cell_published, revision, .. } = glyphs;
+    let GlyphFrames {
+        identity: identity_cache,
+        cell_published,
+        revision,
+        descriptor_hashes,
+        ..
+    } = glyphs;
     for track in 0..app.tracks.len() {
         let cells = app.state.track_pattern_cells(track);
         if cells.is_empty() {
             continue;
         }
         tracks_seen.insert(track);
+        // Launch state feeds the glyph shader's play triangle. It lives in a
+        // side store (not the frame): a launch change must invalidate widget
+        // primitives, but it must NOT force a cohort re-stat.
+        for cell in &cells {
+            if cell.active_effective {
+                play_keys.insert(pattern_cell_glyph_key(track, cell.pattern_id.0));
+            }
+        }
         let descriptor = app
             .graph
             .instrument_descriptors
             .get(track)
             .unwrap_or(&fallback_descriptor);
+        let descriptor_hash =
+            cached_descriptor_glyph_hash(app, track, descriptor, descriptor_hashes);
         let identity_entry = ensure_identity_cached(app, track, descriptor, identity_cache);
         let identity_fingerprint = identity_entry.fingerprint;
         let identity = &identity_entry.branches;
@@ -401,8 +533,7 @@ fn sync_pattern_cell_glyph_frames(app: &app::App, glyphs: &mut GlyphFrames) {
             }
 
             let mut hasher = DefaultHasher::new();
-            descriptor.name.hash(&mut hasher);
-            descriptor.params.len().hash(&mut hasher);
+            descriptor_hash.hash(&mut hasher);
             identity_fingerprint.hash(&mut hasher);
             for (pattern, patch) in &cell_patches {
                 pattern.hash(&mut hasher);
@@ -434,7 +565,27 @@ fn sync_pattern_cell_glyph_frames(app: &app::App, glyphs: &mut GlyphFrames) {
             let reference = values.first().cloned().unwrap_or_default();
             let model = DeltaGlyphCohort::new_with_identity(&schema, &values, &reference, identity);
             for (pattern, patch) in &cell_patches {
-                let Some(patch) = patch else { continue };
+                // A cell whose pattern has no bound patch still publishes an
+                // (empty-substrate) frame: the glyph widget now owns the play
+                // indicator, and a missing frame would drop the primitive
+                // entirely — leaving an active-but-unbound cell with no
+                // triangle at all.
+                let Some(patch) = patch else {
+                    *revision = revision.wrapping_add(1);
+                    pending.push((
+                        pattern_cell_glyph_key(track, pattern.0),
+                        SoundGlyphFrame {
+                            revision: *revision,
+                            cols: 1,
+                            rows: 1,
+                            substrate: vec![0],
+                            pieces: Vec::new(),
+                            anchor: false,
+                            incompatible: false,
+                        },
+                    ));
+                    continue;
+                };
                 // anchor=false everywhere: the palette's anchor ring marks the
                 // reference tile, which in the cell grid is an arbitrary pool
                 // patch — the launch state already has its own indicators.
@@ -479,6 +630,7 @@ fn sync_pattern_cell_glyph_frames(app: &app::App, glyphs: &mut GlyphFrames) {
         publish_sound_glyph_frames(pending);
     }
     retain_sound_glyph_frames("pattern-glyph:", &active);
+    set_sound_glyph_play_keys("pattern-glyph:", play_keys);
     cell_published.retain(|track, _| tracks_seen.contains(track));
 }
 
@@ -714,4 +866,125 @@ pub(crate) fn sync_sound_palette(
         frame.cached_clip_sounds = None;
     }
     dirty
+}
+
+#[cfg(test)]
+mod glyph_fingerprint_tests {
+    use super::*;
+    use sequencer::effects::{EffectDescriptor, ParamDescriptor, ParamUiMetadata};
+
+    fn param(name: &str) -> ParamDescriptor {
+        ParamDescriptor {
+            name: name.to_string(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.5,
+            kind: ParamKind::Continuous { unit: None },
+            scaling: ParamScaling::Linear,
+            node_param_idx: 0,
+            node_param_span: 1,
+            host_control: None,
+            ui_metadata: None,
+        }
+    }
+
+    fn descriptor(params: Vec<ParamDescriptor>) -> EffectDescriptor {
+        EffectDescriptor {
+            name: "test-instrument".to_string(),
+            params,
+            tensor_params: Vec::new(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+        }
+    }
+
+    fn fingerprint(descriptor: &EffectDescriptor) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        hash_descriptor_glyph_inputs(descriptor, &mut hasher);
+        hasher.finish()
+    }
+
+    /// The mixer-cell feed once hashed only name + param count; a reload that
+    /// kept both but changed a param's range/taper/metadata left its glyphs
+    /// stale. The shared helper must react to every schema input.
+    #[test]
+    fn descriptor_fingerprint_tracks_every_schema_input() {
+        let base = descriptor(vec![param("cutoff"), param("res")]);
+        assert_eq!(
+            fingerprint(&base),
+            fingerprint(&descriptor(vec![param("cutoff"), param("res")]))
+        );
+
+        let mut range = descriptor(vec![param("cutoff"), param("res")]);
+        range.params[0].max = 2.0;
+        assert_ne!(fingerprint(&base), fingerprint(&range));
+
+        let mut default = descriptor(vec![param("cutoff"), param("res")]);
+        default.params[1].default = 0.25;
+        assert_ne!(fingerprint(&base), fingerprint(&default));
+
+        let mut taper = descriptor(vec![param("cutoff"), param("res")]);
+        taper.params[0].scaling = ParamScaling::Exponential;
+        assert_ne!(fingerprint(&base), fingerprint(&taper));
+
+        let mut kind = descriptor(vec![param("cutoff"), param("res")]);
+        kind.params[1].kind = ParamKind::Boolean;
+        assert_ne!(fingerprint(&base), fingerprint(&kind));
+
+        let mut metadata = descriptor(vec![param("cutoff"), param("res")]);
+        metadata.params[0].ui_metadata =
+            ParamUiMetadata::new(Some("filter".to_string()), None, None);
+        assert_ne!(fingerprint(&base), fingerprint(&metadata));
+    }
+
+    /// Same engine + registry epoch, same key — the ~0.5-0.7ms skeleton
+    /// extraction stays cached across frames.
+    #[test]
+    fn identity_cache_key_stable_for_unchanged_engine() {
+        assert_eq!(
+            identity_cache_key(Some("my-synth"), 8, Some(3), 7),
+            identity_cache_key(Some("my-synth"), 8, Some(3), 7)
+        );
+    }
+
+    /// An instrument reload that restructures branch clusters WITHOUT changing
+    /// the param surface (same name, same param count, same engine slot) still
+    /// bumps the registry epoch and must change the key, so the identity
+    /// silhouette refreshes.
+    #[test]
+    fn identity_cache_key_changes_with_registry_epoch() {
+        let before = identity_cache_key(Some("my-synth"), 8, Some(3), 7);
+        let after = identity_cache_key(Some("my-synth"), 8, Some(3), 8);
+        assert_ne!(before, after);
+    }
+
+    /// Rebinding the track to a different registered engine changes the key
+    /// even when the epoch hasn't moved (swap-instrument reuses compiled
+    /// engines without re-registering).
+    #[test]
+    fn identity_cache_key_changes_with_engine_id() {
+        let before = identity_cache_key(Some("my-synth"), 8, Some(3), 7);
+        let after = identity_cache_key(Some("my-synth"), 8, Some(4), 7);
+        assert_ne!(before, after);
+    }
+
+    /// Builtins/samplers have no engine; the stock key still discriminates on
+    /// name and param count.
+    #[test]
+    fn identity_cache_key_stock_paths_differ_by_surface() {
+        assert_eq!(
+            identity_cache_key(None, 8, None, 0),
+            identity_cache_key(None, 8, None, 0)
+        );
+        assert_ne!(
+            identity_cache_key(None, 8, None, 0),
+            identity_cache_key(None, 9, None, 0)
+        );
+        assert_ne!(
+            identity_cache_key(None, 8, None, 0),
+            identity_cache_key(Some("my-synth"), 8, None, 0)
+        );
+    }
 }

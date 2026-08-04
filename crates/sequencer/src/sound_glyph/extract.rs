@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use super::geometry::fnv1a;
 use super::sexpr::{parse, Sexpr};
 
 /// Rendering cap from the spec (~30): above this, smallest clusters merge.
@@ -54,17 +55,21 @@ struct Node {
     refs: Vec<String>,
 }
 
+/// Symbols start with a letter or underscore; numeric literals start with a
+/// digit, sign, or dot, so this check never drops symbols that merely *parse*
+/// as floats (defs named `inf` / `infinity` / `nan` stay in the graph).
 fn is_symbol(atom: &str) -> bool {
     let Some(first) = atom.chars().next() else {
         return false;
     };
-    if !(first.is_ascii_alphabetic() || first == '_') {
-        return false;
-    }
-    atom.parse::<f64>().is_err()
+    first.is_ascii_alphabetic() || first == '_'
 }
 
-fn collect_symbols(form: &Sexpr, out: &mut Vec<String>) {
+/// Matches the reader's depth cap: the collectors stop descending here so
+/// their recursion stays bounded even if a caller hands them a deep tree.
+const MAX_COLLECT_DEPTH: usize = 256;
+
+fn collect_symbols(form: &Sexpr, out: &mut Vec<String>, depth: usize) {
     match form {
         Sexpr::Atom(a) => {
             if is_symbol(a) {
@@ -72,8 +77,11 @@ fn collect_symbols(form: &Sexpr, out: &mut Vec<String>) {
             }
         }
         Sexpr::List(items) => {
+            if depth >= MAX_COLLECT_DEPTH {
+                return;
+            }
             for item in items {
-                collect_symbols(item, out);
+                collect_symbols(item, out, depth + 1);
             }
         }
     }
@@ -81,7 +89,7 @@ fn collect_symbols(form: &Sexpr, out: &mut Vec<String>) {
 
 /// Names bound by `def` / `make-history` forms anywhere inside `form`
 /// (macro bodies declare locals that must not resolve to top-level nodes).
-fn collect_local_names(form: &Sexpr, out: &mut Vec<String>) {
+fn collect_local_names(form: &Sexpr, out: &mut Vec<String>, depth: usize) {
     if let Sexpr::List(items) = form {
         if let Some(head) = items.first().and_then(Sexpr::atom) {
             if matches!(head, "def" | "make-history") {
@@ -90,8 +98,11 @@ fn collect_local_names(form: &Sexpr, out: &mut Vec<String>) {
                 }
             }
         }
+        if depth >= MAX_COLLECT_DEPTH {
+            return;
+        }
         for item in items {
-            collect_local_names(item, out);
+            collect_local_names(item, out, depth + 1);
         }
     }
 }
@@ -101,6 +112,9 @@ struct ParsedSource {
     params: Vec<String>,
     nodes: Vec<Node>,
     node_index: HashMap<String, usize>,
+    /// Whether the source parsed to any forms at all (comment/whitespace-only
+    /// sources have none and legitimately yield an empty skeleton).
+    has_forms: bool,
 }
 
 fn parse_source(source: &str) -> ParsedSource {
@@ -146,7 +160,7 @@ fn parse_source(source: &str) -> ParsedSource {
                 if let Some(name) = items.get(1).and_then(Sexpr::atom) {
                     let mut refs = Vec::new();
                     for item in &items[2..] {
-                        collect_symbols(item, &mut refs);
+                        collect_symbols(item, &mut refs, 0);
                     }
                     push_node(
                         &mut nodes,
@@ -172,8 +186,8 @@ fn parse_source(source: &str) -> ParsedSource {
                 }
                 let mut refs = Vec::new();
                 for item in items.iter().skip(3) {
-                    collect_symbols(item, &mut refs);
-                    collect_local_names(item, &mut locals);
+                    collect_symbols(item, &mut refs, 0);
+                    collect_local_names(item, &mut locals, 0);
                 }
                 let local_set: HashSet<&str> = locals.iter().map(String::as_str).collect();
                 refs.retain(|r| !local_set.contains(r.as_str()));
@@ -202,7 +216,7 @@ fn parse_source(source: &str) -> ParsedSource {
                 if let Some(name) = items.get(1).and_then(Sexpr::atom) {
                     let mut refs = Vec::new();
                     for item in &items[2..] {
-                        collect_symbols(item, &mut refs);
+                        collect_symbols(item, &mut refs, 0);
                     }
                     if let Some(&idx) = node_index.get(name) {
                         nodes[idx].refs.extend(refs);
@@ -217,13 +231,16 @@ fn parse_source(source: &str) -> ParsedSource {
         params,
         nodes,
         node_index,
+        has_forms: !forms.is_empty(),
     }
 }
 
 // ── param clustering ──
 
 fn snake_prefixes(name: &str) -> Vec<String> {
-    let segments: Vec<&str> = name.split('_').collect();
+    // Empty segments (leading/double underscores) are dropped so `_a`-style
+    // params never cluster under an empty-string prefix.
+    let segments: Vec<&str> = name.split('_').filter(|s| !s.is_empty()).collect();
     (1..=segments.len())
         .map(|n| segments[..n].join("_"))
         .collect()
@@ -360,6 +377,9 @@ pub(super) fn finalize_branches(mut protos: Vec<ProtoBranch>) -> ExtractedSkelet
 /// Extract the glyph skeleton from an instrument's authored dgenlisp source.
 pub fn extract_skeleton(source: &str) -> ExtractedSkeleton {
     let parsed = parse_source(source);
+    if parsed.params.is_empty() {
+        return param_less_skeleton(source, &parsed);
+    }
     let clusters = cluster_params(&parsed.params);
 
     let mut param_cluster: HashMap<&str, usize> = HashMap::new();
@@ -456,6 +476,40 @@ pub fn extract_skeleton(source: &str) -> ExtractedSkeleton {
         });
     }
     finalize_branches(protos)
+}
+
+/// Never-empty invariant (sound-glyph + delta-glyph specs): every non-empty
+/// source gets a stable, non-empty skeleton even without `(param …)` forms.
+/// Weight-bearing top-level defs become the branches; a source with forms
+/// but no defs collapses to a single trunk branch whose name is seeded by
+/// the FNV-1a hash of the source, so distinct sources keep distinct glyph
+/// identities. Comment/whitespace-only sources still yield an empty skeleton.
+fn param_less_skeleton(source: &str, parsed: &ParsedSource) -> ExtractedSkeleton {
+    let protos: Vec<ProtoBranch> = parsed
+        .nodes
+        .iter()
+        .filter(|node| node.kind != NodeKind::Macro)
+        .map(|node| ProtoBranch {
+            pos: node.src_idx,
+            name: node.name.clone(),
+            weight: 1,
+            children: Vec::new(),
+            params: Vec::new(),
+        })
+        .collect();
+    if !protos.is_empty() {
+        return finalize_branches(protos);
+    }
+    if !parsed.has_forms {
+        return ExtractedSkeleton::default();
+    }
+    finalize_branches(vec![ProtoBranch {
+        pos: 0,
+        name: format!("src_{:016x}", fnv1a(source.as_bytes())),
+        weight: 1,
+        children: Vec::new(),
+        params: Vec::new(),
+    }])
 }
 
 /// Collapse linear chains in a cluster's owned-def subgraph: a producer with

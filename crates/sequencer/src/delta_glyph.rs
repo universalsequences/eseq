@@ -709,13 +709,6 @@ fn dimensions(count: usize) -> (usize, usize) {
     (cols, rows)
 }
 
-fn slot_position(slot: usize, rows: usize) -> (usize, usize) {
-    let col = slot / rows;
-    let sequence_row = slot % rows;
-    let row = if col % 2 == 0 { sequence_row } else { rows - sequence_row - 1 };
-    (col, row)
-}
-
 fn assign_lattice(plans: Vec<SlotPlan>) -> (usize, usize, Vec<Option<SlotPlan>>) {
     let (cols, rows) = dimensions(plans.len());
     let capacity = cols * rows;
@@ -735,8 +728,8 @@ fn assign_lattice(plans: Vec<SlotPlan>) -> (usize, usize, Vec<Option<SlotPlan>>)
         assigned.push(Some(plan));
     }
     assigned.resize_with(capacity, || None);
-    // Storage order is lattice slot order. Geometry performs the odd-column row
-    // reversal, yielding column-major boustrophedon traversal.
+    // Storage order is lattice slot order. Geometry maps slots plain
+    // column-major (slot / rows = col, slot % rows = row); no row reversal.
     (cols, rows, assigned)
 }
 

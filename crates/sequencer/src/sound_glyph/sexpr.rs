@@ -70,7 +70,12 @@ fn tokenize(source: &str) -> Vec<Token> {
     tokens
 }
 
-fn parse_one(tokens: &[Token], pos: &mut usize) -> Option<Sexpr> {
+/// Recursion cap for the reader: a corrupted or adversarial source with tens
+/// of thousands of nested parens must degrade gracefully, never overflow the
+/// stack. Content nested deeper than this truncates to an empty list.
+const MAX_DEPTH: usize = 256;
+
+fn parse_one(tokens: &[Token], pos: &mut usize, depth: usize) -> Option<Sexpr> {
     match tokens.get(*pos)? {
         Token::Atom(a) => {
             *pos += 1;
@@ -80,6 +85,26 @@ fn parse_one(tokens: &[Token], pos: &mut usize) -> Option<Sexpr> {
             // Stray close at top level: skip it.
             *pos += 1;
             None
+        }
+        Token::Open if depth >= MAX_DEPTH => {
+            // Past the depth cap: swallow the balanced sub-form iteratively
+            // and stand in an empty list (tolerant-parser spirit).
+            *pos += 1;
+            let mut open = 1usize;
+            while let Some(token) = tokens.get(*pos) {
+                *pos += 1;
+                match token {
+                    Token::Open => open += 1,
+                    Token::Close => {
+                        open -= 1;
+                        if open == 0 {
+                            break;
+                        }
+                    }
+                    Token::Atom(_) => {}
+                }
+            }
+            Some(Sexpr::List(Vec::new()))
         }
         Token::Open => {
             *pos += 1;
@@ -91,7 +116,7 @@ fn parse_one(tokens: &[Token], pos: &mut usize) -> Option<Sexpr> {
                         return Some(Sexpr::List(items));
                     }
                     _ => {
-                        if let Some(item) = parse_one(tokens, pos) {
+                        if let Some(item) = parse_one(tokens, pos, depth + 1) {
                             items.push(item);
                         }
                     }
@@ -108,7 +133,7 @@ pub fn parse(source: &str) -> Vec<Sexpr> {
     let mut pos = 0;
     let mut forms = Vec::new();
     while pos < tokens.len() {
-        if let Some(form) = parse_one(&tokens, &mut pos) {
+        if let Some(form) = parse_one(&tokens, &mut pos, 0) {
             forms.push(form);
         }
     }

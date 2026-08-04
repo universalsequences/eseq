@@ -182,10 +182,10 @@
         ;; every glyph surface shares it; add shader-knob props here (e.g.
         ;; :rim-gain, :height-amp, :interior-shade) to override live while
         ;; tuning, then bake the result back into the defaults.
-        (box :background-color :bg :padding 0.25 :width :fill
+        (box :background-color :bg :padding 0.15 :width :fill
           (sound-glyph :key (str "sound-palette-glyph-" (get entry :patch-id))
             :source (get entry :glyph-key)
-            :height 4.4)
+            :height 4.2)
           )
         ;; What the sound is (preset / sample name), below the glyph.
         (h-stack :gap 0.24 :align :center

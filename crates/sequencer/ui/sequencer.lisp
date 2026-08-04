@@ -607,63 +607,64 @@
     (rgba 0 0 0 0)
     (let ((vcol (rgba variant-r variant-g variant-b 1.0))
         (seqcol (rgba 0.545 0.545 0.588 0.95))
+        (radius (if (= active 1) 1 0.7))
         (border (if (= selected 1)
             (rgba 0.90 0.92 0.96 1.0)
             (if (= odd 1) 
               (rgba 0.28 0.28 0.28 1.0) 
               (rgba 0.18 0.18 0.18 1.0)))))
-    (sdf/layer
-      (sdf/fill
-        (sdf/translate 0 0.0
-          (sdf/rounded-rect (* 1.0 width) (* 1.00 height) 0.1))
-        (material
-          :lighting (lighting :edge-min -0.3 :edge-max 0.393
-            :light (vec3 0.8 -1.8 4.5) :shininess 92.0)
-          :color (if (= duration 1)
-            (aqua-color
-               (mix :white (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 0.5) (if (= selected 1) 0.8 1))
-              (if (= selected 1) :white (rgba track-r track-g track-b 1)))
-            (rgba 0 0 0 0))))
-      (sdf/fill (sdf/circle (if (= selected 1) 0.76 0.75))
-        (material
-          :lighting (lighting :edge-min -0.3 :edge-max 1.0
-            :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
-          :color (aqua-color border (rgba 0.9 0.1 0.5 1.0))))
-      (sdf/fill (sdf/circle (if (= selected 1) 0.64 0.69))
-        (material
-          :color (if (= odd 1)
-            (rgba 0.15 0.155 0.155 0.6)
-            (rgba 0.015 0.016 0.025 0.8))))
-      (sdf/fill
-        (sdf/translate 0 0.82
-          (sdf/rounded-rect 0.52 0.10 0.05))
-        (material
-          :color (if (= active 1)
-            (if (= plock-kind 2)
-              vcol
-              (if (= plock-kind 1)
-                seqcol
-                (rgba 0 0 0 0)))
-            (rgba 0 0 0 0))
-          :shadow (shadow
+      (sdf/layer
+        (sdf/fill
+          (sdf/translate 0 0.0
+            (sdf/rounded-rect (* 1.0 width) (* 1.00 height) 0.1))
+          (material
+            :lighting (lighting :edge-min -0.3 :edge-max 0.393
+              :light (vec3 0.8 -1.8 4.5) :shininess 92.0)
+            :color (if (= duration 1)
+              (aqua-color
+                (mix :white (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 0.5) (if (= selected 1) 0.8 1))
+                (if (= selected 1) :white (rgba track-r track-g track-b 1)))
+              (rgba 0 0 0 0))))
+        (sdf/fill (sdf/circle (* radius 0.75))
+          (material
+            :lighting (lighting :edge-min -0.3 :edge-max 1.0
+              :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
+            :color (aqua-color border (rgba 0.9 0.1 0.5 1.0))))
+        (sdf/fill (sdf/circle (* radius (if (= selected 1) 0.64 0.69)))
+          (material
+            :color (if (= odd 1)
+              (rgba 0.15 0.155 0.155 0.6)
+              (rgba 0.015 0.016 0.025 0.8))))
+        (sdf/fill
+          (sdf/translate 0 0.82
+            (sdf/rounded-rect 0.52 0.10 0.05))
+          (material
             :color (if (= active 1)
               (if (= plock-kind 2)
-                (rgba variant-r variant-g variant-b 0.70)
-                (rgba 0 0 0 0))
+                vcol
+                (if (= plock-kind 1)
+                  seqcol
+                  (rgba 0 0 0 0)))
               (rgba 0 0 0 0))
-            :blur (if (= active 1)
-              (if (= plock-kind 2) 0.12 0.0)
-              0.0)
-            :offset (vec2 0 0))))
-      (sdf/fill (sdf/circle (if (= selected 1) 0.35 0.5))
-        (material
-          :lighting (lighting :edge-min -0.25 :edge-max 1.95
-            :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
-          :color (if (= active 1)
-            (aqua-color
-              (rgba (* track-r 0.72) (* track-g 0.72) (* track-b 0.82) 1.0)
-              (rgba track-r track-g track-b 1.0))
-            (rgba 0 0 0 0))))))))
+            :shadow (shadow
+              :color (if (= active 1)
+                (if (= plock-kind 2)
+                  (rgba variant-r variant-g variant-b 0.70)
+                  (rgba 0 0 0 0))
+                (rgba 0 0 0 0))
+              :blur (if (= active 1)
+                (if (= plock-kind 2) 0.12 0.0)
+                0.0)
+              :offset (vec2 0 0))))
+        (sdf/fill (sdf/circle (if (= selected 1) 0.35 0.5))
+          (material
+            :lighting (lighting :edge-min -0.25 :edge-max 1.95
+              :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
+            :color (if (= active 1)
+              (aqua-color
+                (rgba (* track-r 0.72) (* track-g 0.72) (* track-b 0.82) 1.0)
+                (rgba track-r track-g track-b 1.0))
+              (rgba 0 0 0 0))))))))
 
 ;; SEQ.song-track-governed carries one number per track (takes spec 10 UX):
 ;; 0 = the lane is not playing a take (pattern lanes stay fully editable —

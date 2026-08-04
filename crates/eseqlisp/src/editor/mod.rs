@@ -5402,19 +5402,22 @@ impl Editor {
             return;
         }
 
-        // A modal is a keyboard boundary. Route the key through the tile that
-        // owns the modal (which may be inactive while inspected source is
-        // open), and never let an unhandled modal key reach editor/global
-        // bindings. Escape and focused modal widgets are handled inside.
-        if self.handle_open_modal_key(key) {
-            return;
-        }
-
+        // Active prompts keep keyboard priority over an open modal: a save
+        // prompt or minibuffer already on screen must still receive its
+        // keystrokes (y/n, prompt text) even if a modal is open.
         if self.handle_save_prompt_key(key) {
             return;
         }
 
         if self.handle_minibuffer_key(key) {
+            return;
+        }
+
+        // A modal is a keyboard boundary. Route the key through the tile that
+        // owns the modal (which may be inactive while inspected source is
+        // open), and never let an unhandled modal key reach editor/global
+        // bindings. Escape and focused modal widgets are handled inside.
+        if self.handle_open_modal_key(key) {
             return;
         }
 

@@ -12543,3 +12543,40 @@ fn inspect_toggle_and_escape_outrank_an_open_modal() {
         "with inspect closed, Esc closes the modal"
     );
 }
+
+/// An active prompt outranks the modal keyboard boundary: if a save prompt is
+/// on screen while a modal is open, keystrokes must reach the prompt (its
+/// filename input / y-n answers), not be swallowed by the modal.
+#[cfg(target_os = "macos")]
+#[test]
+fn save_prompt_keys_outrank_an_open_modal() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = modal_two_tile_editor(MODAL_PANEL_BODY);
+    assert!(editor.modal_is_open());
+
+    editor.open_save_prompt(false);
+    editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert_eq!(
+        editor.save_prompt.as_ref().expect("save prompt stays open").input,
+        "x",
+        "a keystroke must reach the save prompt, not the open modal"
+    );
+    assert!(
+        eval_bool(&mut editor, "modal-open"),
+        "typing into the prompt must not disturb the modal"
+    );
+
+    // Esc answers the prompt (cancel) rather than closing the modal.
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(editor.save_prompt.is_none(), "Esc must cancel the prompt first");
+    assert!(
+        eval_bool(&mut editor, "modal-open"),
+        "the modal stays open until the next Esc"
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        !eval_bool(&mut editor, "modal-open"),
+        "with the prompt gone, Esc closes the modal"
+    );
+}

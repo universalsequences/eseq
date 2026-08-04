@@ -48,10 +48,19 @@ pub fn param_specs(source: &str) -> BTreeMap<String, ParamSpec> {
             }
             i += 1;
         }
+        // Sanitize: non-finite (`@min inf`) or degenerate (min >= max) bounds
+        // would poison host normalization (divide-by-zero → NaN), so they
+        // reset to the 0..1 default range; the default clamps into bounds.
+        let (lo, hi) = if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+            (0.0, 1.0)
+        } else {
+            (lo, hi)
+        };
+        let default = default.filter(|d| d.is_finite()).unwrap_or(lo);
         out.entry(name.to_string()).or_insert(ParamSpec {
             min: lo,
             max: hi,
-            default: default.unwrap_or(lo),
+            default: default.clamp(lo, hi),
         });
     }
     out
@@ -138,7 +147,7 @@ const CHILD_SEGMENTS: usize = 6;
 // ── deterministic hashing ──
 
 /// FNV-1a, fixed offsets — stable across platforms and Rust versions.
-fn fnv1a(bytes: &[u8]) -> u64 {
+pub(super) fn fnv1a(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
         h ^= b as u64;
@@ -183,7 +192,15 @@ fn branch_params<'a>(extracted: &'a ExtractedSkeleton, cluster: &str) -> Vec<&'a
 }
 
 fn value_of(values: &BTreeMap<String, f32>, param: &str) -> f32 {
-    values.get(param).copied().unwrap_or(0.5).clamp(0.0, 1.0)
+    // `clamp` passes NaN through, so non-finite host values (a normalization
+    // gone wrong upstream) fall back to the missing-param default instead of
+    // poisoning every downstream fold/point.
+    let v = values.get(param).copied().unwrap_or(0.5);
+    if v.is_finite() {
+        v.clamp(0.0, 1.0)
+    } else {
+        0.5
+    }
 }
 
 /// Mean of the branch's normalized values (0.5 when the branch has none).

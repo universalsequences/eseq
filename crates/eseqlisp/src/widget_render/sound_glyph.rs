@@ -118,10 +118,25 @@ impl WidgetDefinition for SoundGlyphWidget {
         node: &LayoutNode,
         viewport: WidgetViewport,
     ) -> Vec<MetalPrimitive> {
-        let Some(frame) = source_key(&node.props)
-            .and_then(|source| crate::sound_glyph_data::sound_glyph_frame(&source))
-        else {
+        let Some(source) = source_key(&node.props) else {
             return Vec::new();
+        };
+        let Some(frame) = crate::sound_glyph_data::sound_glyph_frame(&source) else {
+            return Vec::new();
+        };
+        // Play indicator (mixer pattern cells): `:play` prop overrides, else
+        // the host-published play-key store drives it. The store bumps the
+        // widget-state generation on launch changes, and color_a is part of
+        // the primitive cache token, so this stays live without itime.
+        let play = match node.props.get("play") {
+            Some(Value::Number(value)) => *value as f32,
+            _ => {
+                if crate::sound_glyph_data::sound_glyph_playing(&source) {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
         };
 
         // Pack only exact 24-bit integers into float uniforms; depending on NaN
@@ -176,11 +191,13 @@ impl WidgetDefinition for SoundGlyphWidget {
             // Substrate tint (overridable per call site — mixer cells tint the
             // body with the track color); accent hues live in the shader's
             // DG_HUES palette so a per-piece 3-bit index costs no uniform slots.
+            // color_a.w carries the play flag (the shader rebuilds the tint's
+            // alpha as 1.0 itself).
             color_a: [
                 tint_channel(&node.props, "tint-r", 0.20),
                 tint_channel(&node.props, "tint-g", 0.34),
                 tint_channel(&node.props, "tint-b", 0.38),
-                1.0,
+                if play > 0.5 { 1.0 } else { 0.0 },
             ],
             color_b: tune[8..12].try_into().unwrap(),
             color_c: tune[12..16].try_into().unwrap(),
@@ -439,6 +456,25 @@ float4 dg_compose(float4 color, float4 material, float sdf, float fit, float3 ti
     return color;
 }
 
+// Exact signed distance to the play triangle (right-pointing, same vertices
+// the mixer's cell background used to draw): negative inside, so the edge
+// anti-aliases at true pixel width via fwidth.
+float dg_play_triangle(float2 p) {
+    float2 p0 = float2(-0.26, -0.36);
+    float2 p1 = float2(-0.26, 0.36);
+    float2 p2 = float2(0.36, 0.0);
+    float2 e0 = p1 - p0, e1 = p2 - p1, e2 = p0 - p2;
+    float2 v0 = p - p0, v1 = p - p1, v2 = p - p2;
+    float2 pq0 = v0 - e0 * clamp(dot(v0, e0) / dot(e0, e0), 0.0, 1.0);
+    float2 pq1 = v1 - e1 * clamp(dot(v1, e1) / dot(e1, e1), 0.0, 1.0);
+    float2 pq2 = v2 - e2 * clamp(dot(v2, e2) / dot(e2, e2), 0.0, 1.0);
+    float s = sign(e0.x * e2.y - e0.y * e2.x);
+    float2 d = min(min(float2(dot(pq0, pq0), s * (v0.x * e0.y - v0.y * e0.x)),
+                       float2(dot(pq1, pq1), s * (v1.x * e1.y - v1.y * e1.x))),
+                   float2(dot(pq2, pq2), s * (v2.x * e2.y - v2.y * e2.x)));
+    return -sqrt(d.x) * sign(d.y);
+}
+
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) {
     // Centered uv, +y upward, as required by the delta-glyph lattice.
     float2 p = float2(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
@@ -447,9 +483,11 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) {
 
     float edge = max(dg_tune(in, 15), 0.0005) * fit;
     float substrate = dg_substrate_field(p, in);
+    // color_a.w is the play flag, NOT the tint alpha — rebuild alpha as 1.0.
+    float4 baseTint = float4(in.color_a.rgb, 1.0);
     color = dg_compose(color,
-                       dg_material(p, dg_normal_substrate(p, in), in.color_a, false, in),
-                       substrate, fit, in.color_a.rgb, in);
+                       dg_material(p, dg_normal_substrate(p, in), baseTint, false, in),
+                       substrate, fit, baseTint.rgb, in);
 
     // One layer per lit parameter, all anchored into the SHARED lattice so they
     // interpenetrate — the original's second tier of richness, which rev 2's
@@ -487,6 +525,19 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) {
     if (in.corner_radius > 0.5) {
         float ring = 1.0 - smoothstep(0.010, 0.022, abs(length(p) - 0.91));
         color = mix(color, float4(0.96, 0.50, 0.24, 0.9), ring);
+    }
+    // Play indicator ON TOP of the glyph (color_a.w > 0.5 = playing): opaque
+    // green triangle with ~1px coverage AA, over a soft dark ring so the edge
+    // stays legible against bright accent pieces.
+    if (in.color_a.w > 0.5) {
+        float d = dg_play_triangle(p);
+        float aa = max(fwidth(d), 0.002);
+        float halo = (1.0 - smoothstep(0.0, 0.10, d)) * smoothstep(-aa, aa, d);
+        color.rgb = mix(color.rgb, float3(0.01, 0.03, 0.015), 0.62 * halo);
+        color.a = max(color.a, 0.62 * halo);
+        float tri = 1.0 - smoothstep(-aa, aa, d);
+        color.rgb = mix(color.rgb, float3(0.1, 0.95, 0.38), tri);
+        color.a = max(color.a, tri);
     }
     if (color.a <= 0.002) discard_fragment();
     return color;

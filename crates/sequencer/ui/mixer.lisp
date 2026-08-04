@@ -394,19 +394,19 @@
       (middle (rgba track-r track-g track-b 1.0))
       (inner (if (= active 0)
           (rgba 0.02 0.025 0.03 0.7)
-          track-col))
-      (play-col (if (= active 1)
-          (rgba 0.1 0.95 0.38 1.0)
-          (rgba 0 0 0 0))))
+          track-col)))
+    ;; The play triangle moved into the sound-glyph shader (it must sit ON TOP
+    ;; of the glyph; this background always draws underneath it). Liveness
+    ;; comes from the host play-key store (sync_pattern_cell_glyph_frames),
+    ;; and patch-less patterns still get an empty glyph frame published, so
+    ;; every active cell renders the glyph-drawn triangle — no bg fallback.
     (sdf/layer
       (sdf/fill (sdf/rounded-rect width height 0.3)
         (material :color outer))
       (sdf/fill (sdf/rounded-rect (* width 0.94) (* height 0.94) 0.2)
         (material :color middle))
       (sdf/fill (sdf/rounded-rect (* width 0.92) (* height 0.92) 0.22)
-        (material :color inner))
-      
-      )))
+        (material :color inner)))))
 
 
 

@@ -313,10 +313,89 @@ fn sub_prefix_clusters_without_a_parent_stay_split() {
 }
 
 #[test]
-fn empty_source_yields_empty_skeleton() {
+fn comment_only_source_yields_empty_skeleton() {
+    // No forms at all — nothing to derive an identity from.
     let extracted = extract_skeleton("; just a comment\n");
     assert!(extracted.skeleton.branches.is_empty());
     assert!(extracted.param_branch.is_empty());
+}
+
+// ── never-empty invariant (param-less sources) ──
+
+#[test]
+fn defs_only_source_yields_def_branches() {
+    let source = "(def osc (sine 220))\n\
+                  (def mix (* osc 0.5))\n\
+                  (defmacro helper (x) (* x 2))\n";
+    let extracted = extract_skeleton(source);
+    // Weight-bearing defs become branches in source order; macros carry none.
+    assert_eq!(cluster_names(&extracted.skeleton), vec!["osc", "mix"]);
+    assert!(extracted.param_branch.is_empty());
+    assert!(!identity_branches(&extracted.skeleton).is_empty());
+}
+
+#[test]
+fn param_less_def_less_source_still_gets_a_branch() {
+    let extracted = extract_skeleton("(out 0 1 @name audio)\n");
+    assert_eq!(extracted.skeleton.branches.len(), 1);
+    let name = extracted.skeleton.branches[0].cluster.as_str();
+    assert!(name.starts_with("src_"), "fallback branch name {name}");
+    assert!(!identity_branches(&extracted.skeleton).is_empty());
+    // Distinct sources keep distinct fallback identities.
+    let other = extract_skeleton("(out 0 2 @name audio)\n");
+    assert_ne!(name, other.skeleton.branches[0].cluster.as_str());
+    // Deterministic across runs.
+    let again = extract_skeleton("(out 0 1 @name audio)\n");
+    assert_eq!(extracted, again);
+}
+
+// ── parser robustness ──
+
+#[test]
+fn deeply_nested_source_does_not_overflow() {
+    // ~100k nested parens: the reader's depth cap must truncate gracefully
+    // instead of blowing the stack.
+    let mut source = String::from("(param depth_a @min 0 @max 1)\n(def deep ");
+    source.push_str(&"(".repeat(100_000));
+    source.push_str("depth_a");
+    source.push_str(&")".repeat(100_000));
+    source.push(')');
+    let extracted = extract_skeleton(&source);
+    assert!(!extracted.skeleton.branches.is_empty());
+    let _ = param_specs(&source);
+
+    // Unbalanced deep opens survive too.
+    let unbalanced = "(".repeat(100_000);
+    let _ = extract_skeleton(&unbalanced);
+}
+
+// ── symbol / prefix edge cases ──
+
+#[test]
+fn defs_named_like_float_literals_stay_in_reference_graph() {
+    // `inf` / `nan` parse as f64 but are legitimate symbol names; they must
+    // keep flowing through the def-reference graph.
+    let source = "(param lfo_rate @min 0 @max 1)\n\
+                  (param lfo_depth @min 0 @max 1)\n\
+                  (def inf (* lfo_rate 2))\n\
+                  (def nan (+ inf lfo_depth))\n";
+    let extracted = extract_skeleton(source);
+    // 2 params + the inf/nan owned-def chain.
+    assert_eq!(branch(&extracted, "lfo").weight, 4);
+}
+
+#[test]
+fn leading_underscore_params_do_not_form_an_empty_cluster() {
+    let source = "(param _rate @min 0 @max 1)\n\
+                  (param _depth @min 0 @max 1)\n";
+    let extracted = extract_skeleton(source);
+    assert!(extracted
+        .skeleton
+        .branches
+        .iter()
+        .all(|b| !b.cluster.is_empty()));
+    // `_rate`/`_depth` share no non-empty prefix → singletons → global.
+    assert_eq!(cluster_names(&extracted.skeleton), vec![GLOBAL_CLUSTER]);
 }
 
 // ── stock skeletons (builtins) ──
@@ -371,24 +450,6 @@ fn stock_skeletons_cover_all_builtins_and_sampler() {
         let again = format!("{:?}", stock_skeleton(&descriptor));
         assert_eq!(format!("{extracted:?}"), again, "{name}: nondeterministic");
     }
-}
-
-// ── cache ──
-
-#[test]
-fn cache_reuses_extraction_per_source_hash() {
-    let source = instrument_source("core/operator/dsp.lisp");
-    let mut cache = SkeletonCache::new();
-    let a = cache.get_or_extract(&source);
-    let b = cache.get_or_extract(&source);
-    assert!(std::sync::Arc::ptr_eq(&a, &b));
-    assert_eq!(cache.len(), 1);
-
-    // A whitespace edit is a different source hash → new entry, same skeleton.
-    let edited = source.replace("\n(", "\n (");
-    let c = cache.get_or_extract(&edited);
-    assert_eq!(cache.len(), 2);
-    assert_eq!(*a, *c);
 }
 
 // ── geometry (P2) ──
@@ -503,4 +564,64 @@ fn param_ranges_reads_min_max() {
     assert_eq!(ranges.get("opa_freq_hz"), Some(&(0.1, 20000.0)));
     assert_eq!(ranges.get("opa_on"), Some(&(0.0, 1.0)));
     assert_eq!(ranges.len(), 110);
+}
+
+#[test]
+fn param_specs_sanitizes_degenerate_bounds() {
+    let source = "(param a @min inf @max 1 @default 0.5)\n\
+                  (param b @min 2 @max 2 @default 2)\n\
+                  (param c @min 5 @max 1)\n\
+                  (param d @min -1 @max nan @default nan)\n";
+    let specs = param_specs(source);
+    assert_eq!(specs.len(), 4);
+    for (name, spec) in &specs {
+        assert!(
+            spec.min.is_finite() && spec.max.is_finite() && spec.default.is_finite(),
+            "{name}: non-finite spec {spec:?}",
+        );
+        assert!(spec.min < spec.max, "{name}: degenerate bounds {spec:?}");
+        assert!(
+            (spec.min..=spec.max).contains(&spec.default),
+            "{name}: default out of bounds {spec:?}",
+        );
+    }
+    // min == max (host normalization would divide by zero) resets to 0..1;
+    // the declared default clamps into the sanitized range.
+    assert_eq!(
+        specs.get("b"),
+        Some(&ParamSpec {
+            min: 0.0,
+            max: 1.0,
+            default: 1.0,
+        }),
+    );
+}
+
+#[test]
+fn non_finite_values_do_not_poison_geometry() {
+    let extracted = extract_skeleton(&instrument_source("core/operator/dsp.lisp"));
+    let mut values = norm_values(&extracted, f32::NAN);
+    values.insert("filter_freq".to_string(), f32::INFINITY);
+    values.insert("opa_attack".to_string(), f32::NEG_INFINITY);
+    let geom = resolve_geometry(&extracted, &values);
+    for stroke in &geom.strokes {
+        assert!(stroke.width.is_finite(), "{}: NaN width", stroke.branch);
+        for p in &stroke.points {
+            assert!(
+                p[0].is_finite() && p[1].is_finite(),
+                "{}: non-finite point {p:?}",
+                stroke.branch,
+            );
+        }
+    }
+    for mark in &geom.marks {
+        assert!(
+            mark.pos[0].is_finite() && mark.pos[1].is_finite() && mark.radius.is_finite(),
+            "{}: non-finite mark",
+            mark.param,
+        );
+    }
+    // Every non-finite value reads as the missing-param default (0.5).
+    let baseline = resolve_geometry(&extracted, &norm_values(&extracted, 0.5));
+    assert_eq!(geom, baseline);
 }

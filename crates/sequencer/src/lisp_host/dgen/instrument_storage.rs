@@ -40,6 +40,22 @@ pub(in crate::lisp_host) struct InstrumentPresetBank {
     presets: Vec<InstrumentPreset>,
 }
 
+/// Memo for the recursive-walk fallback in `resolve_instrument_storage_path`.
+/// Names that don't resolve via the cheap exact-path probes trigger a full
+/// scan of `INSTRUMENTS_DIR`; hot callers (the glyph feeds re-read sources
+/// every reactive tick) must not pay that walk repeatedly. Hits are
+/// revalidated with `exists()`, so deleting/moving a source re-resolves on
+/// the next call. Known staleness: adding a SECOND source with the same leaf
+/// name mid-session won't surface the ambiguity error until the cached path
+/// goes away.
+fn resolved_walk_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<(String, String), PathBuf>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(String, String), PathBuf>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
 pub(in crate::lisp_host) fn resolve_instrument_storage_path(name: &str, extension: &str) -> io::Result<PathBuf> {
     fn is_hidden(path: &Path) -> bool {
         path.file_name()
@@ -84,6 +100,19 @@ pub(in crate::lisp_host) fn resolve_instrument_storage_path(name: &str, extensio
         }
     }
 
+    let cache_key = (name.to_string(), extension.to_string());
+    if let Some(cached) = resolved_walk_cache()
+        .lock()
+        .unwrap()
+        .get(&cache_key)
+        .cloned()
+    {
+        if cached.exists() {
+            return Ok(cached);
+        }
+        resolved_walk_cache().lock().unwrap().remove(&cache_key);
+    }
+
     let basename = Path::new(trimmed)
         .file_name()
         .and_then(|s| s.to_str())
@@ -99,7 +128,14 @@ pub(in crate::lisp_host) fn resolve_instrument_storage_path(name: &str, extensio
 
     match matches.len() {
         0 => Ok(exact),
-        1 => Ok(matches.remove(0)),
+        1 => {
+            let resolved = matches.remove(0);
+            resolved_walk_cache()
+                .lock()
+                .unwrap()
+                .insert(cache_key, resolved.clone());
+            Ok(resolved)
+        }
         _ => Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
