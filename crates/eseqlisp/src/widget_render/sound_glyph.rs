@@ -456,13 +456,13 @@ float4 dg_compose(float4 color, float4 material, float sdf, float fit, float3 ti
     return color;
 }
 
-// Exact signed distance to the play triangle (right-pointing, same vertices
+// Exact signed distance to the play triangle (right-pointing, 2x the vertices
 // the mixer's cell background used to draw): negative inside, so the edge
 // anti-aliases at true pixel width via fwidth.
 float dg_play_triangle(float2 p) {
-    float2 p0 = float2(-0.26, -0.36);
-    float2 p1 = float2(-0.26, 0.36);
-    float2 p2 = float2(0.36, 0.0);
+    float2 p0 = float2(-0.52, -0.72);
+    float2 p1 = float2(-0.52, 0.72);
+    float2 p2 = float2(0.72, 0.0);
     float2 e0 = p1 - p0, e1 = p2 - p1, e2 = p0 - p2;
     float2 v0 = p - p0, v1 = p - p1, v2 = p - p2;
     float2 pq0 = v0 - e0 * clamp(dot(v0, e0) / dot(e0, e0), 0.0, 1.0);

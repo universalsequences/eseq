@@ -3277,7 +3277,9 @@ impl Editor {
     }
 
     pub fn needs_redraw(&self) -> bool {
-        self.needs_redraw || self.runtime.has_dirty_widget_ids()
+        self.needs_redraw
+            || self.runtime.has_dirty_widget_ids()
+            || crate::widget_render::scroll::has_dirty_scroll_keys()
     }
 
     pub fn clear_needs_redraw(&mut self) {
@@ -4180,7 +4182,23 @@ impl Editor {
     }
 
     pub fn take_dirty_widget_ids(&mut self) -> Vec<u64> {
-        self.runtime.take_dirty_widget_ids()
+        let mut ids = self.runtime.take_dirty_widget_ids();
+        let scroll_keys = crate::widget_render::scroll::take_dirty_scroll_keys();
+        if !scroll_keys.is_empty() {
+            if let Some(layout) = self.runtime.current_layout.as_deref() {
+                collect_scroll_widget_ids_for_keys(layout, &scroll_keys, &mut ids);
+            }
+            for tile_id in self.tile_root.leaf_ids() {
+                if let Some(layout) = self
+                    .tile_root
+                    .find_leaf(tile_id)
+                    .and_then(|leaf| leaf.cached_layout.as_deref())
+                {
+                    collect_scroll_widget_ids_for_keys(layout, &scroll_keys, &mut ids);
+                }
+            }
+        }
+        ids
     }
 
     pub fn set_layout_viewport(&mut self, cols: u16, rows: u16) {
@@ -9774,6 +9792,25 @@ fn find_layout_node_by_stable_key<'a>(
     node.children
         .iter()
         .find_map(|child| find_layout_node_by_stable_key(child, stable_key))
+}
+
+/// Map dirty scroll state keys (stable ids) to the layout widget ids of the
+/// scroll nodes that own them, so scroll changes ride the dirty-widget-id
+/// invalidation path scoped to the owning subtree.
+fn collect_scroll_widget_ids_for_keys(
+    node: &crate::layout::LayoutNode,
+    keys: &std::collections::HashSet<u64>,
+    out: &mut Vec<u64>,
+) {
+    if node.widget_type == "scroll"
+        && keys.contains(&crate::widget_render::scroll::scroll_state_key(node))
+        && !out.contains(&node.widget_id)
+    {
+        out.push(node.widget_id);
+    }
+    for child in &node.children {
+        collect_scroll_widget_ids_for_keys(child, keys, out);
+    }
 }
 
 fn find_patcher_layout_node(node: &crate::layout::LayoutNode) -> Option<crate::layout::LayoutNode> {

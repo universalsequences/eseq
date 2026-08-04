@@ -452,19 +452,21 @@
               ;; sync_pattern_cell_glyph_frames). The tuned shader styling is
               ;; the widget default (TUNING_PROPS); the substrate body tints
               ;; with the track color so cells keep their track identity.
-                (sound-glyph
-                  :key (str "mixer-v2-cell-glyph-" track "-" pattern-id)
-                  :source (str "pattern-glyph:track:" track ":pattern:" pattern-id)
-                  :edge-soft 0.1
-                  :white-damp 0
-                  :height-in 0.3
-                  :height-out -0.08
-                  :height-amp 3
-                  :diffuse 0.6
-                  :rim-width 0.1
-                  :tint-r (mixer-v2-track-color-r track false)
-                  :tint-g (mixer-v2-track-color-g track false)
-                  :tint-b (mixer-v2-track-color-b track false)))))))))
+              (sound-glyph
+                :key (str "mixer-v2-cell-glyph-" track "-" pattern-id)
+                :source (str "pattern-glyph:track:" track ":pattern:" pattern-id)
+                :edge-soft 0.1
+                :white-damp 0
+                :height-in 0.3
+                :height-out -0.08
+                :height-amp 3
+                :diffuse 0.8
+                :rim-width 0.1
+                :tint-r (* 0.4 (mixer-v2-track-color-r track false))
+                
+                :tint-g (* 0.4 (mixer-v2-track-color-g track false))
+                :tint-b (* 0.4 (mixer-v2-track-color-b track false))
+                ))))))))
 
 (def mixer-v2-mod-output-style
   (ui/style

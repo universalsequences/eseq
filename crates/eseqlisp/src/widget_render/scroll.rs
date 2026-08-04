@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{WidgetDefinition, WidgetEvent};
 use crate::layout::{
@@ -35,6 +35,11 @@ impl Default for ScrollState {
 thread_local! {
     static SCROLL_STATES: RefCell<HashMap<u64, ScrollState>> = RefCell::new(HashMap::new());
     static CURRENT_EVENT_SCROLL_OFFSET: RefCell<Option<f32>> = const { RefCell::new(None) };
+    // Scroll state keys (stable ids) whose state changed since the last drain.
+    // Scroll changes are scoped to the owning scroll widget's subtree, so they
+    // flow through the dirty-widget-id path instead of bumping the global
+    // widget state generation (which would invalidate every tile's caches).
+    static DIRTY_SCROLL_KEYS: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
 }
 
 pub fn get_scroll_state(widget_id: u64) -> ScrollState {
@@ -48,8 +53,16 @@ pub fn set_scroll_state(widget_id: u64, state: ScrollState) {
         old.as_ref() != Some(&state)
     });
     if changed {
-        super::bump_widget_state_generation();
+        DIRTY_SCROLL_KEYS.with(|keys| keys.borrow_mut().insert(widget_id));
     }
+}
+
+pub fn take_dirty_scroll_keys() -> HashSet<u64> {
+    DIRTY_SCROLL_KEYS.with(|keys| std::mem::take(&mut *keys.borrow_mut()))
+}
+
+pub fn has_dirty_scroll_keys() -> bool {
+    DIRTY_SCROLL_KEYS.with(|keys| !keys.borrow().is_empty())
 }
 
 pub fn scroll_state_key(node: &LayoutNode) -> u64 {
