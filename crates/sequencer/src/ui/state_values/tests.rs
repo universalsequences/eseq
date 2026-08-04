@@ -8083,6 +8083,60 @@
         assert_eq!(value_map_number(row, "value"), Some(900.0));
     }
 
+    // A continuous instrument p-lock row must read its LOCK cell from the
+    // per-param SEQV field rather than the row's own number. That is what lets
+    // a knob drag repaint the row through the binding path instead of
+    // republishing SEQ.track-plocks (which reruns the whole *step* panel on
+    // every mouse move — the 43ms p-lock drag). Enum/boolean rows render a
+    // dropdown off `:text-value`, so they deliberately stay unbound.
+    #[test]
+    fn continuous_instrument_plock_rows_bind_their_lock_value_to_the_param_field() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let mode_idx = desc
+            .params
+            .iter()
+            .position(|param| matches!(param.kind, sequencer::effects::ParamKind::Enum { .. }))
+            .expect("filter descriptor should include an enum param");
+        let app = test_app_with_instrument_descriptor(desc.clone());
+        app.state.pattern.instrument_slots[0].set_plock(2, cutoff_idx, 900.0);
+        app.state.pattern.instrument_slots[0].set_plock(2, mode_idx, 1.0);
+        let selected_steps = Arc::new(Mutex::new(HashSet::from([2])));
+
+        let rows = value_list_maps(&build_track_plocks_value(
+            &app,
+            &app.state,
+            0,
+            &selected_steps,
+        ));
+        let cutoff_row = rows
+            .iter()
+            .find(|row| value_map_string(row, "name").as_deref() == Some("cutoff"))
+            .expect("cutoff p-lock row");
+        assert_eq!(
+            value_map_string(cutoff_row, "value-field").as_deref(),
+            Some(
+                instrument_param_value_field(0, cutoff_idx, &desc.params[cutoff_idx].name).as_str()
+            ),
+            "continuous instrument p-lock rows must bind to the per-param SEQV value field"
+        );
+
+        let enum_row = rows
+            .iter()
+            .find(|row| {
+                value_map_string(row, "name").as_deref() == Some(&desc.params[mode_idx].name)
+            })
+            .expect("enum p-lock row");
+        assert!(
+            value_map_string(enum_row, "value-field").is_none(),
+            "enum p-lock rows render a dropdown off :text-value and must stay unbound"
+        );
+    }
+
     #[test]
     fn track_plock_variant_preview_rows_show_variant_without_selected_step() {
         let desc = sequencer::effects::EffectDescriptor::builtin_filter();
@@ -19560,6 +19614,93 @@
             long_value.rect.width >= 6.2,
             "long signed values need enough lock-column width to avoid drawing into DEF; got {:?}",
             long_value.rect
+        );
+    }
+
+    // The drag contract behind the p-lock knob fix: once a row exists, moving
+    // the knob only rewrites the row's bound SEQV field. SEQ.track-plocks is
+    // NOT republished, so the panel's widget tree must not change identity —
+    // only the bound value the LOCK picker reads.
+    #[test]
+    fn bound_plock_row_lock_value_follows_the_param_field_without_republishing_the_list() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let value_field = "track-0-instrument-param-2-cutoff";
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", value_field, Value::Number(900.0));
+        let plocks = test_list(vec![map_value([
+            ("target", Value::String("instrument".to_string())),
+            ("domain", Value::String("inst".to_string())),
+            ("step-idx", Value::Number(2.0)),
+            ("param-idx", Value::Number(2.0)),
+            ("group", Value::String("inst".to_string())),
+            ("name", Value::String("cutoff".to_string())),
+            ("value", Value::Number(900.0)),
+            ("value-field", Value::String(value_field.to_string())),
+            ("default", Value::Number(5000.0)),
+            ("text-value", Value::String("900.00".to_string())),
+            ("default-text", Value::String("5000.00".to_string())),
+            ("min", Value::Number(20.0)),
+            ("max", Value::Number(20000.0)),
+        ])]);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-plocks", plocks);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-plock-variants", test_list(vec![]));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(def seqv-param-name (mode) "")"#)
+            .expect("stub sequencer param name helper");
+        editor
+            .runtime_mut()
+            .eval_str(r#"(effect-buffer "*plock-panel-binding-test*" (fx-track-plocks-panel))"#)
+            .expect("create p-lock binding test buffer");
+        editor.refresh_runtime_side_effects();
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*plock-panel-binding-test*")
+            .expect("p-lock binding test buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(24, 60);
+        editor.refresh_visible_layouts_for_buffer_named("*plock-panel-binding-test*");
+
+        let lock_widget_id = {
+            let layout = editor.widget_layout().expect("p-lock panel layout");
+            let lock = find_layout_node_by_stable_key(&layout, "track-plock-row-0-lock")
+                .expect("bound p-lock row lock cell");
+            assert_eq!(
+                layout_prop_number(lock, "value"),
+                Some(900.0),
+                "the LOCK picker must render the bound field's value"
+            );
+            lock.widget_id
+        };
+
+        // Exactly what a knob drag does now: rewrite only the bound field.
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", value_field, Value::Number(1234.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*plock-panel-binding-test*");
+
+        let layout = editor.widget_layout().expect("p-lock panel layout");
+        let lock = find_layout_node_by_stable_key(&layout, "track-plock-row-0-lock")
+            .expect("bound p-lock row lock cell survives the value change");
+        assert_eq!(
+            layout_prop_number(lock, "value"),
+            Some(1234.0),
+            "a bound p-lock row must follow its bound field without republishing SEQ.track-plocks"
+        );
+        assert_eq!(
+            lock.widget_id, lock_widget_id,
+            "the row must repaint in place, not be rebuilt"
         );
     }
 
@@ -31519,6 +31660,135 @@
         assert_eq!(filter_actions.widget_type, "menu-button");
         assert_finite_nonzero_rect(filter_actions, "filter action menu");
         assert_layout_inside(filter_actions, filter_header, "filter action menu");
+    }
+
+    // The Filter curve used to mirror every drag event into `defstate` globals
+    // so the knobs could show the in-flight value. Those `set!`s dirtied the
+    // enclosing panel effect, so `VM::invoke`'s synchronous reactive pass
+    // re-evaluated the whole Filter panel on every mouse move (7.5ms/event,
+    // 12x a plain knob drag). The echo is gone; the curve's band must instead
+    // carry the params' reactive bindings, so a host param sync repaints the
+    // curve in place with no panel rerun.
+    #[test]
+    fn metal_seq_fx_filter_curve_band_is_bound_to_the_param_value_fields() {
+        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let cutoff_field = "track-0-effect-0-param-2-cutoff";
+        let resonance_field = "track-0-effect-0-param-3-resonance";
+        let mut params = test_filter_params();
+        for (idx, field) in [(2usize, cutoff_field), (3usize, resonance_field)] {
+            let Some(Value::Map(param)) = params.get_mut(idx) else {
+                panic!("filter fixture param {idx} should be a map");
+            };
+            param.insert(
+                "value-field".to_string(),
+                Rc::new(RefCell::new(Value::String(field.to_string()))),
+            );
+        }
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Filter".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map("Filter", 0, params))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+                (cutoff_field, Value::Number(1000.0)),
+                (resonance_field, Value::Number(1.0)),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(120, 18);
+
+        fn curve_band_number(layout: &eseqlisp::layout::LayoutNode, key: &str) -> Option<f64> {
+            let curve = find_layout_node_by_widget_type(layout, "response-curve-editor")?;
+            let Value::List(bands) = curve.props.get("bands")? else {
+                return None;
+            };
+            let first = bands.first()?.borrow().clone();
+            let Value::Map(band) = first else {
+                return None;
+            };
+            let entry = band.get(key)?.borrow().clone();
+            match entry {
+                Value::ReactiveRef { ref slot, .. } => {
+                    Some(eseqlisp::reactive::read_float_slot(slot) as f64)
+                }
+                other => panic!("band {key} must stay a reactive binding, got {other:?}"),
+            }
+        }
+
+        let curve_widget_id = {
+            let layout = editor.widget_layout().expect("filter fx layout");
+            let curve = find_layout_node_by_widget_type(&layout, "response-curve-editor")
+                .expect("filter panel renders a response curve editor");
+            assert_eq!(curve_band_number(&layout, "freq"), Some(1000.0));
+            assert_eq!(curve_band_number(&layout, "q"), Some(1.0));
+            curve.widget_id
+        };
+
+        // What `set-effect-param-batch` -> `sync_effect_param_batch_display`
+        // does per drag event: rewrite only the per-param value fields.
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", cutoff_field, Value::Number(4200.0));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", resonance_field, Value::Number(3.5));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("filter fx layout");
+        let curve = find_layout_node_by_widget_type(&layout, "response-curve-editor")
+            .expect("the curve survives a param value change");
+        assert_eq!(
+            curve.widget_id, curve_widget_id,
+            "a param value change must repaint the curve in place, not rebuild the panel"
+        );
+        assert_eq!(curve_band_number(&layout, "freq"), Some(4200.0));
+        assert_eq!(curve_band_number(&layout, "q"), Some(3.5));
     }
 
     #[test]

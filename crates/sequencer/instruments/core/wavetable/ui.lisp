@@ -62,17 +62,25 @@
     "lowpass"
     (if (< mode 1.5) "bandpass" "highpass")))
 
+;; :freq / :q pass the params' raw bindings, not `custom-ui-param-value`.
+;; `custom-ui-param-value` unwraps with `reactive-value`, an eager read that
+;; subscribes this whole custom-UI subtree to the per-param value fields the
+;; host rewrites on every drag event — one full subtree rerun per mouse move.
+;; response-curve-editor declares `bands` bindable and resolves ReactiveRefs
+;; inside each band dict, so the binding repaints just this widget.
+;; :type must stay a value read: it feeds a numeric comparison, and the mode
+;; field only changes when the mode control does, never during a curve drag.
 (def wt-filter-curve-band (mode-p cutoff-p resonance-p)
   (dict
     :id 0
-    :type (wt-filter-type (reactive-value (custom-ui-param-value mode-p)))
-    :freq (custom-ui-param-value cutoff-p)
+    :type (wt-filter-type (custom-ui-param-value mode-p))
+    :freq (custom-ui-param-binding cutoff-p)
     :freq-min (custom-ui-param-control-min cutoff-p)
     :freq-max (custom-ui-param-control-max cutoff-p)
     :gain 0
     :gain-min -12
     :gain-max 12
-    :q (custom-ui-param-value resonance-p)
+    :q (custom-ui-param-binding resonance-p)
     :q-min (custom-ui-param-control-min resonance-p)
     :q-max (custom-ui-param-control-max resonance-p)
     :enabled true

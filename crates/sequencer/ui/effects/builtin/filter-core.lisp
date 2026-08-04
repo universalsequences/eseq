@@ -1,10 +1,12 @@
 ;; Shared built-in FX helpers and Filter curve/control primitives.
 ;; Custom UI bodies for built-in audio effects.
 
-(defstate builtin-fx-filter-live-slot -1)
-(defstate builtin-fx-filter-live-cutoff 0)
-(defstate builtin-fx-filter-live-resonance 0)
-(defstate builtin-fx-filter-live-active false)
+;; NOTE: no drag "live echo" state here on purpose. The curve editor renders
+;; its own in-flight drag from widget-local state (LIVE_BANDS in
+;; response_curve_editor.rs) and the knob/readout values arrive through the
+;; host's targeted SEQV param-value fields (`sync_effect_param_batch_display`),
+;; which dirty exactly the bound widgets. Mirroring the drag into `defstate`
+;; globals instead re-ran the whole effect panel on every mouse move.
 
 (def builtin-fx-param (params name)
   (nth (filter |p| (= (get p :name) name) params) 0))
@@ -35,20 +37,11 @@
         "notch"
         "lowpass"))))
 
-(def builtin-fx-filter-live? (fx)
-  (and builtin-fx-filter-live-active
-       (not (get fx :rack-fx))
-       (not (get fx :bus-fx))
-       (not (get fx :midi-fx))
-       (= builtin-fx-filter-live-slot (get fx :slot-idx))))
-
 (def builtin-fx-filter-cutoff-value (fx cutoff-p)
-  (if (effect-mods-active? fx)
-    (fx-param-value-for fx cutoff-p)
-    (if (builtin-fx-filter-live? fx) builtin-fx-filter-live-cutoff (fx-param-value-for fx cutoff-p))))
+  (fx-param-value-for fx cutoff-p))
 
 (def builtin-fx-filter-resonance-value (fx resonance-p)
-  (if (builtin-fx-filter-live? fx) builtin-fx-filter-live-resonance (fx-param-value-for fx resonance-p)))
+  (fx-param-value-for fx resonance-p))
 
 (def builtin-fx-filter-band (fx mode-p cutoff-p resonance-p)
   (dict
@@ -82,10 +75,6 @@
   (if (or (= (get event :type) :change-band) (= (get event :type) :commit-band))
     (do
       (fx-clear-selected-effect)
-      (set! builtin-fx-filter-live-slot (get fx :slot-idx))
-      (set! builtin-fx-filter-live-cutoff (get event :freq))
-      (set! builtin-fx-filter-live-resonance (get event :q))
-      (set! builtin-fx-filter-live-active (= (get event :type) :change-band))
       (if (or (get fx :rack-fx) (get fx :bus-fx) (get fx :midi-fx))
         (do
           (fx-set-effect-value fx cutoff-p (get event :freq))

@@ -22,6 +22,10 @@
                 (builtin-fx-filter-cutoff-knob fx cutoff-p)
                 (builtin-fx-filter-resonance-knob fx resonance-p)))
               (box :width 28.8 :height 6.30
+                ;; Own subtree: the curve's band dict reads param state, so any
+                ;; future body-level read reruns one widget instead of the whole
+                ;; Filter panel (which is what made curve drags 12x a knob).
+                (subtree :key (builtin-fx-param-subtree-key fx cutoff-p "curve")
                 (response-curve-editor
                   :mode :filter
                   :bands (list (builtin-fx-filter-band fx mode-p cutoff-p resonance-p))
@@ -36,7 +40,7 @@
                   :grid-color (rgba 0.34 0.34 0.36 0.55)
                   :stroke-color :blue
                   :point-color (rgba 1.0 0.62 0.25 1.0)
-                  :on-action |event| (builtin-fx-handle-filter-curve-action fx cutoff-p resonance-p event)))
+                  :on-action |event| (builtin-fx-handle-filter-curve-action fx cutoff-p resonance-p event))))
               (box :width 8.3 :height 6.30  :padding 0.28
                 :background-color :fx-inner-panel-bg :corner-radius 7
                 (v-stack :gap 0.2

@@ -589,6 +589,29 @@ pub(super) fn handle(
                                 "Edit neural override",
                             );
                         }
+                        // Whether the *step* panel already lists a row for this
+                        // p-lock. If it does, the row's LOCK readout is bound
+                        // to the per-param SEQV field (see plocks.rs) and the
+                        // targeted value sync below repaints it — so the row
+                        // list itself does not need republishing, which would
+                        // rerun the whole plock panel on every drag event.
+                        let plock_row_existed = displayed_plock_step(
+                            &state,
+                            track,
+                            selected_plock_step(&selected_steps),
+                        )
+                        .and_then(|step| {
+                            state
+                                .pattern
+                                .instrument_slots
+                                .get(track)
+                                .and_then(|slot| slot.plocks.get(step, param_idx))
+                        })
+                        .is_some()
+                            && matches!(
+                                desc.kind,
+                                sequencer::effects::ParamKind::Continuous { .. }
+                            );
                         if !wrote_neural_plock {
                             let steps: Vec<usize> = selected_steps
                                 .lock()
@@ -621,13 +644,25 @@ pub(super) fn handle(
                                 track,
                                 param_idx,
                                 display_step,
-                                sync_plock_list: wrote_neural_plock,
+                                // Publish the row list only when the row set can
+                                // have changed (first write of this lock, or a
+                                // neural override). Later drag events repaint
+                                // through the bound value field.
+                                sync_plock_list: wrote_neural_plock || !plock_row_existed,
                                 sync_plock_presence: !wrote_neural_plock,
                                 sync_sampler_times: true,
                             },
                         );
-                        fx_epoch.fetch_add(1, Ordering::Relaxed);
-                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                        // Same policy as "set-instrument-param": a continuous
+                        // p-lock drag is fully covered by the targeted display
+                        // syncs above. Bumping the epochs per drag event forced
+                        // `SEQ.instrument-panel` to be rebuilt, which reruns the
+                        // whole *fx* widget source (~30ms) to move one number.
+                        // Only structural params (bool/enum) still need it.
+                        if param_change_needs_fx_rebuild(&desc) {
+                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                 }
             }

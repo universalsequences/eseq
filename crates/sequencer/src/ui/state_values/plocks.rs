@@ -947,7 +947,8 @@ pub(crate) fn build_track_plocks_value(
                     ParamKind::Boolean => Some(vec!["off".to_string(), "on".to_string()]),
                     ParamKind::Continuous { .. } => None,
                 };
-                items.push(plock_entry(
+                let continuous = options.is_none();
+                let entry = plock_entry(
                     step,
                     "instrument",
                     "inst",
@@ -959,7 +960,27 @@ pub(crate) fn build_track_plocks_value(
                     None,
                     Some(param_idx),
                     options,
-                ));
+                );
+                if continuous {
+                    // Bind the LOCK readout to the per-param SEQV field the
+                    // authoring syncs already maintain (it carries the
+                    // displayed step's p-lock value). With the value bound,
+                    // a knob drag repaints this row without republishing
+                    // SEQ.track-plocks — which would rerun the whole *step*
+                    // panel on every mouse move. `fx-plock-row-value` prefers
+                    // :value-field and falls back to :value.
+                    if let Value::Map(map) = &mut *entry.borrow_mut() {
+                        map.insert(
+                            "value-field".to_string(),
+                            value_cell(Value::String(instrument_param_value_field(
+                                track,
+                                param_idx,
+                                &param.name,
+                            ))),
+                        );
+                    }
+                }
+                items.push(entry);
             }
         }
     }
