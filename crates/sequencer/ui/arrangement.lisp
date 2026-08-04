@@ -1257,7 +1257,7 @@
                   nil
                   (arrangement-find-track-clip i (nth ids 0)))))
       (do
-        (seqv-select-track-for-edit-preserving-lower-panel i)
+        (seqv-select-track-for-edit i)
         (set! arrangement-selection '())
         (set! arrangement-selection-rect nil)
         ;; A clip and a region are mutually exclusive (region spec 4.1);
@@ -1285,7 +1285,7 @@
 
 (def arrangement-track-clear-selection (i event)
   (do
-    (seqv-select-track-for-edit-preserving-lower-panel i)
+    (seqv-select-track-for-edit i)
     (set! arrangement-track-selection '())
     (arrangement-publish-selection -1 -1)
     (arrangement-region-clear)
@@ -1333,7 +1333,7 @@
           (arrangement-track-clear-selection i event)))
       :set-cursor
       (do
-        (seqv-select-track-for-edit-preserving-lower-panel i)
+        (seqv-select-track-for-edit i)
         (set-arrangement-cursor (get event :time) i))
       ;; Cross-track region sweep (region spec 4.2/4.4): live frames update
       ;; the ghost only; the release commits the Rust-owned region.

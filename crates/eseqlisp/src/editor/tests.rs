@@ -7854,6 +7854,58 @@ fn tab_selection_survives_reapplying_same_layout() {
 }
 
 #[test]
+fn tab_selection_survives_moving_and_temporarily_removing_its_tile() {
+    let mut editor = editor_with_tabbed_buffers();
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*top*" (label "top"))
+            (effect-buffer "*side*" (label "side"))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    editor
+        .runtime_mut()
+        .eval_str(r#"(set-window-buffer-for "*sequencer*" "*matrix*")"#)
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (set-layout
+              (list :rows
+                0.2 "*top*"
+                0.8 (list :cols
+                  0.3 "*side*"
+                  0.7 (list :buf "*sequencer*"
+                    :tabs (list
+                      (list "Sequencer" "*sequencer*")
+                      (list "Matrix" "*matrix*"))))))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    assert_eq!(editor.active_buffer().name, "*matrix*");
+    assert_eq!(editor.active_leaf().selected_tab, Some(1));
+
+    editor
+        .runtime_mut()
+        .eval_str(r#"(set-layout "*side*")"#)
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    eval_tabbed_test_layout(&mut editor);
+
+    assert_eq!(editor.active_buffer().name, "*matrix*");
+    assert_eq!(editor.active_leaf().selected_tab, Some(1));
+}
+
+#[test]
 fn tabbed_tile_frame_reserves_internal_header_row_for_tabs() {
     let mut editor = editor_with_tabbed_buffers();
     let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 12);

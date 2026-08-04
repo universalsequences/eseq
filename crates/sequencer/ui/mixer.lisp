@@ -394,7 +394,8 @@
       (middle (rgba track-r track-g track-b 1.0))
       (inner (if (= active 0)
           (rgba 0.02 0.025 0.03 0.7)
-          track-col)))
+          (rgba 0.1 0.1 0.1 0.3)
+          )))
     ;; The play triangle moved into the sound-glyph shader (it must sit ON TOP
     ;; of the glyph; this background always draws underneath it). Liveness
     ;; comes from the host play-key store (sync_pattern_cell_glyph_frames),
@@ -405,7 +406,8 @@
         (material :color outer))
       (sdf/fill (sdf/rounded-rect (* width 0.94) (* height 0.94) 0.2)
         (material :color middle))
-      (sdf/fill (sdf/rounded-rect (* width 0.92) (* height 0.92) 0.22)
+      (sdf/fill (sdf/rounded-rect (* width (if (= active 1) 0.8 0.92)) 
+          (* (if (= active 1) 0.8 0.92) height) (if (= active 1) 0.1 0.22))
         (material :color inner)))))
 
 
@@ -428,7 +430,7 @@
 
 (def mixer-v2-track-pattern-grid (track)
   (let ((cells (mixer-v2-track-pattern-cells track)))
-    (box :width :fill :height 3.02 :align :top :bg :black :background-color :buffer-bg
+    (box :width :fill :height 4.0 :align :top :bg :black :background-color :buffer-bg
       (grid :cols 6 :col-width 2.0 :row-height 1.0 :align :center
         (each cells |cell cell-idx|
           (let ((pattern-id (get cell :id)))
@@ -627,7 +629,7 @@
         ;;(seq-set-bus-volume i (mixer-v2-event-volume event))
         ))
     (v-stack
-      (box :width :fill :height 4.7)
+      (box :width :fill :height 6.5)
       (h-stack :gap 0.06 
         (box :width 2 )
         (mixer-v2-volume-triangle
@@ -679,7 +681,7 @@
     ;; dead space at the bottom inside the group container.
     ;; Mute/name/output reads live in bindings or nested subtrees so those
     ;; changes don't rerun the whole strip.
-    (box :width 12.9 :height (if (mixer-v2-track-grouped? i) 12.85 13.15)
+    (box :width 12.9 :height (if (mixer-v2-track-grouped? i) 13.5 13.8)
       :selected (mixer-v2-track-selected-binding i)
       :muted (bind-seq-nth "track-muted-effective" i)
       :background-color :mixer-strip-bg
@@ -737,7 +739,7 @@
           
           (mixer-v2-track-meter-control i))
         
-        (box :width :fill :height 0.25)
+        (box :width :fill :height 0.05)
         (subtree :key (str "mixer-v2-strip-buttons-" i)
           (mixer-v2-strip-buttons i))
         (mixer-v2-mod-port-row i)
@@ -940,7 +942,7 @@
 (def mixer-v2-bus-strip (i)
   (let ((selected (= selected-bus i)))
     (box :key (str "mixer-v2-bus-strip-" i)
-      :width 10.3 :height 13.0
+      :width 10.3 :height 13.8
       :background-color (mixer-v2-strip-bg selected (nth SEQ.bus-mutes i))
       :border-width 2
       :corner-radius 10
@@ -959,7 +961,7 @@
         ;  (box :height 0.8 :width :fill :bg :transparent)
         ;  )
         (h-stack :gap 0.45 :align :center
-          (box :width 3.0 :height 3.6)
+          (box :width 3.0 :height 5.0)
           (mixer-v2-bus-meter-control i))
         (box :height 2.8)
         (h-stack :gap 0.35
@@ -1069,7 +1071,7 @@
       (c (mixer-v2-group-color gidx))
       (bus-idx (mixer-v2-bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
     (box :key (str "mixer-v2-group-bus-strip-" bus-idx)
-      :width 9.0 :height 13.05
+      :width 9.0 :height 13.72
       :corner-radius 12
       :padding 0.0
       :background-color :mixer-strip-bg
@@ -1088,7 +1090,7 @@
           (box  :width :fill :height 9.55
             (mixer-v2-bus-meter-control bus-idx))
           (box :width 0.0 :height 0.0 :bg :transparent))
-        (box :height 0.25)
+        (box :height 0.95)
         (mixer-v2-bus-mod-port-row (get group :bus-id))
         (box :corner-radius 16 :background-color c :width 8.5 :padding 0.2
           :key (str "mixer-v2-group-badge-" (get group :id))
@@ -1182,7 +1184,7 @@
 
 (def mixer-v2-sample-drop-zone ()
   (box :key "mixer-v2-sample-drop-zone"
-    :width 11.8 :height 13.0
+    :width 11.8 :height 13.8
     :background-color :buffer-bg
     :drop-hover-background-color :mixer-control-bg
     :border-width 2

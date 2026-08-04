@@ -145,27 +145,14 @@
     (lambda (track) (seqv-sync-track-cursor-to-global track))
     (range 0 (len SEQ.track-ids))))
 
-(def seqv-select-track-for-edit-with-panel-policy (track show-fx-on-change)
+;; Selecting an edit target must not change workspace layout. Opening FX is an
+;; explicit gesture owned by seqv-show-fx-for-track (track-name double-click).
+(def seqv-select-track-for-edit (track)
   (do
     (set! selected-bus -1)
-    (if (= SEQ.current-track track)
-      nil
-      (do
-        (seq-clear-selection)
-        (if show-fx-on-change
-          (seq-show-fx-lower-panel)
-          nil)))
+    (if (= SEQ.current-track track) nil (seq-clear-selection))
     (seq-set-track track)
     (seqv-sync-track-cursor-to-global track)))
-
-(def seqv-select-track-for-edit (track)
-  (seqv-select-track-for-edit-with-panel-policy track true))
-
-;; Arrangement clip/background gestures change the current track without
-;; changing the lower-panel mode. In arrangement, entering FX is reserved for
-;; the explicit track-header double-click.
-(def seqv-select-track-for-edit-preserving-lower-panel (track)
-  (seqv-select-track-for-edit-with-panel-policy track false))
 
 (def seqv-activate-track-for-edit (track)
   (seqv-select-track-for-edit track))
@@ -179,7 +166,7 @@
 
 (def seqv-show-fx-for-track (track)
   (do
-    (seqv-select-track-for-edit-preserving-lower-panel track)
+    (seqv-select-track-for-edit track)
     (seq-show-fx-lower-panel)))
 
 (def seqv-track-expanded? (track-id)
@@ -758,7 +745,7 @@
       (h-stack :gap 0.4 :align :center
         (box
           :key (str "seqv-color-badge-" i)
-          :width 0.68 :height 1.85
+          :width 0.68 :height 2.0
           :background "seqv-track-color-badge"
           :track-r (seqv-track-color-r-binding i)
           :track-g (seqv-track-color-g-binding i)
@@ -1882,7 +1869,8 @@
                   (seqv-track-actions i))
                 (seqv-drum-track-grid i))
               (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
-                (seqv-track-header i)
+                (v-stack (box :height 0.1)
+                (seqv-track-header i))
                 (seqv-track-grid i)
                 (box :flex 1 :width 0 :height 0.1 :bg :transparent)
                 (seqv-track-actions i)))))))

@@ -16535,7 +16535,7 @@
     }
 
     #[test]
-    fn metal_seq_selecting_different_track_closes_lower_piano_roll() {
+    fn metal_seq_selecting_different_track_preserves_lower_piano_roll() {
         let mut editor = full_grid_editor_for_scroll_tests();
         set_full_grid_track_count(&mut editor, 2, 16);
         editor.runtime_mut().run_reactive_cycle();
@@ -16566,14 +16566,59 @@
             .expect("select a different track");
         assert_eq!(
             editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
-            Some(Value::String("*fx*".to_string())),
-            "selecting a different track should restore the FX lower pane"
+            Some(Value::String("*piano-roll*".to_string())),
+            "selecting a different track should preserve the lower piano roll"
         );
         assert_eq!(
             editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string())),
             "selecting a different track should leave the main sequencer panel visible"
         );
+    }
+
+    #[test]
+    fn metal_seq_selecting_different_track_preserves_hidden_panels() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (do
+                  (set! samples-sidebar-visible false)
+                  (set! mixer-panel-visible false)
+                  (set! lower-panel-visible false)
+                  (seq-apply-fx-layout))
+                "#,
+            )
+            .expect("hide browser, mixer, and FX panels");
+        editor.refresh_runtime_side_effects();
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-select-track-for-edit 1)")
+            .expect("select a different track");
+        editor.refresh_runtime_side_effects();
+
+        for state in [
+            "samples-sidebar-visible",
+            "mixer-panel-visible",
+            "lower-panel-visible",
+        ] {
+            assert_eq!(
+                editor.runtime_mut().eval_str(state).unwrap(),
+                Some(Value::Bool(false)),
+                "track selection must preserve hidden panel state for {state}"
+            );
+        }
+        let tile_buffers = collect_tile_buffer_names(&editor);
+        for hidden in ["*samples*", "*mixer*", "*fx*"] {
+            assert!(
+                !tile_buffers.contains(&hidden.to_string()),
+                "track selection must not restore {hidden}: {tile_buffers:?}"
+            );
+        }
     }
 
     #[test]
@@ -45348,4 +45393,150 @@
                 "{fx_name} did not dispatch to a custom audio FX UI"
             );
         }
+    }
+
+    // ── rack glyph feeds (docs/rack-glyph-spec.md §4) ─────────────────────
+    //
+    // Both feeds published EMPTY glyphs for rack tracks before the composite
+    // surface existed: the track's descriptor is `empty_custom_slot()`, so the
+    // schema, the skeleton and the values were all empty.
+    //
+    // These assert on the frames the collectors RETURN, never on
+    // `sound_glyph_data`'s process-wide store: `retain_sound_glyph_frames`
+    // deletes every key under a prefix that is not in the caller's active set,
+    // and `sync_pattern_cell_glyph_frames` is reached from
+    // `reactive_tick_and_render` by many parallel `metal_seq_*` harness tests,
+    // so a store read here would be timing luck.
+
+    fn rack_cell_frame(
+        pending: &[(String, eseqlisp::sound_glyph_data::SoundGlyphFrame)],
+        pattern: u64,
+    ) -> eseqlisp::sound_glyph_data::SoundGlyphFrame {
+        let key = format!("pattern-glyph:track:0:pattern:{pattern}");
+        pending
+            .iter()
+            .find(|(published, _)| *published == key)
+            .unwrap_or_else(|| panic!("no frame published for {key}"))
+            .1
+            .clone()
+    }
+
+    /// The mixer pattern-cell feed publishes a real, compatible frame for a
+    /// rack track (substrate ink from the grafted identity + slot params, no
+    /// incompatible ring), goes quiet in the steady state, and re-publishes a
+    /// RINGED frame once the live rack's slot lineup diverges from the stored
+    /// patch's — §2.4's structural-incompatibility rule.
+    ///
+    /// One test rather than three because the invalidation claims only mean
+    /// something against a WARM `GlyphFrames`: a fresh one per phase would
+    /// bypass `cell_published`/`descriptor_hashes`/`identity`, i.e. exactly
+    /// the caches the rack arms were added to.
+    #[test]
+    fn rack_track_pattern_cell_glyph_publishes_then_rings_on_a_slot_change() {
+        let app = test_app_with_rack_panel();
+        let pattern = app.state.track_pattern_cells(0)[0].pattern_id.0;
+        let mut glyphs = super::sound_palette::GlyphFrames::default();
+
+        let first = super::sound_palette::collect_pattern_cell_glyph_frames(&app, &mut glyphs);
+        let frame = rack_cell_frame(&first, pattern);
+        assert!(
+            frame.substrate.iter().any(|slot| *slot > 0),
+            "rack glyph substrate is empty: {:?}",
+            frame.substrate
+        );
+        assert!(!frame.incompatible, "the live rack IS the patch's rack");
+
+        // Steady state: nothing changed, nothing is republished.
+        assert!(
+            super::sound_palette::collect_pattern_cell_glyph_frames(&app, &mut glyphs).is_empty(),
+            "an unchanged rack track must not republish"
+        );
+
+        {
+            let mut racks = app.state.pattern.rack_tracks.lock().unwrap();
+            let rack = racks[0].as_mut().expect("live rack");
+            let extra = rack.slots[0].clone();
+            rack.slots.push(extra);
+        }
+
+        let second = super::sound_palette::collect_pattern_cell_glyph_frames(&app, &mut glyphs);
+        let ringed = rack_cell_frame(&second, pattern);
+        assert!(
+            ringed.incompatible,
+            "a 1-slot patch against a 2-slot live rack must ring"
+        );
+        assert!(
+            ringed.revision > frame.revision,
+            "the ringed frame must be a new revision ({} -> {})",
+            frame.revision,
+            ringed.revision
+        );
+
+        // And back to quiet: the rack arms of the fingerprint caches settle.
+        assert!(
+            super::sound_palette::collect_pattern_cell_glyph_frames(&app, &mut glyphs).is_empty(),
+            "a rack track must go quiet again once its change is published"
+        );
+    }
+
+    /// The palette feed does the same for the open overlay's tiles.
+    #[test]
+    fn rack_track_palette_glyph_publishes_then_goes_quiet() {
+        let app = test_app_with_rack_panel();
+        let entries =
+            app.sound_palette_entries(0, sequencer::app::sound_palette::PaletteTarget::Cell);
+        assert!(!entries.is_empty(), "rack track pool should expose a patch");
+        let mut glyphs = super::sound_palette::GlyphFrames::default();
+
+        let pending = super::sound_palette::collect_glyph_frames(&app, 0, &entries, &mut glyphs);
+        let key = format!("sound-glyph:track:0:patch:{}", entries[0].patch.0);
+        let frame = pending
+            .iter()
+            .find(|(published, _)| *published == key)
+            .unwrap_or_else(|| panic!("no palette frame published for {key}"))
+            .1
+            .clone();
+        assert!(
+            frame.substrate.iter().any(|slot| *slot > 0),
+            "rack palette glyph substrate is empty: {:?}",
+            frame.substrate
+        );
+        assert!(!frame.incompatible);
+
+        assert!(
+            super::sound_palette::collect_glyph_frames(&app, 0, &entries, &mut glyphs).is_empty(),
+            "an unchanged palette must not republish"
+        );
+    }
+
+    /// §2.3/§2.4: the rack GLYPH signature is deliberately looser than
+    /// `rack_topology_signature`, which folds in fx-chain node ids that churn
+    /// on every graph rebuild. Node ids, fx chains and mix values must not
+    /// move it — only the slot lineup does — or every graph rebuild would
+    /// throw away the cached identity silhouettes.
+    #[test]
+    fn rack_glyph_signature_ignores_fx_chain_and_node_id_churn() {
+        let app = test_app_with_rack_panel();
+        let signature = |app: &app::App| {
+            let racks = app.state.pattern.rack_tracks.lock().unwrap();
+            super::sound_palette::rack_snapshot_glyph_signature(
+                app,
+                racks[0].as_ref().expect("live rack"),
+            )
+        };
+        let before = signature(&app);
+
+        {
+            let ott = sequencer::effects::EffectDescriptor::builtin_ott();
+            let mut racks = app.state.pattern.rack_tracks.lock().unwrap();
+            let slot = &mut racks[0].as_mut().expect("live rack").slots[0];
+            slot.instrument_slot.node_id += 7;
+            slot.effect_slots[0] = sequencer::effects::EffectSlotSnapshot::new_default(&ott, 99);
+            slot.effect_descriptors[0] = ott;
+            slot.custom_effect_names[0] = Some("builtin:OTT".to_string());
+            slot.gain = 0.125;
+            slot.mute = true;
+        }
+
+        assert_eq!(before, signature(&app));
     }

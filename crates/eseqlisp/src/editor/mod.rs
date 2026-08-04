@@ -665,6 +665,10 @@ pub struct Editor {
     /// Outer margin around the tiled layout, in cell units.
     tile_outer_gap: f32,
     remembered_split_ratios: HashMap<String, f32>,
+    /// Last selected buffer for each declarative tab group. Unlike tile paths,
+    /// a group's ordered buffer IDs remain stable when surrounding panes are
+    /// added, removed, or temporarily replaced by another workspace.
+    remembered_tab_selections: HashMap<Vec<BufferId>, BufferId>,
     retained_tile_layouts: HashMap<BufferId, Vec<RetainedTileLayout>>,
     visible_binding_layout_signature: Option<VisibleBindingLayoutSignature>,
     visible_binding_registry_revision: u64,
@@ -829,6 +833,7 @@ impl Editor {
             cached_tiled_frame_size: None,
             tile_outer_gap: 0.0,
             remembered_split_ratios: HashMap::new(),
+            remembered_tab_selections: HashMap::new(),
             retained_tile_layouts: HashMap::new(),
             visible_binding_layout_signature: None,
             visible_binding_registry_revision: 0,
@@ -1522,52 +1527,41 @@ impl Editor {
             .and_then(|leaf| self.buffers.get(leaf.buffer_idx))
             .map(|buffer| buffer.id);
 
-        #[derive(Clone)]
-        struct PreviousTabbedLeaf {
-            tab_buffer_indices: Vec<usize>,
-            selected_buffer_idx: Option<usize>,
-        }
-
-        fn collect_previous_tabbed_leaves(
+        fn remember_tab_selections(
             node: &TileNode,
-            path: &mut Vec<usize>,
-            out: &mut HashMap<Vec<usize>, PreviousTabbedLeaf>,
+            bufs: &[Buf],
+            out: &mut HashMap<Vec<BufferId>, BufferId>,
         ) {
             match node {
                 TileNode::Leaf(leaf) => {
-                    if !leaf.tabs.is_empty() {
-                        out.insert(
-                            path.clone(),
-                            PreviousTabbedLeaf {
-                                tab_buffer_indices: leaf
-                                    .tabs
-                                    .iter()
-                                    .map(|tab| tab.buffer_idx)
-                                    .collect(),
-                                selected_buffer_idx: leaf
-                                    .selected_tab
-                                    .and_then(|index| leaf.tabs.get(index))
-                                    .map(|tab| tab.buffer_idx),
-                            },
-                        );
+                    let tab_buffer_ids = leaf
+                        .tabs
+                        .iter()
+                        .map(|tab| bufs.get(tab.buffer_idx).map(|buffer| buffer.id))
+                        .collect::<Option<Vec<_>>>();
+                    let selected_buffer_id = leaf
+                        .selected_tab
+                        .and_then(|index| leaf.tabs.get(index))
+                        .and_then(|tab| bufs.get(tab.buffer_idx))
+                        .map(|buffer| buffer.id);
+                    if let (Some(tab_buffer_ids), Some(selected_buffer_id)) =
+                        (tab_buffer_ids, selected_buffer_id)
+                        && !tab_buffer_ids.is_empty()
+                    {
+                        out.insert(tab_buffer_ids, selected_buffer_id);
                     }
                 }
                 TileNode::Split(split) => {
-                    path.push(0);
-                    collect_previous_tabbed_leaves(&split.a, path, out);
-                    path.pop();
-                    path.push(1);
-                    collect_previous_tabbed_leaves(&split.b, path, out);
-                    path.pop();
+                    remember_tab_selections(&split.a, bufs, out);
+                    remember_tab_selections(&split.b, bufs, out);
                 }
             }
         }
 
-        let mut previous_tabbed_leaves = HashMap::new();
-        collect_previous_tabbed_leaves(
+        remember_tab_selections(
             &self.tile_root,
-            &mut Vec::new(),
-            &mut previous_tabbed_leaves,
+            &self.buffers,
+            &mut self.remembered_tab_selections,
         );
         self.remember_visible_tile_layouts();
 
@@ -1579,8 +1573,7 @@ impl Editor {
             spec: LayoutSpec,
             bufs: &[Buf],
             next_id: &mut TileId,
-            path: &mut Vec<usize>,
-            previous_tabbed_leaves: &HashMap<Vec<usize>, PreviousTabbedLeaf>,
+            remembered_tab_selections: &HashMap<Vec<BufferId>, BufferId>,
             retained_tile_layouts: &HashMap<BufferId, Vec<RetainedTileLayout>>,
             remembered_split_ratios: &HashMap<String, f32>,
         ) -> Result<TileNode, String> {
@@ -1629,20 +1622,16 @@ impl Editor {
                     *next_id += 1;
                     let mut leaf = TileLeaf::new(id, buf_idx);
                     if !resolved_tabs.is_empty() {
-                        let tab_buffer_indices = resolved_tabs
+                        let tab_buffer_ids = resolved_tabs
                             .iter()
-                            .map(|tab| tab.buffer_idx)
+                            .map(|tab| bufs[tab.buffer_idx].id)
                             .collect::<Vec<_>>();
-                        let preserved = previous_tabbed_leaves.get(path).and_then(|previous| {
-                            (previous.tab_buffer_indices == tab_buffer_indices)
-                                .then_some(previous.selected_buffer_idx)
-                                .flatten()
-                        });
-                        let selected_tab = preserved
-                            .and_then(|selected_buffer_idx| {
+                        let selected_tab = remembered_tab_selections
+                            .get(&tab_buffer_ids)
+                            .and_then(|selected_buffer_id| {
                                 resolved_tabs
                                     .iter()
-                                    .position(|tab| tab.buffer_idx == selected_buffer_idx)
+                                    .position(|tab| bufs[tab.buffer_idx].id == *selected_buffer_id)
                             })
                             .or_else(|| {
                                 resolved_tabs
@@ -1689,8 +1678,7 @@ impl Editor {
                     remember,
                     bufs,
                     next_id,
-                    path,
-                    previous_tabbed_leaves,
+                    remembered_tab_selections,
                     retained_tile_layouts,
                     remembered_split_ratios,
                 ),
@@ -1705,8 +1693,7 @@ impl Editor {
                     remember,
                     bufs,
                     next_id,
-                    path,
-                    previous_tabbed_leaves,
+                    remembered_tab_selections,
                     retained_tile_layouts,
                     remembered_split_ratios,
                 ),
@@ -1720,8 +1707,7 @@ impl Editor {
             remember: Option<String>,
             bufs: &[Buf],
             next_id: &mut TileId,
-            path: &mut Vec<usize>,
-            previous_tabbed_leaves: &HashMap<Vec<usize>, PreviousTabbedLeaf>,
+            remembered_tab_selections: &HashMap<Vec<BufferId>, BufferId>,
             retained_tile_layouts: &HashMap<BufferId, Vec<RetainedTileLayout>>,
             remembered_split_ratios: &HashMap<String, f32>,
         ) -> Result<TileNode, String> {
@@ -1731,8 +1717,7 @@ impl Editor {
                     panes.into_iter().next().unwrap().1,
                     bufs,
                     next_id,
-                    path,
-                    previous_tabbed_leaves,
+                    remembered_tab_selections,
                     retained_tile_layouts,
                     remembered_split_ratios,
                 );
@@ -1741,30 +1726,23 @@ impl Editor {
             let (ratio, first_spec) = iter.next().unwrap();
             let rest: Vec<(f32, LayoutSpec)> = iter.collect();
 
-            path.push(0);
             let child_a = build(
                 first_spec,
                 bufs,
                 next_id,
-                path,
-                previous_tabbed_leaves,
+                remembered_tab_selections,
                 retained_tile_layouts,
                 remembered_split_ratios,
             )?;
-            path.pop();
             let child_b = if rest.len() == 1 {
-                path.push(1);
-                let child = build(
+                build(
                     rest.into_iter().next().unwrap().1,
                     bufs,
                     next_id,
-                    path,
-                    previous_tabbed_leaves,
+                    remembered_tab_selections,
                     retained_tile_layouts,
                     remembered_split_ratios,
-                )?;
-                path.pop();
-                child
+                )?
             } else {
                 let rest_total: f32 = rest.iter().map(|(r, _)| r).sum();
                 let rescaled: Vec<(f32, LayoutSpec)> = if rest_total > 0.0 {
@@ -1772,21 +1750,17 @@ impl Editor {
                 } else {
                     rest
                 };
-                path.push(1);
-                let child = build_split(
+                build_split(
                     rescaled,
                     dir,
                     gap,
                     None,
                     bufs,
                     next_id,
-                    path,
-                    previous_tabbed_leaves,
+                    remembered_tab_selections,
                     retained_tile_layouts,
                     remembered_split_ratios,
-                )?;
-                path.pop();
-                child
+                )?
             };
 
             let split_id = *next_id;
@@ -1807,13 +1781,11 @@ impl Editor {
             }))
         }
 
-        let mut path = Vec::new();
         let new_root = match build(
             spec,
             &self.buffers,
             &mut self.next_tile_id,
-            &mut path,
-            &previous_tabbed_leaves,
+            &self.remembered_tab_selections,
             &self.retained_tile_layouts,
             &self.remembered_split_ratios,
         ) {
@@ -4896,6 +4868,11 @@ impl Editor {
             self.buffer_recency.retain(|id| *id != removed_id);
             self.patcher_emitted_source_origins
                 .retain(|_, buffer_id| *buffer_id != removed_id);
+            self.remembered_tab_selections.retain(
+                |tab_buffer_ids, selected_buffer_id| {
+                    *selected_buffer_id != removed_id && !tab_buffer_ids.contains(&removed_id)
+                },
+            );
             // Fix up any tile leaf buffer indices that pointed past the removed slot
             Self::fix_leaf_indices(&mut self.tile_root, idx);
             true
