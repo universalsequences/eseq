@@ -32071,6 +32071,10 @@
             ],
             true,
         );
+        // The p-lock presence projection (param-controls.lisp) publishes into
+        // the Lisp-writable SEQV namespace, which init_runtime always
+        // registers in production.
+        editor.runtime_mut().register_reactive("SEQV", vec![], true);
         editor
             .runtime_mut()
             .eval_str(

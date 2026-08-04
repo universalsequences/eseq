@@ -1099,6 +1099,135 @@ pub fn reuse_layout_node_for_subtree_path_result(
     )
 }
 
+/// Applies several subtree replacements in ONE traversal of the layout tree.
+///
+/// Equivalent to calling `reuse_layout_node_for_subtree_path_result` once per
+/// path, but the per-call cost of that loop is a deep clone of every sibling
+/// along the path — effectively the whole layout tree — so N subtree flushes
+/// into the same buffer paid N full-tree clones. Batching keeps the cost at
+/// one tree rebuild regardless of how many subtrees changed.
+///
+/// A path that is a prefix of another covers the deeper replacement (both are
+/// rebuilt from the same source `tree`), matching the sequential outcome.
+/// Any failure returns Err without partial results; callers keep the per-path
+/// loop as the fallback so failure semantics (per-root partial relayout) are
+/// unchanged.
+pub fn reuse_layout_node_for_subtree_paths_result(
+    existing: &LayoutNode,
+    tree: &Value,
+    child_paths: &[&[usize]],
+    dirty_widget_ids: &mut Vec<u64>,
+) -> Result<LayoutNode, String> {
+    let mut trace_path = Vec::new();
+    reuse_layout_node_at_paths(existing, tree, child_paths, dirty_widget_ids, &mut trace_path)
+}
+
+fn reuse_layout_node_at_paths(
+    existing: &LayoutNode,
+    tree: &Value,
+    child_paths: &[&[usize]],
+    dirty_widget_ids: &mut Vec<u64>,
+    trace_path: &mut Vec<String>,
+) -> Result<LayoutNode, String> {
+    if child_paths.is_empty() {
+        return Ok(existing.clone());
+    }
+    if child_paths.iter().any(|path| path.is_empty()) {
+        // This node itself is one of the replaced subtree roots; rebuilding it
+        // from `tree` also covers any deeper replacement paths.
+        return reuse_layout_node_impl(existing, tree, dirty_widget_ids, trace_path);
+    }
+
+    let widget_type = get_widget_type(tree).ok_or_else(|| "not-widget".to_string())?;
+    if widget_type != existing.widget_type {
+        return Err(format!(
+            "widget-type:{}->{}",
+            existing.widget_type, widget_type
+        ));
+    }
+
+    let new_stable_widget_id = get_stable_widget_id(tree);
+    let new_subtree_root_id = get_prop_u64(tree, "__subtree-root-id");
+    let new_parent_subtree_root_id = get_prop_u64(tree, "__parent-subtree-root-id");
+    let new_stable_key = get_stable_widget_key(tree);
+    let is_explicit_subtree_root =
+        existing.subtree_root_id.is_some() && existing.subtree_root_id == new_subtree_root_id;
+    let identity_mismatch = if is_explicit_subtree_root {
+        existing.subtree_root_id != new_subtree_root_id || existing.stable_key != new_stable_key
+    } else {
+        existing.stable_widget_id != new_stable_widget_id
+            || existing.subtree_root_id != new_subtree_root_id
+            || existing.parent_subtree_root_id != new_parent_subtree_root_id
+            || existing.stable_key != new_stable_key
+    };
+    if identity_mismatch {
+        return Err(format!("stable-identity:{widget_type}"));
+    }
+
+    let mut new_props = collect_props(tree);
+    preserve_layout_internal_props(&existing.props, &mut new_props);
+    if !size_affecting_props_equal(&widget_type, &existing.props, &new_props) {
+        return Err(format!("size-props:{widget_type}"));
+    }
+    if existing.props != new_props {
+        dirty_widget_ids.push(existing.widget_id);
+    }
+
+    let children_values = get_children(tree);
+    let effective_children_values: Vec<&Value> = if widget_type == "tabs" {
+        let selected = (get_prop_num(tree, "value").map(f64_to_f32).unwrap_or(0.0) as usize)
+            .min(children_values.len().saturating_sub(1));
+        children_values.get(selected).into_iter().collect()
+    } else {
+        children_values.iter().collect()
+    };
+    if effective_children_values.len() != existing.children.len() {
+        return Err(format!("children-len:{widget_type}"));
+    }
+
+    let mut groups: std::collections::BTreeMap<usize, Vec<&[usize]>> =
+        std::collections::BTreeMap::new();
+    for path in child_paths {
+        groups.entry(path[0]).or_default().push(&path[1..]);
+    }
+
+    let mut children = existing.children.clone();
+    for (child_idx, tails) in groups {
+        let child_layout = existing
+            .children
+            .get(child_idx)
+            .ok_or_else(|| format!("missing-layout-child:{widget_type}[{child_idx}]"))?;
+        let child_tree = effective_children_values
+            .get(child_idx)
+            .ok_or_else(|| format!("missing-tree-child:{widget_type}[{child_idx}]"))?;
+        trace_path.push(format!("{widget_type}[{child_idx}]"));
+        let updated_child = reuse_layout_node_at_paths(
+            child_layout,
+            child_tree,
+            &tails,
+            dirty_widget_ids,
+            trace_path,
+        )?;
+        trace_path.pop();
+        children[child_idx] = updated_child;
+    }
+
+    let focusable = matches!(new_props.get("focusable"), Some(Value::Bool(true)));
+    Ok(with_cached_animation(LayoutNode {
+        widget_id: existing.widget_id,
+        stable_widget_id: existing.stable_widget_id,
+        subtree_root_id: existing.subtree_root_id,
+        parent_subtree_root_id: existing.parent_subtree_root_id,
+        stable_key: existing.stable_key.clone(),
+        widget_type,
+        rect: existing.rect,
+        props: new_props,
+        children,
+        focusable,
+        animation: LayoutAnimationHints::default(),
+    }))
+}
+
 pub fn relayout_subtree_path_result(
     existing: &LayoutNode,
     tree: &Value,

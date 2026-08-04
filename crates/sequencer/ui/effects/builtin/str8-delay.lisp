@@ -55,16 +55,17 @@
     nil))
 
 (def builtin-fx-str8-delay-sync-button (fx p)
-  (button "Sync"
-    :width 4.95 :height 0.88 :padding 0 :font-size 8.5
-    :background-color (if (fx-param-on-for? fx p) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
-    :color (if (fx-param-on-for? fx p) :black :dim)
-        :border-color :transparent
-    :plock-active (if (param-plock-active? fx p) 1 0)
-    :plock-color-r (param-plock-color-r)
-    :plock-color-g (param-plock-color-g)
-    :plock-color-b (param-plock-color-b)
-    :on-click |x y r| (fx-toggle-effect-value fx p)))
+  (subtree :key (builtin-fx-param-subtree-key fx p "s8-sync")
+    (button "Sync"
+      :width 4.95 :height 0.88 :padding 0 :font-size 8.5
+      :background-color (if (fx-param-on-for? fx p) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
+      :color (if (fx-param-on-for? fx p) :black :dim)
+          :border-color :transparent
+      :plock-active (if (param-plock-active? fx p) 1 0)
+      :plock-color-r (param-plock-color-r)
+      :plock-color-g (param-plock-color-g)
+      :plock-color-b (param-plock-color-b)
+      :on-click |x y r| (fx-toggle-effect-value fx p))))
 
 (def builtin-fx-str8-delay-div-button (fx p label-text)
   (button label-text
@@ -79,25 +80,26 @@
     :on-click |x y r| (builtin-fx-set-effect-option fx p label-text)))
 
 (def builtin-fx-str8-delay-div-grid (fx p)
-  (v-stack :gap 0.11
-    (h-stack :gap 0.12
-      (builtin-fx-str8-delay-div-button fx p "1/32")
-      (builtin-fx-str8-delay-div-button fx p "1/16"))
-    (h-stack :gap 0.12
-      (builtin-fx-str8-delay-div-button fx p "1/16t")
-      (builtin-fx-str8-delay-div-button fx p "1/8"))
-    (h-stack :gap 0.12
-      (builtin-fx-str8-delay-div-button fx p "1/8t")
-      (builtin-fx-str8-delay-div-button fx p "1/8."))
-    (h-stack :gap 0.12
-      (builtin-fx-str8-delay-div-button fx p "1/4")
-      (builtin-fx-str8-delay-div-button fx p "1/4t"))
-    (h-stack :gap 0.12
-      (builtin-fx-str8-delay-div-button fx p "1/4.")
-      (builtin-fx-str8-delay-div-button fx p "1/2"))
-    (h-stack :gap 0.12
-      (builtin-fx-str8-delay-div-button fx p "1")
-      (box :width 2.72 :height 0.82))))
+  (subtree :key (builtin-fx-param-subtree-key fx p "s8-div")
+    (v-stack :gap 0.11
+      (h-stack :gap 0.12
+        (builtin-fx-str8-delay-div-button fx p "1/32")
+        (builtin-fx-str8-delay-div-button fx p "1/16"))
+      (h-stack :gap 0.12
+        (builtin-fx-str8-delay-div-button fx p "1/16t")
+        (builtin-fx-str8-delay-div-button fx p "1/8"))
+      (h-stack :gap 0.12
+        (builtin-fx-str8-delay-div-button fx p "1/8t")
+        (builtin-fx-str8-delay-div-button fx p "1/8."))
+      (h-stack :gap 0.12
+        (builtin-fx-str8-delay-div-button fx p "1/4")
+        (builtin-fx-str8-delay-div-button fx p "1/4t"))
+      (h-stack :gap 0.12
+        (builtin-fx-str8-delay-div-button fx p "1/4.")
+        (builtin-fx-str8-delay-div-button fx p "1/2"))
+      (h-stack :gap 0.12
+        (builtin-fx-str8-delay-div-button fx p "1")
+        (box :width 2.72 :height 0.82)))))
 
 (def builtin-fx-str8-delay-side (fx title sync-p div-p offset-p time-p)
   (box :width 6.15 :height 7.45 :padding 0.18

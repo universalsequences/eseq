@@ -237,6 +237,48 @@ pub struct Buffer {
     pub text_styles: Vec<BufferTextStyle>,
 }
 
+fn flush_identical_cell(
+    a: &std::rc::Rc<std::cell::RefCell<Value>>,
+    b: &std::rc::Rc<std::cell::RefCell<Value>>,
+) -> bool {
+    std::rc::Rc::ptr_eq(a, b) || widget_tree_flush_identical(&a.borrow(), &b.borrow())
+}
+
+/// Structural identity for pending widget-tree flushes. Matches `Value`
+/// equality except that closures only compare identical when they share the
+/// same chunk AND the same captured upvalue cells (pointer equality), and
+/// native functions never compare identical. A pending subtree replacement
+/// whose tree is flush-identical to the committed content is a no-op: the
+/// committed tree, its input handlers, and its rendered output would all be
+/// unchanged by applying it.
+pub fn widget_tree_flush_identical(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::List(x), Value::List(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y.iter())
+                    .all(|(left, right)| flush_identical_cell(left, right))
+        }
+        (Value::Map(x), Value::Map(y)) => {
+            x.len() == y.len()
+                && x.iter().all(|(key, left)| {
+                    y.get(key)
+                        .is_some_and(|right| flush_identical_cell(left, right))
+                })
+        }
+        (Value::Closure(x_chunk, x_upvalues), Value::Closure(y_chunk, y_upvalues)) => {
+            x_chunk == y_chunk
+                && x_upvalues.len() == y_upvalues.len()
+                && x_upvalues
+                    .iter()
+                    .zip(y_upvalues.iter())
+                    .all(|(left, right)| std::rc::Rc::ptr_eq(left, right))
+        }
+        (Value::NativeFunction(_), _) | (_, Value::NativeFunction(_)) => false,
+        _ => a == b,
+    }
+}
+
 pub fn debug_widget_tree_summary(tree: Option<&Value>) -> String {
     fn value_label(value: &Value, depth: usize) -> String {
         if depth > 1 {
@@ -1512,6 +1554,28 @@ impl CommittedBufferUiSnapshot {
             .get(field)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// True when replacing `subtree_root_id` with `tree` (and the given
+    /// dependency list) would leave the committed snapshot bit-for-bit
+    /// unchanged, so the whole flush (tree splice, re-index, layout refresh,
+    /// retained repaint) can be skipped. Uses flush-identity semantics: value
+    /// equality, except closures must share both chunk and captured upvalue
+    /// cells (pointer equality), so a skipped flush can never leave a stale
+    /// captured environment in the committed tree.
+    pub fn subtree_replacement_is_noop(
+        &self,
+        subtree_root_id: u64,
+        tree: &Value,
+        reactive_dependencies: &[ReactiveFieldKey],
+    ) -> bool {
+        let Some(existing) = self.subtree_roots.get(&subtree_root_id) else {
+            return false;
+        };
+        self.subtree_root_dependencies
+            .get(&subtree_root_id)
+            .is_some_and(|deps| deps.as_slice() == reactive_dependencies)
+            && widget_tree_flush_identical(&existing.tree, tree)
     }
 
     pub fn subtree_replace_failure_reason(

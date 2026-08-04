@@ -485,27 +485,55 @@
                            (= (get chip :kind) "variant"))
         SEQ.track-plock-variants) 0))
 
+;; --- P-lock presence projection ------------------------------------------
+;; Param controls must not read SEQ.track-plocks / SEQ.track-plock-variants
+;; directly: every control in every visible panel would rerun whenever the
+;; p-lock list changes (i.e. on every selection change). A single projection
+;; effect (bottom of this file) fans the list out into per-param SEQV fields;
+;; each control subscribes only to its own field, so a p-lock change reruns
+;; exactly the controls whose lock state actually changed.
+
+(def param-plock-projected-key (target slot rack-slot idx)
+  (str "plk-" target "-" slot "-" rack-slot "-" idx))
+
+;; Key a control reads. Mirrors param-plock-row's match exactly: instrument
+;; controls match any slot; only rack effects discriminate on the rack slot.
+(def param-plock-control-key (fx p)
+  (param-plock-projected-key
+    (param-plock-row-target fx)
+    (if fx (get fx :slot-idx) "any")
+    (if (and fx (get fx :rack-fx)) (get fx :rack-slot) "x")
+    (get p :idx)))
+
+(def param-plock-field-on? (fx p)
+  ;; Explicit nil check: param index 0 is a valid lockable param, but bare
+  ;; truthiness would treat it as "no idx" (0 is falsey).
+  (if (= (get p :idx) nil)
+    false
+    (= (reactive-get "SEQV" (str (param-plock-control-key fx p) "-on")) 1)))
+
 (def param-plock-active? (fx p)
   (if (and (not fx) (instrument-keys-active?))
     (instrument-param-key-lock-active? p)
     (and (not (param-mods-open? fx))
-         (param-plock-row fx p))))
+         (param-plock-field-on? fx p))))
 
 (def param-plock-default (fx p)
-  (let ((row (param-plock-row fx p)))
-    (if row (get row :default) (fx-param-value-for fx p))))
+  (if (param-plock-field-on? fx p)
+    (reactive-get "SEQV" (str (param-plock-control-key fx p) "-def"))
+    (fx-param-value-for fx p)))
 
 (def param-plock-color-r ()
-  (let ((chip (param-current-variant-chip)))
-    (if chip (get chip :color-r) 0.27058825)))
+  (let ((v (reactive-get "SEQV" "plk-var-r")))
+    (if (= v nil) 0.27058825 v)))
 
 (def param-plock-color-g ()
-  (let ((chip (param-current-variant-chip)))
-    (if chip (get chip :color-g) 0.78431374)))
+  (let ((v (reactive-get "SEQV" "plk-var-g")))
+    (if (= v nil) 0.78431374 v)))
 
 (def param-plock-color-b ()
-  (let ((chip (param-current-variant-chip)))
-    (if chip (get chip :color-b) 0.8627451)))
+  (let ((v (reactive-get "SEQV" "plk-var-b")))
+    (if (= v nil) 0.8627451 v)))
 
 (def param-plock-text-color (fx p)
   (if (param-plock-active? fx p)
@@ -898,3 +926,67 @@
              :on-double-click (lambda (info) (instrument-toggle-param-modulation p))
           body))
       body)))))
+
+;; --- P-lock presence projection effect ------------------------------------
+;; The single reader of SEQ.track-plocks / SEQ.track-plock-variants on behalf
+;; of all param controls. Projects each displayed p-lock row into per-param
+;; SEQV float fields ("<key>-on" / "<key>-def") and the current variant chip
+;; color into three scalars; reactive value-compare suppresses no-op writes,
+;; so only the controls whose lock state actually changed rerun.
+
+(def param-plock-projected-row-key (row)
+  (param-plock-projected-key
+    (get row :target)
+    (if (= (get row :target) "instrument") "any" (get row :slot-idx))
+    (if (= (get row :target) "rack-effect") (get row :rack-slot) "x")
+    (get row :param-idx)))
+
+(def param-plock-key-member? (items value)
+  (> (len (filter |item| (= item value) items)) 0))
+
+(defstate param-plock-published-keys '())
+
+;; Runs as a dedicated non-visual effect buffer: a plain (effect ...) treats
+;; its result as the source buffer's widget tree, which would clobber the
+;; buffer that loaded this file. The named target gives the projection its
+;; own inert scratch buffer and keeps it live in every layout.
+(effect-buffer "*plock-sync*"
+  (do
+    (let ((keys
+            (reverse
+              (reduce |acc row|
+                ;; nil check, not truthiness: param index 0 must project too.
+                ;; Rows without a param index (timebase/swing/swing-resolution
+                ;; track locks) project under a target-only key read by the
+                ;; *track* parameters panel.
+                (let ((key (if (= (get row :param-idx) nil)
+                             (str "plk-t-" (get row :target))
+                             (param-plock-projected-row-key row))))
+                  (do
+                    (reactive-set "SEQV" (str key "-on") 1)
+                    (reactive-set "SEQV" (str key "-def") (get row :default))
+                    (cons key acc)))
+                '()
+                SEQ.track-plocks)))
+          (chip (param-current-variant-chip)))
+      (do
+        ;; Lock colors are only visible while some lock is shown, so leave
+        ;; the scalars untouched when no locks exist: publishing defaults on
+        ;; every deselect would flip the value back and forth and rerun every
+        ;; control for a color nothing displays.
+        (if (> (len keys) 0)
+          (do
+            (reactive-set "SEQV" "plk-var-r" (if chip (get chip :color-r) 0.27058825))
+            (reactive-set "SEQV" "plk-var-g" (if chip (get chip :color-g) 0.78431374))
+            (reactive-set "SEQV" "plk-var-b" (if chip (get chip :color-b) 0.8627451)))
+          false)
+        (each param-plock-published-keys |key idx|
+          (if (param-plock-key-member? keys key)
+            false
+            (do
+              (reactive-set "SEQV" (str key "-on") 0)
+              (reactive-set "SEQV" (str key "-def") false))))
+        (if (= param-plock-published-keys keys)
+          false
+          (set! param-plock-published-keys keys))))
+    nil))

@@ -20,15 +20,17 @@
       (seq-plock-timebase label)
       (seq-set-timebase label))))
 
-(def fx-track-param-plock-row (target)
-  (nth (filter |row| (= (get row :target) target) SEQ.track-plocks) 0))
-
+;; Track-level lock presence rides the SEQV p-lock projection
+;; (param-controls.lisp) instead of reading SEQ.track-plocks directly, so a
+;; selection change only reruns this panel when one of these locks actually
+;; changed.
 (def fx-track-param-plock-active? (target)
-  (if (fx-track-param-plock-row target) true false))
+  (= (reactive-get "SEQV" (str "plk-t-" target "-on")) 1))
 
 (def fx-track-param-plock-default (target fallback)
-  (let ((row (fx-track-param-plock-row target)))
-    (if row (get row :default) fallback)))
+  (if (fx-track-param-plock-active? target)
+    (reactive-get "SEQV" (str "plk-t-" target "-def"))
+    fallback))
 
 (def fx-track-bus-send-control (send)
   (v-stack :align :center :gap 0.25

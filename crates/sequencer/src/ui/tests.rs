@@ -2051,6 +2051,20 @@
     }
 
     #[test]
+    #[ignore = "release-mode perf probe: Cmd+A select-all and Escape unselect-all under the real production multi-pane layout (seq-apply-fx-layout), with retained Metal updates for every visible tile"]
+    fn project_92_full_layout_step_interactions_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("project-92-full-layout-step-interactions-probe".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                project_92_ui_performance_probe_impl(Project92UiProbe::StepInteractionsFullLayout)
+            })
+            .expect("spawn project 92 full-layout step interaction probe")
+            .join()
+            .expect("project 92 full-layout step interaction probe should pass");
+    }
+
+    #[test]
     #[ignore = "release-mode perf probe: step interactions with a realistic committed arrangement (scene lane + clip lanes) present, exercising the per-tick song-state sync the real event loop runs"]
     fn project_92_arranged_step_interactions_end_to_end_perf() {
         std::thread::Builder::new()
@@ -2080,6 +2094,14 @@
         EscapeDeselect,
         RackMacroDrag,
         StepInteractions,
+        /// Cmd+A select-all / Escape unselect-all under the real production
+        /// multi-pane startup layout (`seq-apply-fx-layout`, exactly as
+        /// `editor_setup::create_editor` installs it): transport bar, samples
+        /// sidebar, sequencer, step/track panels, mixer strip, and the *fx*
+        /// lower panel are all visible, so the fx/mixer selection publication
+        /// paths and every tile's retained Metal update are inside the timed
+        /// region.
+        StepInteractionsFullLayout,
         /// Selection-gesture probe on the saved `pianohold` project: a real
         /// takes-bearing arrangement (take_pools, use_arrangement, ~137
         /// clips), covering the drag-selection paths the project-92 probes
@@ -2115,6 +2137,12 @@
         }
 
         let _dir = SequencerDirGuard::enter();
+        let full_layout = probe == Project92UiProbe::StepInteractionsFullLayout;
+        // The production layout packs seven tiles; 180x70 leaves the smaller
+        // step-panel tile too short to keep all 64 step cells on screen, so
+        // the full-layout variant runs at a larger cell viewport with the
+        // same ~1250x850 production aspect.
+        let (vp_cols, vp_rows): (u16, u16) = if full_layout { (220, 110) } else { (180, 70) };
         let project_name = if probe == Project92UiProbe::PianoholdSelection {
             "pianohold"
         } else {
@@ -2226,9 +2254,16 @@
         );
         editor.process_lisp_reload_report(report);
         editor.refresh_runtime_side_effects();
+        if full_layout {
+            // Install the production multi-pane startup layout through the
+            // exact helper the real app uses (editor_setup.rs), so the probe
+            // layout cannot drift from what create_editor produces.
+            super::editor_setup::apply_startup_grid_layout(&mut editor)
+                .expect("apply production startup grid layout");
+        }
         reload_custom_instrument_ui(&mut editor);
-        editor.set_layout_viewport(180, 70);
-        editor.update_tile_rects(180, 70);
+        editor.set_layout_viewport(vp_cols, vp_rows);
+        editor.update_tile_rects(vp_cols, vp_rows);
         let _ = editor.drain_host_commands();
 
         app.queue_project_load_named(project_name)
@@ -2399,7 +2434,7 @@
         }
         editor.refresh_runtime_side_effects();
         refresh_visible_track_topology_layouts(&mut editor);
-        editor.update_tile_rects(180, 70);
+        editor.update_tile_rects(vp_cols, vp_rows);
         let _ = editor.drain_host_commands();
 
         if probe == Project92UiProbe::PianoholdSelection {
@@ -2843,6 +2878,594 @@
                 assert!(
                     median <= ceiling_ms,
                     "{name} median {median:.3} ms exceeded the {ceiling_ms:.1} ms ceiling on the pianohold fixture",
+                );
+            }
+            return;
+        }
+
+        if probe == Project92UiProbe::StepInteractionsFullLayout {
+            const TRACK: usize = 0;
+            const STEP_COUNT: usize = 64;
+            const WARMUPS: usize = 5;
+            const SAMPLES: usize = 20;
+
+            // Focus the tile that shows *sequencer* without disturbing the
+            // production layout (set_active_buffer would swap the active
+            // tile's buffer instead of switching tiles).
+            let sequencer_buffer_idx = editor
+                .buffers
+                .iter()
+                .position(|buffer| buffer.name == "*sequencer*")
+                .expect("sequencer buffer index");
+            let sequencer_tile = editor
+                .tile_root
+                .leaf_ids()
+                .into_iter()
+                .find(|tile_id| {
+                    editor
+                        .tile_root
+                        .find_leaf(*tile_id)
+                        .is_some_and(|leaf| leaf.buffer_idx == sequencer_buffer_idx)
+                })
+                .expect("the production layout must show *sequencer*");
+            editor.switch_active_tile(sequencer_tile);
+            assert_eq!(
+                editor.active_buffer().name,
+                "*sequencer*",
+                "the full-layout probe must focus the sequencer tile"
+            );
+
+            state.pattern.track_params[TRACK].set_num_steps(STEP_COUNT);
+            for step in 0..STEP_COUNT {
+                state.pattern.patterns[TRACK].set_step_active(step, step < 24);
+            }
+            // Give step 0 a real instrument p-lock whose value differs from
+            // the track's base value. Cmd+A displays the lowest selected step
+            // (step 0) in the fx panel, so with the production layout the
+            // p-lock publication path must visibly change the fx tile — and
+            // Escape must revert it. Without any p-lock the fx panel would
+            // legitimately have nothing to repaint and the probe could not
+            // tell that path was skipped.
+            {
+                let instrument_desc = app
+                    .graph
+                    .instrument_descriptors
+                    .get(TRACK)
+                    .expect("track 0 instrument descriptor");
+                let (plock_param_idx, plock_pdesc) = instrument_desc
+                    .params
+                    .iter()
+                    .enumerate()
+                    .find(|(_, pdesc)| {
+                        matches!(
+                            pdesc.kind,
+                            sequencer::effects::ParamKind::Continuous { .. }
+                        ) && pdesc.max > pdesc.min
+                    })
+                    .expect("track 0 must expose a continuous instrument param");
+                let base = app
+                    .effective_instrument_param_value(TRACK, plock_param_idx)
+                    .unwrap_or(plock_pdesc.default);
+                let plock_value = if (base - plock_pdesc.min).abs() >= (plock_pdesc.max - base).abs()
+                {
+                    plock_pdesc.min
+                } else {
+                    plock_pdesc.max
+                };
+                assert!(
+                    (plock_value - base).abs() > f32::EPSILON,
+                    "fixture p-lock value must differ from the base instrument value"
+                );
+                state.pattern.instrument_slots[TRACK].set_plock(0, plock_param_idx, plock_value);
+            }
+            sync_all_track_sequencer_state(
+                editor.runtime_mut(),
+                &state,
+                &app,
+                TRACK,
+                &selected_steps,
+            );
+
+            // The production layout must make the selection side-effect
+            // publication paths live: these flags gate the fx/mixer work in
+            // apply_ui_invalidations and reactive_sync.rs, and the
+            // single-tile probes leave them all false.
+            let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
+            let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
+            let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
+            assert!(fx_visible, "production layout must show the *fx* panel");
+            assert!(mixer_visible, "production layout must show the *mixer* strip");
+            assert!(
+                transport_visible,
+                "production layout must show the *transport* bar"
+            );
+            assert!(
+                !editor_has_visible_buffer(&editor, "*arrangement*"),
+                "the full-layout step probe must measure the Seq view"
+            );
+
+            let mut song_frame = super::state_values::SongFrameState::default();
+            app.sync_track_sound_bindings();
+            super::state_values::sync_song_state(
+                editor.runtime_mut(),
+                &app,
+                &mut song_frame,
+                transport_visible,
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            editor.update_tile_rects(vp_cols, vp_rows);
+
+            // Tripwire: every step cell the Cmd+A/Escape repaint must cover
+            // has to exist in the sequencer tile's layout at this viewport.
+            {
+                let layout = editor.widget_layout().expect("sequencer layout");
+                for step in [0, 8, 15, 16, 31, 32, 47, 48, 63] {
+                    assert!(
+                        find_layout_node_by_stable_key(
+                            &layout,
+                            &format!("seqv-step-cell-{TRACK}-{step}"),
+                        )
+                        .is_some(),
+                        "step cell {step} must be present in the sequencer tile layout at {vp_cols}x{vp_rows}",
+                    );
+                }
+            }
+
+            let initial_frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                &mut editor,
+                vp_cols as usize,
+                vp_rows as usize,
+            );
+            let visible_buffers: Vec<String> = initial_frame
+                .tiles
+                .iter()
+                .map(|tile| tile.frame.buffer_name.clone())
+                .collect();
+            assert!(
+                visible_buffers.len() >= 3,
+                "the production layout must keep at least 3 tiles visible, got {visible_buffers:?}"
+            );
+            for required in ["*sequencer*", "*fx*", "*mixer*", "*transport*"] {
+                assert!(
+                    visible_buffers.iter().any(|name| name == required),
+                    "the production layout must show {required}, got {visible_buffers:?}"
+                );
+            }
+            eprintln!("[project-92-fullayout-visible-buffers] {visible_buffers:?}");
+
+            // Retained Metal runs for EVERY visible tile, mirroring what the
+            // Metal backend keeps per widget scene. Refusing to track a tile
+            // here would let an "optimization" cheat by dropping its redraw.
+            struct TileRetained {
+                buffer_name: String,
+                viewport: eseqlisp::widget_render::WidgetViewport,
+                runs: Vec<eseqlisp::widget_render::MetalPrimitiveRun>,
+                indices: eseqlisp::widget_render::MetalPrimitiveRunIndex,
+            }
+            let mut tile_retained: Vec<TileRetained> = Vec::new();
+            for tile in &initial_frame.tiles {
+                let layout = tile.frame.widget_layout.as_ref().unwrap_or_else(|| {
+                    panic!("visible tile {} must have a widget layout", tile.frame.buffer_name)
+                });
+                let viewport = eseqlisp::widget_render::WidgetViewport {
+                    cell_w: 8.0,
+                    cell_h: 16.0,
+                    vp_w: vp_cols as f32 * 8.0,
+                    vp_h: vp_rows as f32 * 16.0,
+                    time_seconds: 0.0,
+                    focused_widget_id: tile.frame.focused_widget_id,
+                    focused_branch: tile.is_active,
+                    overlay_viewport_bottom: vp_rows as f32,
+                    scroll_top: tile.frame.widget_scroll_top
+                        + tile.frame.text_scroll_top as f32,
+                    scroll_left: tile.frame.widget_layout_scroll_left,
+                    inherited_hover: false,
+                };
+                let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                    layout,
+                    viewport,
+                    viewport.scroll_top,
+                    vp_rows,
+                );
+                let indices = eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                tile_retained.push(TileRetained {
+                    buffer_name: tile.frame.buffer_name.clone(),
+                    viewport,
+                    runs,
+                    indices,
+                });
+            }
+            // The shell packs its state uniforms in compiled shader order, so
+            // derive the `selected` slot from the registered widget def
+            // instead of hard-coding an index.
+            let shell_selected_idx = eseqlisp::widget_render::sdf_widget::sdf_widget_def(
+                "seqv-step-shell",
+            )
+            .expect("seqv-step-shell widget def")
+            .state_uniforms
+            .iter()
+            .position(|name| name == "selected")
+            .expect("seqv-step-shell must expose a selected state uniform");
+            let count_selected_shells = |tiles: &Vec<TileRetained>| -> usize {
+                let read_uniform =
+                    |instance: &eseqlisp::widget_render::WidgetInstance, idx: usize| -> f32 {
+                        match idx {
+                            0..=3 => instance.uniform_a[idx],
+                            4..=7 => instance.uniform_b[idx - 4],
+                            8..=11 => instance.uniform_c[idx - 8],
+                            _ => instance.uniform_d[idx - 12],
+                        }
+                    };
+                tiles
+                    .iter()
+                    .find(|tile| tile.buffer_name == "*sequencer*")
+                    .expect("retained runs for the sequencer tile")
+                    .runs
+                    .iter()
+                    .flat_map(|run| &run.primitives)
+                    .filter(|primitive| {
+                        matches!(
+                            eseqlisp::widget_render::innermost_primitive(primitive),
+                            eseqlisp::widget_render::MetalPrimitive::WidgetInstance {
+                                widget_type,
+                                instance,
+                                ..
+                            } if widget_type == "seqv-step-shell"
+                                && read_uniform(instance, shell_selected_idx) > 0.5
+                        )
+                    })
+                    .count()
+            };
+
+            struct FullLayoutUpdate {
+                invalidation_ms: f64,
+                tick_sync_ms: f64,
+                reactive_ms: f64,
+                frame_ms: f64,
+                retained_ms: f64,
+                // (buffer name, dirty widget count, retained refresh ms,
+                //  structural full-rebuild fallback taken)
+                tiles: Vec<(String, usize, f64, bool)>,
+            }
+            let step_clipboard = Arc::new(Mutex::new(None));
+            let neural = selected_neural_neurons.lock().unwrap().clone();
+            let mut finish_visible_update = |editor: &mut Editor,
+                                             app: &mut app::App,
+                                             tiles: &mut Vec<TileRetained>|
+             -> FullLayoutUpdate {
+                let started = Instant::now();
+                let invalidations = ui_invalidations.drain();
+                if !invalidations.is_empty() {
+                    apply_ui_invalidations(
+                        invalidations,
+                        UiInvalidationApplyCtx {
+                            app,
+                            editor,
+                            state: &state,
+                            track_collapsed: &track_collapsed,
+                            bus_state: &bus_state,
+                            current_track_idx: TRACK,
+                            selected_steps: &selected_steps,
+                            selected_neural_neurons: &neural,
+                            piano_roll_selection: &piano_roll_selection,
+                            accumulator_names: &accumulator_names,
+                            cached_track_peak_levels: &cached_track_peak_levels,
+                            cached_bus_peak_levels: &cached_bus_peak_levels,
+                            record_armed: &record_armed,
+                            active_delete_target: &active_delete_target,
+                            active_delete_target_version: &active_delete_target_version,
+                            expanded_step_projection: &expanded_step_projection,
+                            fx_visible,
+                            sequencer_visible: true,
+                            mixer_visible,
+                        },
+                    );
+                }
+                let invalidations_done = Instant::now();
+                // The real event loop's reactive tick runs these song/sound
+                // syncs on every frame before the reactive cycle
+                // (reactive_tick.rs).
+                app.sync_track_sound_bindings();
+                super::state_values::sync_song_state(
+                    editor.runtime_mut(),
+                    app,
+                    &mut song_frame,
+                    transport_visible,
+                );
+                let tick_sync_done = Instant::now();
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                let reactive_done = Instant::now();
+                let frame = eseqlisp::frame::build_tiled_render_frame_borderless(
+                    editor,
+                    vp_cols as usize,
+                    vp_rows as usize,
+                );
+                let frame_done = Instant::now();
+                assert_eq!(
+                    frame.tiles.len(),
+                    tiles.len(),
+                    "the production layout must keep every tile visible"
+                );
+                let mut tile_stats = Vec::with_capacity(frame.tiles.len());
+                for tile in &frame.tiles {
+                    let entry = tiles
+                        .iter_mut()
+                        .find(|entry| entry.buffer_name == tile.frame.buffer_name)
+                        .unwrap_or_else(|| {
+                            panic!("retained runs for visible tile {}", tile.frame.buffer_name)
+                        });
+                    let layout = tile.frame.widget_layout.as_ref().unwrap_or_else(|| {
+                        panic!(
+                            "visible tile {} must keep a widget layout",
+                            tile.frame.buffer_name
+                        )
+                    });
+                    let tile_started = Instant::now();
+                    let (_, stats) =
+                        eseqlisp::widget_render::refresh_metal_primitive_runs_retained_in_place(
+                            layout,
+                            entry.viewport,
+                            entry.viewport.scroll_top,
+                            vp_rows,
+                            &mut entry.runs,
+                            &entry.indices,
+                            &tile.frame.dirty_widget_ids,
+                        );
+                    let structural_rebuild = stats.missing_previous_runs > 0
+                        || stats.invalid_previous_runs > 0;
+                    if tile.frame.buffer_name == "*sequencer*" {
+                        // The interaction's primary surface keeps the strict
+                        // contract the single-tile probes enforce.
+                        assert_eq!(
+                            stats.missing_previous_runs, 0,
+                            "sequencer tile retained refresh must not miss runs"
+                        );
+                        assert_eq!(
+                            stats.invalid_previous_runs, 0,
+                            "sequencer tile retained refresh must not invalidate runs"
+                        );
+                    } else if structural_rebuild {
+                        // Production fallback: when a tile's widget structure
+                        // changed, the Metal backend rebuilds that tile's run
+                        // scene in full (metal_backend.rs,
+                        // refresh_widget_run_scene_for_dirty_layout). That
+                        // real cost stays inside the timed region.
+                        let (runs, _) = eseqlisp::widget_render::collect_metal_primitive_runs(
+                            layout,
+                            entry.viewport,
+                            entry.viewport.scroll_top,
+                            vp_rows,
+                        );
+                        entry.indices =
+                            eseqlisp::widget_render::build_metal_primitive_run_index(&runs);
+                        entry.runs = runs;
+                    }
+                    tile_stats.push((
+                        tile.frame.buffer_name.clone(),
+                        tile.frame.dirty_widget_ids.len(),
+                        duration_ms(tile_started.elapsed()),
+                        structural_rebuild,
+                    ));
+                }
+                let retained_done = Instant::now();
+                FullLayoutUpdate {
+                    invalidation_ms: duration_ms(invalidations_done - started),
+                    tick_sync_ms: duration_ms(tick_sync_done - invalidations_done),
+                    reactive_ms: duration_ms(reactive_done - tick_sync_done),
+                    frame_ms: duration_ms(frame_done - reactive_done),
+                    retained_ms: duration_ms(retained_done - frame_done),
+                    tiles: tile_stats,
+                }
+            };
+
+            let percentile = |samples: &mut Vec<f64>, fraction: f64| {
+                samples.sort_by(|a, b| a.total_cmp(b));
+                let index = ((samples.len() - 1) as f64 * fraction).round() as usize;
+                samples[index]
+            };
+            let fx_display_step = |editor: &mut Editor| -> f64 {
+                match editor
+                    .runtime_mut()
+                    .eval_str("SEQ.fx-step-display-step")
+                    .expect("read SEQ.fx-step-display-step")
+                {
+                    Some(Value::Number(step)) => step,
+                    other => panic!("SEQ.fx-step-display-step must be a number, got {other:?}"),
+                }
+            };
+
+            struct ActionSamples {
+                total: Vec<f64>,
+                dispatch: Vec<f64>,
+                invalidation: Vec<f64>,
+                tick_sync: Vec<f64>,
+                reactive: Vec<f64>,
+                frame: Vec<f64>,
+                retained: Vec<f64>,
+                tile_retained: std::collections::BTreeMap<String, Vec<f64>>,
+                tile_rebuilds: std::collections::BTreeMap<String, usize>,
+            }
+            impl ActionSamples {
+                fn new() -> Self {
+                    Self {
+                        total: Vec::new(),
+                        dispatch: Vec::new(),
+                        invalidation: Vec::new(),
+                        tick_sync: Vec::new(),
+                        reactive: Vec::new(),
+                        frame: Vec::new(),
+                        retained: Vec::new(),
+                        tile_retained: std::collections::BTreeMap::new(),
+                        tile_rebuilds: std::collections::BTreeMap::new(),
+                    }
+                }
+                fn record(
+                    &mut self,
+                    total_ms: f64,
+                    dispatch_ms: f64,
+                    update: &FullLayoutUpdate,
+                ) {
+                    self.total.push(total_ms);
+                    self.dispatch.push(dispatch_ms);
+                    self.invalidation.push(update.invalidation_ms);
+                    self.tick_sync.push(update.tick_sync_ms);
+                    self.reactive.push(update.reactive_ms);
+                    self.frame.push(update.frame_ms);
+                    self.retained.push(update.retained_ms);
+                    for (name, _, retained_ms, rebuilt) in &update.tiles {
+                        self.tile_retained
+                            .entry(name.clone())
+                            .or_default()
+                            .push(*retained_ms);
+                        if *rebuilt {
+                            *self.tile_rebuilds.entry(name.clone()).or_default() += 1;
+                        }
+                    }
+                }
+            }
+            let mut select_samples = ActionSamples::new();
+            let mut unselect_samples = ActionSamples::new();
+
+            for iteration in 0..(WARMUPS + SAMPLES) {
+                // Reset to a known empty selection outside the timed region.
+                selected_steps.lock().unwrap().clear();
+                ui_invalidations.push(UiInvalidation::StepSelection {
+                    track: TRACK,
+                    changed_steps: (0..STEP_COUNT).collect(),
+                });
+                finish_visible_update(&mut editor, &mut app, &mut tile_retained);
+                assert_eq!(
+                    count_selected_shells(&tile_retained),
+                    0,
+                    "reset must leave no selected step shells in the retained scene"
+                );
+
+                // (a) Cmd+A select-all through the real shortcut path.
+                let started = Instant::now();
+                assert!(handle_metal_command_shortcut_with_ui_epoch(
+                    &mut editor,
+                    &crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Char('a'),
+                        KeyModifiers::SUPER,
+                    ),
+                    &state,
+                    &current_track,
+                    &selected_steps,
+                    &step_clipboard,
+                    &ui_epoch,
+                ));
+                let dispatch_done = Instant::now();
+                let update = finish_visible_update(&mut editor, &mut app, &mut tile_retained);
+                let total_ms = duration_ms(started.elapsed());
+                assert_eq!(
+                    selected_steps.lock().unwrap().len(),
+                    STEP_COUNT,
+                    "Cmd+A must select all {STEP_COUNT} steps"
+                );
+                assert_eq!(
+                    count_selected_shells(&tile_retained),
+                    STEP_COUNT,
+                    "all {STEP_COUNT} selected step shells must be in the retained sequencer scene"
+                );
+                assert_eq!(
+                    fx_display_step(&mut editor),
+                    0.0,
+                    "select-all must publish the selection's p-lock display step to the fx panel"
+                );
+                let fx_dirty = update
+                    .tiles
+                    .iter()
+                    .find(|(name, _, _, _)| name == "*fx*")
+                    .map(|(_, dirty, _, _)| *dirty)
+                    .expect("fx tile stats");
+                assert!(
+                    fx_dirty > 0,
+                    "select-all must dirty widgets in the visible *fx* tile"
+                );
+                if iteration >= WARMUPS {
+                    select_samples.record(
+                        total_ms,
+                        duration_ms(dispatch_done - started),
+                        &update,
+                    );
+                }
+
+                // (b) Escape unselect-all through the real production key
+                // binding (Cmd+A is a pure select-all; the production path
+                // for clearing a full selection is ESC -> seq-clear-ui-selection).
+                let started = Instant::now();
+                editor.handle_key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Esc,
+                    KeyModifiers::NONE,
+                ));
+                let dispatch_done = Instant::now();
+                let update = finish_visible_update(&mut editor, &mut app, &mut tile_retained);
+                let total_ms = duration_ms(started.elapsed());
+                assert!(
+                    selected_steps.lock().unwrap().is_empty(),
+                    "Escape must clear the full selection"
+                );
+                assert_eq!(
+                    count_selected_shells(&tile_retained),
+                    0,
+                    "no selected step shells may remain in the retained scene after Escape"
+                );
+                assert_eq!(
+                    fx_display_step(&mut editor),
+                    -1.0,
+                    "unselect must revert the fx panel's p-lock display step"
+                );
+                if iteration >= WARMUPS {
+                    unselect_samples.record(
+                        total_ms,
+                        duration_ms(dispatch_done - started),
+                        &update,
+                    );
+                }
+            }
+
+            for (name, samples) in [
+                ("cmd-a-select", &mut select_samples),
+                ("escape-unselect", &mut unselect_samples),
+            ] {
+                let median = percentile(&mut samples.total, 0.50);
+                let dispatch_median = percentile(&mut samples.dispatch, 0.50);
+                eprintln!(
+                    "[project-92-fullayout-{name}] tracks={} steps={} tiles={} samples={} median_ms={:.3} p95_ms={:.3} dispatch_host_ms={:.3} visible_update_ms={:.3}",
+                    app.tracks.len(),
+                    STEP_COUNT,
+                    visible_buffers.len(),
+                    SAMPLES,
+                    median,
+                    percentile(&mut samples.total, 0.95),
+                    dispatch_median,
+                    median - dispatch_median,
+                );
+                eprintln!(
+                    "[project-92-fullayout-{name}-visible-phases] invalidation_ms={:.3} tick_sync_ms={:.3} reactive_ms={:.3} frame_ms={:.3} retained_ms={:.3}",
+                    percentile(&mut samples.invalidation, 0.50),
+                    percentile(&mut samples.tick_sync, 0.50),
+                    percentile(&mut samples.reactive, 0.50),
+                    percentile(&mut samples.frame, 0.50),
+                    percentile(&mut samples.retained, 0.50),
+                );
+                let tile_rebuilds = samples.tile_rebuilds.clone();
+                let tile_breakdown = samples
+                    .tile_retained
+                    .iter_mut()
+                    .map(|(tile, tile_samples)| {
+                        format!(
+                            "{tile}={:.3}(rebuilds={})",
+                            percentile(tile_samples, 0.50),
+                            tile_rebuilds.get(tile).copied().unwrap_or(0),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                eprintln!(
+                    "[project-92-fullayout-{name}-retained-tiles] {tile_breakdown}"
                 );
             }
             return;

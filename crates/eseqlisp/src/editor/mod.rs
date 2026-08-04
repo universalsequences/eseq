@@ -668,6 +668,18 @@ pub struct Editor {
     retained_tile_layouts: HashMap<BufferId, Vec<RetainedTileLayout>>,
     visible_binding_layout_signature: Option<VisibleBindingLayoutSignature>,
     visible_binding_registry_revision: u64,
+    /// While true, `sync_reactive_bindings_for_visible_layouts` records a
+    /// pending request instead of running. `refresh_runtime_side_effects`
+    /// sets this around its inactive-buffer refresh loop so the visible
+    /// binding scan (which walks every visible layout) runs once per flush
+    /// instead of once per refreshed buffer.
+    visible_binding_sync_deferred: bool,
+    visible_binding_sync_pending: bool,
+    /// Per-tile extracted widget-binding entries, keyed by the layout Arc
+    /// pointer + layout revision that produced them. Rebuilding the binding
+    /// table only rescans tiles whose layout actually changed.
+    visible_binding_tile_entries:
+        HashMap<TileId, (usize, u64, Arc<Vec<(crate::vm::ReactiveBindingKey, u64)>>)>,
     widget_cursor: WidgetCursor,
     suppress_mouse_until_left_up: bool,
     active_tab_mouse_capture: Option<TileId>,
@@ -820,6 +832,9 @@ impl Editor {
             retained_tile_layouts: HashMap::new(),
             visible_binding_layout_signature: None,
             visible_binding_registry_revision: 0,
+            visible_binding_sync_deferred: false,
+            visible_binding_sync_pending: false,
+            visible_binding_tile_entries: HashMap::new(),
             widget_cursor: WidgetCursor::Default,
             suppress_mouse_until_left_up: false,
             active_tab_mouse_capture: None,
@@ -4346,6 +4361,10 @@ impl Editor {
     }
 
     pub fn sync_reactive_bindings_for_visible_layouts(&mut self) {
+        if self.visible_binding_sync_deferred {
+            self.visible_binding_sync_pending = true;
+            return;
+        }
         let visible_layouts = self
             .tile_root
             .leaf_ids()
@@ -4369,8 +4388,35 @@ impl Editor {
         {
             return;
         }
-        self.runtime.replace_widget_bindings_from_layouts(
-            visible_layouts.iter().map(|(_, _, layout)| layout.as_ref()),
+        // Rescan only tiles whose layout changed; unchanged tiles reuse their
+        // cached entry list (keyed like `signature`: layout Arc + revision).
+        let mut entry_lists = Vec::with_capacity(visible_layouts.len());
+        for (tile_id, revision, layout) in &visible_layouts {
+            let layout_ptr = Arc::as_ptr(layout) as usize;
+            let entries = match self.visible_binding_tile_entries.get(tile_id) {
+                Some((cached_ptr, cached_revision, cached_entries))
+                    if *cached_ptr == layout_ptr && *cached_revision == *revision =>
+                {
+                    cached_entries.clone()
+                }
+                _ => {
+                    let mut out = Vec::new();
+                    crate::reactive::ReactiveRegistry::collect_widget_binding_entries(
+                        layout.as_ref(),
+                        &mut out,
+                    );
+                    let entries = Arc::new(out);
+                    self.visible_binding_tile_entries
+                        .insert(*tile_id, (layout_ptr, *revision, entries.clone()));
+                    entries
+                }
+            };
+            entry_lists.push(entries);
+        }
+        self.visible_binding_tile_entries
+            .retain(|tile_id, _| visible_layouts.iter().any(|(id, _, _)| id == tile_id));
+        self.runtime.replace_widget_bindings_from_entry_lists(
+            entry_lists.iter().map(|entries| entries.as_slice()),
         );
         self.visible_binding_layout_signature = Some(signature);
         self.visible_binding_registry_revision = self.runtime.widget_bindings_revision();
@@ -7345,7 +7391,39 @@ impl Editor {
             let subtree_paths = layout
                 .as_ref()
                 .map(|layout| crate::layout::subtree_root_paths(layout.as_ref()));
+            // Fast path: apply every subtree replacement in one traversal.
+            // The per-root loop below rebuilds the full layout tree once per
+            // root, so N changed subtrees cost N full-tree clones; the batched
+            // reuse keeps it at one. Any miss falls through to the per-root
+            // loop, which preserves the targeted-relayout and full-relayout
+            // fallbacks (and their diagnostics) unchanged.
+            let mut batched_applied = false;
+            if let (Some(existing), Some(paths_by_root)) =
+                (layout.clone(), subtree_paths.as_ref())
+            {
+                let batched_paths: Option<Vec<&[usize]>> = subtree_roots
+                    .iter()
+                    .map(|root_id| paths_by_root.get(root_id).map(|path| path.as_slice()))
+                    .collect();
+                if let Some(batched_paths) = batched_paths
+                    && let Ok(updated) = crate::layout::reuse_layout_node_for_subtree_paths_result(
+                        existing.as_ref(),
+                        tree,
+                        &batched_paths,
+                        &mut dirty_widget_ids,
+                    )
+                {
+                    layout = Some(std::sync::Arc::new(updated));
+                    batched_applied = true;
+                }
+                if !batched_applied {
+                    dirty_widget_ids.clear();
+                }
+            }
             for subtree_root_id in subtree_roots {
+                if batched_applied {
+                    break;
+                }
                 let Some(existing) = layout.as_ref() else {
                     targeted = false;
                     miss_reason.get_or_insert_with(|| "missing-layout".to_string());
@@ -8156,6 +8234,26 @@ impl Editor {
                             ),
                         )
                     });
+                    // A rerun subtree whose rendered tree (including captured
+                    // callback environments) is identical to the committed
+                    // content changes nothing: skip the splice, snapshot
+                    // re-index, layout refresh, and retained repaint for it.
+                    if self.buffers[buffer_idx]
+                        .committed_ui_snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| {
+                            snapshot.subtree_replacement_is_noop(
+                                subtree_root_id,
+                                &tree,
+                                &reactive_dependencies,
+                            )
+                        })
+                    {
+                        self.trace_ui_tree_event_with(&buffer_name, "noop-subtree", || {
+                            format!("root={subtree_root_id}")
+                        });
+                        continue;
+                    }
                     let is_active = self.active_buffer_idx() == buffer_idx;
                     if is_active {
                         active_subtree_replacements.push(EditorSubtreeReplacement {
@@ -8328,6 +8426,9 @@ impl Editor {
             );
         }
         let inactive_started = std::time::Instant::now();
+        // The visible-binding scan walks every visible layout; defer it so
+        // refreshing N buffers in this flush pays for one scan, not N.
+        self.visible_binding_sync_deferred = true;
         for (buffer_idx, subtree_roots) in inactive_buffers_to_refresh {
             match subtree_roots {
                 Some(subtree_roots) => {
@@ -8357,6 +8458,17 @@ impl Editor {
                         );
                     }
                 }
+            }
+        }
+        self.visible_binding_sync_deferred = false;
+        if std::mem::take(&mut self.visible_binding_sync_pending) {
+            let bindings_started = std::time::Instant::now();
+            self.sync_reactive_bindings_for_visible_layouts();
+            if scene_trace {
+                eprintln!(
+                    "[side-effects-trace] deferred-bindings {:.3}ms",
+                    bindings_started.elapsed().as_secs_f64() * 1000.0
+                );
             }
         }
         if scene_trace {

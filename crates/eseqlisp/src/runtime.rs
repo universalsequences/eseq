@@ -2651,6 +2651,14 @@ impl Runtime {
             .replace_widget_bindings_from_layouts(layouts);
     }
 
+    pub fn replace_widget_bindings_from_entry_lists<'a>(
+        &mut self,
+        entry_lists: impl IntoIterator<Item = &'a [(crate::vm::ReactiveBindingKey, u64)]>,
+    ) {
+        self.reactive_registry
+            .replace_widget_bindings_from_entry_lists(entry_lists);
+    }
+
     pub fn widget_bindings_revision(&self) -> u64 {
         self.reactive_registry.widget_bindings_revision()
     }

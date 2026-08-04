@@ -10,7 +10,11 @@
         ;; closed.
         (subtree :key "step-sound-palette"
           (sound-palette-panel))
-        (fx-step-parameters-panel)
-        (fx-track-plocks-panel)))))
+        ;; Each panel is its own subtree so selection/p-lock updates rerun
+        ;; only the panel that reads them instead of the whole buffer.
+        (subtree :key "step-parameters-panel"
+          (fx-step-parameters-panel))
+        (subtree :key "step-track-plocks-panel"
+          (fx-track-plocks-panel))))))
 
 (set-buffer-mode-for "*step*" "seq-plock-panel-mode")

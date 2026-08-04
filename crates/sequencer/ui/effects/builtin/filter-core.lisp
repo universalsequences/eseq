@@ -9,6 +9,23 @@
 (def builtin-fx-param (params name)
   (nth (filter |p| (= (get p :name) name) params) 0))
 
+;; Chain-scoped subtree key for a single built-in FX param control. The
+;; controls below read p-lock state (SEQ.track-plocks / track-plock-variants),
+;; so each one lives in its own subtree — a p-lock change reruns only the
+;; affected controls instead of the whole effect panel. Keys carry the chain
+;; identity so two panels with the same param index can never collide.
+(def builtin-fx-param-subtree-scope (fx)
+  (if (get fx :rack-fx)
+    (str "rack-" (get fx :track-idx) "-" (get fx :rack-slot) "-" (get fx :slot-idx))
+    (if (get fx :bus-fx)
+      (str "bus-" (get fx :bus-idx) "-" (get fx :slot-idx))
+      (if (get fx :midi-fx)
+        (str "midi-" (get fx :slot-idx))
+        (str "audio-" (get fx :slot-idx))))))
+
+(def builtin-fx-param-subtree-key (fx p tag)
+  (str "builtin-fx-" tag "-" (builtin-fx-param-subtree-scope fx) "-param-" (get p :idx)))
+
 (def builtin-fx-filter-mode-type (mode-label)
   (if (= mode-label "highpass")
     "highpass"
@@ -83,90 +100,111 @@
     nil))
 
 (def builtin-fx-filter-readout (fx label-text p value width)
-  (h-stack :gap 0.18 :align :baseline
-    (label label-text :font-size 8.5 :width 3.2 :color :dim :bg :transparent)
-    (number-picker :value value
-      :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
-      :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
-      :plock-active (if (param-plock-active? fx p) 1 0)
-      :plock-color-r (param-plock-color-r)
-      :plock-color-g (param-plock-color-g)
-      :plock-color-b (param-plock-color-b)
-      :on-change (lambda (v) (param-set-control-value fx p v))
-      :width width :height 0.95)))
+  (subtree :key (builtin-fx-param-subtree-key fx p "readout")
+    (h-stack :gap 0.18 :align :baseline
+      (label label-text :font-size 8.5 :width 3.2 :color :dim :bg :transparent)
+      (number-picker :value value
+        :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
+        :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
+        :plock-active (if (param-plock-active? fx p) 1 0)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
+        :on-change (lambda (v) (param-set-control-value fx p v))
+        :width width :height 0.95))))
 
 (def builtin-fx-filter-number (fx label-text p width decimals)
-  (h-stack :gap 0.22 :align :baseline
-    (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
-    (number-picker :value (fx-param-value-for fx p)
-      :min (param-control-min fx p) :max (param-control-max fx p) :decimals decimals
-      :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
-      :plock-active (if (param-plock-active? fx p) 1 0)
-      :plock-color-r (param-plock-color-r)
-      :plock-color-g (param-plock-color-g)
-      :plock-color-b (param-plock-color-b)
-      :on-change (lambda (v) (param-set-control-value fx p v))
-      :width width :height 1.05)))
+  (subtree :key (builtin-fx-param-subtree-key fx p "num")
+    (h-stack :gap 0.22 :align :baseline
+      (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
+      (number-picker :value (fx-param-value-for fx p)
+        :min (param-control-min fx p) :max (param-control-max fx p) :decimals decimals
+        :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
+        :plock-active (if (param-plock-active? fx p) 1 0)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
+        :on-change (lambda (v) (param-set-control-value fx p v))
+        :width width :height 1.05))))
 
 (def builtin-fx-filter-percent (fx label-text p width)
-  (h-stack :gap 0.22 :align :baseline
-    (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
-    (number-picker :value (fx-param-value-for fx p)
-      :min (param-control-min fx p) :max (param-control-max fx p) :value-scale 100 :decimals 0
-      :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
-      :plock-active (if (param-plock-active? fx p) 1 0)
-      :plock-color-r (param-plock-color-r)
-      :plock-color-g (param-plock-color-g)
-      :plock-color-b (param-plock-color-b)
-      :on-change (lambda (v) (param-set-control-value fx p v))
-      :width width :height 1.05)))
+  (subtree :key (builtin-fx-param-subtree-key fx p "pct")
+    (h-stack :gap 0.22 :align :baseline
+      (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
+      (number-picker :value (fx-param-value-for fx p)
+        :min (param-control-min fx p) :max (param-control-max fx p) :value-scale 100 :decimals 0
+        :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
+        :plock-active (if (param-plock-active? fx p) 1 0)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
+        :on-change (lambda (v) (param-set-control-value fx p v))
+        :width width :height 1.05))))
 
 (def builtin-fx-filter-option (fx label-text p width)
-  (h-stack :gap 0.22 :align :center
-    (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
-    (dropdown :value (get p :text-value)
-      :options (get p :options)
-      :on-change (lambda (v) (builtin-fx-set-effect-option fx p v))
-      :plock-active (if (param-plock-active? fx p) 1 0)
-      :plock-color-r (param-plock-color-r)
-      :plock-color-g (param-plock-color-g)
-      :plock-color-b (param-plock-color-b)
-      :width width :height 1.05 :font-size 9.5)))
+  (subtree :key (builtin-fx-param-subtree-key fx p "opt")
+    (h-stack :gap 0.22 :align :center
+      (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
+      (dropdown :value (get p :text-value)
+        :options (get p :options)
+        :on-change (lambda (v) (builtin-fx-set-effect-option fx p v))
+        :plock-active (if (param-plock-active? fx p) 1 0)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
+        :width width :height 1.05 :font-size 9.5))))
 
 (def builtin-fx-filter-sync-label (fx p)
   (if (fx-param-on-for? fx p) "sync" "free"))
 
 (def builtin-fx-filter-sync-control (fx p)
-  (h-stack :gap 0.22 :align :center
-    (label "sync" :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
-    (dropdown :value (builtin-fx-filter-sync-label fx p)
-      :options '("free" "sync")
-      :on-change (lambda (v) (fx-set-effect-value fx p (if (= v "sync") 1 0)))
-      :plock-active (if (param-plock-active? fx p) 1 0)
-      :plock-color-r (param-plock-color-r)
-      :plock-color-g (param-plock-color-g)
-      :plock-color-b (param-plock-color-b)
-      :width 4.8 :height 1.05 :font-size 9.5)))
+  (subtree :key (builtin-fx-param-subtree-key fx p "sync")
+    (h-stack :gap 0.22 :align :center
+      (label "sync" :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
+      (dropdown :value (builtin-fx-filter-sync-label fx p)
+        :options '("free" "sync")
+        :on-change (lambda (v) (fx-set-effect-value fx p (if (= v "sync") 1 0)))
+        :plock-active (if (param-plock-active? fx p) 1 0)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
+        :width 4.8 :height 1.05 :font-size 9.5))))
 
 (def builtin-fx-filter-mini-number (fx label-text p)
   (param-mod-wrapper fx p (str "builtin-fx-mini-param-" (get p :idx) "-mod-wrapper")
-    (h-stack :gap 0.18 :align :baseline
-      (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
-      (number-picker :value (fx-param-value-for fx p)
-        :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
-        :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
-        :plock-active (if (param-plock-active? fx p) 1 0)
-        :plock-color-r (param-plock-color-r)
-        :plock-color-g (param-plock-color-g)
-        :plock-color-b (param-plock-color-b)
-        :on-change (lambda (v) (param-set-control-value fx p v))
-        :width 4.6 :height 1.0))))
+    (subtree :key (builtin-fx-param-subtree-key fx p "mini-num")
+      (h-stack :gap 0.18 :align :baseline
+        (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
+        (number-picker :value (fx-param-value-for fx p)
+          :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
+          :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
+          :plock-active (if (param-plock-active? fx p) 1 0)
+          :plock-color-r (param-plock-color-r)
+          :plock-color-g (param-plock-color-g)
+          :plock-color-b (param-plock-color-b)
+          :on-change (lambda (v) (param-set-control-value fx p v))
+          :width 4.6 :height 1.0)))))
 
 (def builtin-fx-filter-mini-cutoff (fx p)
   (param-mod-wrapper fx p (str "builtin-fx-mini-param-" (get p :idx) "-mod-wrapper")
+    (subtree :key (builtin-fx-param-subtree-key fx p "mini-cut")
+      (h-stack :gap 0.18 :align :baseline
+        (label "cut" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
+        (number-picker :value (builtin-fx-filter-cutoff-value fx p)
+          :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
+          :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
+          :plock-active (if (param-plock-active? fx p) 1 0)
+          :plock-color-r (param-plock-color-r)
+          :plock-color-g (param-plock-color-g)
+          :plock-color-b (param-plock-color-b)
+          :on-change (lambda (v) (param-set-control-value fx p v))
+          :width 4.6 :height 1.0)))))
+
+(def builtin-fx-filter-mini-resonance (fx p)
+  (subtree :key (builtin-fx-param-subtree-key fx p "mini-res")
     (h-stack :gap 0.18 :align :baseline
-      (label "cut" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
-      (number-picker :value (builtin-fx-filter-cutoff-value fx p)
+      (label "res" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
+      (number-picker :value (builtin-fx-filter-resonance-value fx p)
         :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
         :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
         :plock-active (if (param-plock-active? fx p) 1 0)
@@ -176,24 +214,27 @@
         :on-change (lambda (v) (param-set-control-value fx p v))
         :width 4.6 :height 1.0))))
 
-(def builtin-fx-filter-mini-resonance (fx p)
-  (h-stack :gap 0.18 :align :baseline
-    (label "res" :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
-    (number-picker :value (builtin-fx-filter-resonance-value fx p)
-      :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
-      :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
-      :plock-active (if (param-plock-active? fx p) 1 0)
-      :plock-color-r (param-plock-color-r)
-      :plock-color-g (param-plock-color-g)
-      :plock-color-b (param-plock-color-b)
-      :on-change (lambda (v) (param-set-control-value fx p v))
-      :width 4.6 :height 1.0)))
-
 (def builtin-fx-filter-cutoff-knob (fx p)
   (param-mod-wrapper fx p (str "fx-slot-" (get fx :slot-idx) "-param-" (get p :idx) "-mod-wrapper")
-    (knob-number :label "cut"
-      :value (builtin-fx-filter-cutoff-value fx p)
-      :min (param-control-min fx p) :max (param-control-max fx p) :decimals 0
+    (subtree :key (builtin-fx-param-subtree-key fx p "cut-knob")
+      (knob-number :label "cut"
+        :value (builtin-fx-filter-cutoff-value fx p)
+        :min (param-control-min fx p) :max (param-control-max fx p) :decimals 0
+        :font-size 9.5 :label-font-size 9.5
+        :text-color (param-plock-text-color fx p) :label-color :dim
+        :plock-active (if (param-plock-active? fx p) 1 0)
+        :plock-default (param-plock-default fx p)
+        :plock-color-r (param-plock-color-r)
+        :plock-color-g (param-plock-color-g)
+        :plock-color-b (param-plock-color-b)
+        :width 4.65 :height 2.55 :knob-size 1.65
+        :on-change (lambda (v) (param-set-control-value fx p v))))))
+
+(def builtin-fx-filter-resonance-knob (fx p)
+  (subtree :key (builtin-fx-param-subtree-key fx p "res-knob")
+    (knob-number :label "res"
+      :value (builtin-fx-filter-resonance-value fx p)
+      :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
       :font-size 9.5 :label-font-size 9.5
       :text-color (param-plock-text-color fx p) :label-color :dim
       :plock-active (if (param-plock-active? fx p) 1 0)
@@ -204,40 +245,28 @@
       :width 4.65 :height 2.55 :knob-size 1.65
       :on-change (lambda (v) (param-set-control-value fx p v)))))
 
-(def builtin-fx-filter-resonance-knob (fx p)
-  (knob-number :label "res"
-    :value (builtin-fx-filter-resonance-value fx p)
-    :min (param-control-min fx p) :max (param-control-max fx p) :decimals 2
-    :font-size 9.5 :label-font-size 9.5
-    :text-color (param-plock-text-color fx p) :label-color :dim
-    :plock-active (if (param-plock-active? fx p) 1 0)
-    :plock-default (param-plock-default fx p)
-    :plock-color-r (param-plock-color-r)
-    :plock-color-g (param-plock-color-g)
-    :plock-color-b (param-plock-color-b)
-    :width 4.65 :height 2.55 :knob-size 1.65
-    :on-change (lambda (v) (param-set-control-value fx p v))))
-
 (def builtin-fx-filter-mini-percent (fx label-text p)
   (param-mod-wrapper fx p (str "builtin-fx-mini-param-" (get p :idx) "-mod-wrapper")
-    (h-stack :gap 0.18 :align :baseline
-      (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
-      (number-picker :value (fx-param-value-for fx p)
-        :min (param-control-min fx p) :max (param-control-max fx p) :value-scale 100 :decimals 0
-        :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
-        :plock-active (if (param-plock-active? fx p) 1 0)
-        :plock-color-r (param-plock-color-r)
-        :plock-color-g (param-plock-color-g)
-        :plock-color-b (param-plock-color-b)
-        :on-change (lambda (v) (param-set-control-value fx p v))
-        :width 4.6 :height 1.0))))
+    (subtree :key (builtin-fx-param-subtree-key fx p "mini-pct")
+      (h-stack :gap 0.18 :align :baseline
+        (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
+        (number-picker :value (fx-param-value-for fx p)
+          :min (param-control-min fx p) :max (param-control-max fx p) :value-scale 100 :decimals 0
+          :noui true :font-size 9.5 :text-color (param-plock-text-color fx p)
+          :plock-active (if (param-plock-active? fx p) 1 0)
+          :plock-color-r (param-plock-color-r)
+          :plock-color-g (param-plock-color-g)
+          :plock-color-b (param-plock-color-b)
+          :on-change (lambda (v) (param-set-control-value fx p v))
+          :width 4.6 :height 1.0)))))
 
 (def builtin-fx-filter-mini-option (fx p)
-  (dropdown :value (get p :text-value)
-    :options (get p :options)
-    :on-change (lambda (v) (builtin-fx-set-effect-option fx p v))
-    :plock-active (if (param-plock-active? fx p) 1 0)
-    :plock-color-r (param-plock-color-r)
-    :plock-color-g (param-plock-color-g)
-    :plock-color-b (param-plock-color-b)
-    :width 5.4 :height 1.05 :font-size 9.5))
+  (subtree :key (builtin-fx-param-subtree-key fx p "mini-opt")
+    (dropdown :value (get p :text-value)
+      :options (get p :options)
+      :on-change (lambda (v) (builtin-fx-set-effect-option fx p v))
+      :plock-active (if (param-plock-active? fx p) 1 0)
+      :plock-color-r (param-plock-color-r)
+      :plock-color-g (param-plock-color-g)
+      :plock-color-b (param-plock-color-b)
+      :width 5.4 :height 1.05 :font-size 9.5)))

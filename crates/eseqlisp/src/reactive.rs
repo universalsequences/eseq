@@ -436,6 +436,25 @@ impl ReactiveRegistry {
         self.bump_widget_bindings_revision();
     }
 
+    /// Rebuilds the binding table from pre-extracted per-layout entry lists.
+    /// Lets callers cache `collect_widget_binding_entries` output per visible
+    /// tile so only layouts that actually changed get rescanned.
+    pub fn replace_widget_bindings_from_entry_lists<'a>(
+        &mut self,
+        entry_lists: impl IntoIterator<Item = &'a [(ReactiveBindingKey, u64)]>,
+    ) {
+        self.field_to_widgets.clear();
+        for entries in entry_lists {
+            for (key, widget_id) in entries {
+                self.field_to_widgets
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(*widget_id);
+            }
+        }
+        self.bump_widget_bindings_revision();
+    }
+
     pub fn widget_bindings_revision(&self) -> u64 {
         self.widget_bindings_revision
     }
@@ -459,6 +478,51 @@ impl ReactiveRegistry {
         }
         for child in &node.children {
             self.collect_widget_bindings(child);
+        }
+    }
+
+    /// Extracts a layout's widget bindings as a flat entry list, matching the
+    /// traversal `collect_widget_bindings` performs, so the result can be
+    /// cached per layout and merged via
+    /// `replace_widget_bindings_from_entry_lists`.
+    pub fn collect_widget_binding_entries(
+        node: &LayoutNode,
+        out: &mut Vec<(ReactiveBindingKey, u64)>,
+    ) {
+        fn collect_value(widget_id: u64, value: &Value, out: &mut Vec<(ReactiveBindingKey, u64)>) {
+            match value {
+                Value::ReactiveRef {
+                    namespace,
+                    field,
+                    index,
+                    ..
+                } => {
+                    let key = match index {
+                        Some(index) => {
+                            ReactiveBindingKey::indexed(namespace.clone(), field.clone(), *index)
+                        }
+                        None => ReactiveBindingKey::field(namespace.clone(), field.clone()),
+                    };
+                    out.push((key, widget_id));
+                }
+                Value::List(items) => {
+                    for item in items {
+                        collect_value(widget_id, &item.borrow(), out);
+                    }
+                }
+                Value::Map(map) => {
+                    for item in map.values() {
+                        collect_value(widget_id, &item.borrow(), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for value in node.props.values() {
+            collect_value(node.widget_id, value, out);
+        }
+        for child in &node.children {
+            Self::collect_widget_binding_entries(child, out);
         }
     }
 
