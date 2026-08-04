@@ -1662,13 +1662,13 @@ pub(super) fn apply_ui_invalidations(
                             track,
                             selected_plock_step(selected_steps),
                         );
-                        let previous_display = match rt.global_value("SEQ") {
-                            Some(Value::Map(fields)) => fields
-                                .get("fx-step-display-step")
-                                .and_then(|value| match &*value.borrow() {
-                                    Value::Number(step) if *step >= 0.0 => Some(*step as usize),
-                                    _ => None,
-                                }),
+                        // Read the single field directly: `global_value("SEQ")`
+                        // clones the entire SEQ namespace map (thousands of
+                        // per-track/per-step fields) just to look at one entry.
+                        let previous_display = match rt
+                            .reactive_field_value("SEQ", "fx-step-display-step")
+                        {
+                            Some(Value::Number(step)) if *step >= 0.0 => Some(*step as usize),
                             _ => None,
                         };
                         needs_reactive_cycle |= sync_track_plocks_for_neural_selection(

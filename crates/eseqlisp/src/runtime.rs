@@ -2154,6 +2154,14 @@ impl Runtime {
         self.vm.global_value(name)
     }
 
+    /// Borrows one field of a reactive namespace without cloning the whole
+    /// namespace map. `global_value("SEQ")` clones every key/value pair in the
+    /// namespace, so its cost grows with total UI state; prefer this whenever
+    /// only a single field is needed.
+    pub fn reactive_field_value(&self, namespace: &str, field: &str) -> Option<&Value> {
+        self.reactive_registry.field_value(namespace, field)
+    }
+
     pub fn register_reactive(&mut self, name: &str, fields: Vec<(&str, Value)>, writable: bool) {
         let map = self.reactive_registry.register(name, fields, writable);
         self.vm.set_global_value(name, map);
@@ -2657,6 +2665,15 @@ impl Runtime {
     ) {
         self.reactive_registry
             .replace_widget_bindings_from_entry_lists(entry_lists);
+    }
+
+    pub fn update_widget_bindings_with_tile_delta<'a>(
+        &mut self,
+        removed: impl IntoIterator<Item = &'a [(crate::vm::ReactiveBindingKey, u64)]>,
+        added: impl IntoIterator<Item = &'a [(crate::vm::ReactiveBindingKey, u64)]>,
+    ) {
+        self.reactive_registry
+            .update_widget_bindings_with_tile_delta(removed, added);
     }
 
     pub fn widget_bindings_revision(&self) -> u64 {

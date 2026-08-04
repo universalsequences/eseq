@@ -4388,9 +4388,19 @@ impl Editor {
         {
             return;
         }
+        // The binding table stays valid across syncs as long as nobody else
+        // replaced it: `visible_binding_registry_revision` is the registry
+        // revision this editor last published. When it still matches, only the
+        // tiles whose layout changed need to be diffed into the table; when it
+        // does not (some other path rebuilt the bindings), the table has to be
+        // rebuilt from every visible tile's entries.
+        let can_apply_delta = self.visible_binding_layout_signature.is_some()
+            && self.visible_binding_registry_revision == registry_revision;
         // Rescan only tiles whose layout changed; unchanged tiles reuse their
         // cached entry list (keyed like `signature`: layout Arc + revision).
         let mut entry_lists = Vec::with_capacity(visible_layouts.len());
+        let mut removed_entries = Vec::<Arc<Vec<(crate::vm::ReactiveBindingKey, u64)>>>::new();
+        let mut added_entries = Vec::<Arc<Vec<(crate::vm::ReactiveBindingKey, u64)>>>::new();
         for (tile_id, revision, layout) in &visible_layouts {
             let layout_ptr = Arc::as_ptr(layout) as usize;
             let entries = match self.visible_binding_tile_entries.get(tile_id) {
@@ -4399,13 +4409,17 @@ impl Editor {
                 {
                     cached_entries.clone()
                 }
-                _ => {
+                previous => {
+                    if let Some((_, _, previous_entries)) = previous {
+                        removed_entries.push(previous_entries.clone());
+                    }
                     let mut out = Vec::new();
                     crate::reactive::ReactiveRegistry::collect_widget_binding_entries(
                         layout.as_ref(),
                         &mut out,
                     );
                     let entries = Arc::new(out);
+                    added_entries.push(entries.clone());
                     self.visible_binding_tile_entries
                         .insert(*tile_id, (layout_ptr, *revision, entries.clone()));
                     entries
@@ -4413,11 +4427,23 @@ impl Editor {
             };
             entry_lists.push(entries);
         }
-        self.visible_binding_tile_entries
-            .retain(|tile_id, _| visible_layouts.iter().any(|(id, _, _)| id == tile_id));
-        self.runtime.replace_widget_bindings_from_entry_lists(
-            entry_lists.iter().map(|entries| entries.as_slice()),
-        );
+        self.visible_binding_tile_entries.retain(|tile_id, entry| {
+            let still_visible = visible_layouts.iter().any(|(id, _, _)| id == tile_id);
+            if !still_visible {
+                removed_entries.push(entry.2.clone());
+            }
+            still_visible
+        });
+        if can_apply_delta {
+            self.runtime.update_widget_bindings_with_tile_delta(
+                removed_entries.iter().map(|entries| entries.as_slice()),
+                added_entries.iter().map(|entries| entries.as_slice()),
+            );
+        } else {
+            self.runtime.replace_widget_bindings_from_entry_lists(
+                entry_lists.iter().map(|entries| entries.as_slice()),
+            );
+        }
         self.visible_binding_layout_signature = Some(signature);
         self.visible_binding_registry_revision = self.runtime.widget_bindings_revision();
     }
@@ -7378,15 +7404,21 @@ impl Editor {
         for (tile_id, cols, rows, frame_viewport) in tiles_to_update {
             let layout_started = Instant::now();
             let buffer_name = self.buffers[buffer_idx].name.clone();
-            let existing_layout = self
+            // Move the cached layout out of the tile (and drop the cached
+            // inactive frame, which this refresh invalidates anyway) so this
+            // update owns the only reference: the batched in-place reuse below
+            // can then mutate the path nodes instead of rebuilding the tree.
+            // Every exit from this iteration reassigns `leaf.cached_layout`.
+            let mut layout = self
                 .tile_root
-                .find_leaf(tile_id)
-                .and_then(|leaf| leaf.cached_layout.clone());
+                .find_leaf_mut(tile_id)
+                .and_then(|leaf| {
+                    leaf.cached_inactive_frame = None;
+                    leaf.cached_layout.take()
+                });
             let mut dirty_widget_ids = Vec::new();
             let mut reuse_mode = "targeted";
             let mut miss_reason = None::<String>;
-            let reusable_existing_layout = existing_layout;
-            let mut layout = reusable_existing_layout.clone();
             let mut targeted = layout.is_some();
             let subtree_paths = layout
                 .as_ref()
@@ -7394,26 +7426,27 @@ impl Editor {
             // Fast path: apply every subtree replacement in one traversal.
             // The per-root loop below rebuilds the full layout tree once per
             // root, so N changed subtrees cost N full-tree clones; the batched
-            // reuse keeps it at one. Any miss falls through to the per-root
-            // loop, which preserves the targeted-relayout and full-relayout
-            // fallbacks (and their diagnostics) unchanged.
+            // reuse keeps it at one, and at zero when this tile owns its
+            // layout. Any miss falls through to the per-root loop, which
+            // preserves the targeted-relayout and full-relayout fallbacks (and
+            // their diagnostics) unchanged.
             let mut batched_applied = false;
             if let (Some(existing), Some(paths_by_root)) =
-                (layout.clone(), subtree_paths.as_ref())
+                (layout.as_mut(), subtree_paths.as_ref())
             {
                 let batched_paths: Option<Vec<&[usize]>> = subtree_roots
                     .iter()
                     .map(|root_id| paths_by_root.get(root_id).map(|path| path.as_slice()))
                     .collect();
                 if let Some(batched_paths) = batched_paths
-                    && let Ok(updated) = crate::layout::reuse_layout_node_for_subtree_paths_result(
-                        existing.as_ref(),
+                    && crate::layout::reuse_layout_node_for_subtree_paths_in_place(
+                        existing,
                         tree,
                         &batched_paths,
                         &mut dirty_widget_ids,
                     )
+                    .is_ok()
                 {
-                    layout = Some(std::sync::Arc::new(updated));
                     batched_applied = true;
                 }
                 if !batched_applied {
@@ -7424,11 +7457,11 @@ impl Editor {
                 if batched_applied {
                     break;
                 }
-                let Some(existing) = layout.as_ref() else {
+                if layout.is_none() {
                     targeted = false;
                     miss_reason.get_or_insert_with(|| "missing-layout".to_string());
                     break;
-                };
+                }
                 let Some(child_path) = subtree_paths
                     .as_ref()
                     .and_then(|paths| paths.get(subtree_root_id))
@@ -7437,35 +7470,38 @@ impl Editor {
                     miss_reason = Some(format!("missing-subtree-path:{subtree_root_id}"));
                     break;
                 };
-                let updated = match crate::layout::reuse_layout_node_for_subtree_path_result(
-                    existing.as_ref(),
+                // Reuse in place first (no tree copy when this tile owns its
+                // layout); the plan phase fails before touching anything, so
+                // the relayout fallback still sees the untouched layout.
+                let reuse_result = crate::layout::reuse_layout_node_for_subtree_paths_in_place(
+                    layout.as_mut().expect("layout checked above"),
                     tree,
-                    child_path,
+                    &[child_path.as_slice()],
                     &mut dirty_widget_ids,
-                ) {
-                    Ok(updated) => updated,
-                    Err(reuse_reason) => {
-                        reuse_mode = "targeted-relayout";
-                        match self.runtime.relayout_subtree_for_tree_with_viewport(
-                            existing.as_ref(),
-                            tree,
-                            child_path,
-                            Some((cols, rows)),
-                            frame_viewport,
-                            &mut dirty_widget_ids,
-                        ) {
-                            Ok(updated) => updated,
-                            Err(relayout_reason) => {
-                                targeted = false;
-                                miss_reason = Some(format!(
-                                    "subtree:{subtree_root_id}:{reuse_reason}; partial-relayout:{relayout_reason}"
-                                ));
-                                break;
-                            }
+                );
+                if let Err(reuse_reason) = reuse_result {
+                    reuse_mode = "targeted-relayout";
+                    let relayout_result = self.runtime.relayout_subtree_for_tree_with_viewport(
+                        layout.as_ref().expect("layout checked above").as_ref(),
+                        tree,
+                        child_path,
+                        Some((cols, rows)),
+                        frame_viewport,
+                        &mut dirty_widget_ids,
+                    );
+                    match relayout_result {
+                        Ok(updated) => {
+                            layout = Some(std::sync::Arc::new(updated));
+                        }
+                        Err(relayout_reason) => {
+                            targeted = false;
+                            miss_reason = Some(format!(
+                                "subtree:{subtree_root_id}:{reuse_reason}; partial-relayout:{relayout_reason}"
+                            ));
+                            break;
                         }
                     }
-                };
-                layout = Some(std::sync::Arc::new(updated));
+                }
             }
             let (layout, dirty_widget_ids) = if targeted {
                 (layout, dirty_widget_ids)

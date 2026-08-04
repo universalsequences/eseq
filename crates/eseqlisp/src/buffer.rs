@@ -1698,7 +1698,6 @@ impl CommittedBufferUiSnapshot {
                 dependency_lookup.insert(root_id, replacement.reactive_dependencies.to_vec());
             }
         }
-
         Some(Self::from_tree_with_dependency_lookup(
             merged_tree,
             self.source_buffer_id,
@@ -1914,28 +1913,22 @@ fn replace_subtree_in_value(
         return None;
     };
 
-    let mut replacements = Vec::with_capacity(children.len());
-    let mut replaced_any = false;
-    for child in children {
-        let child_borrow = child.borrow();
-        let replaced_child =
-            replace_subtree_in_value(&child_borrow, subtree_root_id, replacement_tree);
-        replaced_any |= replaced_child.is_some();
-        replacements.push(replaced_child);
+    // Unchanged children keep their existing cell; only the replaced path is
+    // rebuilt (see `replace_subtrees_in_value`).
+    let mut next_children: Option<Vec<std::rc::Rc<std::cell::RefCell<Value>>>> = None;
+    for (index, child) in children.iter().enumerate() {
+        let Some(replacement) =
+            replace_subtree_in_value(&child.borrow(), subtree_root_id, replacement_tree)
+        else {
+            continue;
+        };
+        next_children.get_or_insert_with(|| children.clone())[index] =
+            std::rc::Rc::new(std::cell::RefCell::new(replacement));
     }
 
-    if !replaced_any {
+    let Some(next_children) = next_children else {
         return None;
-    }
-
-    let next_children: Vec<std::rc::Rc<std::cell::RefCell<Value>>> = children
-        .iter()
-        .zip(replacements)
-        .map(|(child, replacement)| {
-            let child_value = replacement.unwrap_or_else(|| child.borrow().clone());
-            std::rc::Rc::new(std::cell::RefCell::new(child_value))
-        })
-        .collect();
+    };
     drop(children_borrow);
 
     let mut rebuilt = HashMap::with_capacity(map.len());
@@ -1972,26 +1965,23 @@ fn replace_subtrees_in_value(
         return None;
     };
 
-    let mut replaced_any = false;
-    let next_children = children
-        .iter()
-        .map(|child| {
-            let child_borrow = child.borrow();
-            let child_value = if let Some(replacement) =
-                replace_subtrees_in_value(&child_borrow, replacement_lookup)
-            {
-                replaced_any = true;
-                replacement
-            } else {
-                child_borrow.clone()
-            };
-            std::rc::Rc::new(std::cell::RefCell::new(child_value))
-        })
-        .collect::<Vec<_>>();
-
-    if !replaced_any {
-        return None;
+    // Only children that actually contain a replacement are rebuilt. Cloning
+    // every child up front allocated a fresh cell for every node in the tree
+    // and then threw all but the replaced path away, making a single subtree
+    // splice cost a walk-and-copy of the whole buffer tree.
+    let mut next_children: Option<Vec<std::rc::Rc<std::cell::RefCell<Value>>>> = None;
+    for (index, child) in children.iter().enumerate() {
+        let Some(replacement) = replace_subtrees_in_value(&child.borrow(), replacement_lookup)
+        else {
+            continue;
+        };
+        next_children.get_or_insert_with(|| children.clone())[index] =
+            std::rc::Rc::new(std::cell::RefCell::new(replacement));
     }
+
+    let Some(next_children) = next_children else {
+        return None;
+    };
     drop(children_borrow);
 
     let mut rebuilt = HashMap::with_capacity(map.len());
@@ -2459,6 +2449,137 @@ mod tests {
             Rc::new(RefCell::new(Value::Number(parent_subtree_root_id as f64))),
         );
         Value::Map(map)
+    }
+
+    /// Builds a widget whose `on-click` prop is a closure over `cell`, i.e.
+    /// two of these are only interchangeable when they capture the same cell.
+    fn widget_with_callback(
+        widget_type: &str,
+        stable_widget_id: u64,
+        subtree_root_id: u64,
+        chunk: usize,
+        cell: &Rc<RefCell<Value>>,
+    ) -> Value {
+        let Value::Map(mut map) = widget(widget_type, stable_widget_id, subtree_root_id, Vec::new())
+        else {
+            unreachable!("test widget helper returns a map");
+        };
+        map.insert(
+            "on-click".to_string(),
+            Rc::new(RefCell::new(Value::Closure(chunk, vec![cell.clone()]))),
+        );
+        Value::Map(map)
+    }
+
+    #[test]
+    fn flush_identical_accepts_an_equal_tree_capturing_the_same_upvalue_cell() {
+        let cell = Rc::new(RefCell::new(Value::Number(7.0)));
+        let left = widget(
+            "root",
+            1,
+            1,
+            vec![widget_with_callback("button", 2, 1, 4, &cell)],
+        );
+        let right = widget(
+            "root",
+            1,
+            1,
+            vec![widget_with_callback("button", 2, 1, 4, &cell)],
+        );
+
+        assert!(super::widget_tree_flush_identical(&left, &right));
+    }
+
+    #[test]
+    fn flush_identical_rejects_an_equal_tree_capturing_a_different_upvalue_cell() {
+        let cell = Rc::new(RefCell::new(Value::Number(7.0)));
+        // Same value, different cell: the committed tree's handler would keep
+        // writing through the stale cell if the flush were skipped.
+        let rebound_cell = Rc::new(RefCell::new(Value::Number(7.0)));
+        let left = widget(
+            "root",
+            1,
+            1,
+            vec![widget_with_callback("button", 2, 1, 4, &cell)],
+        );
+        let right = widget(
+            "root",
+            1,
+            1,
+            vec![widget_with_callback("button", 2, 1, 4, &rebound_cell)],
+        );
+
+        assert!(!super::widget_tree_flush_identical(&left, &right));
+    }
+
+    #[test]
+    fn flush_identical_rejects_closures_from_a_different_chunk() {
+        let cell = Rc::new(RefCell::new(Value::Number(7.0)));
+        let left = widget_with_callback("button", 2, 1, 4, &cell);
+        let right = widget_with_callback("button", 2, 1, 5, &cell);
+
+        assert!(!super::widget_tree_flush_identical(&left, &right));
+    }
+
+    #[test]
+    fn subtree_replacement_is_noop_only_when_the_captured_environment_matches() {
+        let cell = Rc::new(RefCell::new(Value::Number(7.0)));
+        let committed = widget(
+            "root",
+            1,
+            1,
+            vec![widget_with_callback("button", 2, 2, 4, &cell)],
+        );
+        let snapshot = CommittedBufferUiSnapshot::from_tree(committed, Some(3), Vec::new());
+
+        let identical = widget_with_callback("button", 2, 2, 4, &cell);
+        assert!(snapshot.subtree_replacement_is_noop(2, &identical, &[]));
+
+        let rebound_cell = Rc::new(RefCell::new(Value::Number(7.0)));
+        let rebound = widget_with_callback("button", 2, 2, 4, &rebound_cell);
+        assert!(!snapshot.subtree_replacement_is_noop(2, &rebound, &[]));
+
+        // Same tree, different reactive dependency list: the snapshot's
+        // dependency index would go stale, so this is never a no-op.
+        assert!(!snapshot.subtree_replacement_is_noop(
+            2,
+            &identical,
+            &[ReactiveFieldKey {
+                namespace: "SEQ".to_string(),
+                field: "steps".to_string(),
+            }],
+        ));
+    }
+
+    #[test]
+    fn replacing_subtrees_shares_untouched_sibling_cells_with_the_previous_tree() {
+        let tree = widget(
+            "root",
+            1,
+            1,
+            vec![
+                widget_with_parent("left", 2, 2, 1, Vec::new()),
+                widget_with_parent("right", 3, 3, 1, Vec::new()),
+            ],
+        );
+        let snapshot = CommittedBufferUiSnapshot::from_tree(tree, Some(1), Vec::new());
+        let previous_right = super::value_children(&snapshot.tree)[1].clone();
+
+        let merged = snapshot
+            .replacing_subtrees(&[(
+                2,
+                widget_with_parent("left-updated", 2, 2, 1, Vec::new()),
+                Vec::new(),
+            )])
+            .expect("replace subtree");
+
+        let children = super::value_children(&merged.tree);
+        assert_eq!(
+            super::value_map(&children[0]).and_then(|map| super::prop_widget_type(&map)),
+            Some("left-updated".to_string())
+        );
+        // The untouched sibling must be carried over untouched, not rebuilt.
+        assert_eq!(children[1], previous_right);
     }
 
     #[test]

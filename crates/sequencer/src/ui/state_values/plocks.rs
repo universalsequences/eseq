@@ -836,6 +836,19 @@ pub(super) fn build_selected_neural_plocks_value(
     Value::List(items)
 }
 
+/// Builds the `SEQ.track-plocks` rows for the selected step.
+///
+/// INVARIANT — one row per projected key. The `*plock-sync*` effect buffer
+/// (`ui/effects/param-controls.lisp`) reduces these rows into per-param `SEQV`
+/// scalars keyed by `(target, slot-idx, rack-slot, param-idx)` — or by
+/// `target` alone for the rows that carry no param index (timebase, swing,
+/// swing resolution). It writes `<key>-on` / `<key>-def` once per row and then
+/// clears the keys that dropped out of the list, so two rows collapsing onto
+/// the same key would make a control's displayed default depend on row order
+/// and could leave a stale `-on` after one of them disappears. Every row
+/// emitted below must therefore be unique in that tuple: each track-level lock
+/// appears at most once, and the step-param / instrument / effect / rack-macro
+/// / rack-effect rows are each emitted once per distinct parameter slot.
 pub(crate) fn build_track_plocks_value(
     app: &app::App,
     state: &Arc<SequencerState>,
