@@ -30269,6 +30269,22 @@
             Some(true),
             "fixture generation 0 should render track 0 pattern 1 active"
         );
+        let initial_glyph = find_layout_node_by_widget_type(initial_cell, "sound-glyph")
+            .expect("active mixer pattern cell should contain its sound glyph");
+        assert_finite_nonzero_rect(initial_glyph, "active mixer pattern sound glyph");
+        assert_layout_inside(initial_glyph, initial_cell, "active mixer pattern sound glyph");
+        assert_eq!(
+            layout_prop_number(initial_glyph, "play-glyph-padding"),
+            Some(0.14)
+        );
+        assert_eq!(
+            layout_prop_number(initial_glyph, "play-glyph-opacity"),
+            Some(0.4)
+        );
+        assert_eq!(
+            initial_glyph.props.get("play-color"),
+            Some(&Value::Keyword("white".to_string()))
+        );
 
         let _ = editor.take_dirty_widget_ids();
         apply_mixer_v2_perf_pattern(&mut editor, track_count, cell_count, 1);

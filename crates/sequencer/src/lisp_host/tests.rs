@@ -2253,6 +2253,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             let weight = find_by_stable_key(layout, "graph-variable-reset-weight-matrix").unwrap();
             assert_number_prop(weight, "rows", count as f64);
             assert_number_prop(weight, "cols", count as f64);
+            assert!(weight.props.contains_key("on-cell-press"));
+            assert!(weight.props.contains_key("on-cell-release"));
             let trigger =
                 find_by_stable_key(layout, "graph-variable-reset-trigger-matrix").unwrap();
             assert_number_prop(trigger, "rows", count as f64);
@@ -2266,6 +2268,10 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             }
             let first_row = find_by_stable_key(layout, "graph-variable-reset-transpose-0")
                 .expect("missing first active row control");
+            let first_row_highlight =
+                find_by_stable_key(layout, "graph-variable-reset-row-0")
+                    .expect("missing first active row highlight");
+            assert_measured(first_row_highlight);
             let active_row_key = format!("graph-variable-reset-transpose-{}", count - 1);
             let final_row = find_by_stable_key(layout, &active_row_key)
                 .unwrap_or_else(|| panic!("missing final active row control {active_row_key}"));
@@ -2368,6 +2374,51 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
         let layout = latest_layout(&mut runtime);
         assert_active_layout(&layout, 8);
+        let cell_press = find_by_stable_key(&layout, "graph-variable-reset-weight-matrix")
+            .and_then(|node| node.props.get("on-cell-press"))
+            .cloned()
+            .expect("weight matrix cell-press callback");
+        let cell_release = find_by_stable_key(&layout, "graph-variable-reset-weight-matrix")
+            .and_then(|node| node.props.get("on-cell-release"))
+            .cloned()
+            .expect("weight matrix cell-release callback");
+        runtime
+            .invoke(
+                cell_press,
+                vec![Value::Number(2.0), Value::Number(3.0)],
+            )
+            .expect("select destination neuron 3 from source neuron 2");
+        runtime.run_reactive_cycle();
+        let layout = latest_layout(&mut runtime);
+        let source_row = find_by_stable_key(&layout, "graph-variable-reset-row-2")
+            .expect("source row highlight");
+        let destination_row = find_by_stable_key(&layout, "graph-variable-reset-row-3")
+            .expect("destination row highlight");
+        assert_eq!(source_row.props.get("selected"), Some(&Value::Bool(false)));
+        assert_eq!(destination_row.props.get("selected"), Some(&Value::Bool(true)));
+        assert_eq!(
+            destination_row.props.get("selected-background-color"),
+            Some(&Value::Keyword("mixer-strip-selected-bg".to_string()))
+        );
+        assert_eq!(
+            runtime.eval_str("gvr-selected-neuron").expect("selected neuron"),
+            Some(Value::Number(3.0))
+        );
+        runtime
+            .invoke(
+                cell_release,
+                vec![Value::Number(2.0), Value::Number(3.0)],
+            )
+            .expect("release destination neuron 3");
+        runtime.run_reactive_cycle();
+        let layout = latest_layout(&mut runtime);
+        let released_row = find_by_stable_key(&layout, "graph-variable-reset-row-3")
+            .expect("released destination row");
+        assert_eq!(released_row.props.get("selected"), Some(&Value::Bool(false)));
+        assert_eq!(
+            runtime.eval_str("gvr-selected-neuron").expect("released neuron"),
+            Some(Value::Number(-1.0))
+        );
         assert_reactive_number(
             &mut runtime,
             "(reactive-value (bind \"GRAPH\" (gvr-route-color-field 0 \"active\")))",

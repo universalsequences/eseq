@@ -7,7 +7,12 @@ use crate::layout::{f64_to_f32, get_prop_num, Constraints, MeasureCtx, Size};
 use crate::vm::Value;
 
 #[cfg(target_os = "macos")]
-use super::{metal_widget_instance, ndc_bounds, MetalPrimitive, WidgetInstance, WidgetViewport};
+use super::{
+    get_f32_prop, metal_widget_instance, ndc_bounds, resolve_named_color, MetalPrimitive,
+    WidgetInstance, WidgetViewport,
+};
+#[cfg(target_os = "macos")]
+use crate::backend::Color;
 #[cfg(target_os = "macos")]
 use crate::layout::{LayoutNode, Rect};
 
@@ -83,9 +88,22 @@ fn tuning(props: &HashMap<String, Value>) -> [f32; 16] {
     packed
 }
 
+/// Pack an RGB color into an exactly representable 24-bit integer carried by
+/// one float uniform. Sound-glyph already uses this representation for its
+/// lattice payload; unlike `itime`, this field participates in the retained
+/// primitive cache token, so live style changes cannot reuse stale colors.
+#[cfg(target_os = "macos")]
+fn pack_rgb24(color: Color) -> f32 {
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (channel(color.r) | (channel(color.g) << 8) | (channel(color.b) << 16)) as f32
+}
+
 impl WidgetDefinition for SoundGlyphWidget {
     fn names(&self) -> &'static [&'static str] { &["sound-glyph"] }
     fn size_affecting_props(&self) -> &'static [&'static str] { &["width", "height"] }
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &["play", "play-glyph-padding", "play-glyph-opacity"]
+    }
 
     fn measure(
         &self,
@@ -128,16 +146,24 @@ impl WidgetDefinition for SoundGlyphWidget {
         // the host-published play-key store drives it. The store bumps the
         // widget-state generation on launch changes, and color_a is part of
         // the primitive cache token, so this stays live without itime.
-        let play = match node.props.get("play") {
-            Some(Value::Number(value)) => *value as f32,
-            _ => {
-                if crate::sound_glyph_data::sound_glyph_playing(&source) {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
+        let play = if node.props.contains_key("play") {
+            get_f32_prop(&node.props, "play", 0.0) > 0.5
+        } else {
+            crate::sound_glyph_data::sound_glyph_playing(&source)
         };
+        // These are deliberately play-state overrides rather than global glyph
+        // styling. The host play-key store is the launch-state authority, so
+        // applying them in the renderer guarantees that the glyph shrinks and
+        // dims in the same frame that the triangle appears.
+        let play_glyph_padding = get_f32_prop(&node.props, "play-glyph-padding", 0.0)
+            .clamp(0.0, 0.45);
+        let play_glyph_opacity = get_f32_prop(&node.props, "play-glyph-opacity", 1.0)
+            .clamp(0.0, 1.0);
+        let play_color = resolve_named_color(
+            &node.props,
+            "play-color",
+            Color::rgba(0.10, 0.95, 0.38, 1.0),
+        );
 
         // Pack only exact 24-bit integers into float uniforms; depending on NaN
         // payload bits would be unsafe across GPU drivers.
@@ -178,12 +204,17 @@ impl WidgetDefinition for SoundGlyphWidget {
         packed[16] = tune[6];
 
         let (ndc_min, ndc_max) = ndc_bounds(square, viewport);
+        let frame_flags = u8::from(frame.anchor) | (u8::from(frame.incompatible) << 1);
         metal_widget_instance(widget_type, WidgetInstance {
             ndc_min,
             ndc_max,
             value_t: packed[16],
-            orientation: 0.0,
-            itime: packed[17],
+            // The shared vertex shader exposes `itime`, but retained-run cache
+            // tokens intentionally exclude it for non-animated widgets. Mirror
+            // padding into cache-visible orientation so reactive changes still
+            // invalidate this primitive correctly.
+            orientation: play_glyph_padding,
+            itime: play_glyph_padding,
             uniform_a: packed[0..4].try_into().unwrap(),
             uniform_b: packed[4..8].try_into().unwrap(),
             uniform_c: packed[8..12].try_into().unwrap(),
@@ -197,13 +228,21 @@ impl WidgetDefinition for SoundGlyphWidget {
                 tint_channel(&node.props, "tint-r", 0.20),
                 tint_channel(&node.props, "tint-g", 0.34),
                 tint_channel(&node.props, "tint-b", 0.38),
-                if play > 0.5 { 1.0 } else { 0.0 },
+                play as u8 as f32,
             ],
             color_b: tune[8..12].try_into().unwrap(),
             color_c: tune[12..16].try_into().unwrap(),
-            color_d: [frame.cols as f32, frame.rows as f32, tune[7], frame.anchor as u8 as f32],
-            corner_radius: frame.incompatible as u8 as f32,
-            pixel_aspect: 1.0,
+            // color_d.w is a two-bit flag word: bit 0 = anchor, bit 1 =
+            // incompatible. Keeping both flags here frees corner_radius for the
+            // cache-visible packed play color without expanding WidgetInstance.
+            color_d: [
+                frame.cols as f32,
+                frame.rows as f32,
+                tune[7],
+                frame_flags as f32,
+            ],
+            corner_radius: pack_rgb24(play_color),
+            pixel_aspect: play_glyph_opacity,
         })
     }
 }
@@ -248,6 +287,15 @@ float dg_packed(WidgetVaryings in, int index) {
 
 int dg_cols(WidgetVaryings in) { return clamp(int(round(in.color_d.x)), 1, 5); }
 int dg_rows(WidgetVaryings in) { return clamp(int(round(in.color_d.y)), 1, 5); }
+bool dg_anchor(WidgetVaryings in) { return (uint(round(in.color_d.w)) & 1u) != 0u; }
+bool dg_incompatible(WidgetVaryings in) { return (uint(round(in.color_d.w)) & 2u) != 0u; }
+
+float3 dg_play_color(WidgetVaryings in) {
+    uint rgb = uint(round(in.corner_radius));
+    return float3(float(rgb & 255u),
+                  float((rgb >> 8) & 255u),
+                  float((rgb >> 16) & 255u)) / 255.0;
+}
 
 // 0 = unassigned slot, else 1..15 across the substrate radius band.
 uint dg_substrate(WidgetVaryings in, int slot) {
@@ -478,15 +526,22 @@ float dg_play_triangle(float2 p) {
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) {
     // Centered uv, +y upward, as required by the delta-glyph lattice.
     float2 p = float2(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
+    bool play = in.color_a.w > 0.5;
+    // Padding is a fraction of the glyph's half-extent on every side. It and
+    // opacity apply only while the play indicator is present; the triangle
+    // remains full-size and fully opaque above the quieter identity glyph.
+    float glyphScale = play ? 1.0 - 2.0 * clamp(in.itime, 0.0, 0.45) : 1.0;
+    float glyphOpacity = play ? clamp(in.aspect, 0.0, 1.0) : 1.0;
+    float2 glyphP = p / max(glyphScale, 0.10);
     float fit = dg_fit(in);
     float4 color = float4(0.0);
 
     float edge = max(dg_tune(in, 15), 0.0005) * fit;
-    float substrate = dg_substrate_field(p, in);
+    float substrate = dg_substrate_field(glyphP, in);
     // color_a.w is the play flag, NOT the tint alpha — rebuild alpha as 1.0.
     float4 baseTint = float4(in.color_a.rgb, 1.0);
     color = dg_compose(color,
-                       dg_material(p, dg_normal_substrate(p, in), baseTint, false, in),
+                       dg_material(glyphP, dg_normal_substrate(glyphP, in), baseTint, false, in),
                        substrate, fit, baseTint.rgb, in);
 
     // One layer per lit parameter, all anchored into the SHARED lattice so they
@@ -496,8 +551,8 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) {
     for (int index = 0; index < DG_MAX_PIECES; ++index) {
         uint record = dg_piece(in, index);
         if (((record >> 17) & 1u) == 0u) continue;
-        float sdf = dg_piece_field(p, in, record);
-        float3 n = dg_normal_piece(p, in, record);
+        float sdf = dg_piece_field(glyphP, in, record);
+        float3 n = dg_normal_piece(glyphP, in, record);
 
         float3 hue = DG_HUES[min((record >> 9) & 7u, 6u)];
         float magnitude = float((record >> 12) & 7u) / 7.0;
@@ -507,10 +562,10 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) {
                                            : float3(1.08, 1.00, 0.92);
         float4 tint = float4(clamp(hue * (0.5 + 0.5 * magnitude), 0.0, 1.0), 1.0);
 
-        color = dg_compose(color, dg_material(p, n, tint, false, in),
+        color = dg_compose(color, dg_material(glyphP, n, tint, false, in),
                            sdf, fit, tint.rgb, in);
         float intersection = max(unionSoFar, sdf + 0.05 * fit);
-        color = mix(color, dg_material(p, n, tint, true, in),
+        color = mix(color, dg_material(glyphP, n, tint, true, in),
                     1.0 - smoothstep(0.0, edge, intersection + 0.001 * fit));
         unionSoFar = min(unionSoFar, sdf);
     }
@@ -518,28 +573,145 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) {
 
     // The anchor tile carries no accents by definition; ring it so it reads as
     // the zero point rather than as an empty patch.
-    if (in.color_d.w > 0.5) {
-        float ring = 1.0 - smoothstep(0.008, 0.017, abs(length(p) - 0.055));
+    if (dg_anchor(in)) {
+        float ring = 1.0 - smoothstep(0.008, 0.017, abs(length(glyphP) - 0.055));
         color = mix(color, float4(0.85, 0.87, 0.85, 0.8), ring);
     }
-    if (in.corner_radius > 0.5) {
-        float ring = 1.0 - smoothstep(0.010, 0.022, abs(length(p) - 0.91));
+    if (dg_incompatible(in)) {
+        float ring = 1.0 - smoothstep(0.010, 0.022, abs(length(glyphP) - 0.91));
         color = mix(color, float4(0.96, 0.50, 0.24, 0.9), ring);
     }
-    // Play indicator ON TOP of the glyph (color_a.w > 0.5 = playing): opaque
-    // green triangle with ~1px coverage AA, over a soft dark ring so the edge
-    // stays legible against bright accent pieces.
-    if (in.color_a.w > 0.5) {
+    color.a *= glyphOpacity;
+    // Play indicator ON TOP of the glyph (color_a.w > 0.5 = playing): caller-
+    // colored triangle with ~1px coverage AA, over a soft dark ring so the
+    // edge stays legible against bright accent pieces.
+    if (play) {
         float d = dg_play_triangle(p);
         float aa = max(fwidth(d), 0.002);
         float halo = (1.0 - smoothstep(0.0, 0.10, d)) * smoothstep(-aa, aa, d);
         color.rgb = mix(color.rgb, float3(0.01, 0.03, 0.015), 0.62 * halo);
         color.a = max(color.a, 0.62 * halo);
         float tri = 1.0 - smoothstep(-aa, aa, d);
-        color.rgb = mix(color.rgb, float3(0.1, 0.95, 0.38), tri);
+        color.rgb = mix(color.rgb, dg_play_color(in), tri);
         color.a = max(color.a, tri);
     }
     if (color.a <= 0.002) discard_fragment();
     return color;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn play_style_numeric_props_accept_reactive_bindings() {
+        assert_eq!(
+            SOUND_GLYPH_WIDGET.bindable_props(),
+            &["play", "play-glyph-padding", "play-glyph-opacity"]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn play_style_resolves_live_numeric_props_and_color_into_shader_uniforms() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let slots = crate::reactive::ReactiveBindingStore::default();
+        slots.write_float("SOUND_GLYPH_TEST", "play", 1.0);
+        slots.write_float("SOUND_GLYPH_TEST", "padding", 0.14);
+        slots.write_float("SOUND_GLYPH_TEST", "opacity", 0.4);
+        let reactive = |field: &str| Value::ReactiveRef {
+            namespace: "SOUND_GLYPH_TEST".to_string(),
+            field: field.to_string(),
+            index: None,
+            kind: crate::vm::BindingKind::Float,
+            slot: slots.slot("SOUND_GLYPH_TEST", field),
+        };
+        let play_color = Value::List(
+            [0.2, 0.4, 0.8]
+                .into_iter()
+                .map(|value| Rc::new(RefCell::new(Value::Number(value))))
+                .collect(),
+        );
+        let source = "sound-glyph-play-style-test";
+        crate::sound_glyph_data::publish_sound_glyph_frame(
+            source,
+            crate::sound_glyph_data::SoundGlyphFrame {
+                revision: 1,
+                cols: 1,
+                rows: 1,
+                substrate: vec![8],
+                pieces: Vec::new(),
+                anchor: true,
+                incompatible: true,
+            },
+        );
+        let node = LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "sound-glyph".to_string(),
+            rect: Rect { row: 0.0, col: 0.0, width: 4.0, height: 4.0 },
+            props: HashMap::from([
+                ("source".to_string(), Value::String(source.to_string())),
+                ("play".to_string(), reactive("play")),
+                ("play-glyph-padding".to_string(), reactive("padding")),
+                ("play-glyph-opacity".to_string(), reactive("opacity")),
+                ("play-color".to_string(), play_color),
+            ]),
+            children: Vec::new(),
+            focusable: false,
+            animation: Default::default(),
+        };
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 10.0,
+            vp_w: 100.0,
+            vp_h: 100.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 10.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let instance = |primitives: Vec<MetalPrimitive>| {
+            primitives
+                .into_iter()
+                .find_map(|primitive| match primitive {
+                    MetalPrimitive::WidgetInstance { instance, .. } => Some(instance),
+                    _ => None,
+                })
+                .expect("sound glyph shader instance")
+        };
+
+        let playing = instance(SOUND_GLYPH_WIDGET.build_metal_primitives(
+            "sound-glyph",
+            &node,
+            viewport,
+        ));
+        assert!((playing.orientation - 0.14).abs() < 0.0001);
+        assert!((playing.itime - 0.14).abs() < 0.0001);
+        assert!((playing.pixel_aspect - 0.4).abs() < 0.0001);
+        assert_eq!(playing.color_a[3], 1.0);
+        assert_eq!(playing.color_d[3], 3.0);
+        assert_eq!(playing.corner_radius, (51 | (102 << 8) | (204 << 16)) as f32);
+
+        slots.write_float("SOUND_GLYPH_TEST", "play", 0.0);
+        slots.write_float("SOUND_GLYPH_TEST", "padding", 0.25);
+        slots.write_float("SOUND_GLYPH_TEST", "opacity", 0.7);
+        let stopped = instance(SOUND_GLYPH_WIDGET.build_metal_primitives(
+            "sound-glyph",
+            &node,
+            viewport,
+        ));
+        assert_eq!(stopped.color_a[3], 0.0);
+        assert!((stopped.orientation - 0.25).abs() < 0.0001);
+        assert!((stopped.pixel_aspect - 0.7).abs() < 0.0001);
+    }
+}

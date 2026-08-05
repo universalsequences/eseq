@@ -464,8 +464,12 @@
                 :height-amp 3
                 :diffuse 0.8
                 :rim-width 0.1
+                ;; Leave the active launch mark visually dominant: its host-
+                ;; driven play state shrinks and dims only the identity glyph.
+                :play-glyph-padding 0.14
+                :play-glyph-opacity 0.4
+                :play-color :white
                 :tint-r (* 0.4 (mixer-v2-track-color-r track false))
-                
                 :tint-g (* 0.4 (mixer-v2-track-color-g track false))
                 :tint-b (* 0.4 (mixer-v2-track-color-b track false))
                 ))))))))

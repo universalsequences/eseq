@@ -582,6 +582,7 @@
 
 (defwidget seqv-step-shell
   :width 1.5 :height 1.5
+  :paint-margin 1
   :state (active plock-kind selected duration muted hide track-r track-g track-b variant-r variant-g variant-b off-fill-r off-fill-g off-fill-b)
   :bindable (active plock-kind selected duration muted hide track-r track-g track-b variant-r variant-g variant-b)
   :shader
@@ -595,13 +596,13 @@
       (sdf/layer
         (sdf/fill
           (sdf/translate 0 0.0
-            (sdf/rounded-rect (* 1.0 width) (* 1.00 height) 0.1))
+            (sdf/rounded-rect (* 8.0 width) (* 1.00 height) 0.1))
           (material
             :lighting (lighting :edge-min -0.3 :edge-max 0.393
               :light (vec3 0.8 -1.8 4.5) :shininess 92.0)
             :color (if (= duration 1)
               (if (= muted 1)
-                (aqua-color offcol offcol)
+                (rgba 0 0 0 0)
                 (aqua-color
                   (mix border (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 0.5) (if (= selected 1) 0.8 1))
                   (if (= selected 1) border (rgba track-r track-g track-b 1))))
@@ -610,12 +611,12 @@
           (material
             :lighting (lighting :edge-min -0.3 :edge-max 1.0
               :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
-            :color (aqua-color border border)))
+            :color (* (if (= selected 1) 1 (if (= muted 1) 0.6 1)) (aqua-color border border))))
         (sdf/fill (sdf/circle (* radius (if (= selected 1) 0.64 0.69)))
           (material
             :lighting (lighting :edge-min -0.1 :edge-max 1.0
               :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
-            :color (aqua-color offcol offcol)))
+            :color (* (if (= muted 1) 0.3 1) (aqua-color offcol offcol))))
         (sdf/fill
           (sdf/translate 0 0.82
             (sdf/rounded-rect 0.52 0.10 0.05))
@@ -649,7 +650,7 @@
               :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
             :color (if (= active 1)
               (if (= muted 1)
-                (aqua-color offcol border)
+                (* 0.7 (aqua-color offcol border))
                 (aqua-color
                   (rgba (* track-r 0.72) (* track-g 0.72) (* track-b 0.82) 1.0)
                   (rgba track-r track-g track-b 1.0)))
@@ -787,7 +788,7 @@
             :highlight-color :transparent
             :shadow-color :transparent
             :color (if (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i))
-              :dark-gray
+              (rgba 0.4 0.4 0.4 0.6)
               :dim)
             :bg :transparent))
         (seqv-track-volume-control i)
