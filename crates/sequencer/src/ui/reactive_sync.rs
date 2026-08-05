@@ -1193,12 +1193,45 @@ pub(super) struct InstrumentParamDisplaySync<'a> {
     pub(super) state: &'a Arc<SequencerState>,
     pub(super) selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
     pub(super) selection: &'a BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
+    pub(super) expanded_step_projection: &'a Arc<ExpandedStepProjectionRegistry>,
     pub(super) track: usize,
     pub(super) param_idx: usize,
     pub(super) display_step: Option<usize>,
     pub(super) sync_plock_list: bool,
     pub(super) sync_plock_presence: bool,
     pub(super) sync_sampler_times: bool,
+}
+
+/// Republish every p-lock *presence* surface an instrument p-lock write can
+/// change: the compact grid values plus the expanded lanes' per-slot p-lock
+/// ticks. The expanded ticks used to be refreshed by the reactive tick's
+/// `ui_epoch`-driven full viewport resync, which the p-lock authoring path no
+/// longer triggers (see `sync_expanded_step_plocked_fields_for_steps`).
+pub(super) fn sync_instrument_plock_presence_display_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &app::App,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+    track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) -> bool {
+    let mut dirty = sync_instrument_plock_presence_fields(
+        rt,
+        state,
+        &app.graph.effect_descriptors,
+        track,
+        selected_steps,
+    );
+    let steps: Vec<usize> = selected_steps.lock().unwrap().iter().copied().collect();
+    dirty |= sync_expanded_step_plocked_fields_for_steps(
+        rt,
+        state,
+        app,
+        expanded_step_projection,
+        track,
+        &steps,
+    );
+    dirty
 }
 
 pub(super) fn sync_instrument_param_authoring_display(
@@ -1217,10 +1250,11 @@ pub(super) fn sync_instrument_param_authoring_display(
         );
     }
     if sync.sync_plock_presence {
-        ui_dirty |= sync_instrument_plock_presence_fields(
+        ui_dirty |= sync_instrument_plock_presence_display_fields(
             editor.runtime_mut(),
             sync.state,
-            &sync.app.graph.effect_descriptors,
+            sync.app,
+            sync.expanded_step_projection,
             sync.track,
             sync.selected_steps,
         );
@@ -1369,6 +1403,59 @@ pub(super) fn sync_expanded_step_viewports_for_track(
     for viewport in expanded_step_projection.viewports_for_track(track) {
         dirty |=
             sync_expanded_step_viewport(rt, state, app, &selected, current_track_idx, viewport);
+    }
+    dirty
+}
+
+/// Repaint just the p-lock ticks of the expanded lanes that show `steps` on
+/// `track`.
+///
+/// `seqv-slot-plocked-*` used to be refreshed by the reactive tick's
+/// `sync_all_expanded_step_viewports`, which rode along with the `ui_epoch`
+/// bump the instrument p-lock authoring path used to do on every drag update.
+/// That bump is gone (it rebuilt the whole fx widget source per drag event),
+/// so the authoring path writes the affected slots itself instead of paying
+/// for a full viewport sync.
+pub(super) fn sync_expanded_step_plocked_fields_for_steps(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &app::App,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+    track: usize,
+    steps: &[usize],
+) -> bool {
+    if track >= app.tracks.len() {
+        return false;
+    }
+    let viewports = expanded_step_projection.viewports_for_track(track);
+    if viewports.is_empty() {
+        return false;
+    }
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .min(MAX_STEPS);
+    let mut dirty = false;
+    for viewport in viewports {
+        for &step in steps {
+            let Some(slot) = visible_slot_for_step(viewport, step) else {
+                continue;
+            };
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &expanded_step_slot_plocked_field(viewport.track_id, slot),
+                    Value::Bool(
+                        step < num_steps
+                            && track_step_has_plock(
+                                state,
+                                track,
+                                &app.graph.effect_descriptors,
+                                step,
+                            ),
+                    ),
+                )
+                .effects_dirty;
+        }
     }
     dirty
 }

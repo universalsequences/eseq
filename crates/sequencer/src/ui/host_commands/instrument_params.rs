@@ -34,6 +34,7 @@ pub(super) fn handle(
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let fx_epoch = ctx.shared.fx_epoch.clone();
     let keyboard_tx = ctx.shared.keyboard_tx.clone();
+    let expanded_step_projection = ctx.shared.expanded_step_projection.clone();
     match name {
         "set-instrument-param" => {
             if let Value::Map(ref map) = payload {
@@ -88,6 +89,7 @@ pub(super) fn handle(
                                 state: &state,
                                 selected_steps: &selected_steps,
                                 selection: &neural_selection,
+                                expanded_step_projection: &expanded_step_projection,
                                 track,
                                 param_idx,
                                 display_step: None,
@@ -419,6 +421,7 @@ pub(super) fn handle(
                                     state: &state,
                                     selected_steps: &selected_steps,
                                     selection: &neural_selection,
+                                    expanded_step_projection: &expanded_step_projection,
                                     track,
                                     param_idx,
                                     display_step: None,
@@ -467,6 +470,7 @@ pub(super) fn handle(
                                     state: &state,
                                     selected_steps: &selected_steps,
                                     selection: &neural_selection,
+                                    expanded_step_projection: &expanded_step_projection,
                                     track,
                                     param_idx,
                                     display_step,
@@ -538,6 +542,7 @@ pub(super) fn handle(
                                     state: &state,
                                     selected_steps: &selected_steps,
                                     selection: &neural_selection,
+                                    expanded_step_projection: &expanded_step_projection,
                                     track,
                                     param_idx,
                                     display_step: None,
@@ -641,6 +646,7 @@ pub(super) fn handle(
                                 state: &state,
                                 selected_steps: &selected_steps,
                                 selection: &neural_selection,
+                                expanded_step_projection: &expanded_step_projection,
                                 track,
                                 param_idx,
                                 display_step,
@@ -806,6 +812,7 @@ pub(super) fn handle(
                                     state: &state,
                                     selected_steps: &selected_steps,
                                     selection: &neural_selection,
+                                    expanded_step_projection: &expanded_step_projection,
                                     track,
                                     param_idx,
                                     display_step,

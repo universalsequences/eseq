@@ -4017,6 +4017,7 @@
                                         state: &state,
                                         selected_steps: &selected_steps,
                                         selection: &neural_selection,
+                                        expanded_step_projection: &expanded_step_projection,
                                         track: TRACK,
                                         param_idx,
                                         display_step,

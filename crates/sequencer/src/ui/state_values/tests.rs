@@ -8137,6 +8137,75 @@
         );
     }
 
+    // The instrument p-lock authoring path no longer bumps `ui_epoch` per drag
+    // update, so the reactive tick's full expanded-viewport resync no longer
+    // repaints the expanded lane's p-lock tick. The presence sync must write
+    // the affected `seqv-slot-plocked-*` fields itself, or the first lock on a
+    // selected step lights the compact grid but not the expanded lane.
+    #[test]
+    fn instrument_plock_presence_sync_lights_the_expanded_lane_plock_tick() {
+        const TRACK_ID: usize = 7;
+        const STEP: usize = 2;
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let app = test_app_with_instrument_descriptor(desc.clone());
+        let selected_steps = Arc::new(Mutex::new(HashSet::from([STEP])));
+        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
+        expanded_step_projection.set_viewport(ExpandedStepViewport {
+            track: 0,
+            track_id: TRACK_ID,
+            page: 0,
+            mode: 0,
+            cursor_step: 0,
+        });
+        let field = expanded_step_slot_plocked_field(TRACK_ID, STEP);
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], true);
+        runtime.register_reactive("SEQV", vec![], true);
+        let plocked = |runtime: &Runtime| {
+            let Some(Value::Map(map)) = runtime.global_value("SEQ") else {
+                return None;
+            };
+            map.get(&field).and_then(|value| match &*value.borrow() {
+                Value::Bool(value) => Some(*value),
+                _ => None,
+            })
+        };
+
+        sync_instrument_plock_presence_display_fields(
+            &mut runtime,
+            &app.state,
+            &app,
+            &expanded_step_projection,
+            0,
+            &selected_steps,
+        );
+        assert_eq!(
+            plocked(&runtime),
+            Some(false),
+            "an unlocked step must publish an unlit expanded p-lock tick"
+        );
+
+        app.state.pattern.instrument_slots[0].set_plock(STEP, cutoff_idx, 900.0);
+        sync_instrument_plock_presence_display_fields(
+            &mut runtime,
+            &app.state,
+            &app,
+            &expanded_step_projection,
+            0,
+            &selected_steps,
+        );
+        assert_eq!(
+            plocked(&runtime),
+            Some(true),
+            "the first p-lock write must light the expanded lane's tick without an epoch bump"
+        );
+    }
+
     #[test]
     fn track_plock_variant_preview_rows_show_variant_without_selected_step() {
         let desc = sequencer::effects::EffectDescriptor::builtin_filter();
