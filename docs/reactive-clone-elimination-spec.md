@@ -1,6 +1,8 @@
 # Reactive-Cycle Clone Elimination Spec
 
-Status: DRAFT (rev 1, 2026-08-05)
+Status: rev 3 (2026-08-05) — P0+P1 BUILT (commit e2db824b), audit clean,
+baseline captured (§P0 probe results below). W1 closed at its floor;
+P2 (widget-tree Rc-sharing, freeze-first) is the remaining work.
 
 Eliminate the two per-tick `Value::deep_clone` hot paths found in the
 Instruments Allocations capture (2-track sampler project, ~28k allocs /
@@ -239,16 +241,45 @@ Both clone families are instrumented behind `ESEQLISP_PROFILE_CLONES=1`
 release-probe pattern: per-site cumulative time and allocation counts
 (cloned Value nodes ≈ `Rc<RefCell<..>>` allocations) emitted once per
 second as `[clone-probe] site=<name> calls/s=<n> allocs/s=<n> ms/s=<n>`.
-Sites: `w1:dag-source-store` (`vm.rs`, covers both the patch and the
-full-clone fallback) and the `w2:*` family wrapping every deep-clone
+Sites: the W1 family in `mark_source_dependents_dirty` — `w1:patch`
+(per-index arm) and shape-split fallbacks `w1:full-map` / `w1:full-list`
+/ `w1:full-other` — and the `w2:*` family wrapping every deep-clone
 listed in §3.1 (`probed_deep_clone` in `vm.rs`; call sites in
 `runtime.rs` and `buffer.rs`).
 
-Baseline capture: run a release build with playback on a large project —
-`ESEQLISP_PROFILE_CLONES=1 cargo run --release ...` — and record the
-steady-state `[clone-probe]` lines during ~30s of playback. Not captured
-yet in this round (needs an interactive session with a real project);
-P3 re-runs this alongside the Allocations capture.
+### Probe results (P0 baseline, 2026-08-05, large project, release)
+
+Steady-state during playback + editing (the project that motivated the
+effort). These are the W1-*after* / W2-*before* numbers P3 compares
+against.
+
+| site                       | calls/s | allocs/s (nodes) | ms/s      |
+|----------------------------|---------|------------------|-----------|
+| w2:buffer-set-widget-tree  | 9–11    | 56k–65k          | 4.4–5.7   |
+| w2:buffer-replace-subtrees | 5–23 (bursty during interaction) | up to 44k | up to 3.6 |
+| w1:patch                   | 9–18    | 16k–21k          | 1.7–2.6   |
+| w2:snapshot-layout-store/commit | 1  | ~3.6k each       | ~0.3 each |
+| w2:flush-replace-subtree / flush-subtree-batch | 1 | ~1.4k each | ~0.1 each |
+| w1:full-other              | 53–96   | = calls (1 node/call) | ~0.02 |
+| w1:full-map / w1:full-list | absent  | —                | —         |
+
+**W1 verdict — closed at its floor.** The residual is the patch arm
+working as designed: ~1.2k–2k nodes cloned per call means list sources
+whose *elements* are large structures that genuinely changed (step maps
+with p-locks). Maps never hit the fallback, so the §2.2-deferred
+key-scoped `ValueChange` variant is NOT needed. `w1:full-other` is
+scalar sources at 1 node/call — free. Going deeper would mean recursive
+intra-element diffing; not justified at ~2.3 ms/s. Optional cheap
+diagnostic if this ever grows: log the source label when a patch call
+clones >500 nodes — patch cadence tracks the reactive-save cadence, so
+one producer rebuilding elements wholesale (where a targeted write would
+do) is the plausible upstream fix.
+
+**W2 verdict — confirmed as the target.** `buffer-set-widget-tree`
+alone deep-copies a ~6k-node tree ~10×/s (~0.5 ms per call, landing as
+latency spikes inside reactive cycles that are already doing eval/layout
+work); with `buffer-replace-subtrees` bursts, W2 totals ~8–9 ms/s vs
+W1's ~2.3. Proceed with §3.2/§3.4, freeze assertions first.
 
 ### 3.4 Enforcement (debug-only)
 
@@ -266,13 +297,19 @@ dev runs and the UI-script test suite.
 - **P1**: W1 incremental patch (2.2) + a `value_change_scope`/patch unit
   test: list source, one index write → exactly one element cloned, dirty
   scope unchanged; length-change and shape-change fallbacks covered.
-- **P2**: W2 conversion site-by-site: `buffer.rs:950` and the
-  `runtime.rs` deep-clone cluster → shallow, mutation sites → scoped
-  deep-clone, debug freeze assertions on.
+- **P2**: W2 conversion, **freeze assertions FIRST** (ordering amended
+  after the audit): land the §3.4 debug freeze registry before flipping
+  any site, so the three latent hazards listed in §3.3 surface as dev
+  panics rather than stale-UI bugs. Then convert site-by-site:
+  `buffer.rs:952` and the `runtime.rs` deep-clone cluster → shallow,
+  mutation sites → scoped deep-clone. **Constraint (audit corollary):
+  annotation must stay on the storage path** — the per-prop deep clone
+  in `annotate_widget_tree_stable_ids` (`vm.rs:1620`) is what severs
+  sharing with the reactive store's cells.
 - **P3**: re-run the Allocations capture + probes on a large project;
-  update this spec with before/after.
+  compare against the §Probe-results baseline and update this spec.
 
-P1 is independent of P0/P2 and can ship first.
+P1 is independent of P0/P2 and shipped first (e2db824b).
 
 ## 5. Risks / gotchas
 

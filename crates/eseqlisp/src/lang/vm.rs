@@ -4186,7 +4186,7 @@ impl VM {
             // fallback), and `changed` may contain LEN_READ_SENTINEL, which
             // is not an index: length changes are handled by the explicit
             // truncate/extend below.
-            match (&change, &mut *current_value, &value) {
+            let probe_label = match (&change, &mut *current_value, &value) {
                 (ValueChange::Indices(changed), Value::List(old_items), Value::List(new_items)) => {
                     for &index in changed {
                         if index == LEN_READ_SENTINEL || index >= old_items.len() {
@@ -4212,16 +4212,22 @@ impl VM {
                             old_items.push(Rc::new(RefCell::new(cloned)));
                         }
                     }
+                    "w1:patch"
                 }
                 _ => {
                     *current_value = value.deep_clone();
                     if probe_started.is_some() {
                         probe_allocs = value_alloc_nodes(current_value);
                     }
+                    match &value {
+                        Value::Map(_) => "w1:full-map",
+                        Value::List(_) => "w1:full-list",
+                        _ => "w1:full-other",
+                    }
                 }
-            }
+            };
             if let Some(started) = probe_started {
-                clone_probe_record("w1:dag-source-store", started.elapsed(), probe_allocs);
+                clone_probe_record(probe_label, started.elapsed(), probe_allocs);
             }
             let dependents = dependents.clone().into_iter().collect::<Vec<_>>();
             for dependent in dependents {
