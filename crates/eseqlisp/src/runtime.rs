@@ -18,7 +18,7 @@ use crate::layout::{
 use crate::reactive::ReactiveRegistry;
 use crate::vm::{
     EffectTarget, PendingUiUpdate, PendingWidgetTree, ReactiveFieldKey, VM, Value, VmStateSnapshot,
-    register_core_natives,
+    freeze_widget_tree, probed_shallow_clone, register_core_natives,
 };
 use crate::widgets::register_widget_natives;
 
@@ -920,13 +920,15 @@ impl NativeContext {
     }
 
     pub fn render_widget(&mut self, tree: Value) {
+        freeze_widget_tree(&tree);
         self.shared
             .borrow_mut()
             .pending_widget_tree
-            .replace(tree.deep_clone());
+            .replace(probed_shallow_clone("w2:render-widget", &tree));
     }
 
     pub fn render_widget_to_buffer(&mut self, buffer_name: String, tree: Value) {
+        freeze_widget_tree(&tree);
         let source_buffer_id = self.shared.borrow().current_buffer_id;
         self.shared
             .borrow_mut()
@@ -935,7 +937,7 @@ impl NativeContext {
                 source_buffer_id,
                 source_module: None,
                 target: EffectTarget::BufferName(buffer_name),
-                tree: tree.deep_clone(),
+                tree: probed_shallow_clone("w2:render-widget-to-buffer", &tree),
                 reactive_dependencies: Vec::new(),
             }));
     }
@@ -2960,10 +2962,11 @@ impl Runtime {
         // Snapshotting an arbitrary buffer/tree should not try to reuse against
         // the currently active layout; that mixes unrelated trees and inflates
         // both relayout work and profiling noise.
+        freeze_widget_tree(tree);
         self.current_layout = None;
-        self.current_widget_tree = Some(tree.deep_clone());
+        self.current_widget_tree = Some(probed_shallow_clone("w2:snapshot-layout-store", &tree));
         self.commit_current_ui_snapshot(Some(CommittedBufferUiSnapshot::from_tree(
-            tree.deep_clone(),
+            probed_shallow_clone("w2:snapshot-layout-commit", &tree),
             None,
             Vec::new(),
         )));
@@ -3048,14 +3051,15 @@ impl Runtime {
     pub fn set_widget_tree(&mut self, tree: Value) {
         // Replace the visual widget tree without destroying reactive effects.
         // Effects from other buffers must survive buffer switches.
+        freeze_widget_tree(&tree);
         let previous_layout = self.current_layout.clone();
         self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
         self.layout_revision = self.layout_revision.wrapping_add(1);
-        self.current_widget_tree = Some(tree.deep_clone());
+        self.current_widget_tree = Some(probed_shallow_clone("w2:set-widget-tree-store", &tree));
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.commit_current_ui_snapshot(Some(CommittedBufferUiSnapshot::from_tree(
-            tree.deep_clone(),
+            probed_shallow_clone("w2:set-widget-tree-commit", &tree),
             current_buffer_id,
             Vec::new(),
         )));
@@ -3079,10 +3083,11 @@ impl Runtime {
     /// Restore a previously saved widget tree for display only,
     /// without clearing reactive effects.
     pub fn restore_widget_tree(&mut self, tree: Value) {
-        self.current_widget_tree = Some(tree.deep_clone());
+        freeze_widget_tree(&tree);
+        self.current_widget_tree = Some(probed_shallow_clone("w2:restore-widget-tree-store", &tree));
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.commit_current_ui_snapshot(Some(CommittedBufferUiSnapshot::from_tree(
-            tree.deep_clone(),
+            probed_shallow_clone("w2:restore-widget-tree-commit", &tree),
             current_buffer_id,
             Vec::new(),
         )));
@@ -3108,6 +3113,7 @@ impl Runtime {
             self.layout_rows = rows;
         }
         self.widget_id_offset = widget_id_offset;
+        freeze_widget_tree(&tree);
         self.current_widget_tree = Some(tree.clone());
         let snapshot = snapshot.or_else(|| {
             Some(CommittedBufferUiSnapshot::from_tree(
@@ -3143,6 +3149,7 @@ impl Runtime {
         widget_id_offset: u64,
     ) {
         self.widget_id_offset = widget_id_offset;
+        freeze_widget_tree(&tree);
         self.current_widget_tree = Some(tree.clone());
         let snapshot = snapshot.or_else(|| {
             Some(CommittedBufferUiSnapshot::from_tree(
@@ -3333,7 +3340,7 @@ impl Runtime {
         };
         Some(self.replace_current_subtree_without_relayout(
             subtree_root_id,
-            pending.tree.deep_clone(),
+            probed_shallow_clone("w2:upgrade-full-tree-subtree", &pending.tree),
             pending.reactive_dependencies.clone(),
         ))
     }
@@ -3398,7 +3405,7 @@ impl Runtime {
                     .map(|replacement| {
                         (
                             replacement.subtree_root_id,
-                            replacement.tree.deep_clone(),
+                            probed_shallow_clone("w2:flush-subtree-batch", &replacement.tree),
                             replacement.reactive_dependencies.clone(),
                         )
                     })
@@ -3465,7 +3472,10 @@ impl Runtime {
                                                     source_module: pending.source_module.clone(),
                                                     target: pending.target.clone(),
                                                     subtree_root_id,
-                                                    tree: pending.tree.deep_clone(),
+                                                    tree: probed_shallow_clone(
+                                                        "w2:flush-full-as-subtree",
+                                                        &pending.tree,
+                                                    ),
                                                     reactive_dependencies: pending
                                                         .reactive_dependencies
                                                         .clone(),
@@ -3491,10 +3501,16 @@ impl Runtime {
                                 .as_ref()
                                 .is_some_and(|current| *current == pending.tree);
                             if !unchanged {
-                                self.current_widget_tree = Some(pending.tree.deep_clone());
+                                self.current_widget_tree = Some(probed_shallow_clone(
+                                    "w2:flush-full-tree-store",
+                                    &pending.tree,
+                                ));
                                 self.commit_current_ui_snapshot(Some(
                                     CommittedBufferUiSnapshot::from_tree(
-                                        pending.tree.deep_clone(),
+                                        probed_shallow_clone(
+                                            "w2:flush-full-tree-commit",
+                                            &pending.tree,
+                                        ),
                                         pending.source_buffer_id,
                                         pending.reactive_dependencies.clone(),
                                     ),
@@ -3503,7 +3519,10 @@ impl Runtime {
                             } else {
                                 self.commit_current_ui_snapshot(Some(
                                     CommittedBufferUiSnapshot::from_tree(
-                                        pending.tree.deep_clone(),
+                                        probed_shallow_clone(
+                                            "w2:flush-unchanged-tree-commit",
+                                            &pending.tree,
+                                        ),
                                         pending.source_buffer_id,
                                         pending.reactive_dependencies.clone(),
                                     ),
@@ -3523,7 +3542,7 @@ impl Runtime {
                             source_module: pending.source_module().map(PathBuf::from),
                             target: pending.target().clone(),
                             subtree_root_id: *subtree_root_id,
-                            tree: tree.deep_clone(),
+                            tree: probed_shallow_clone("w2:flush-replace-subtree", tree),
                             reactive_dependencies: reactive_dependencies.clone(),
                         });
                         subtree_reruns += 1;

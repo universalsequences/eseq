@@ -324,6 +324,215 @@ fn value_change_scope(old: &Value, new: &Value) -> Option<ValueChange> {
     }
 }
 
+/// Release-mode probe for the reactive-clone-elimination effort
+/// (docs/reactive-clone-elimination-spec.md §3.3 / P0). Set
+/// `ESEQLISP_PROFILE_CLONES=1` to log, once per second, cumulative clone
+/// time and allocation counts per site (each cloned Value node allocates
+/// one `Rc<RefCell<..>>`, so the node count is the allocation proxy).
+pub fn clone_probe_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ESEQLISP_PROFILE_CLONES").is_some())
+}
+
+thread_local! {
+    static CLONE_PROBE: RefCell<CloneProbeWindow> = RefCell::new(CloneProbeWindow {
+        window_start: Instant::now(),
+        sites: HashMap::new(),
+    });
+}
+
+struct CloneProbeWindow {
+    window_start: Instant,
+    sites: HashMap<&'static str, (u64, u64, Duration)>,
+}
+
+/// Count the Value nodes a `deep_clone` of `value` allocates.
+pub fn value_alloc_nodes(value: &Value) -> u64 {
+    match value {
+        Value::List(items) => {
+            1 + items
+                .iter()
+                .map(|item| value_alloc_nodes(&item.borrow()))
+                .sum::<u64>()
+        }
+        Value::Map(map) => {
+            1 + map
+                .values()
+                .map(|item| value_alloc_nodes(&item.borrow()))
+                .sum::<u64>()
+        }
+        _ => 1,
+    }
+}
+
+pub fn clone_probe_record(site: &'static str, elapsed: Duration, nodes: u64) {
+    if !clone_probe_enabled() {
+        return;
+    }
+    CLONE_PROBE.with(|probe| {
+        let mut probe = probe.borrow_mut();
+        let entry = probe.sites.entry(site).or_insert((0, 0, Duration::ZERO));
+        entry.0 += 1;
+        entry.1 += nodes;
+        entry.2 += elapsed;
+        let secs = probe.window_start.elapsed().as_secs_f64();
+        if secs < 1.0 {
+            return;
+        }
+        let mut sites = probe.sites.drain().collect::<Vec<_>>();
+        sites.sort_by(|a, b| b.1.2.cmp(&a.1.2));
+        for (site, (calls, nodes, total)) in sites {
+            eprintln!(
+                "[clone-probe] site={site} calls/s={:.1} allocs/s={:.0} ms/s={:.3}",
+                calls as f64 / secs,
+                nodes as f64 / secs,
+                total.as_secs_f64() * 1000.0 / secs,
+            );
+        }
+        probe.window_start = Instant::now();
+    });
+}
+
+/// `value.deep_clone()` wrapped in the clone probe; near-zero cost when
+/// `ESEQLISP_PROFILE_CLONES` is unset.
+pub fn probed_deep_clone(site: &'static str, value: &Value) -> Value {
+    if !clone_probe_enabled() {
+        return value.deep_clone();
+    }
+    let started = Instant::now();
+    let cloned = value.deep_clone();
+    clone_probe_record(site, started.elapsed(), value_alloc_nodes(&cloned));
+    cloned
+}
+
+/// Shallow `value.clone()` (Rc bump on the top-level list/map) wrapped in the
+/// clone probe, so P3 re-runs can confirm the converted W2 sites collapsed to
+/// ~0; near-zero cost when `ESEQLISP_PROFILE_CLONES` is unset.
+pub fn probed_shallow_clone(site: &'static str, value: &Value) -> Value {
+    if !clone_probe_enabled() {
+        return value.clone();
+    }
+    let started = Instant::now();
+    let cloned = value.clone();
+    clone_probe_record(site, started.elapsed(), 1);
+    cloned
+}
+
+// ---------------------------------------------------------------------------
+// Widget-tree freeze registry (docs/reactive-clone-elimination-spec.md §3.4)
+//
+// Rendered widget trees are immutable from the moment they are handed to the
+// runtime (pending_widget_trees / current_widget_tree / Buffer::widget_tree);
+// storage sites share them by shallow clone. This debug-only registry records
+// every list/map cell of a frozen tree by Rc pointer identity; the (few) tree
+// mutation helpers call `debug_assert_cell_not_frozen` so a post-storage
+// mutation panics in dev/test runs instead of silently editing history for
+// every holder of the Rc. Zero cost in release builds.
+//
+// Closure upvalue cells are deliberately NOT frozen: `Value::deep_clone`
+// shares them too, and handler-captured state is legitimately mutated when
+// handlers run. Freezing covers tree *structure* (list/map cells), which is
+// exactly what the shallow-shared storage sites alias.
+// ---------------------------------------------------------------------------
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static FROZEN_TREE_CELLS: RefCell<HashMap<usize, std::rc::Weak<RefCell<Value>>>> =
+        RefCell::new(HashMap::new());
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static FROZEN_TREE_PRUNE_THRESHOLD: std::cell::Cell<usize> = const { std::cell::Cell::new(4096) };
+}
+
+/// Register every list/map cell reachable from `tree` as frozen. Idempotent
+/// and cheap on re-freeze: an already-registered live cell short-circuits its
+/// whole subtree (shared cells imply shared subtrees). No-op in release.
+pub fn freeze_widget_tree(tree: &Value) {
+    #[cfg(debug_assertions)]
+    FROZEN_TREE_CELLS.with(|cells| {
+        let mut cells = cells.borrow_mut();
+        // A live Weak pins its allocation's memory, so dead entries only
+        // release memory once pruned; prune when the registry doubles past
+        // the last high-water mark.
+        FROZEN_TREE_PRUNE_THRESHOLD.with(|threshold| {
+            if cells.len() > threshold.get() {
+                cells.retain(|_, weak| weak.strong_count() > 0);
+                threshold.set((cells.len() * 2).max(4096));
+            }
+        });
+        freeze_value_cells(tree, &mut cells);
+    });
+    #[cfg(not(debug_assertions))]
+    let _ = tree;
+}
+
+#[cfg(debug_assertions)]
+fn freeze_value_cells(
+    value: &Value,
+    cells: &mut HashMap<usize, std::rc::Weak<RefCell<Value>>>,
+) {
+    match value {
+        Value::List(items) => {
+            for cell in items {
+                freeze_tree_cell(cell, cells);
+            }
+        }
+        Value::Map(map) => {
+            for cell in map.values() {
+                freeze_tree_cell(cell, cells);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(debug_assertions)]
+fn freeze_tree_cell(
+    cell: &Rc<RefCell<Value>>,
+    cells: &mut HashMap<usize, std::rc::Weak<RefCell<Value>>>,
+) {
+    let ptr = Rc::as_ptr(cell) as usize;
+    if let Some(existing) = cells.get(&ptr) {
+        if existing.strong_count() > 0 {
+            // A live Weak pins its allocation, so a matching pointer is the
+            // same cell: this subtree is already frozen.
+            return;
+        }
+    }
+    cells.insert(ptr, Rc::downgrade(cell));
+    freeze_value_cells(&cell.borrow(), cells);
+}
+
+/// Panic (debug builds only) if `cell` belongs to a frozen widget tree.
+/// Mutation of a stored tree must instead deep-clone at the mutation site,
+/// scoped to the subtree it modifies (spec §3.2).
+#[inline]
+pub fn debug_assert_cell_not_frozen(cell: &Rc<RefCell<Value>>, context: &'static str) {
+    #[cfg(debug_assertions)]
+    FROZEN_TREE_CELLS.with(|cells| {
+        let mut cells = cells.borrow_mut();
+        let ptr = Rc::as_ptr(cell) as usize;
+        match cells.get(&ptr) {
+            Some(frozen) if frozen.strong_count() > 0 => panic!(
+                "widget-tree freeze violation: {context} mutating a cell of a stored \
+                 (frozen) widget tree; deep-clone the subtree at the mutation site \
+                 instead (docs/reactive-clone-elimination-spec.md §3.2/§3.4)"
+            ),
+            Some(_) => {
+                // The frozen cell died and this is a new allocation at a
+                // reused address (possible once the dead Weak is the only
+                // reference left after pruning kept it — clean it up).
+                cells.remove(&ptr);
+            }
+            None => {}
+        }
+    });
+    #[cfg(not(debug_assertions))]
+    let _ = (cell, context);
+}
+
 /// Which part of a reactive source a dependent actually read.
 #[derive(Clone, Debug)]
 pub enum ReadScope {
@@ -3944,9 +4153,11 @@ impl VM {
 
         match self.globals.get_mut(idx) {
             Some(Some(existing)) => {
+                debug_assert_cell_not_frozen(existing, "update_reactive_global");
                 let mut borrowed = existing.borrow_mut();
                 if let Value::Map(map) = &mut *borrowed {
                     if let Some(slot) = map.get(field) {
+                        debug_assert_cell_not_frozen(slot, "update_reactive_global");
                         *slot.borrow_mut() = value;
                     } else {
                         map.insert(field.to_string(), Rc::new(RefCell::new(value)));
@@ -3982,12 +4193,17 @@ impl VM {
             let slot = map
                 .entry(field.to_string())
                 .or_insert_with(|| Rc::new(RefCell::new(Value::List(Vec::new()))));
+            debug_assert_cell_not_frozen(slot, "update_reactive_global_list_index");
             let mut borrowed = slot.borrow_mut();
             match &mut *borrowed {
                 Value::List(items) => {
                     while items.len() <= index {
                         items.push(Rc::new(RefCell::new(Value::Nil)));
                     }
+                    debug_assert_cell_not_frozen(
+                        &items[index],
+                        "update_reactive_global_list_index",
+                    );
                     *items[index].borrow_mut() = value.clone();
                 }
                 other => {
@@ -4095,7 +4311,59 @@ impl VM {
             let Some(change) = value_change_scope(current_value, &value) else {
                 return;
             };
-            *current_value = value.deep_clone();
+            let probe_started = clone_probe_enabled().then(Instant::now);
+            let mut probe_allocs = 0u64;
+            // Update the stored value. The store must stay a private deep
+            // copy — never share Rcs with the caller's value. For list→list
+            // changes patch only the changed indices; everything else keeps
+            // the whole-value deep clone. The patch-vs-full decision is made
+            // by this single match (never a partial patch then a Full
+            // fallback), and `changed` may contain LEN_READ_SENTINEL, which
+            // is not an index: length changes are handled by the explicit
+            // truncate/extend below.
+            let probe_label = match (&change, &mut *current_value, &value) {
+                (ValueChange::Indices(changed), Value::List(old_items), Value::List(new_items)) => {
+                    for &index in changed {
+                        if index == LEN_READ_SENTINEL || index >= old_items.len() {
+                            continue;
+                        }
+                        let Some(new_item) = new_items.get(index) else {
+                            continue;
+                        };
+                        let cloned = new_item.borrow().deep_clone();
+                        if probe_started.is_some() {
+                            probe_allocs += value_alloc_nodes(&cloned);
+                        }
+                        old_items[index] = Rc::new(RefCell::new(cloned));
+                    }
+                    if old_items.len() > new_items.len() {
+                        old_items.truncate(new_items.len());
+                    } else {
+                        for new_item in &new_items[old_items.len()..] {
+                            let cloned = new_item.borrow().deep_clone();
+                            if probe_started.is_some() {
+                                probe_allocs += value_alloc_nodes(&cloned);
+                            }
+                            old_items.push(Rc::new(RefCell::new(cloned)));
+                        }
+                    }
+                    "w1:patch"
+                }
+                _ => {
+                    *current_value = value.deep_clone();
+                    if probe_started.is_some() {
+                        probe_allocs = value_alloc_nodes(current_value);
+                    }
+                    match &value {
+                        Value::Map(_) => "w1:full-map",
+                        Value::List(_) => "w1:full-list",
+                        _ => "w1:full-other",
+                    }
+                }
+            };
+            if let Some(started) = probe_started {
+                clone_probe_record(probe_label, started.elapsed(), probe_allocs);
+            }
             let dependents = dependents.clone().into_iter().collect::<Vec<_>>();
             for dependent in dependents {
                 let affected = match (&change, self.dag.dependency_scope(dependent, source_id)) {
@@ -4273,6 +4541,7 @@ impl VM {
                                 None,
                                 &mut path,
                             );
+                            freeze_widget_tree(&annotated_tree);
                             {
                                 static SCENE_TRACE: std::sync::OnceLock<bool> =
                                     std::sync::OnceLock::new();
@@ -4754,9 +5023,11 @@ impl VM {
                         }),
                         _ => None,
                     };
+                    debug_assert_cell_not_frozen(&target, "OpCode::StoreField");
                     match &mut *target.borrow_mut() {
                         Value::Map(map) => {
                             if let Some(slot) = map.get(&field) {
+                                debug_assert_cell_not_frozen(slot, "OpCode::StoreField");
                                 *slot.borrow_mut() = new_value.clone();
                             } else {
                                 map.insert(field.clone(), Rc::new(RefCell::new(new_value.clone())));
@@ -5283,6 +5554,7 @@ impl VM {
                             None,
                             &mut path,
                         );
+                        freeze_widget_tree(&annotated_tree);
                         if let Some((subtree_root_id, _stable_key)) =
                             explicit_subtree_root_metadata(&annotated_tree)
                         {
@@ -5342,12 +5614,17 @@ impl VM {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::HashSet, rc::Rc};
+    use std::{
+        cell::RefCell,
+        collections::{HashMap, HashSet},
+        rc::Rc,
+    };
 
     use super::{
-        EffectTarget, PendingUiUpdate, ReactiveDag, ReactiveNode, ReactiveSource,
-        SOURCE_BUFFER_ID_PROP, SOURCE_END_BYTE_PROP, SOURCE_MODULE_PATH_PROP, SOURCE_REVISION_PROP,
-        SOURCE_START_BYTE_PROP, SOURCE_SYMBOL_PROP, VM, Value,
+        EffectTarget, LEN_READ_SENTINEL, NodeId, PendingUiUpdate, ReactiveDag, ReactiveNode,
+        ReactiveSource, SOURCE_BUFFER_ID_PROP, SOURCE_END_BYTE_PROP, SOURCE_MODULE_PATH_PROP,
+        SOURCE_REVISION_PROP, SOURCE_START_BYTE_PROP, SOURCE_SYMBOL_PROP, VM, Value,
+        debug_assert_cell_not_frozen, freeze_widget_tree,
     };
 
     fn map_prop<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
@@ -5987,5 +6264,230 @@ mod tests {
         assert_eq!(dag.find_source_node(&source), Some(8));
         dag.remove_node(8);
         assert_eq!(dag.find_source_node(&source), None);
+    }
+
+    fn number_list(items: &[f64]) -> Value {
+        Value::List(
+            items
+                .iter()
+                .map(|n| Rc::new(RefCell::new(Value::Number(*n))))
+                .collect(),
+        )
+    }
+
+    fn add_source(vm: &mut VM, value: Value) -> NodeId {
+        let id = vm.dag.alloc_id();
+        vm.dag.add_node(ReactiveNode::Source {
+            id,
+            source: ReactiveSource::LocalState {
+                name: format!("test-source-{id}"),
+            },
+            value,
+            dependents: HashSet::new(),
+        });
+        id
+    }
+
+    fn add_effect_dependent(vm: &mut VM) -> NodeId {
+        let id = vm.dag.alloc_id();
+        vm.dag.add_node(ReactiveNode::Effect {
+            id,
+            chunk_idx: 0,
+            callable: None,
+            source_buffer_id: None,
+            source_module: None,
+            source_revision: None,
+            target: EffectTarget::BufferId(None),
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            symbol_dependencies: HashSet::new(),
+            dirty: false,
+        });
+        id
+    }
+
+    fn stored_source_list(vm: &VM, id: NodeId) -> Vec<Rc<RefCell<Value>>> {
+        match vm.dag.nodes.get(&id) {
+            Some(ReactiveNode::Source {
+                value: Value::List(items),
+                ..
+            }) => items.clone(),
+            _ => panic!("source {id} does not hold a list"),
+        }
+    }
+
+    fn stored_source_value(vm: &VM, id: NodeId) -> Value {
+        match vm.dag.nodes.get(&id) {
+            Some(ReactiveNode::Source { value, .. }) => value.clone(),
+            _ => panic!("missing source {id}"),
+        }
+    }
+
+    #[test]
+    fn list_source_single_index_write_patches_only_that_element() {
+        let mut vm = VM::new(Vec::new());
+        let source = add_source(&mut vm, number_list(&[1.0, 2.0, 3.0]));
+        let reads_index_1 = add_effect_dependent(&mut vm);
+        let reads_index_2 = add_effect_dependent(&mut vm);
+        vm.dag.add_edge_indexed(source, reads_index_1, 1);
+        vm.dag.add_edge_indexed(source, reads_index_2, 2);
+
+        let before = stored_source_list(&vm, source);
+        let new_value = number_list(&[1.0, 9.0, 3.0]);
+        let Value::List(caller_items) = new_value.clone() else {
+            unreachable!();
+        };
+        vm.mark_source_dependents_dirty(source, new_value);
+
+        let after = stored_source_list(&vm, source);
+        assert_eq!(stored_source_value(&vm, source), number_list(&[1.0, 9.0, 3.0]));
+        // Unchanged elements keep their existing Rcs; only index 1 is replaced.
+        assert!(Rc::ptr_eq(&before[0], &after[0]));
+        assert!(!Rc::ptr_eq(&before[1], &after[1]));
+        assert!(Rc::ptr_eq(&before[2], &after[2]));
+        // The store never aliases the caller's value.
+        assert!(!Rc::ptr_eq(&caller_items[1], &after[1]));
+        // Dirty scope unchanged: only the index-1 reader is affected.
+        assert!(vm.dag.is_dirty(reads_index_1));
+        assert!(!vm.dag.is_dirty(reads_index_2));
+    }
+
+    #[test]
+    fn list_source_length_grow_and_shrink_patch_the_stored_list() {
+        let mut vm = VM::new(Vec::new());
+        let source = add_source(&mut vm, number_list(&[1.0, 2.0]));
+        let reads_len = add_effect_dependent(&mut vm);
+        vm.dag.add_edge_indexed(source, reads_len, LEN_READ_SENTINEL);
+
+        let before = stored_source_list(&vm, source);
+        let grown = number_list(&[1.0, 2.0, 3.0, 4.0]);
+        let Value::List(caller_items) = grown.clone() else {
+            unreachable!();
+        };
+        vm.mark_source_dependents_dirty(source, grown);
+
+        let after = stored_source_list(&vm, source);
+        assert_eq!(
+            stored_source_value(&vm, source),
+            number_list(&[1.0, 2.0, 3.0, 4.0])
+        );
+        assert!(Rc::ptr_eq(&before[0], &after[0]));
+        assert!(Rc::ptr_eq(&before[1], &after[1]));
+        assert!(!Rc::ptr_eq(&caller_items[2], &after[2]));
+        assert!(!Rc::ptr_eq(&caller_items[3], &after[3]));
+        assert!(vm.dag.is_dirty(reads_len));
+
+        vm.dag.clear_dirty(reads_len);
+        vm.mark_source_dependents_dirty(source, number_list(&[1.0]));
+        let shrunk = stored_source_list(&vm, source);
+        assert_eq!(stored_source_value(&vm, source), number_list(&[1.0]));
+        assert_eq!(shrunk.len(), 1);
+        assert!(Rc::ptr_eq(&after[0], &shrunk[0]));
+        assert!(vm.dag.is_dirty(reads_len));
+    }
+
+    #[test]
+    fn shape_change_between_list_and_scalar_falls_back_to_full_clone() {
+        let mut vm = VM::new(Vec::new());
+        let source = add_source(&mut vm, number_list(&[1.0, 2.0]));
+        let reads_index_0 = add_effect_dependent(&mut vm);
+        vm.dag.add_edge_indexed(source, reads_index_0, 0);
+
+        vm.mark_source_dependents_dirty(source, Value::Number(5.0));
+        assert_eq!(stored_source_value(&vm, source), Value::Number(5.0));
+        // Full change dirties even index-scoped readers.
+        assert!(vm.dag.is_dirty(reads_index_0));
+
+        vm.dag.clear_dirty(reads_index_0);
+        let back_to_list = number_list(&[7.0, 8.0]);
+        let Value::List(caller_items) = back_to_list.clone() else {
+            unreachable!();
+        };
+        vm.mark_source_dependents_dirty(source, back_to_list);
+        let after = stored_source_list(&vm, source);
+        assert_eq!(stored_source_value(&vm, source), number_list(&[7.0, 8.0]));
+        assert!(!Rc::ptr_eq(&caller_items[0], &after[0]));
+        assert!(!Rc::ptr_eq(&caller_items[1], &after[1]));
+        assert!(vm.dag.is_dirty(reads_index_0));
+    }
+
+    #[test]
+    fn unchanged_write_marks_nothing_dirty_and_leaves_the_store_untouched() {
+        let mut vm = VM::new(Vec::new());
+        let source = add_source(&mut vm, number_list(&[1.0, 2.0]));
+        let reads_index_0 = add_effect_dependent(&mut vm);
+        let reads_all = add_effect_dependent(&mut vm);
+        vm.dag.add_edge_indexed(source, reads_index_0, 0);
+        vm.dag.add_edge(source, reads_all);
+
+        let before = stored_source_list(&vm, source);
+        vm.mark_source_dependents_dirty(source, number_list(&[1.0, 2.0]));
+
+        let after = stored_source_list(&vm, source);
+        assert!(Rc::ptr_eq(&before[0], &after[0]));
+        assert!(Rc::ptr_eq(&before[1], &after[1]));
+        assert!(!vm.dag.is_dirty(reads_index_0));
+        assert!(!vm.dag.is_dirty(reads_all));
+    }
+
+    fn tree_with_label(label: &str) -> (Value, Rc<RefCell<Value>>) {
+        let label_cell = Rc::new(RefCell::new(Value::String(label.to_string())));
+        let child = {
+            let mut map = HashMap::new();
+            map.insert("label".to_string(), label_cell.clone());
+            Rc::new(RefCell::new(Value::Map(map)))
+        };
+        let mut root = HashMap::new();
+        root.insert(
+            "children".to_string(),
+            Rc::new(RefCell::new(Value::List(vec![child]))),
+        );
+        (Value::Map(root), label_cell)
+    }
+
+    #[test]
+    #[should_panic(expected = "widget-tree freeze violation")]
+    fn mutating_a_frozen_tree_cell_panics_in_debug() {
+        let (tree, label_cell) = tree_with_label("frozen");
+        freeze_widget_tree(&tree);
+        debug_assert_cell_not_frozen(&label_cell, "test mutation");
+    }
+
+    #[test]
+    fn deep_cloned_variant_of_a_frozen_tree_stays_mutable() {
+        let (tree, _) = tree_with_label("frozen");
+        freeze_widget_tree(&tree);
+        let variant = tree.deep_clone();
+        let Value::Map(map) = &variant else {
+            unreachable!();
+        };
+        // Every cell of the deep clone is fresh, so mutating it is allowed.
+        debug_assert_cell_not_frozen(&map["children"], "test mutation");
+        let Value::List(children) = &*map["children"].borrow() else {
+            unreachable!();
+        };
+        debug_assert_cell_not_frozen(&children[0], "test mutation");
+    }
+
+    #[test]
+    fn shallow_clone_of_a_frozen_tree_shares_frozen_cells() {
+        let (tree, label_cell) = tree_with_label("frozen");
+        freeze_widget_tree(&tree);
+        let shared = tree.clone();
+        let Value::Map(map) = &shared else {
+            unreachable!();
+        };
+        let Value::List(children) = &*map["children"].borrow() else {
+            unreachable!();
+        };
+        let Value::Map(child) = &*children[0].borrow() else {
+            unreachable!();
+        };
+        assert!(Rc::ptr_eq(&child["label"], &label_cell));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            debug_assert_cell_not_frozen(&child["label"], "test mutation");
+        }));
+        assert!(result.is_err(), "shared frozen cell must still assert");
     }
 }

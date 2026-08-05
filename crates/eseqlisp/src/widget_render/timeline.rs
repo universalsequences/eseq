@@ -4317,6 +4317,7 @@ fn set_map_bool(value: &Value, key: &str, next: bool) {
         return;
     };
     if let Some(value) = map.get(key) {
+        crate::vm::debug_assert_cell_not_frozen(value, "timeline set_map_bool");
         *value.borrow_mut() = Value::Bool(next);
     }
 }

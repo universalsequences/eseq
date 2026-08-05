@@ -939,6 +939,9 @@ impl Buffer {
     }
 
     pub fn set_widget_tree(&mut self, tree: Option<Value>, source: Option<BufferId>) {
+        if let Some(tree) = tree.as_ref() {
+            crate::vm::freeze_widget_tree(tree);
+        }
         let tree_unchanged = self.widget_tree.as_ref() == tree.as_ref();
         let source_unchanged = self.widget_tree_source == source;
         if tree_unchanged && source_unchanged {
@@ -947,7 +950,12 @@ impl Buffer {
             );
             return;
         }
-        self.widget_tree = tree.as_ref().map(Value::deep_clone);
+        // Stored trees are frozen (immutable after annotation), so storage is
+        // an Rc bump; anything needing a mutated variant deep-clones at the
+        // mutation site, scoped to the subtree it modifies (spec §3.2).
+        self.widget_tree = tree
+            .as_ref()
+            .map(|tree| crate::vm::probed_shallow_clone("w2:buffer-set-widget-tree", tree));
         self.widget_tree_source = source;
         self.widget_tree_revision = self.widget_tree_revision.wrapping_add(1);
         self.set_committed_ui_snapshot(
@@ -1526,6 +1534,7 @@ impl CommittedBufferUiSnapshot {
         source_buffer_id: Option<BufferId>,
         reactive_dependencies: Vec<ReactiveFieldKey>,
     ) -> Self {
+        crate::vm::freeze_widget_tree(&tree);
         let root = CommittedSubtreeSnapshot::from_tree(tree.clone(), &reactive_dependencies);
         let mut subtree_roots = HashMap::new();
         let mut widgets = HashMap::new();
@@ -1710,6 +1719,7 @@ impl CommittedBufferUiSnapshot {
         source_buffer_id: Option<BufferId>,
         dependency_lookup: &HashMap<u64, Vec<ReactiveFieldKey>>,
     ) -> Self {
+        crate::vm::freeze_widget_tree(&tree);
         let root = CommittedSubtreeSnapshot::from_tree_with_dependency_lookup(
             tree.clone(),
             &[],
@@ -1904,7 +1914,10 @@ fn replace_subtree_in_value(
         return None;
     };
     if prop_u64_from_map(map, "__subtree-root-id") == Some(subtree_root_id) {
-        return Some(replacement_tree.deep_clone());
+        return Some(crate::vm::probed_deep_clone(
+            "w2:buffer-replace-subtree",
+            replacement_tree,
+        ));
     }
 
     let children_value = map.get("children")?;
@@ -1956,7 +1969,10 @@ fn replace_subtrees_in_value(
     if let Some(replacement_tree) = prop_u64_from_map(map, "__subtree-root-id")
         .and_then(|root_id| replacement_lookup.get(&root_id))
     {
-        return Some((*replacement_tree).deep_clone());
+        return Some(crate::vm::probed_deep_clone(
+            "w2:buffer-replace-subtrees",
+            replacement_tree,
+        ));
     }
 
     let children_value = map.get("children")?;
