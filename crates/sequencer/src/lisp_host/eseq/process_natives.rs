@@ -1799,6 +1799,7 @@ fn commit_published_graph_deltas(
                                 seed_on_reset: None,
                                 duration: None,
                                 swing: None,
+                                neural_group: None,
                             },
                         );
                     }

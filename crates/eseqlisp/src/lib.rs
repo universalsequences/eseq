@@ -3353,6 +3353,94 @@ mod tests {
             "partial bus solo writes must dirty effects that read SEQ.bus-solos directly"
         );
     }
+
+    fn fx_panel_value(name: &str, value: f64) -> Value {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String(name.to_string()))),
+        );
+        map.insert(
+            "value".to_string(),
+            Rc::new(RefCell::new(Value::Number(value))),
+        );
+        Value::List(vec![Rc::new(RefCell::new(Value::Map(map)))])
+    }
+
+    fn install_fx_reader(runtime: &mut Runtime) {
+        runtime.register_reactive("SEQ", vec![("effects", fx_panel_value("Delay", 0.5))], false);
+        runtime
+            .eval_str(
+                r#"
+                (effect-buffer "*fx*"
+                  (v-stack
+                    (each SEQ.effects |fx idx|
+                      (label (fmt "{}:{}" (get fx :name) (get fx :value))))))
+                "#,
+            )
+            .expect("install fx reader effect");
+        let _ = runtime.take_pending_buffer_widget_trees();
+    }
+
+    #[test]
+    fn set_reactive_value_patch_skips_rerun_for_value_only_diffs() {
+        let mut runtime = Runtime::new();
+        install_fx_reader(&mut runtime);
+
+        let result = runtime.set_reactive_value_patch("SEQ", "effects", fx_panel_value("Delay", 0.9));
+        assert!(!result.changed && !result.effects_dirty && !result.widgets_dirty);
+        runtime.run_reactive_cycle();
+        assert!(
+            runtime.take_pending_buffer_widget_trees().is_empty(),
+            "value-only patches must not rerun the fx reader effect"
+        );
+
+        // The patched cell is shared with the VM global: the next honest
+        // rerun (structural change) must render the patched number.
+        let value = runtime
+            .eval_str("(get (nth SEQ.effects 0) :value)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(value, Value::Number(0.9));
+        // A rebuilt identical tree now compares equal: no rerun either.
+        let result = runtime.set_reactive_value_patch("SEQ", "effects", fx_panel_value("Delay", 0.9));
+        assert!(!result.changed);
+    }
+
+    #[test]
+    fn set_reactive_value_patch_falls_back_on_string_change() {
+        let mut runtime = Runtime::new();
+        install_fx_reader(&mut runtime);
+
+        let result = runtime.set_reactive_value_patch("SEQ", "effects", fx_panel_value("Reverb", 0.5));
+        assert!(result.changed, "renames are structural");
+        runtime.run_reactive_cycle();
+        assert!(
+            !runtime.take_pending_buffer_widget_trees().is_empty(),
+            "structural fallbacks must rerun the fx reader effect"
+        );
+    }
+
+    #[test]
+    fn set_reactive_value_patch_falls_back_on_shape_change() {
+        let mut runtime = Runtime::new();
+        install_fx_reader(&mut runtime);
+
+        let Value::List(mut items) = fx_panel_value("Delay", 0.5) else {
+            unreachable!();
+        };
+        items.extend(match fx_panel_value("Chorus", 0.1) {
+            Value::List(extra) => extra,
+            _ => unreachable!(),
+        });
+        let result = runtime.set_reactive_value_patch("SEQ", "effects", Value::List(items));
+        assert!(result.changed, "list growth is structural");
+        runtime.run_reactive_cycle();
+        assert!(
+            !runtime.take_pending_buffer_widget_trees().is_empty(),
+            "shape fallbacks must rerun the fx reader effect"
+        );
+    }
 }
 
 #[cfg(test)]

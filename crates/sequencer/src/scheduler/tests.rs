@@ -375,6 +375,7 @@
                 seed_on_reset: None,
                 duration: None,
                 swing: None,
+                neural_group: None,
             }],
             node_params: Vec::new(),
             edge_params: Vec::new(),
@@ -3615,6 +3616,7 @@
                         seed_on_reset: None,
                         duration: None,
                         swing: None,
+                        neural_group: None,
                     }],
                     node_params: Vec::new(),
                     edge_params: vec![ProjectGraphEdgeParamOverride {

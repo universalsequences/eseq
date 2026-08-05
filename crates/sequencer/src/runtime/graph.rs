@@ -528,6 +528,9 @@ impl From<&ProjectGraphSeedFrom> for SeedFrom {
     }
 }
 
+/// Max neural groups in v1 (A–D), neural-groups spec §3.1.
+pub const NEURAL_GROUP_MAX: u8 = 4;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectGraphNodeIntrinsicOverride {
     pub group: String,
@@ -554,6 +557,11 @@ pub struct ProjectGraphNodeIntrinsicOverride {
     pub duration: Option<GraphDurationSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swing: Option<GraphSwingSpec>,
+    /// Neural-group (cluster) assignment, `docs/neural-groups-spec.md` §3.1. The
+    /// lisp-facing keyword is `:group`; the Rust name dodges the `group` field above,
+    /// which holds the prototype name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neural_group: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -630,6 +638,9 @@ pub struct GraphNode {
     pub duration: GraphDurationSpec,
     /// Timing swing policy for graph triggers.
     pub swing: GraphSwingSpec,
+    /// Cluster assignment for group-scoped control (neural-groups spec §3.1),
+    /// clamped to `0..NEURAL_GROUP_MAX`. Inert until per-group arbitration lands.
+    pub neural_group: u8,
 }
 
 impl Default for GraphNode {
@@ -650,6 +661,7 @@ impl Default for GraphNode {
             threshold: 1.0,
             duration: GraphDurationSpec::default(),
             swing: GraphSwingSpec::default(),
+            neural_group: 0,
         }
     }
 }
@@ -2193,7 +2205,49 @@ impl GraphRuntime {
         }
     }
 
+    /// Per-group polyphony (neural-groups spec §4.2): partition candidates by the
+    /// firing node's group — a stable filter over the already-sorted list — and run
+    /// the unmodified selection over each partition with the same `max_poly` budget.
+    /// Groups never compete for each other's slots, so a loop in group B can't have
+    /// its fire stolen (and its energy zeroed) by an unrelated hot cluster in group A.
+    /// With every candidate in one group this delegates untouched, byte-identical to
+    /// the pre-groups behavior.
     fn max_poly_accept(&mut self, candidates: &[GraphFiringCandidate], max_poly: u32) -> Vec<bool> {
+        let mut accepted = vec![true; candidates.len()];
+        if max_poly == 0 || candidates.len() <= max_poly as usize {
+            return accepted;
+        }
+        let group_ids: Vec<u8> = candidates
+            .iter()
+            .map(|candidate| self.nodes[candidate.node_index].neural_group)
+            .collect();
+        if group_ids.iter().any(|&group| group != group_ids[0]) {
+            accepted.fill(false);
+            for group in 0..NEURAL_GROUP_MAX {
+                let members: Vec<usize> = (0..candidates.len())
+                    .filter(|&idx| group_ids[idx] == group)
+                    .collect();
+                if members.is_empty() {
+                    continue;
+                }
+                let subset: Vec<GraphFiringCandidate> =
+                    members.iter().map(|&idx| candidates[idx].clone()).collect();
+                let subset_accepted = self.max_poly_accept_within(&subset, max_poly);
+                for (subset_idx, &candidate_idx) in members.iter().enumerate() {
+                    accepted[candidate_idx] = subset_accepted[subset_idx];
+                }
+            }
+            return accepted;
+        }
+        self.max_poly_accept_within(candidates, max_poly)
+    }
+
+    /// The selection-mode arbitration over one group's candidates.
+    fn max_poly_accept_within(
+        &mut self,
+        candidates: &[GraphFiringCandidate],
+        max_poly: u32,
+    ) -> Vec<bool> {
         let mut accepted = vec![true; candidates.len()];
         if max_poly == 0 || candidates.len() <= max_poly as usize {
             return accepted;
@@ -2779,6 +2833,7 @@ impl GraphManifest {
                 .clone()
                 .unwrap_or_else(|| self.duration.clone());
             let mut swing = self.node.swing.unwrap_or(self.swing);
+            let mut neural_group = 0u8;
             if let Some(overrides) = overrides {
                 for intrinsic in overrides.node_intrinsics.iter().filter(|intrinsic| {
                     intrinsic.group == self.node.name && intrinsic.instance == idx
@@ -2815,6 +2870,9 @@ impl GraphManifest {
                     if let Some(value) = intrinsic.swing {
                         swing = value;
                     }
+                    if let Some(value) = intrinsic.neural_group {
+                        neural_group = value.min(NEURAL_GROUP_MAX - 1);
+                    }
                 }
                 for param in overrides
                     .node_params
@@ -2844,6 +2902,7 @@ impl GraphManifest {
                 threshold: node_params[idx].get("threshold").copied().unwrap_or(1.0),
                 duration,
                 swing,
+                neural_group,
             });
         }
 
@@ -3631,6 +3690,30 @@ mod tests {
         let out = run(&mut runtime, 1.0, 1, vec![1.0, 1.0]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].node_index, 0);
+    }
+
+    #[test]
+    fn max_poly_arbitrates_per_neural_group() {
+        // Groups get their own max_poly budget (neural-groups spec §4.2): a group-B
+        // loop can't have its slot stolen — and its energy zeroed — by group A.
+        let mut n2 = node(Timebase::Quarter);
+        n2.neural_group = 1;
+        let nodes = vec![node(Timebase::Quarter), node(Timebase::Quarter), n2];
+        let edges = vec![
+            GraphEdge::new(0, 0, 1.0),
+            GraphEdge::new(1, 1, 1.0),
+            GraphEdge::new(2, 2, 1.0),
+        ];
+        let mut runtime = GraphRuntime::new(7, "g".into(), nodes, edges, 1.0, 0.0);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+        runtime.push_propagation(1, 0.0, GraphPayload::default());
+        runtime.push_propagation(2, 0.0, GraphPayload::default());
+
+        // max_poly 1: group A keeps its lowest-index firing, group B fires untouched.
+        let out = run(&mut runtime, 1.0, 1, vec![1.0, 1.0, 1.0]);
+        let mut fired: Vec<usize> = out.iter().map(|e| e.node_index).collect();
+        fired.sort_unstable();
+        assert_eq!(fired, vec![0, 2]);
     }
 
     #[test]
@@ -4619,6 +4702,54 @@ mod tests {
     }
 
     #[test]
+    fn neural_group_override_resolves_and_clamps() {
+        let manifest = GraphManifest {
+            id: 21,
+            name: "grouped".into(),
+            shape: ShapeSpec::Line(3),
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 0,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: GraphDurationSpec::default(),
+            swing: GraphSwingSpec::default(),
+            node: NodeProto {
+                name: "nrn".into(),
+                ..NodeProto::default()
+            },
+            edge_sets: vec![],
+        };
+        let intrinsic =
+            |instance: usize, neural_group: Option<u8>| ProjectGraphNodeIntrinsicOverride {
+                group: "nrn".into(),
+                instance,
+                resolution: None,
+                delay_steps: None,
+                quantize: None,
+                route: None,
+                seed_from: None,
+                seed_on_reset: None,
+                duration: None,
+                swing: None,
+                neural_group,
+            };
+        let overrides = ProjectGraphOverrides {
+            sequencer_id: manifest.id,
+            sequencer_name: manifest.name.clone(),
+            node_intrinsics: vec![intrinsic(1, Some(2)), intrinsic(2, Some(9))],
+            ..ProjectGraphOverrides::default()
+        };
+
+        let config = manifest.runtime_config_with_overrides(Some(&overrides));
+        // No override: group A, matching pre-groups behavior.
+        assert_eq!(config.nodes[0].neural_group, 0);
+        assert_eq!(config.nodes[1].neural_group, 2);
+        // Out-of-range assignments clamp into the v1 group space.
+        assert_eq!(config.nodes[2].neural_group, NEURAL_GROUP_MAX - 1);
+    }
+
+    #[test]
     fn variable_line_materialization_preserves_dormant_overrides() {
         let manifest = GraphManifest {
             id: 17,
@@ -4677,6 +4808,7 @@ mod tests {
                 seed_on_reset: Some(1.25),
                 duration: None,
                 swing: None,
+                neural_group: None,
             }],
             node_params: vec![ProjectGraphNodeParamOverride {
                 group: "nrn".into(),

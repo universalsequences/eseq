@@ -595,6 +595,31 @@ impl TrackPatternData {
         }
     }
 
+    /// Rack macro NAMES are authoring-level device labels, not per-scene
+    /// state: a stored Patch carries whatever names existed when it was
+    /// saved, and adopting them on launch reverts live renames. Values,
+    /// mappings, and p-locks still restore from the snapshot.
+    fn rack_snapshot_with_live_macro_names(
+        incoming: Option<RackTrackSnapshot>,
+        live: Option<&RackTrackSnapshot>,
+    ) -> Option<RackTrackSnapshot> {
+        let Some(mut rack) = incoming else {
+            return None;
+        };
+        if let Some(live) = live {
+            for macro_def in &mut rack.macros {
+                if let Some(live_macro) = live
+                    .macros
+                    .iter()
+                    .find(|live_macro| live_macro.id == macro_def.id)
+                {
+                    macro_def.name = live_macro.name.clone();
+                }
+            }
+        }
+        Some(rack)
+    }
+
     /// Restore only the device/sound half of this snapshot into the live
     /// mirror — instruments, effects, MIDI FX, rack and the mixer-side track
     /// params — leaving every per-step lane and the step grid itself alone.
@@ -664,7 +689,11 @@ impl TrackPatternData {
         {
             let mut rack_tracks = state.pattern.rack_tracks.lock().unwrap();
             if track < rack_tracks.len() {
-                rack_tracks[track] = self.rack_track.clone();
+                let live = rack_tracks[track].take();
+                rack_tracks[track] = Self::rack_snapshot_with_live_macro_names(
+                    self.rack_track.clone(),
+                    live.as_ref(),
+                );
             }
         }
         let refreshed_process_chain = {
@@ -787,7 +816,15 @@ impl TrackPatternData {
         {
             let mut rack_tracks = state.pattern.rack_tracks.lock().unwrap();
             if track < rack_tracks.len() {
-                rack_tracks[track] = self.rack_track.clone();
+                let live = rack_tracks[track].take();
+                rack_tracks[track] = if preserve_live_identity {
+                    Self::rack_snapshot_with_live_macro_names(
+                        self.rack_track.clone(),
+                        live.as_ref(),
+                    )
+                } else {
+                    self.rack_track.clone()
+                };
             }
         }
         let refreshed_process_chain = {

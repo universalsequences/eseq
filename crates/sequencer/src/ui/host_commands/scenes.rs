@@ -554,7 +554,7 @@ pub(super) fn handle(
             sync_track_mixer_state(rt, &app, &state);
             sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
             if fx_visible {
-                rt.set_reactive(
+                rt.set_reactive_value_patch(
                     "SEQ",
                     "effects",
                     build_effects_value(
@@ -564,12 +564,12 @@ pub(super) fn handle(
                         &selected_steps,
                     ),
                 );
-                rt.set_reactive(
+                rt.set_reactive_value_patch(
                     "SEQ",
                     "midi-effects",
                     build_midi_effects_value(&state, ct, &selected_steps),
                 );
-                rt.set_reactive(
+                rt.set_reactive_value_patch(
                     "SEQ",
                     "instrument-panel",
                     build_instrument_panel_value(&app, ct, &selected_steps),
@@ -740,7 +740,7 @@ pub(super) fn handle(
                         let started = Instant::now();
                         if fx_visible {
                             let sub_started = Instant::now();
-                            rt.set_reactive(
+                            rt.set_reactive_value_patch(
                                 "SEQ",
                                 "effects",
                                 build_effects_value(
@@ -753,7 +753,7 @@ pub(super) fn handle(
                             sync_effects_elapsed = sub_started.elapsed();
 
                             let sub_started = Instant::now();
-                            rt.set_reactive(
+                            rt.set_reactive_value_patch(
                                 "SEQ",
                                 "midi-effects",
                                 build_midi_effects_value(&state, ct, &selected_steps),
@@ -761,7 +761,7 @@ pub(super) fn handle(
                             sync_midi_effects_elapsed = sub_started.elapsed();
 
                             let sub_started = Instant::now();
-                            rt.set_reactive(
+                            rt.set_reactive_value_patch(
                                 "SEQ",
                                 "instrument-panel",
                                 build_instrument_panel_value(&app, ct, &selected_steps),
@@ -1040,7 +1040,7 @@ pub(super) fn handle(
                 sync_bus_mixer_state(rt, &app);
                 sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
                 sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
-                rt.set_reactive(
+                rt.set_reactive_value_patch(
                     "SEQ",
                     "effects",
                     build_effects_value(
@@ -1050,12 +1050,12 @@ pub(super) fn handle(
                         &selected_steps,
                     ),
                 );
-                rt.set_reactive(
+                rt.set_reactive_value_patch(
                     "SEQ",
                     "midi-effects",
                     build_midi_effects_value(&state, ct, &selected_steps),
                 );
-                rt.set_reactive(
+                rt.set_reactive_value_patch(
                     "SEQ",
                     "instrument-panel",
                     build_instrument_panel_value(&app, ct, &selected_steps),

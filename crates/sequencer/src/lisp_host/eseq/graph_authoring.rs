@@ -488,6 +488,7 @@ struct GraphNodeEdit {
     seed_on_reset: Option<f64>,
     duration: Option<crate::graph::GraphDurationSpec>,
     swing: Option<crate::graph::GraphSwingSpec>,
+    neural_group: Option<u8>,
 }
 
 struct GraphEdgeEdit {
@@ -631,7 +632,7 @@ fn graph_node_numeric_value(
 ) -> Result<f64, String> {
     match field {
         "delay" | "delay-steps" | "seed-on-reset" | "reset-seed" | "seed-route"
-        | "seed-from-route" => {
+        | "seed-from-route" | "group" | "grp" => {
             let value = resolved_graph_node_value(state, manifest, instance, field)?;
             graph_number(&value).ok_or_else(|| format!("bind-graph field :{field} is not numeric"))
         }
@@ -913,6 +914,7 @@ fn resolved_graph_node_value(
             },
         )),
         "seed-on-reset" | "reset-seed" => Ok(EValue::Number(node.seed_on_reset)),
+        "group" | "grp" => Ok(EValue::Number(node.neural_group as f64)),
         other => Err(format!("graph-node-value unknown field :{other}")),
     }
 }
@@ -1117,6 +1119,7 @@ fn ensure_graph_node_intrinsic<'a>(
             seed_on_reset: None,
             duration: None,
             swing: None,
+            neural_group: None,
         });
     graph
         .node_intrinsics
@@ -1246,6 +1249,11 @@ fn parse_graph_node_edit(args: &[EValue]) -> Result<GraphNodeEdit, String> {
             }
             "duration" | "dur" => edit.duration = Some(graph_parse_duration_spec(value)?),
             "swing" => edit.swing = Some(graph_parse_swing_spec(value)?),
+            "group" | "grp" => {
+                let group = parse_u32_value(value, "group")?;
+                edit.neural_group =
+                    Some(group.min(crate::graph::NEURAL_GROUP_MAX as u32 - 1) as u8);
+            }
             other => return Err(format!("graph-node unknown argument :{other}")),
         }
         idx += 1;
@@ -1280,6 +1288,9 @@ fn apply_graph_node_edit(
     }
     if edit.swing.is_some() {
         node.swing = edit.swing;
+    }
+    if edit.neural_group.is_some() {
+        node.neural_group = edit.neural_group;
     }
 }
 

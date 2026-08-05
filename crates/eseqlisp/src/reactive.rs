@@ -116,6 +116,223 @@ fn changed_numeric_indices(previous: Option<&Value>, next: &Value) -> Vec<usize>
     changed
 }
 
+fn summarize_diff_leaf(value: &Value) -> String {
+    match value {
+        Value::Number(n) => format!("{n}"),
+        Value::Bool(b) => format!("{b}"),
+        Value::Nil => "nil".to_string(),
+        Value::String(s) | Value::Symbol(s) | Value::Keyword(s) => {
+            let mut s = s.clone();
+            if s.len() > 32 {
+                s.truncate(32);
+                s.push('…');
+            }
+            format!("{s:?}")
+        }
+        Value::List(items) => format!("list(len={})", items.len()),
+        Value::Map(map) => format!("map(len={})", map.len()),
+        _ => "<opaque>".to_string(),
+    }
+}
+
+/// Walk two values in parallel and record the paths where they differ.
+/// Recurses only into lists and maps; everything else is a leaf compared
+/// with PartialEq. Stops once `limit` diffs have been collected.
+fn collect_value_diffs(previous: &Value, next: &Value, path: &str, out: &mut Vec<String>, limit: usize) {
+    if out.len() >= limit {
+        return;
+    }
+    match (previous, next) {
+        (Value::List(prev_items), Value::List(next_items)) => {
+            if prev_items.len() != next_items.len() {
+                out.push(format!(
+                    "{path}: list len {} -> {}",
+                    prev_items.len(),
+                    next_items.len()
+                ));
+            }
+            for (index, (prev_item, next_item)) in
+                prev_items.iter().zip(next_items.iter()).enumerate()
+            {
+                collect_value_diffs(
+                    &prev_item.borrow(),
+                    &next_item.borrow(),
+                    &format!("{path}[{index}]"),
+                    out,
+                    limit,
+                );
+            }
+        }
+        (Value::Map(prev_map), Value::Map(next_map)) => {
+            let mut keys: Vec<&String> = prev_map.keys().chain(next_map.keys()).collect();
+            keys.sort();
+            keys.dedup();
+            for key in keys {
+                match (prev_map.get(key), next_map.get(key)) {
+                    (Some(prev_item), Some(next_item)) => collect_value_diffs(
+                        &prev_item.borrow(),
+                        &next_item.borrow(),
+                        &format!("{path}.{key}"),
+                        out,
+                        limit,
+                    ),
+                    (Some(prev_item), None) => out.push(format!(
+                        "{path}.{key}: {} -> <absent>",
+                        summarize_diff_leaf(&prev_item.borrow())
+                    )),
+                    (None, Some(next_item)) => out.push(format!(
+                        "{path}.{key}: <absent> -> {}",
+                        summarize_diff_leaf(&next_item.borrow())
+                    )),
+                    (None, None) => {}
+                }
+                if out.len() >= limit {
+                    return;
+                }
+            }
+        }
+        _ => {
+            if previous != next {
+                out.push(format!(
+                    "{path}: {} -> {}",
+                    summarize_diff_leaf(previous),
+                    summarize_diff_leaf(next)
+                ));
+            }
+        }
+    }
+}
+
+/// Classification of a candidate value against the stored one for the
+/// value-patch fast path (docs/fx-value-delta-spec.md).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReactiveValueDelta {
+    /// Deep-equal: nothing to do.
+    Equal,
+    /// Same shape everywhere; only Number/Bool leaves differ. Safe to write
+    /// into the stored tree's shared cells without dirtying subscribers —
+    /// widgets display these leaves through per-param field bindings.
+    Patchable,
+    /// Shape, string, or variant change (or unregistered field): must go
+    /// through the full set_reactive pipeline so dependents re-evaluate.
+    Structural,
+}
+
+fn classify_value_delta(stored: &Value, next: &Value) -> ReactiveValueDelta {
+    match (stored, next) {
+        (Value::List(stored_items), Value::List(next_items)) => {
+            if stored_items.len() != next_items.len() {
+                return ReactiveValueDelta::Structural;
+            }
+            let mut class = ReactiveValueDelta::Equal;
+            for (stored_item, next_item) in stored_items.iter().zip(next_items.iter()) {
+                match classify_value_delta(&stored_item.borrow(), &next_item.borrow()) {
+                    ReactiveValueDelta::Structural => return ReactiveValueDelta::Structural,
+                    ReactiveValueDelta::Patchable => class = ReactiveValueDelta::Patchable,
+                    ReactiveValueDelta::Equal => {}
+                }
+            }
+            class
+        }
+        (Value::Map(stored_map), Value::Map(next_map)) => {
+            if stored_map.len() != next_map.len() {
+                return ReactiveValueDelta::Structural;
+            }
+            let mut class = ReactiveValueDelta::Equal;
+            for (key, stored_item) in stored_map {
+                let Some(next_item) = next_map.get(key) else {
+                    return ReactiveValueDelta::Structural;
+                };
+                match classify_value_delta(&stored_item.borrow(), &next_item.borrow()) {
+                    ReactiveValueDelta::Structural => return ReactiveValueDelta::Structural,
+                    ReactiveValueDelta::Patchable => class = ReactiveValueDelta::Patchable,
+                    ReactiveValueDelta::Equal => {}
+                }
+            }
+            class
+        }
+        (Value::Number(stored_number), Value::Number(next_number)) => {
+            if stored_number == next_number {
+                ReactiveValueDelta::Equal
+            } else {
+                ReactiveValueDelta::Patchable
+            }
+        }
+        (Value::Bool(stored_bool), Value::Bool(next_bool)) => {
+            if stored_bool == next_bool {
+                ReactiveValueDelta::Equal
+            } else {
+                ReactiveValueDelta::Patchable
+            }
+        }
+        _ => {
+            if stored == next {
+                ReactiveValueDelta::Equal
+            } else {
+                ReactiveValueDelta::Structural
+            }
+        }
+    }
+}
+
+fn patch_value_cells(
+    stored: &Rc<RefCell<Value>>,
+    next: &Rc<RefCell<Value>>,
+    patched: &mut usize,
+) {
+    enum Step {
+        Recurse,
+        Write(Value),
+        Nothing,
+    }
+    let step = {
+        match (&*stored.borrow(), &*next.borrow()) {
+            (Value::List(_), Value::List(_)) | (Value::Map(_), Value::Map(_)) => Step::Recurse,
+            (Value::Number(stored_number), Value::Number(next_number)) => {
+                if stored_number != next_number {
+                    Step::Write(Value::Number(*next_number))
+                } else {
+                    Step::Nothing
+                }
+            }
+            (Value::Bool(stored_bool), Value::Bool(next_bool)) => {
+                if stored_bool != next_bool {
+                    Step::Write(Value::Bool(*next_bool))
+                } else {
+                    Step::Nothing
+                }
+            }
+            _ => Step::Nothing,
+        }
+    };
+    match step {
+        Step::Recurse => {
+            let stored_ref = stored.borrow();
+            let next_ref = next.borrow();
+            match (&*stored_ref, &*next_ref) {
+                (Value::List(stored_items), Value::List(next_items)) => {
+                    for (stored_item, next_item) in stored_items.iter().zip(next_items.iter()) {
+                        patch_value_cells(stored_item, next_item, patched);
+                    }
+                }
+                (Value::Map(stored_map), Value::Map(next_map)) => {
+                    for (key, stored_item) in stored_map {
+                        if let Some(next_item) = next_map.get(key) {
+                            patch_value_cells(stored_item, next_item, patched);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Step::Write(next_value) => {
+            *stored.borrow_mut() = next_value;
+            *patched += 1;
+        }
+        Step::Nothing => {}
+    }
+}
+
 #[derive(Clone)]
 pub struct ReactiveRegistry {
     float_slots: ReactiveBindingStore,
@@ -190,6 +407,82 @@ impl ReactiveRegistry {
             .is_some_and(|current| current == value)
     }
 
+    /// Classifies `next` against the stored value for the value-patch fast
+    /// path. Returns None when the field is unregistered. Only container
+    /// (list/map) roots are ever Patchable: a scalar root lives by value in
+    /// this registry and in the VM global, so writing it here would not
+    /// propagate — scalar roots must take the full set pipeline.
+    pub fn classify_value_patch(
+        &self,
+        namespace: &str,
+        field: &str,
+        next: &Value,
+    ) -> Option<ReactiveValueDelta> {
+        let stored = self
+            .namespaces
+            .get(namespace)
+            .and_then(|namespace_entry| namespace_entry.fields.get(field))?;
+        if !matches!(
+            (stored, next),
+            (Value::List(_), Value::List(_)) | (Value::Map(_), Value::Map(_))
+        ) {
+            return Some(if stored == next {
+                ReactiveValueDelta::Equal
+            } else {
+                ReactiveValueDelta::Structural
+            });
+        }
+        // Root lists with numeric elements carry per-index float slots for
+        // bind-seq subscribers; an in-place patch would leave those slots
+        // stale, so such fields always take the full set pipeline.
+        if let Value::List(items) = stored
+            && items
+                .iter()
+                .any(|item| matches!(&*item.borrow(), Value::Number(_) | Value::Bool(_)))
+        {
+            return Some(if stored == next {
+                ReactiveValueDelta::Equal
+            } else {
+                ReactiveValueDelta::Structural
+            });
+        }
+        Some(classify_value_delta(stored, next))
+    }
+
+    /// Writes `next`'s differing Number/Bool leaves into the stored tree's
+    /// cells. Those cells are shared (Value::clone is shallow at the cell
+    /// level) with the VM global namespace and anything the Lisp side
+    /// captured from earlier evals, so every reader sees the new values on
+    /// its next evaluation without any subscriber dirtying. Callers must
+    /// have classified the delta as Patchable first. Returns the number of
+    /// leaves written.
+    pub fn apply_value_patch(&self, namespace: &str, field: &str, next: &Value) -> usize {
+        let Some(stored) = self
+            .namespaces
+            .get(namespace)
+            .and_then(|namespace_entry| namespace_entry.fields.get(field))
+        else {
+            return 0;
+        };
+        let mut patched = 0;
+        match (stored, next) {
+            (Value::List(stored_items), Value::List(next_items)) => {
+                for (stored_item, next_item) in stored_items.iter().zip(next_items.iter()) {
+                    patch_value_cells(stored_item, next_item, &mut patched);
+                }
+            }
+            (Value::Map(stored_map), Value::Map(next_map)) => {
+                for (key, stored_item) in stored_map {
+                    if let Some(next_item) = next_map.get(key) {
+                        patch_value_cells(stored_item, next_item, &mut patched);
+                    }
+                }
+            }
+            _ => {}
+        }
+        patched
+    }
+
     pub fn set(
         &mut self,
         namespace: &str,
@@ -220,6 +513,34 @@ impl ReactiveRegistry {
                     changed_indices,
                     previous.is_some()
                 );
+            }
+        }
+        {
+            // ESEQ_SCENE_TRACE_DIFF=field1,field2 dumps the value paths that
+            // actually differ on a changed set of those fields.
+            static DIFF_FIELDS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+            let diff_fields = DIFF_FIELDS.get_or_init(|| {
+                std::env::var("ESEQ_SCENE_TRACE_DIFF")
+                    .map(|v| {
+                        v.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            if diff_fields.iter().any(|f| f == field) {
+                if let Some(previous) = previous {
+                    const DIFF_LIMIT: usize = 60;
+                    let mut diffs = Vec::new();
+                    collect_value_diffs(previous, &value, "", &mut diffs, DIFF_LIMIT);
+                    for line in &diffs {
+                        eprintln!("[reactive-diff] {namespace}.{field}{line}");
+                    }
+                    if diffs.len() >= DIFF_LIMIT {
+                        eprintln!("[reactive-diff] {namespace}.{field}: ... (truncated at {DIFF_LIMIT})");
+                    }
+                }
             }
         }
 

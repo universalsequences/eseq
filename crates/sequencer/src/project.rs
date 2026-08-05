@@ -3085,6 +3085,7 @@ mod tests {
                         seed_on_reset: None,
                         duration: None,
                         swing: None,
+                        neural_group: None,
                     }],
                     node_params: vec![crate::graph::ProjectGraphNodeParamOverride {
                         group: "nrn".to_string(),

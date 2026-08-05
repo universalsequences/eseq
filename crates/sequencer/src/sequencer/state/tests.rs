@@ -780,6 +780,38 @@
         )
     }
 
+    #[test]
+    fn pattern_restore_keeps_live_rack_macro_names() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(vec![sample_pattern_snapshot(1)], 0);
+        let mut live_rack = sample_rack_track_snapshot();
+        live_rack.macros[0].name = "Release".to_string();
+        state.pattern.rack_tracks.lock().unwrap()[0] = Some(live_rack);
+
+        let launched = {
+            let mut scenes = state.pattern.scenes.lock().unwrap();
+            let id = scenes.fork_track_pattern(0).expect("track pattern fork");
+            let mut stored_rack = sample_rack_track_snapshot();
+            stored_rack.macros[0].value = 0.75;
+            assert!(scenes.track_pools[0].edit(id, |data| {
+                data.rack_track = Some(stored_rack.clone());
+            }));
+            scenes.track_pools[0].get(id).expect("forked pattern")
+        };
+        launched.restore_to(&state, 0);
+
+        let racks = state.pattern.rack_tracks.lock().unwrap();
+        let rack = racks[0].as_ref().expect("rack restored");
+        assert_eq!(
+            rack.macros[0].name, "Release",
+            "live macro renames must survive scene restore"
+        );
+        assert_eq!(
+            rack.macros[0].value, 0.75,
+            "macro values still restore from the stored patch"
+        );
+    }
+
     fn sample_sampler_rack_slot(
         buffer_id: i32,
         sample_name: &str,

@@ -314,7 +314,7 @@ pub(crate) fn reactive_tick_and_render(
             sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
             sync_modulator_phase_fields(rt, &ctx.meters.cached_modulator_phases);
             sync_modulator_level_fields(rt, &ctx.meters.cached_modulator_levels);
-            rt.set_reactive(
+            rt.set_reactive_value_patch(
                 "SEQ",
                 "effects",
                 build_effects_value(
@@ -324,12 +324,12 @@ pub(crate) fn reactive_tick_and_render(
                     &ctx.shared.selected_steps,
                 ),
             );
-            rt.set_reactive(
+            rt.set_reactive_value_patch(
                 "SEQ",
                 "midi-effects",
                 build_midi_effects_value(&ctx.shared.state, ct, &ctx.shared.selected_steps),
             );
-            rt.set_reactive(
+            rt.set_reactive_value_patch(
                 "SEQ",
                 "instrument-panel",
                 build_instrument_panel_value(&app, ct, &ctx.shared.selected_steps),
@@ -1215,7 +1215,7 @@ pub(crate) fn reactive_tick_and_render(
         let fx_ep = ctx.shared.fx_epoch.load(Ordering::Relaxed);
         if fx_visible && fx_ep != ctx.frame.prev_fx_epoch {
             let rt = editor.runtime_mut();
-            rt.set_reactive(
+            rt.set_reactive_value_patch(
                 "SEQ",
                 "effects",
                 if app.tracks.is_empty() {
@@ -1229,7 +1229,7 @@ pub(crate) fn reactive_tick_and_render(
                     )
                 },
             );
-            rt.set_reactive(
+            rt.set_reactive_value_patch(
                 "SEQ",
                 "midi-effects",
                 if app.tracks.is_empty() {
@@ -1238,7 +1238,7 @@ pub(crate) fn reactive_tick_and_render(
                     build_midi_effects_value(&ctx.shared.state, ct, &ctx.shared.selected_steps)
                 },
             );
-            rt.set_reactive(
+            rt.set_reactive_value_patch(
                 "SEQ",
                 "instrument-panel",
                 if app.tracks.is_empty() {
@@ -1256,7 +1256,7 @@ pub(crate) fn reactive_tick_and_render(
                     build_step_has_plocks(&ctx.shared.state, ct, &app.graph.effect_descriptors)
                 },
             );
-            rt.set_reactive(
+            rt.set_reactive_value_patch(
                 "SEQ",
                 "bus-effects",
                 build_bus_effects_value_for_selection(&app, Some(&ctx.shared.selected_steps)),

@@ -1655,6 +1655,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     seed_on_reset: None,
                     duration: None,
                     swing: None,
+                    neural_group: None,
                 });
             graph
                 .node_intrinsics
@@ -1669,6 +1670,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     seed_on_reset: None,
                     duration: None,
                     swing: None,
+                    neural_group: None,
                 });
             graph
                 .edge_params
@@ -3288,6 +3290,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     seed_on_reset: None,
                     duration: None,
                     swing: None,
+                    neural_group: None,
                 },
                 crate::graph::ProjectGraphNodeIntrinsicOverride {
                     group: "nrn".to_string(),
@@ -3300,6 +3303,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     seed_on_reset: None,
                     duration: None,
                     swing: None,
+                    neural_group: None,
                 },
                 crate::graph::ProjectGraphNodeIntrinsicOverride {
                     group: "nrn".to_string(),
@@ -3312,6 +3316,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     seed_on_reset: None,
                     duration: None,
                     swing: None,
+                    neural_group: None,
                 },
             ],
             node_params: vec![crate::graph::ProjectGraphNodeParamOverride {
@@ -3533,6 +3538,26 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 .eval_str("(reactive-value (bind-graph \"neural\" 1 :seed-on-reset))")
                 .expect("bound seed-on-reset"),
             Some(Value::Number(1.0))
+        );
+        runtime
+            .eval_str("(graph-node \"neural\" 1 :group 2)")
+            .expect("graph-node group");
+        assert_eq!(
+            state.current_graph_overrides()[0].node_intrinsics[0].neural_group,
+            Some(2)
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-node-value \"neural\" 1 :group)")
+                .expect("graph-node-value group"),
+            Some(Value::Number(2.0))
+        );
+        // Unassigned nodes stay in group A, and the numeric bind path serves the value.
+        assert_eq!(
+            runtime
+                .eval_str("(reactive-value (bind-graph \"neural\" 0 :group))")
+                .expect("bound group default"),
+            Some(Value::Number(0.0))
         );
         runtime
             .eval_str("(graph-node \"neural\" 1 :seed-from :off :seed-on-reset 0)")

@@ -2262,6 +2262,53 @@ impl Runtime {
         }
     }
 
+    /// Value-patch variant of set_reactive (docs/fx-value-delta-spec.md).
+    /// When the candidate differs from the stored value only at Number/Bool
+    /// leaves inside an identically-shaped container tree, the differing
+    /// leaves are written into the stored tree's shared cells and NO
+    /// subscribers are dirtied — later Lisp evals read the fresh values, and
+    /// live display flows through the per-param field bindings synced
+    /// alongside. Any shape/string/variant difference (device added, slot
+    /// count, rename, track switch) falls back to the full set_reactive
+    /// pipeline, so this is safe wherever set_reactive is.
+    pub fn set_reactive_value_patch(
+        &mut self,
+        namespace: &str,
+        field: &str,
+        value: Value,
+    ) -> ReactiveSetResult {
+        match self
+            .reactive_registry
+            .classify_value_patch(namespace, field, &value)
+        {
+            Some(crate::reactive::ReactiveValueDelta::Equal) => ReactiveSetResult {
+                changed: false,
+                effects_dirty: false,
+                widgets_dirty: false,
+            },
+            Some(crate::reactive::ReactiveValueDelta::Patchable) => {
+                let patched = self
+                    .reactive_registry
+                    .apply_value_patch(namespace, field, &value);
+                static SCENE_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                if *SCENE_TRACE
+                    .get_or_init(|| std::env::var("ESEQ_SCENE_TRACE").is_ok_and(|v| v == "1"))
+                    || trace_ui_enabled()
+                {
+                    eprintln!("[reactive-value-patch] {namespace}.{field} leaves={patched}");
+                }
+                ReactiveSetResult {
+                    changed: false,
+                    effects_dirty: false,
+                    widgets_dirty: false,
+                }
+            }
+            Some(crate::reactive::ReactiveValueDelta::Structural) | None => {
+                self.set_reactive(namespace, field, value)
+            }
+        }
+    }
+
     pub fn set_reactive_list_index(
         &mut self,
         namespace: &str,

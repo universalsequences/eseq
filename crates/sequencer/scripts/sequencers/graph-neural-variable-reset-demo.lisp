@@ -105,6 +105,9 @@
         "Off"))
 (def gvr-max-poly-selection-options
   (list "deterministic" "propagation" "random" "loudest" "lowest-transpose" "highest-transpose" "seed-first"))
+;; Neural-group assignment (docs/neural-groups-spec.md §3.1). The stored value IS the
+;; dropdown index (group A = 0), so the numeric bind-graph handle seeds it directly.
+(def gvr-group-options (list "A" "B" "C" "D"))
 (def gvr-route-off-index (- (len gvr-route-options) 1))
 (def gvr-route-off-color (list 0.20 0.21 0.23))
 
@@ -366,6 +369,7 @@
 (def gvr-node-width 1.4)
 (def gvr-control-width 6.0)
 (def gvr-seed-control-width 4.8)
+(def gvr-group-width 3.0)
 
 (def gvr-matrix-data-height (count)
   (+ (* count gvr-row-height)
@@ -459,6 +463,9 @@
       (gvr-pick (str "graph-variable-reset-route-" n)
         (bind-graph gvr-name n :route gvr-route-options) gvr-route-options
         (lambda (v) (gvr-edit-route n v track-colors)))
+      (gvr-pick-sized (str "graph-variable-reset-group-" n)
+        (bind-graph gvr-name n :group) gvr-group-options gvr-group-width
+        (lambda (v) (gvr-edit-num n :group (gvr-index-of gvr-group-options v))))
       (gvr-seed-toggle (str "graph-variable-reset-seed-route-" n)
         (gvr-seed-route-value n)
         (lambda (v) (gvr-edit-seed-route n v)))
@@ -498,6 +505,7 @@
     (label "" :width gvr-route-bar-width :height 1.0 :font-size 1 :bg :transparent)
     (label "node"   :width gvr-node-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
     (label "route"  :width gvr-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "grp"    :width gvr-group-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
     (label "seed rt" :width gvr-seed-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
     (label "rst seed" :width gvr-seed-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
     (label "delay"  :width gvr-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
