@@ -1408,9 +1408,13 @@ pub(crate) fn plock_variant_step_render_values(
 }
 
 pub(crate) fn build_step_plock_kinds(state: &Arc<SequencerState>, track: usize) -> Value {
+    build_step_plock_kinds_from_render(&plock_variant_step_render_values(state, track))
+}
+
+pub(crate) fn build_step_plock_kinds_from_render(render_values: &[PlockVariantStepRender]) -> Value {
     Value::List(
-        plock_variant_step_render_values(state, track)
-            .into_iter()
+        render_values
+            .iter()
             .map(|render| Rc::new(RefCell::new(Value::Number(render.kind as f64))))
             .collect(),
     )
@@ -1421,9 +1425,19 @@ pub(crate) fn build_step_variant_color_channel(
     track: usize,
     channel: usize,
 ) -> Value {
+    build_step_variant_color_channel_from_render(
+        &plock_variant_step_render_values(state, track),
+        channel,
+    )
+}
+
+pub(crate) fn build_step_variant_color_channel_from_render(
+    render_values: &[PlockVariantStepRender],
+    channel: usize,
+) -> Value {
     Value::List(
-        plock_variant_step_render_values(state, track)
-            .into_iter()
+        render_values
+            .iter()
             .map(|render| {
                 Rc::new(RefCell::new(Value::Number(
                     render.color.get(channel).copied().unwrap_or(0.0) as f64,

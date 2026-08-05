@@ -729,23 +729,7 @@ pub(super) fn sync_step_batch_structural_bindings(
                 Value::Bool(visible && track == current_track_idx && selected.contains(&step)),
             )
             .effects_dirty;
-        let render = render_values[step];
-        dirty |= rt
-            .set_reactive(
-                "SEQ",
-                &track_step_plock_kind_field(track, step),
-                Value::Number(render.kind as f64),
-            )
-            .effects_dirty;
-        for (channel, value) in ['r', 'g', 'b'].into_iter().zip(render.color) {
-            dirty |= rt
-                .set_reactive(
-                    "SEQ",
-                    &track_step_variant_color_field(track, step, channel),
-                    Value::Number(value as f64),
-                )
-                .effects_dirty;
-        }
+        dirty |= sync_track_step_plock_render_fields(rt, track, step, render_values[step]);
         for viewport in expanded_step_projection.viewports_for_track(track) {
             if let Some(slot) = visible_slot_for_step(viewport, step) {
                 dirty |= sync_expanded_step_slot(
@@ -771,6 +755,42 @@ pub(super) fn sync_step_batch_structural_bindings(
             selected.iter().copied().min(),
             selected.len(),
         );
+    }
+    dirty
+}
+
+/// Write the compact step shell's per-step p-lock *render* bindings
+/// (`seq-track-step-plock-kind-{track}-{step}` plus the three
+/// `seq-track-step-variant-{r,g,b}-{track}-{step}` fields).
+///
+/// These are the fields the compact grid's tick and variant tint bind to. They
+/// are otherwise only published by the full `ui_epoch`-driven sync
+/// (`sync_all_track_step_binding_fields_inner`) and by
+/// `sync_step_batch_structural_bindings`; the p-lock authoring path publishes
+/// them through this helper so the tick appears on the first knob touch.
+/// Values/gating match the full sync exactly (render values are written
+/// ungated by step visibility, like the full sync does).
+pub(super) fn sync_track_step_plock_render_fields(
+    rt: &mut Runtime,
+    track: usize,
+    step: usize,
+    render: PlockVariantStepRender,
+) -> bool {
+    let mut dirty = rt
+        .set_reactive(
+            "SEQ",
+            &track_step_plock_kind_field(track, step),
+            Value::Number(render.kind as f64),
+        )
+        .effects_dirty;
+    for (channel, value) in ['r', 'g', 'b'].into_iter().zip(render.color) {
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_step_variant_color_field(track, step, channel),
+                Value::Number(value as f64),
+            )
+            .effects_dirty;
     }
     dirty
 }
@@ -1028,10 +1048,11 @@ pub(super) fn sync_instrument_plock_presence_fields(
             build_step_has_plocks(state, track, effect_descriptors),
         )
         .effects_dirty;
-    let step_plock_kinds = build_step_plock_kinds(state, track);
-    let step_variant_r = build_step_variant_color_channel(state, track, 0);
-    let step_variant_g = build_step_variant_color_channel(state, track, 1);
-    let step_variant_b = build_step_variant_color_channel(state, track, 2);
+    let render_values = plock_variant_step_render_values(state, track);
+    let step_plock_kinds = build_step_plock_kinds_from_render(&render_values);
+    let step_variant_r = build_step_variant_color_channel_from_render(&render_values, 0);
+    let step_variant_g = build_step_variant_color_channel_from_render(&render_values, 1);
+    let step_variant_b = build_step_variant_color_channel_from_render(&render_values, 2);
     dirty |= rt
         .set_reactive("SEQ", "step-plock-kinds", step_plock_kinds.clone())
         .effects_dirty;
@@ -1063,17 +1084,32 @@ pub(super) fn sync_instrument_plock_presence_fields(
             build_track_plock_variants_value(state, track, selected_steps),
         )
         .effects_dirty;
+    // Per-step compact-grid bindings for the touched steps. The compact step
+    // shell binds its p-lock tick to the per-step `-plock-kind-` number and its
+    // tint to the per-step `-variant-{r,g,b}-` fields, not to the list forms
+    // published above, so those must be written here too — otherwise the tick
+    // only appears on the next `ui_epoch`-driven full sync (i.e. after an
+    // unrelated selection change).
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .min(MAX_STEPS);
     for step in steps {
         if step >= MAX_STEPS {
             continue;
         }
+        // `visible` gating matches the full sync (out-of-range steps report no
+        // p-lock); previously this write was ungated.
+        let visible = step < num_steps;
         dirty |= rt
             .set_reactive(
                 "SEQ",
                 &track_step_plocked_field(track, step),
-                Value::Bool(track_step_has_plock(state, track, effect_descriptors, step)),
+                Value::Bool(
+                    visible && track_step_has_plock(state, track, effect_descriptors, step),
+                ),
             )
             .effects_dirty;
+        dirty |= sync_track_step_plock_render_fields(rt, track, step, render_values[step]);
     }
     dirty
 }

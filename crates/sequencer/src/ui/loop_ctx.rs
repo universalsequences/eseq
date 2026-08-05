@@ -2,6 +2,7 @@ use super::*;
 
 /// Inline editor session state (instrument/effect creation/editing) plus the
 /// lisp authoring-transaction checkpoints, bundled out of the event loop.
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct EditSessionState {
     pub(crate) editor_buffer_name: Option<String>,
     pub(crate) editor_mode: Option<String>,
@@ -60,6 +61,7 @@ pub(crate) struct ParamSyncRevision {
 
 /// Previous-frame values the reactive tick diffs against to decide which
 /// reactives to republish.
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct FrameDiffState {
     pub(crate) prev_editor_macro_action: (String, String),
     pub(crate) prev_playing: bool,
@@ -119,6 +121,7 @@ pub(crate) struct FrameDiffState {
 /// In-flight pointer-gesture state that host commands need to observe or
 /// reset (e.g. committing a rack drag's scheduler snapshot once at gesture
 /// end).
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct GestureState {
     pub(crate) rack_control_snapshot_dirty: bool,
     pub(crate) piano_roll_history_gesture: Option<ActivePianoRollHistoryGesture>,
