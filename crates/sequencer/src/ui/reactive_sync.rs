@@ -385,6 +385,52 @@ pub(super) fn sync_track_step_param_list_bindings(
     dirty
 }
 
+/// The per-track slice of `sync_track_step_param_list_bindings` for a SINGLE
+/// param, minus the current-track flat list.
+///
+/// `sync_single_step_param_binding` already writes the flat
+/// `SEQ.{velocities,durations,...}` list at the edited INDEX, which is the
+/// cheap index-aware write; rewriting the whole list here would re-dirty every
+/// effect that reads it (that whole-list rewrite is exactly what made a
+/// velocity drag cost ~4.4ms of reactive cycle under the old ui_epoch resync).
+/// The list-of-lists `SEQ.track-{velocities,durations,...}` has no per-index
+/// writer, though, and `seqv-track-param-values` reads it for every
+/// non-current track's expanded lane, so it still needs the per-track write.
+pub(super) fn sync_track_step_param_list_binding_for_param(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+    param: StepParam,
+) -> bool {
+    let Some((_, track_field, _)) = step_param_fields(param) else {
+        return false;
+    };
+    rt.set_reactive_list_index(
+        "SEQ",
+        track_field,
+        track,
+        build_param_list(state, track, param),
+    )
+    .effects_dirty
+}
+
+/// `track-duration-spans` at one track index — the list-of-lists half of the
+/// duration-bar surface whose per-step half is
+/// `sync_track_duration_span_binding_fields`.
+pub(super) fn sync_track_duration_spans_list_binding(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+) -> bool {
+    rt.set_reactive_list_index(
+        "SEQ",
+        "track-duration-spans",
+        track,
+        build_track_duration_spans_value(state, track),
+    )
+    .effects_dirty
+}
+
 pub(super) fn sync_single_step_param_binding(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -757,6 +803,19 @@ pub(super) fn sync_step_batch_structural_bindings(
         );
     }
     dirty
+}
+
+/// Accumulate a `(track, steps)` entry for a deferred per-track fan-out inside
+/// `apply_ui_invalidations`, de-duplicating both the track and the step.
+fn push_deferred_track_step(entries: &mut Vec<(usize, Vec<usize>)>, track: usize, step: usize) {
+    match entries.iter_mut().find(|(entry, _)| *entry == track) {
+        Some((_, steps)) => {
+            if !steps.contains(&step) {
+                steps.push(step);
+            }
+        }
+        None => entries.push((track, vec![step])),
+    }
 }
 
 /// Write the compact step shell's per-step p-lock *render* bindings
@@ -1586,6 +1645,31 @@ pub(super) fn apply_ui_invalidations(
 
     let mut needs_reactive_cycle = false;
     let mut bus_state_pulled = false;
+    // Step-param edits fan out to two surfaces that have no per-step writer:
+    // the `SEQ.track-{velocities,durations,...}` list-of-lists (read by every
+    // non-current track's expanded lane) and `SEQ.track-duration-spans`. Both
+    // are per-TRACK rewrites, so a drag over a 64-step selection must not do
+    // them once per step — collect the distinct (track, param) pairs here and
+    // flush them once after the loop. `set-step-param-history` used to reach
+    // them by bumping ui_epoch, which resynced every track instead.
+    let mut step_param_track_lists: Vec<(usize, StepParam)> = Vec::new();
+    let mut duration_span_tracks: Vec<usize> = Vec::new();
+    // The compact step shell's p-lock tick/variant tint is derived from
+    // `live_track_has_seq_lock`, which is true as soon as ANY StepParam leaves
+    // its default — so a transpose/velocity/duration edit flips the step's
+    // render kind. Computing the render vector needs a per-track registry
+    // reconcile over all MAX_STEPS, so collect the touched steps here and do
+    // one reconcile per track after the loop.
+    let mut plock_render_steps: Vec<(usize, Vec<usize>)> = Vec::new();
+    // Drum-rack lanes place a hit on the pad row named by the step's Transpose,
+    // so a transpose edit moves the hit between rows. `drum_rack_sound_options`
+    // needs a rack-track lock plus a SEQ namespace read, so this is likewise
+    // batched to one call per track.
+    let mut drum_lane_transpose_steps: Vec<(usize, Vec<usize>)> = Vec::new();
+    // The piano roll renders notes from transpose/velocity/duration, so a
+    // step-param edit on the current track moves them. One sync per apply,
+    // never one per step.
+    let mut piano_roll_step_params_dirty = false;
     let active_track_count = state.active_track_count().min(app.tracks.len());
     let legacy_step_grid_visible = editor_has_visible_buffer(editor, "*metal*");
     let rt = editor.runtime_mut();
@@ -1718,22 +1802,36 @@ pub(super) fn apply_ui_invalidations(
                 change,
             } => match change {
                 StepInvalidation::Param(param) => {
+                    let param = param.to_step_param();
                     needs_reactive_cycle |= sync_single_step_param_binding(
                         rt,
                         state,
                         track,
                         step,
-                        param.to_step_param(),
+                        param,
                         current_track_idx,
                         selected_steps,
                         expanded_step_projection,
                     );
+                    if !step_param_track_lists.contains(&(track, param)) {
+                        step_param_track_lists.push((track, param));
+                    }
+                    push_deferred_track_step(&mut plock_render_steps, track, step);
+                    if param == StepParam::Transpose {
+                        push_deferred_track_step(&mut drum_lane_transpose_steps, track, step);
+                    }
+                    if track == current_track_idx {
+                        piano_roll_step_params_dirty = true;
+                    }
                 }
                 StepInvalidation::DurationSpan => {
                     needs_reactive_cycle |=
                         sync_track_duration_span_binding_fields(rt, state, track, step);
                     needs_reactive_cycle |=
                         sync_drum_lane_duration_span_binding_fields(rt, state, app, track, step);
+                    if !duration_span_tracks.contains(&track) {
+                        duration_span_tracks.push(track);
+                    }
                 }
                 StepInvalidation::Active
                 | StepInvalidation::Payload
@@ -2224,6 +2322,39 @@ pub(super) fn apply_ui_invalidations(
                 needs_reactive_cycle = true;
             }
         }
+    }
+
+    // Deferred per-track fan-out of the step-param invalidations (see the
+    // declarations above): one write per distinct (track, param), not one per
+    // invalidated step.
+    for (track, param) in step_param_track_lists {
+        needs_reactive_cycle |=
+            sync_track_step_param_list_binding_for_param(rt, state, track, param);
+    }
+    for track in duration_span_tracks {
+        needs_reactive_cycle |= sync_track_duration_spans_list_binding(rt, state, track);
+    }
+    // One registry reconcile per track, then per-step writes only: the p-lock
+    // tick has no other writer on a step-param edit now that the funnel does
+    // not bump ui_epoch.
+    for (track, steps) in plock_render_steps {
+        let render_values = plock_variant_step_render_values(state, track);
+        for step in steps {
+            if let Some(render) = render_values.get(step).copied() {
+                needs_reactive_cycle |=
+                    sync_track_step_plock_render_fields(rt, track, step, render);
+            }
+        }
+    }
+    // Cheap no-op on non-drum tracks (`drum_rack_sound_options` returns empty
+    // before any namespace read).
+    for (track, steps) in drum_lane_transpose_steps {
+        needs_reactive_cycle |=
+            sync_drum_lane_step_binding_fields_for_steps(rt, state, app, track, &steps);
+    }
+    if piano_roll_step_params_dirty {
+        sync_piano_roll_state(rt, app, state, current_track_idx, piano_roll_selection);
+        needs_reactive_cycle = true;
     }
 
     if needs_reactive_cycle {

@@ -6067,8 +6067,26 @@ pub(crate) fn init_runtime(
     let ui_ep = ui_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-pause-auto-follow", move |_args, _ctx| {
-        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
+        let now = Instant::now();
+        let was_following = {
+            let mut guard = auto_follow_override.lock().unwrap();
+            // Mirror `auto_follow_enabled`: no deadline, or an expired one,
+            // means the playhead is still following.
+            let was_following = guard.map_or(true, |until| now >= until);
+            *guard = Some(now + AUTO_FOLLOW_COOLDOWN);
+            was_following
+        };
+        // Only the FOLLOWING -> PAUSED transition changes a UI surface, and
+        // `SEQ.auto-follow` has its own per-tick delta writer in
+        // `reactive_tick` that re-reads this cell every frame. Re-arming an
+        // already-paused cooldown is what every drag update after the first
+        // does — `cool-off-follow` runs on every step/param edit — and bumping
+        // ui_epoch there forced a whole-project resync (~7ms of
+        // `sync_all_track_sequencer_state` + a `*sequencer*` layout refresh)
+        // per pointer event.
+        if was_following {
+            ui_ep.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(Value::Bool(false))
     });
 

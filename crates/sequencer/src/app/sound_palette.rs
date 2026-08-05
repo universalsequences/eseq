@@ -868,7 +868,7 @@ mod tests {
     /// neither playback row transitions nor take splices can toggle dots.
     #[test]
     fn clip_dots_mark_patch_identity_and_ignore_the_effective_refs() {
-        let (mut app, take, _scene_pattern, _chunks) = app_with_take();
+        let (app, take, _scene_pattern, _chunks) = app_with_take();
         let lanes = app.song_clip_sounds();
         assert!(
             lanes[0].iter().all(|(_, dot, _)| *dot),
