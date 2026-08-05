@@ -1,6 +1,7 @@
 # Reactive-Cycle Clone Elimination Spec
 
-Status: rev 4 (2026-08-05) — COMPLETE. P0+P1 BUILT (e2db824b), W1 closed
+Status: rev 5 (2026-08-05) — COMPLETE; review notes added (§2.2
+reader-aliasing caveat, §3.4 opt-in-assert rule). P0+P1 BUILT (e2db824b), W1 closed
 at its floor; P2 BUILT (freeze registry + all §3.1 storage sites shallow);
 P3 probe re-run confirms W2 storage collapsed to ~0 (§P3 results below).
 Remaining cost is the intentionally-kept scoped replacement-subtree deep
@@ -72,9 +73,22 @@ In `mark_source_dependents_dirty` (`vm.rs:4088`):
   rev 1 — list sources (step buffers, playheads, meters) are where the
   per-tick volume is.
 
-Semantics are unchanged: the store still holds a private deep copy,
-aliasing guarantees identical, readers untouched. This is a ~20-line
-change confined to one function.
+Semantics are unchanged with respect to the *writer*: the store never
+aliases the caller's value. This is a ~20-line change confined to one
+function.
+
+**Reader-aliasing caveat (review, 2026-08-05):** `OpCode::LoadState`
+(`vm.rs:5199`) and `read_tracked_state_value` (`vm.rs:3534`) hand out
+*shallow* clones of the stored value, so programs share the store's
+element Rcs. Before the patch, every changed write replaced the whole
+stored value with fresh cells, severing any program-held alias at the
+next write; now unchanged indices keep their cells indefinitely. A
+program that mutated a loaded state value in place would silently edit
+the store forever *and* defeat the `value_change_scope` diff (cell
+already equal → nothing marked dirty). That failure mode already
+existed between writes — not a new bug class, but the window widens
+from "until next write" to "unbounded for untouched indices". If a
+stale-dependent bug ever shows up on a list source, look here first.
 
 ### 2.3 Optional sidecar (defer unless probes justify)
 
@@ -317,6 +331,11 @@ top-level `Rc` pointer, checked by a debug assertion in the (few) tree
 mutation helpers; freezing happens where trees are handed to the runtime.
 Cheap, zero release cost, and turns a silent aliasing bug into a panic in
 dev runs and the UI-script test suite.
+
+**Enforcement is opt-in per mutation helper**: any new
+`*cell.borrow_mut() = …` write on a `Value` cell must call
+`debug_assert_cell_not_frozen` first, or it silently bypasses the
+invariant. Reviewers should enforce this on every new cell-write path.
 
 ## 4. Phasing
 
