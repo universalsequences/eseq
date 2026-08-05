@@ -113,7 +113,10 @@
     (fx-empty-track-fallback)
     (box :padding 1.0
       (v-stack :gap 0.2
-        (fx-track-parameters-panel)
+        ;; Own subtree so p-lock highlight updates rerun only this panel,
+        ;; not the whole buffer.
+        (subtree :key "track-parameters-panel"
+          (fx-track-parameters-panel))
         ;(fx-track-accumulator-panel)
         ))))
 

@@ -118,6 +118,10 @@ pub struct Theme {
     pub widget_toggle_off: Color,
     pub widget_toggle_knob_on: Color,
     pub widget_toggle_knob_off: Color,
+    pub sequencer_step_border: Color,
+    pub sequencer_step_selected_border: Color,
+    pub sequencer_step_off_fill: Color,
+    pub sequencer_step_off_fill_alt: Color,
     pub patcher_bg: Color,
     pub patcher_grid_minor: Color,
     pub patcher_grid_major: Color,
@@ -646,6 +650,26 @@ theme_slots!(
         WIDGET_TOGGLE_KNOB_OFF,
         Color::from_hex(0xf1, 0xf3, 0xf7)
     ),
+    (
+        sequencer_step_border,
+        SEQUENCER_STEP_BORDER,
+        Color::from_hex(0x38, 0x38, 0x3b)
+    ),
+    (
+        sequencer_step_selected_border,
+        SEQUENCER_STEP_SELECTED_BORDER,
+        Color::from_hex(0xe6, 0xeb, 0xf5)
+    ),
+    (
+        sequencer_step_off_fill,
+        SEQUENCER_STEP_OFF_FILL,
+        Color::from_hex(0x0e, 0x0f, 0x11)
+    ),
+    (
+        sequencer_step_off_fill_alt,
+        SEQUENCER_STEP_OFF_FILL_ALT,
+        Color::from_hex(0x26, 0x28, 0x29)
+    ),
     (patcher_bg, PATCHER_BG, Color::from_hex(0x12, 0x12, 0x13)),
     (
         patcher_grid_minor,
@@ -1009,6 +1033,26 @@ mod tests {
         assert_eq!(
             named_color("patcher back button hover border"),
             Some(PATCHER_BACK_BUTTON_HOVER_BORDER())
+        );
+    }
+
+    #[test]
+    fn sequencer_step_surface_slots_are_named_colors() {
+        assert_eq!(
+            named_color("sequencer-step-border"),
+            Some(SEQUENCER_STEP_BORDER())
+        );
+        assert_eq!(
+            named_color("sequencer-step-selected-border"),
+            Some(SEQUENCER_STEP_SELECTED_BORDER())
+        );
+        assert_eq!(
+            named_color("sequencer step off fill"),
+            Some(SEQUENCER_STEP_OFF_FILL())
+        );
+        assert_eq!(
+            named_color("sequencer_step_off_fill_alt"),
+            Some(SEQUENCER_STEP_OFF_FILL_ALT())
         );
     }
 

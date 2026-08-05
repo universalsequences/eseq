@@ -2,6 +2,7 @@ use super::*;
 
 /// Inline editor session state (instrument/effect creation/editing) plus the
 /// lisp authoring-transaction checkpoints, bundled out of the event loop.
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct EditSessionState {
     pub(crate) editor_buffer_name: Option<String>,
     pub(crate) editor_mode: Option<String>,
@@ -60,6 +61,7 @@ pub(crate) struct ParamSyncRevision {
 
 /// Previous-frame values the reactive tick diffs against to decide which
 /// reactives to republish.
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct FrameDiffState {
     pub(crate) prev_editor_macro_action: (String, String),
     pub(crate) prev_playing: bool,
@@ -91,6 +93,10 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_ui_epoch: usize,
     pub(crate) prev_fx_epoch: usize,
     pub(crate) prev_sound_binding_epoch: usize,
+    /// Arming/clearing a delete target republishes only the delete-target
+    /// read surfaces (version reactive + mixer/rack binding fields) off this
+    /// counter — it deliberately does NOT ride `ui_epoch`.
+    pub(crate) prev_delete_target_version: usize,
     pub(crate) track_param_sync_revision: Option<ParamSyncRevision>,
     pub(crate) fx_param_sync_revision: Option<ParamSyncRevision>,
     /// Identity of the CLIP-derived piano-roll surfaces (clip panel, window
@@ -119,6 +125,7 @@ pub(crate) struct FrameDiffState {
 /// In-flight pointer-gesture state that host commands need to observe or
 /// reset (e.g. committing a rack drag's scheduler snapshot once at gesture
 /// end).
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct GestureState {
     pub(crate) rack_control_snapshot_dirty: bool,
     pub(crate) piano_roll_history_gesture: Option<ActivePianoRollHistoryGesture>,

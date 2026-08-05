@@ -165,6 +165,31 @@ fn leaf_cached_layout_matches_viewport(
     }
 }
 
+fn frame_viewport_matches(a: Option<crate::layout::Rect>, b: Option<crate::layout::Rect>) -> bool {
+    const EPSILON: f32 = 0.05;
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            (a.row - b.row).abs() <= EPSILON
+                && (a.col - b.col).abs() <= EPSILON
+                && (a.width - b.width).abs() <= EPSILON
+                && (a.height - b.height).abs() <= EPSILON
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn leaf_cached_layout_matches_geometry(
+    leaf: &TileLeaf,
+    layout: &LayoutNode,
+    cols: f32,
+    rows: f32,
+    frame_viewport: Option<crate::layout::Rect>,
+) -> bool {
+    leaf_cached_layout_matches_viewport(leaf, layout, cols, rows)
+        && frame_viewport_matches(leaf.layout_frame_viewport, frame_viewport)
+}
+
 fn format_lisp_reload_report(report: &ReloadReport) -> String {
     let mut lines = Vec::new();
     lines.push(if report.success {
@@ -507,6 +532,7 @@ struct RetainedTileLayout {
     widget_scroll_left: f32,
     widget_viewport_width: f32,
     widget_viewport_height: f32,
+    layout_frame_viewport: Option<crate::layout::Rect>,
 }
 
 impl RetainedTileLayout {
@@ -541,6 +567,7 @@ impl RetainedTileLayout {
             widget_scroll_left: leaf.widget_scroll_left,
             widget_viewport_width: viewport_width,
             widget_viewport_height: viewport_height,
+            layout_frame_viewport: leaf.layout_frame_viewport,
         })
     }
 
@@ -566,6 +593,7 @@ impl RetainedTileLayout {
         leaf.widget_scroll_left = self.widget_scroll_left;
         leaf.widget_viewport_width = self.widget_viewport_width;
         leaf.widget_viewport_height = self.widget_viewport_height;
+        leaf.layout_frame_viewport = self.layout_frame_viewport;
         leaf.cached_inactive_frame = self.cached_inactive_frame.clone();
         true
     }
@@ -577,6 +605,15 @@ impl RetainedTileLayout {
             cols,
             rows,
         )
+    }
+    fn matches_geometry(
+        &self,
+        cols: f32,
+        rows: f32,
+        frame_viewport: Option<crate::layout::Rect>,
+    ) -> bool {
+        self.matches_viewport(cols, rows)
+            && frame_viewport_matches(self.layout_frame_viewport, frame_viewport)
     }
 }
 
@@ -623,12 +660,30 @@ pub struct Editor {
     typing_undo_buffer_id: Option<BufferId>,
     /// Cached tile rects, recomputed when tiles change or viewport resizes.
     cached_tile_rects: Vec<(TileId, Rect)>,
+    /// Full tiled frame size used to derive frame-local overlay geometry.
+    cached_tiled_frame_size: Option<(f32, f32)>,
     /// Outer margin around the tiled layout, in cell units.
     tile_outer_gap: f32,
     remembered_split_ratios: HashMap<String, f32>,
+    /// Last selected buffer for each declarative tab group. Unlike tile paths,
+    /// a group's ordered buffer IDs remain stable when surrounding panes are
+    /// added, removed, or temporarily replaced by another workspace.
+    remembered_tab_selections: HashMap<Vec<BufferId>, BufferId>,
     retained_tile_layouts: HashMap<BufferId, Vec<RetainedTileLayout>>,
     visible_binding_layout_signature: Option<VisibleBindingLayoutSignature>,
     visible_binding_registry_revision: u64,
+    /// While true, `sync_reactive_bindings_for_visible_layouts` records a
+    /// pending request instead of running. `refresh_runtime_side_effects`
+    /// sets this around its inactive-buffer refresh loop so the visible
+    /// binding scan (which walks every visible layout) runs once per flush
+    /// instead of once per refreshed buffer.
+    visible_binding_sync_deferred: bool,
+    visible_binding_sync_pending: bool,
+    /// Per-tile extracted widget-binding entries, keyed by the layout Arc
+    /// pointer + layout revision that produced them. Rebuilding the binding
+    /// table only rescans tiles whose layout actually changed.
+    visible_binding_tile_entries:
+        HashMap<TileId, (usize, u64, Arc<Vec<(crate::vm::ReactiveBindingKey, u64)>>)>,
     widget_cursor: WidgetCursor,
     suppress_mouse_until_left_up: bool,
     active_tab_mouse_capture: Option<TileId>,
@@ -775,11 +830,16 @@ impl Editor {
             redo_stack: Vec::new(),
             typing_undo_buffer_id: None,
             cached_tile_rects: vec![],
+            cached_tiled_frame_size: None,
             tile_outer_gap: 0.0,
             remembered_split_ratios: HashMap::new(),
+            remembered_tab_selections: HashMap::new(),
             retained_tile_layouts: HashMap::new(),
             visible_binding_layout_signature: None,
             visible_binding_registry_revision: 0,
+            visible_binding_sync_deferred: false,
+            visible_binding_sync_pending: false,
+            visible_binding_tile_entries: HashMap::new(),
             widget_cursor: WidgetCursor::Default,
             suppress_mouse_until_left_up: false,
             active_tab_mouse_capture: None,
@@ -969,6 +1029,10 @@ impl Editor {
             existing.widget_tree_revision == retained.widget_tree_revision
                 && existing.viewport_width_bits == retained.viewport_width_bits
                 && existing.viewport_height_bits == retained.viewport_height_bits
+                && frame_viewport_matches(
+                    existing.layout_frame_viewport,
+                    retained.layout_frame_viewport,
+                )
         }) {
             *existing = retained;
             return;
@@ -989,11 +1053,12 @@ impl Editor {
         });
     }
 
-    fn retained_tile_layout_for_viewport(
+    fn retained_tile_layout_for_geometry(
         &self,
         buffer: &Buffer,
         cols: f32,
         rows: f32,
+        frame_viewport: Option<crate::layout::Rect>,
     ) -> Option<RetainedTileLayout> {
         self.retained_tile_layouts
             .get(&buffer.id)?
@@ -1001,7 +1066,7 @@ impl Editor {
             .rev()
             .find(|retained| {
                 retained.widget_tree_revision == buffer.widget_tree_revision
-                    && retained.matches_viewport(cols, rows)
+                    && retained.matches_geometry(cols, rows, frame_viewport)
             })
             .cloned()
     }
@@ -1048,6 +1113,7 @@ impl Editor {
 
     /// Recompute cached tile rects for the given viewport.
     pub fn update_tile_rects(&mut self, total_width: u16, total_height: u16) {
+        self.cached_tiled_frame_size = Some((total_width as f32, total_height as f32));
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         let horizontal_margin = (self.tile_outer_gap.max(0.0) * TILE_GAP_PX_PER_UNIT
             / cell_w.max(1.0))
@@ -1103,6 +1169,7 @@ impl Editor {
                 .into_iter()
                 .filter(|id| *id != self.active_tile)
                 .filter_map(|id| {
+                    let frame_viewport = self.tile_layout_frame_viewport(id)?;
                     let leaf = self.tile_root.find_leaf(id)?;
                     let rect = self
                         .cached_tile_rects
@@ -1123,12 +1190,23 @@ impl Editor {
                     );
                     let valid = leaf.cached_layout.as_ref().is_some_and(|layout| {
                         leaf.cached_layout_widget_tree_revision == buffer.widget_tree_revision
-                            && leaf_cached_layout_matches_viewport(leaf, layout, cols, rows)
+                            && leaf_cached_layout_matches_geometry(
+                                leaf,
+                                layout,
+                                cols,
+                                rows,
+                                Some(frame_viewport),
+                            )
                     });
                     let retained = if valid {
                         None
                     } else {
-                        self.retained_tile_layout_for_viewport(buffer, cols, rows)
+                        self.retained_tile_layout_for_geometry(
+                            buffer,
+                            cols,
+                            rows,
+                            Some(frame_viewport),
+                        )
                     };
                     Some((
                         id,
@@ -1155,6 +1233,7 @@ impl Editor {
                     }
                     leaf.cached_layout = None;
                     leaf.cached_layout_widget_tree_revision = 0;
+                    leaf.layout_frame_viewport = None;
                     leaf.dirty_widget_ids.clear();
                     leaf.cached_inactive_frame = None;
                     if !buf_indices.contains(&buffer_idx) {
@@ -1172,6 +1251,30 @@ impl Editor {
                 leaf.widget_viewport_height = viewport_height;
             }
         }
+    }
+
+    /// Full-frame viewport expressed in a tile's local content coordinates.
+    /// This is the geometry frame-anchored widgets must be laid out against,
+    /// regardless of whether their owner tile is currently active.
+    pub(crate) fn tile_layout_frame_viewport(
+        &self,
+        tile_id: TileId,
+    ) -> Option<crate::layout::Rect> {
+        let (frame_width, frame_height) = self.cached_tiled_frame_size?;
+        let leaf = self.tile_root.find_leaf(tile_id)?;
+        let tile_rect = self
+            .cached_tile_rects
+            .iter()
+            .find(|(id, _)| *id == tile_id)
+            .map(|(_, rect)| *rect)?;
+        let body_rect = tile_body_rect(tile_rect, !leaf.tabs.is_empty());
+        let (border_col, border_row) = self.tile_content_border_insets(tile_id, 0);
+        Some(crate::layout::Rect {
+            row: -(body_rect.row + border_row),
+            col: -(body_rect.col + border_col),
+            width: frame_width,
+            height: frame_height,
+        })
     }
 
     /// Find which tile contains the given screen coordinate.
@@ -1273,10 +1376,17 @@ impl Editor {
         let Some(target_leaf) = self.tile_root.find_leaf(new_tile) else {
             return;
         };
+        let layout_frame_viewport = target_leaf.layout_frame_viewport;
         let cached_layout = target_leaf.cached_layout.as_ref().and_then(|layout| {
             viewport
                 .map(|(cols, rows)| {
-                    leaf_cached_layout_matches_viewport(target_leaf, layout, cols, rows)
+                    leaf_cached_layout_matches_geometry(
+                        target_leaf,
+                        layout,
+                        cols,
+                        rows,
+                        layout_frame_viewport,
+                    )
                 })
                 .unwrap_or(true)
                 .then(|| layout.clone())
@@ -1287,6 +1397,8 @@ impl Editor {
         self.active_tile = new_tile;
         self.record_buffer_access_by_idx(buffer_idx);
         self.sync_runtime_context();
+        self.runtime
+            .set_layout_frame_viewport(layout_frame_viewport);
         self.restore_buffer_widget_tree_with_cached_layout(
             cached_layout,
             viewport,
@@ -1415,52 +1527,41 @@ impl Editor {
             .and_then(|leaf| self.buffers.get(leaf.buffer_idx))
             .map(|buffer| buffer.id);
 
-        #[derive(Clone)]
-        struct PreviousTabbedLeaf {
-            tab_buffer_indices: Vec<usize>,
-            selected_buffer_idx: Option<usize>,
-        }
-
-        fn collect_previous_tabbed_leaves(
+        fn remember_tab_selections(
             node: &TileNode,
-            path: &mut Vec<usize>,
-            out: &mut HashMap<Vec<usize>, PreviousTabbedLeaf>,
+            bufs: &[Buf],
+            out: &mut HashMap<Vec<BufferId>, BufferId>,
         ) {
             match node {
                 TileNode::Leaf(leaf) => {
-                    if !leaf.tabs.is_empty() {
-                        out.insert(
-                            path.clone(),
-                            PreviousTabbedLeaf {
-                                tab_buffer_indices: leaf
-                                    .tabs
-                                    .iter()
-                                    .map(|tab| tab.buffer_idx)
-                                    .collect(),
-                                selected_buffer_idx: leaf
-                                    .selected_tab
-                                    .and_then(|index| leaf.tabs.get(index))
-                                    .map(|tab| tab.buffer_idx),
-                            },
-                        );
+                    let tab_buffer_ids = leaf
+                        .tabs
+                        .iter()
+                        .map(|tab| bufs.get(tab.buffer_idx).map(|buffer| buffer.id))
+                        .collect::<Option<Vec<_>>>();
+                    let selected_buffer_id = leaf
+                        .selected_tab
+                        .and_then(|index| leaf.tabs.get(index))
+                        .and_then(|tab| bufs.get(tab.buffer_idx))
+                        .map(|buffer| buffer.id);
+                    if let (Some(tab_buffer_ids), Some(selected_buffer_id)) =
+                        (tab_buffer_ids, selected_buffer_id)
+                        && !tab_buffer_ids.is_empty()
+                    {
+                        out.insert(tab_buffer_ids, selected_buffer_id);
                     }
                 }
                 TileNode::Split(split) => {
-                    path.push(0);
-                    collect_previous_tabbed_leaves(&split.a, path, out);
-                    path.pop();
-                    path.push(1);
-                    collect_previous_tabbed_leaves(&split.b, path, out);
-                    path.pop();
+                    remember_tab_selections(&split.a, bufs, out);
+                    remember_tab_selections(&split.b, bufs, out);
                 }
             }
         }
 
-        let mut previous_tabbed_leaves = HashMap::new();
-        collect_previous_tabbed_leaves(
+        remember_tab_selections(
             &self.tile_root,
-            &mut Vec::new(),
-            &mut previous_tabbed_leaves,
+            &self.buffers,
+            &mut self.remembered_tab_selections,
         );
         self.remember_visible_tile_layouts();
 
@@ -1472,8 +1573,7 @@ impl Editor {
             spec: LayoutSpec,
             bufs: &[Buf],
             next_id: &mut TileId,
-            path: &mut Vec<usize>,
-            previous_tabbed_leaves: &HashMap<Vec<usize>, PreviousTabbedLeaf>,
+            remembered_tab_selections: &HashMap<Vec<BufferId>, BufferId>,
             retained_tile_layouts: &HashMap<BufferId, Vec<RetainedTileLayout>>,
             remembered_split_ratios: &HashMap<String, f32>,
         ) -> Result<TileNode, String> {
@@ -1522,20 +1622,16 @@ impl Editor {
                     *next_id += 1;
                     let mut leaf = TileLeaf::new(id, buf_idx);
                     if !resolved_tabs.is_empty() {
-                        let tab_buffer_indices = resolved_tabs
+                        let tab_buffer_ids = resolved_tabs
                             .iter()
-                            .map(|tab| tab.buffer_idx)
+                            .map(|tab| bufs[tab.buffer_idx].id)
                             .collect::<Vec<_>>();
-                        let preserved = previous_tabbed_leaves.get(path).and_then(|previous| {
-                            (previous.tab_buffer_indices == tab_buffer_indices)
-                                .then_some(previous.selected_buffer_idx)
-                                .flatten()
-                        });
-                        let selected_tab = preserved
-                            .and_then(|selected_buffer_idx| {
+                        let selected_tab = remembered_tab_selections
+                            .get(&tab_buffer_ids)
+                            .and_then(|selected_buffer_id| {
                                 resolved_tabs
                                     .iter()
-                                    .position(|tab| tab.buffer_idx == selected_buffer_idx)
+                                    .position(|tab| bufs[tab.buffer_idx].id == *selected_buffer_id)
                             })
                             .or_else(|| {
                                 resolved_tabs
@@ -1582,8 +1678,7 @@ impl Editor {
                     remember,
                     bufs,
                     next_id,
-                    path,
-                    previous_tabbed_leaves,
+                    remembered_tab_selections,
                     retained_tile_layouts,
                     remembered_split_ratios,
                 ),
@@ -1598,8 +1693,7 @@ impl Editor {
                     remember,
                     bufs,
                     next_id,
-                    path,
-                    previous_tabbed_leaves,
+                    remembered_tab_selections,
                     retained_tile_layouts,
                     remembered_split_ratios,
                 ),
@@ -1613,8 +1707,7 @@ impl Editor {
             remember: Option<String>,
             bufs: &[Buf],
             next_id: &mut TileId,
-            path: &mut Vec<usize>,
-            previous_tabbed_leaves: &HashMap<Vec<usize>, PreviousTabbedLeaf>,
+            remembered_tab_selections: &HashMap<Vec<BufferId>, BufferId>,
             retained_tile_layouts: &HashMap<BufferId, Vec<RetainedTileLayout>>,
             remembered_split_ratios: &HashMap<String, f32>,
         ) -> Result<TileNode, String> {
@@ -1624,8 +1717,7 @@ impl Editor {
                     panes.into_iter().next().unwrap().1,
                     bufs,
                     next_id,
-                    path,
-                    previous_tabbed_leaves,
+                    remembered_tab_selections,
                     retained_tile_layouts,
                     remembered_split_ratios,
                 );
@@ -1634,30 +1726,23 @@ impl Editor {
             let (ratio, first_spec) = iter.next().unwrap();
             let rest: Vec<(f32, LayoutSpec)> = iter.collect();
 
-            path.push(0);
             let child_a = build(
                 first_spec,
                 bufs,
                 next_id,
-                path,
-                previous_tabbed_leaves,
+                remembered_tab_selections,
                 retained_tile_layouts,
                 remembered_split_ratios,
             )?;
-            path.pop();
             let child_b = if rest.len() == 1 {
-                path.push(1);
-                let child = build(
+                build(
                     rest.into_iter().next().unwrap().1,
                     bufs,
                     next_id,
-                    path,
-                    previous_tabbed_leaves,
+                    remembered_tab_selections,
                     retained_tile_layouts,
                     remembered_split_ratios,
-                )?;
-                path.pop();
-                child
+                )?
             } else {
                 let rest_total: f32 = rest.iter().map(|(r, _)| r).sum();
                 let rescaled: Vec<(f32, LayoutSpec)> = if rest_total > 0.0 {
@@ -1665,21 +1750,17 @@ impl Editor {
                 } else {
                     rest
                 };
-                path.push(1);
-                let child = build_split(
+                build_split(
                     rescaled,
                     dir,
                     gap,
                     None,
                     bufs,
                     next_id,
-                    path,
-                    previous_tabbed_leaves,
+                    remembered_tab_selections,
                     retained_tile_layouts,
                     remembered_split_ratios,
-                )?;
-                path.pop();
-                child
+                )?
             };
 
             let split_id = *next_id;
@@ -1700,13 +1781,11 @@ impl Editor {
             }))
         }
 
-        let mut path = Vec::new();
         let new_root = match build(
             spec,
             &self.buffers,
             &mut self.next_tile_id,
-            &mut path,
-            &previous_tabbed_leaves,
+            &self.remembered_tab_selections,
             &self.retained_tile_layouts,
             &self.remembered_split_ratios,
         ) {
@@ -1746,7 +1825,12 @@ impl Editor {
         );
         let retained = {
             let buffer = self.active_buffer();
-            self.retained_tile_layout_for_viewport(buffer, viewport.0, viewport.1)
+            self.retained_tile_layout_for_geometry(
+                buffer,
+                viewport.0,
+                viewport.1,
+                self.runtime.layout_frame_viewport(),
+            )
         };
         if let Some(retained) = retained {
             self.restore_buffer_widget_tree_with_cached_layout(
@@ -1758,8 +1842,14 @@ impl Editor {
             let (cached_layout, layout_revision) = {
                 let leaf = self.active_leaf();
                 let cached_layout = leaf.cached_layout.as_ref().and_then(|layout| {
-                    leaf_cached_layout_matches_viewport(leaf, layout, viewport.0, viewport.1)
-                        .then(|| layout.clone())
+                    leaf_cached_layout_matches_geometry(
+                        leaf,
+                        layout,
+                        viewport.0,
+                        viewport.1,
+                        self.runtime.layout_frame_viewport(),
+                    )
+                    .then(|| layout.clone())
                 });
                 (cached_layout, leaf.layout_revision)
             };
@@ -1888,7 +1978,18 @@ impl Editor {
         precise_row: f32,
         border_inset: u16,
     ) {
-        if crate::widget_render::overlay_widget_id().is_some()
+        // Inspect mode outranks the overlay intercept: inspecting a modal's
+        // widgets needs the raw hover/click, and the inspect path does its
+        // own modal-subtree hit-testing. Without an overlay the inspect
+        // check keeps its usual place further down the chain.
+        if self.inspect_mode
+            && crate::widget_render::overlay_widget_id().is_some()
+            && self.handle_tiled_inspect_mouse_precise(mouse, precise_col, precise_row, border_inset)
+        {
+            return;
+        }
+
+        if let Some(entry) = crate::widget_render::topmost_overlay()
             && matches!(
                 mouse.kind,
                 MouseEventKind::Moved
@@ -1897,13 +1998,29 @@ impl Editor {
                     | MouseEventKind::Up(MouseButton::Left)
             )
         {
-            let tile_id = self.active_tile;
+            let tile_id = self.overlay_owner_tile(entry).unwrap_or(self.active_tile);
             let Some((content_col, content_row, content_width, content_height)) =
                 self.tile_content_area(tile_id, border_inset)
             else {
                 return;
             };
-            self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
+            if matches!(mouse.kind, MouseEventKind::Moved) && tile_id != self.active_tile {
+                self.update_inactive_overlay_hover(
+                    entry,
+                    tile_id,
+                    content_col,
+                    content_row,
+                    precise_col,
+                    precise_row,
+                    border_inset,
+                );
+                return;
+            }
+            self.route_event_to_tile(tile_id, border_inset, false, |editor| {
+                // Switching the active runtime clears render-derived overlay
+                // state. This entry is the event's captured routing target
+                // and remains valid for the duration of this dispatch.
+                crate::widget_render::push_overlay(entry);
                 let (event_col, event_row) = editor
                     .tile_content_precise_event_position(
                         tile_id,
@@ -1924,6 +2041,11 @@ impl Editor {
                     event_row,
                 );
             });
+            if self.overlay_entry_is_open_in_tile(entry, tile_id) {
+                crate::widget_render::push_overlay(entry);
+            } else {
+                crate::widget_render::remove_overlay(entry.widget_id);
+            }
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 self.suppress_mouse_until_left_up = true;
             }
@@ -1983,11 +2105,11 @@ impl Editor {
         if matches!(
             mouse.kind,
             MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
-        ) && self.route_pointer_event_to_tile(self.active_tile, border_inset, true, |editor| {
+        ) && self.route_event_to_tile(self.active_tile, border_inset, true, |editor| {
             editor.active_layout_has_pending_patch_drag()
         }) {
             let tile_id = self.active_tile;
-            self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
+            self.route_event_to_tile(tile_id, border_inset, true, |editor| {
                 let Some((content_col, content_row, _, _)) =
                     editor.tile_content_area(tile_id, border_inset)
                 else {
@@ -2027,7 +2149,7 @@ impl Editor {
             && let Some(tile_id) =
                 self.status_toggle_tile_at_screen(mouse.column as f32, mouse.row as f32)
         {
-            self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
+            self.route_event_to_tile(tile_id, border_inset, true, |editor| {
                 editor.toggle_active_buffer_view_mode_from_indicator();
             });
             return;
@@ -2059,7 +2181,7 @@ impl Editor {
                 .tile_at_screen(screen_col, screen_row)
                 .unwrap_or(self.active_tile);
             let mut dropped = false;
-            self.route_pointer_event_to_tile(target_tile, border_inset, false, |editor| {
+            self.route_event_to_tile(target_tile, border_inset, false, |editor| {
                 let Some((content_col, content_row, _, _)) =
                     editor.tile_content_area(target_tile, border_inset)
                 else {
@@ -2193,7 +2315,7 @@ impl Editor {
             {
                 self.tile_root.clear_focus_except(tile_id);
             }
-            self.route_pointer_event_to_tile(tile_id, border_inset, persist_selection, |editor| {
+            self.route_event_to_tile(tile_id, border_inset, persist_selection, |editor| {
                 let Some((content_col, content_row, content_width, content_height)) =
                     editor.tile_content_area(tile_id, border_inset)
                 else {
@@ -2243,7 +2365,12 @@ impl Editor {
             }
             _ => return false,
         }
-        let Some(tile_id) = self.tile_at_screen(precise_col, precise_row) else {
+        // With a modal open, inspect the modal's own tile — the panel can
+        // hang over neighbouring tiles whose layouts don't contain it.
+        let Some(tile_id) = self
+            .modal_owner_tile()
+            .or_else(|| self.tile_at_screen(precise_col, precise_row))
+        else {
             if self.inspect_hover_tile_id.take().is_some()
                 || self.inspect_hover_widget_id.take().is_some()
             {
@@ -2292,6 +2419,194 @@ impl Editor {
         true
     }
 
+    /// Resolve a render-derived overlay entry back to the visible tile whose
+    /// layout owns it. Inspect can deliberately make a source tile active
+    /// while the modal remains mounted in an arrangement/step tile, so active
+    /// tile identity is not overlay ownership.
+    fn overlay_owner_tile(&self, entry: crate::widget_render::OverlayEntry) -> Option<TileId> {
+        let owns_entry = |layout: &crate::layout::LayoutNode| {
+            widget_focus::find_node_by_id(layout, entry.widget_id).is_some()
+                || (entry.kind == crate::widget_render::OverlayKind::Modal
+                    && widget_focus::find_open_modal_node(layout).is_some())
+        };
+        if self
+            .runtime
+            .current_layout
+            .as_deref()
+            .is_some_and(owns_entry)
+        {
+            return Some(self.active_tile);
+        }
+        self.tile_root
+            .leaf_ids()
+            .into_iter()
+            .filter(|tile_id| *tile_id != self.active_tile)
+            .find(|tile_id| {
+                self.tile_root
+                    .find_leaf(*tile_id)
+                    .and_then(|leaf| leaf.cached_layout.as_deref())
+                    .is_some_and(owns_entry)
+            })
+    }
+
+    fn modal_owner_tile(&self) -> Option<TileId> {
+        if self
+            .runtime
+            .current_layout
+            .as_deref()
+            .and_then(widget_focus::find_open_modal_node)
+            .is_some()
+        {
+            return Some(self.active_tile);
+        }
+        self.tile_root
+            .leaf_ids()
+            .into_iter()
+            .filter(|tile_id| *tile_id != self.active_tile)
+            .find(|tile_id| {
+                self.tile_root
+                    .find_leaf(*tile_id)
+                    .and_then(|leaf| leaf.cached_layout.as_deref())
+                    .and_then(widget_focus::find_open_modal_node)
+                    .is_some()
+            })
+    }
+
+    /// True when any visible tile owns an open modal. This is the app-level
+    /// keyboard shortcut gate: modal input remains exclusive even when source
+    /// inspection temporarily makes another tile active.
+    pub fn modal_is_open(&self) -> bool {
+        self.modal_owner_tile().is_some()
+    }
+
+    /// Route keyboard input exclusively to the open modal. Returns `false`
+    /// only when no visible tile owns one.
+    fn handle_open_modal_key(&mut self, key: KeyEvent) -> bool {
+        let Some(owner_tile) = self.modal_owner_tile() else {
+            return false;
+        };
+        // Switching to an inactive owner restores that tile's widget tree and
+        // clears render-derived overlay registration. Preserve the keyboard
+        // target across the temporary switch; widget state remains canonical.
+        let topmost_overlay = crate::widget_render::topmost_overlay();
+
+        // A chord begun before the modal opened must not resume after it
+        // closes; the modal establishes a fresh keyboard context.
+        self.pending_key = None;
+        self.route_event_to_tile(owner_tile, 0, false, |editor| {
+            editor.sync_modal_focus_state();
+
+            if key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE {
+                // A dropdown inside the modal is the topmost keyboard target
+                // and closes first. The next Escape reaches the modal itself.
+                if let Some(entry) = topmost_overlay
+                    && entry.kind == crate::widget_render::OverlayKind::Dropdown
+                {
+                    if !editor.handle_focused_widget_key(key) {
+                        crate::widget_render::dropdown::close_dropdown(entry.widget_id);
+                        crate::widget_render::remove_overlay(entry.widget_id);
+                        editor.mark_needs_redraw();
+                    }
+                    return;
+                }
+
+                let modal_id = editor
+                    .runtime
+                    .current_layout
+                    .as_deref()
+                    .and_then(widget_focus::find_open_modal_node)
+                    .map(|modal| modal.widget_id);
+                if let Some(modal_id) = modal_id {
+                    editor.fire_modal_on_close(modal_id);
+                }
+                return;
+            }
+
+            // Native widget editing/navigation gets first refusal, followed
+            // only by an explicit :on-focus-key callback on that control.
+            // Do not call the editor's generic focus navigation here: its
+            // edge behavior scrolls the owning tile, which is under the modal.
+            // Anything the modal focus does not define is swallowed.
+            if !editor.handle_focused_widget_key(key) {
+                let _ = editor.dispatch_focus_key(key);
+            }
+        });
+        true
+    }
+
+    fn modal_gesture_tile(&self) -> Option<TileId> {
+        self.modal_owner_tile()
+    }
+
+    fn overlay_entry_is_open_in_tile(
+        &self,
+        entry: crate::widget_render::OverlayEntry,
+        tile_id: TileId,
+    ) -> bool {
+        let layout = if tile_id == self.active_tile {
+            self.runtime.current_layout.as_deref()
+        } else {
+            self.tile_root
+                .find_leaf(tile_id)
+                .and_then(|leaf| leaf.cached_layout.as_deref())
+        };
+        match entry.kind {
+            crate::widget_render::OverlayKind::Modal => {
+                layout.and_then(widget_focus::find_open_modal_node).is_some()
+            }
+            crate::widget_render::OverlayKind::Dropdown => {
+                crate::widget_render::dropdown::is_dropdown_open(entry.widget_id)
+                    && layout.is_some_and(|layout| {
+                        widget_focus::find_node_by_id(layout, entry.widget_id).is_some()
+                    })
+            }
+        }
+    }
+
+    fn update_inactive_overlay_hover(
+        &mut self,
+        entry: crate::widget_render::OverlayEntry,
+        tile_id: TileId,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+        border_inset: u16,
+    ) {
+        let (event_col, event_row) = self
+            .tile_content_precise_event_position(
+                tile_id,
+                border_inset,
+                content_col,
+                content_row,
+                precise_col,
+                precise_row,
+            )
+            .unwrap_or((precise_col, precise_row));
+        let local_col = event_col - content_col as f32;
+        let local_row = event_row - content_row as f32;
+
+        if entry.kind == crate::widget_render::OverlayKind::Dropdown {
+            if crate::widget_render::dropdown::hover_overlay(entry.widget_id, local_row) {
+                self.mark_needs_redraw();
+            }
+            return;
+        }
+
+        let hovered = self.tile_root.find_leaf(tile_id).and_then(|leaf| {
+            let layout = leaf.cached_layout.as_deref()?;
+            let modal = widget_focus::find_node_by_id(layout, entry.widget_id)
+                .or_else(|| widget_focus::find_open_modal_node(layout).cloned())?;
+            let layout_col = local_col + leaf.widget_scroll_left;
+            let layout_row = local_row + leaf.widget_scroll_top;
+            crate::ui::layout::hit_test_layout(&modal, layout_row, layout_col)
+                .map(|node| node.widget_id)
+        });
+        crate::widget_render::set_pointer_hover_widget(hovered);
+        self.widget_cursor = WidgetCursor::Default;
+        self.mark_needs_redraw();
+    }
+
     pub fn handle_tiled_touchpad_magnify(
         &mut self,
         precise_col: f32,
@@ -2299,10 +2614,18 @@ impl Editor {
         border_inset: u16,
         delta: f64,
     ) {
-        let Some(tile_id) = self.tile_at_screen(precise_col, precise_row) else {
+        let modal_entry = crate::widget_render::topmost_overlay()
+            .filter(|entry| entry.kind == crate::widget_render::OverlayKind::Modal);
+        let Some(tile_id) = self
+            .modal_gesture_tile()
+            .or_else(|| self.tile_at_screen(precise_col, precise_row))
+        else {
             return;
         };
-        self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
+        self.route_event_to_tile(tile_id, border_inset, modal_entry.is_none(), |editor| {
+            if let Some(entry) = modal_entry {
+                crate::widget_render::push_overlay(entry);
+            }
             let Some((content_col, content_row, _, _)) =
                 editor.tile_content_area(tile_id, border_inset)
             else {
@@ -2316,6 +2639,11 @@ impl Editor {
                 delta,
             );
         });
+        if let Some(entry) = modal_entry
+            && self.overlay_entry_is_open_in_tile(entry, tile_id)
+        {
+            crate::widget_render::push_overlay(entry);
+        }
     }
 
     pub fn handle_tiled_touchpad_scroll(
@@ -2326,24 +2654,48 @@ impl Editor {
         delta_x: f32,
         delta_y: f32,
     ) -> bool {
-        let Some(tile_id) = self.tile_at_screen(precise_col, precise_row) else {
+        let modal_entry = crate::widget_render::topmost_overlay()
+            .filter(|entry| entry.kind == crate::widget_render::OverlayKind::Modal);
+        let modal_open = modal_entry.is_some();
+        let Some(tile_id) = self
+            .modal_gesture_tile()
+            .or_else(|| self.tile_at_screen(precise_col, precise_row))
+        else {
             return false;
         };
-        self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
-            let Some((content_col, content_row, _, _)) =
-                editor.tile_content_area(tile_id, border_inset)
-            else {
-                return false;
-            };
-            editor.handle_touchpad_scroll(
-                content_col,
-                content_row,
-                precise_col,
-                precise_row,
-                delta_x,
-                delta_y,
-            )
-        })
+        let consumed = self.route_event_to_tile(
+            tile_id,
+            border_inset,
+            modal_entry.is_none(),
+            |editor| {
+                if let Some(entry) = modal_entry {
+                    crate::widget_render::push_overlay(entry);
+                }
+                let Some((content_col, content_row, _, _)) =
+                    editor.tile_content_area(tile_id, border_inset)
+                else {
+                    // With a modal open the gesture is trapped either way: a
+                    // false here would let the caller scroll the tile leaf
+                    // behind the panel (see collect_modal_overlay's coherence
+                    // note).
+                    return modal_open;
+                };
+                editor.handle_touchpad_scroll(
+                    content_col,
+                    content_row,
+                    precise_col,
+                    precise_row,
+                    delta_x,
+                    delta_y,
+                )
+            },
+        );
+        if let Some(entry) = modal_entry
+            && self.overlay_entry_is_open_in_tile(entry, tile_id)
+        {
+            crate::widget_render::push_overlay(entry);
+        }
+        consumed
     }
 
     fn tile_content_area(
@@ -2565,6 +2917,7 @@ impl Editor {
     fn invalidate_leaf_for_buffer_switch(leaf: &mut TileLeaf) {
         leaf.cached_layout = None;
         leaf.cached_layout_widget_tree_revision = 0;
+        leaf.layout_frame_viewport = None;
         leaf.cached_inactive_frame = None;
         leaf.hit_grid_cache = None;
         leaf.highlight_cache = None;
@@ -2637,7 +2990,7 @@ impl Editor {
             && precise_col < rect.col + STATUS_TOGGLE_WIDTH
     }
 
-    fn route_pointer_event_to_tile<R>(
+    fn route_event_to_tile<R>(
         &mut self,
         tile_id: TileId,
         border_inset: u16,
@@ -2911,7 +3264,9 @@ impl Editor {
     }
 
     pub fn needs_redraw(&self) -> bool {
-        self.needs_redraw || self.runtime.has_dirty_widget_ids()
+        self.needs_redraw
+            || self.runtime.has_dirty_widget_ids()
+            || crate::widget_render::scroll::has_dirty_scroll_keys()
     }
 
     pub fn clear_needs_redraw(&mut self) {
@@ -3690,6 +4045,14 @@ impl Editor {
     /// Apply smooth (sub-cell) scroll deltas to the widget viewport.
     /// `delta_cells_x` and `delta_cells_y` are in cell units (fractional).
     pub fn apply_smooth_widget_scroll(&mut self, delta_cells_x: f32, delta_cells_y: f32) {
+        // Tile scroll is trapped while a modal overlay is open — the modal's
+        // frame-anchored overlay geometry is only coherent with the layout
+        // when the leaf offset does not move under it (collect_modal_overlay).
+        if crate::widget_render::topmost_overlay()
+            .is_some_and(|entry| entry.kind == crate::widget_render::OverlayKind::Modal)
+        {
+            return;
+        }
         if !self.active_buffer().inline_code_widgets().is_empty() {
             self.active_leaf_mut().widget_scroll_top = 0.0;
             return;
@@ -3806,7 +4169,23 @@ impl Editor {
     }
 
     pub fn take_dirty_widget_ids(&mut self) -> Vec<u64> {
-        self.runtime.take_dirty_widget_ids()
+        let mut ids = self.runtime.take_dirty_widget_ids();
+        let scroll_keys = crate::widget_render::scroll::take_dirty_scroll_keys();
+        if !scroll_keys.is_empty() {
+            if let Some(layout) = self.runtime.current_layout.as_deref() {
+                collect_scroll_widget_ids_for_keys(layout, &scroll_keys, &mut ids);
+            }
+            for tile_id in self.tile_root.leaf_ids() {
+                if let Some(layout) = self
+                    .tile_root
+                    .find_leaf(tile_id)
+                    .and_then(|leaf| leaf.cached_layout.as_deref())
+                {
+                    collect_scroll_widget_ids_for_keys(layout, &scroll_keys, &mut ids);
+                }
+            }
+        }
+        ids
     }
 
     pub fn set_layout_viewport(&mut self, cols: u16, rows: u16) {
@@ -3836,7 +4215,12 @@ impl Editor {
         let retained = (!runtime_viewport_matches)
             .then(|| {
                 let buffer = self.active_buffer();
-                self.retained_tile_layout_for_viewport(buffer, cols, rows)
+                self.retained_tile_layout_for_geometry(
+                    buffer,
+                    cols,
+                    rows,
+                    self.runtime.layout_frame_viewport(),
+                )
             })
             .flatten();
         if let Some(retained) = retained {
@@ -3915,12 +4299,14 @@ impl Editor {
         let widget_tree_revision = self.active_buffer().widget_tree_revision;
         let viewport_width = self.runtime.layout_cols_exact();
         let viewport_height = self.runtime.layout_rows_exact();
+        let layout_frame_viewport = self.runtime.layout_frame_viewport();
         let already_synced = {
             let leaf = self.active_leaf();
             leaf.layout_revision == revision
                 && leaf.cached_layout_widget_tree_revision == widget_tree_revision
                 && leaf.widget_viewport_width.to_bits() == viewport_width.to_bits()
                 && leaf.widget_viewport_height.to_bits() == viewport_height.to_bits()
+                && frame_viewport_matches(leaf.layout_frame_viewport, layout_frame_viewport)
                 && match (&leaf.cached_layout, &layout) {
                     (Some(cached), Some(current)) => Arc::ptr_eq(cached, current),
                     (None, None) => true,
@@ -3941,11 +4327,16 @@ impl Editor {
         leaf.layout_revision = revision;
         leaf.widget_viewport_width = viewport_width;
         leaf.widget_viewport_height = viewport_height;
+        leaf.layout_frame_viewport = layout_frame_viewport;
         self.remap_focused_widget_after_layout_change();
         self.sync_reactive_bindings_for_visible_layouts();
     }
 
     pub fn sync_reactive_bindings_for_visible_layouts(&mut self) {
+        if self.visible_binding_sync_deferred {
+            self.visible_binding_sync_pending = true;
+            return;
+        }
         let visible_layouts = self
             .tile_root
             .leaf_ids()
@@ -3969,9 +4360,62 @@ impl Editor {
         {
             return;
         }
-        self.runtime.replace_widget_bindings_from_layouts(
-            visible_layouts.iter().map(|(_, _, layout)| layout.as_ref()),
-        );
+        // The binding table stays valid across syncs as long as nobody else
+        // replaced it: `visible_binding_registry_revision` is the registry
+        // revision this editor last published. When it still matches, only the
+        // tiles whose layout changed need to be diffed into the table; when it
+        // does not (some other path rebuilt the bindings), the table has to be
+        // rebuilt from every visible tile's entries.
+        let can_apply_delta = self.visible_binding_layout_signature.is_some()
+            && self.visible_binding_registry_revision == registry_revision;
+        // Rescan only tiles whose layout changed; unchanged tiles reuse their
+        // cached entry list (keyed like `signature`: layout Arc + revision).
+        let mut entry_lists = Vec::with_capacity(visible_layouts.len());
+        let mut removed_entries = Vec::<Arc<Vec<(crate::vm::ReactiveBindingKey, u64)>>>::new();
+        let mut added_entries = Vec::<Arc<Vec<(crate::vm::ReactiveBindingKey, u64)>>>::new();
+        for (tile_id, revision, layout) in &visible_layouts {
+            let layout_ptr = Arc::as_ptr(layout) as usize;
+            let entries = match self.visible_binding_tile_entries.get(tile_id) {
+                Some((cached_ptr, cached_revision, cached_entries))
+                    if *cached_ptr == layout_ptr && *cached_revision == *revision =>
+                {
+                    cached_entries.clone()
+                }
+                previous => {
+                    if let Some((_, _, previous_entries)) = previous {
+                        removed_entries.push(previous_entries.clone());
+                    }
+                    let mut out = Vec::new();
+                    crate::reactive::ReactiveRegistry::collect_widget_binding_entries(
+                        layout.as_ref(),
+                        &mut out,
+                    );
+                    let entries = Arc::new(out);
+                    added_entries.push(entries.clone());
+                    self.visible_binding_tile_entries
+                        .insert(*tile_id, (layout_ptr, *revision, entries.clone()));
+                    entries
+                }
+            };
+            entry_lists.push(entries);
+        }
+        self.visible_binding_tile_entries.retain(|tile_id, entry| {
+            let still_visible = visible_layouts.iter().any(|(id, _, _)| id == tile_id);
+            if !still_visible {
+                removed_entries.push(entry.2.clone());
+            }
+            still_visible
+        });
+        if can_apply_delta {
+            self.runtime.update_widget_bindings_with_tile_delta(
+                removed_entries.iter().map(|entries| entries.as_slice()),
+                added_entries.iter().map(|entries| entries.as_slice()),
+            );
+        } else {
+            self.runtime.replace_widget_bindings_from_entry_lists(
+                entry_lists.iter().map(|entries| entries.as_slice()),
+            );
+        }
         self.visible_binding_layout_signature = Some(signature);
         self.visible_binding_registry_revision = self.runtime.widget_bindings_revision();
     }
@@ -4015,6 +4459,7 @@ impl Editor {
             if let Some(leaf) = self.tile_root.find_leaf_mut(id) {
                 leaf.cached_layout = None;
                 leaf.cached_layout_widget_tree_revision = 0;
+                leaf.layout_frame_viewport = None;
                 leaf.dirty_widget_ids.clear();
                 leaf.cached_inactive_frame = None;
                 if !buf_indices.contains(&leaf.buffer_idx) {
@@ -4423,6 +4868,11 @@ impl Editor {
             self.buffer_recency.retain(|id| *id != removed_id);
             self.patcher_emitted_source_origins
                 .retain(|_, buffer_id| *buffer_id != removed_id);
+            self.remembered_tab_selections.retain(
+                |tab_buffer_ids, selected_buffer_id| {
+                    *selected_buffer_id != removed_id && !tab_buffer_ids.contains(&removed_id)
+                },
+            );
             // Fix up any tile leaf buffer indices that pointed past the removed slot
             Self::fix_leaf_indices(&mut self.tile_root, idx);
             true
@@ -4473,6 +4923,11 @@ impl Editor {
 
     pub fn inspect_mode_enabled(&self) -> bool {
         self.inspect_mode
+    }
+
+    /// The widget currently highlighted by inspect-mode hover (test hook).
+    pub fn inspect_hovered_widget_id(&self) -> Option<u64> {
+        self.inspect_hover_widget_id
     }
 
     pub fn toggle_inspect_mode(&mut self) {
@@ -4626,13 +5081,23 @@ impl Editor {
         if buffer.view_mode == ViewMode::TextOnly {
             return None;
         }
-        let (local_col, local_row) =
-            crate::ui::hit::to_local(precise_col, precise_row, content_col, content_row)?;
         let layout = if tile_id == self.active_tile {
             self.runtime.current_layout.as_ref()
         } else {
             leaf.cached_layout.as_ref()
         }?;
+        let modal = widget_focus::find_open_modal_node(layout);
+        // The modal panel may legitimately extend above/left of its tile's
+        // content origin (frame-anchored); the normal content-area
+        // conversion rejects those points.
+        let (local_col, local_row) = if modal.is_some() {
+            (
+                precise_col - content_col as f32,
+                precise_row - content_row as f32,
+            )
+        } else {
+            crate::ui::hit::to_local(precise_col, precise_row, content_col, content_row)?
+        };
         let (text_width_scale, text_height_scale) = self.text_cell_scales_for_buffer(buffer);
         let has_inline_widgets = !buffer.inline_code_widgets().is_empty();
         let layout_scroll_left = if has_inline_widgets {
@@ -4649,7 +5114,15 @@ impl Editor {
         };
         let layout_col = local_col + layout_scroll_left;
         let layout_row = local_row + leaf.widget_scroll_top + text_scroll_top;
-        inspect_hit_test_layout(layout, layout_row, layout_col).cloned()
+        // While a modal is open, inspect only its subtree — hits must never
+        // fall through the panel to the widgets underneath.
+        let (node, scroll_dy) = match modal {
+            Some(modal) => inspect_hit_test_layout(modal, layout_row, layout_col)?,
+            None => inspect_hit_test_layout(layout, layout_row, layout_col)?,
+        };
+        let mut node = node.clone();
+        node.rect.row -= scroll_dy;
+        Some(node)
     }
 
     fn inspect_status_for_node(&self, node: &crate::layout::LayoutNode) -> String {
@@ -4983,16 +5456,35 @@ impl Editor {
             self.finish_typing_undo_group();
         }
 
+        // Inspect mode outranks the modal keyboard boundary, same as it
+        // outranks the overlay intercept for hit-testing: the toggle chord and
+        // the Esc that exits inspect must work while inspecting a modal.
+        if is_inspect_mode_toggle_key(key) {
+            self.toggle_inspect_mode();
+            return;
+        }
+
         if self.inspect_mode && key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE {
             self.exit_inspect_mode();
             return;
         }
 
+        // Active prompts keep keyboard priority over an open modal: a save
+        // prompt or minibuffer already on screen must still receive its
+        // keystrokes (y/n, prompt text) even if a modal is open.
         if self.handle_save_prompt_key(key) {
             return;
         }
 
         if self.handle_minibuffer_key(key) {
+            return;
+        }
+
+        // A modal is a keyboard boundary. Route the key through the tile that
+        // owns the modal (which may be inactive while inspected source is
+        // open), and never let an unhandled modal key reach editor/global
+        // bindings. Escape and focused modal widgets are handled inside.
+        if self.handle_open_modal_key(key) {
             return;
         }
 
@@ -5012,11 +5504,6 @@ impl Editor {
             return;
         }
 
-        if is_inspect_mode_toggle_key(key) {
-            self.toggle_inspect_mode();
-            return;
-        }
-
         if self.handle_completion_key(key) {
             return;
         }
@@ -5031,32 +5518,6 @@ impl Editor {
                 }
             }
             return;
-        }
-
-        // Escape closes the topmost overlay first. Modal → fire :on-close (a
-        // request; the app flips the :is-open binding). Dropdown above a
-        // modal keeps precedence: when focused it closes via the
-        // focused-widget path below (preserving its focus semantics), when
-        // unfocused it is closed here — either way the next Escape reaches
-        // the modal.
-        if key.code == KeyCode::Esc
-            && key.modifiers == KeyModifiers::NONE
-            && let Some(entry) = crate::widget_render::topmost_overlay()
-        {
-            match entry.kind {
-                crate::widget_render::OverlayKind::Modal => {
-                    self.fire_modal_on_close(entry.widget_id);
-                    return;
-                }
-                crate::widget_render::OverlayKind::Dropdown => {
-                    if self.active_leaf().focused_widget_id != Some(entry.widget_id) {
-                        crate::widget_render::dropdown::close_dropdown(entry.widget_id);
-                        crate::widget_render::remove_overlay(entry.widget_id);
-                        self.mark_needs_redraw();
-                        return;
-                    }
-                }
-            }
         }
 
         // Escape is both a local cancellation key and a commonly bound global
@@ -6733,7 +7194,7 @@ impl Editor {
         let tile_ids = self.tile_root.leaf_ids();
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         // Collect tile viewports first to avoid borrow issues
-        let tiles_to_update: Vec<(TileId, f32, f32, bool)> = tile_ids
+        let tiles_to_update: Vec<(TileId, f32, f32, Option<crate::layout::Rect>, bool)> = tile_ids
             .into_iter()
             .filter(|id| *id != self.active_tile)
             .filter_map(|id| {
@@ -6765,17 +7226,24 @@ impl Editor {
                         self.runtime.layout_rows_exact(),
                     ),
                 };
-                Some((id, cols, rows, viewport_known))
+                let frame_viewport = self.tile_layout_frame_viewport(id);
+                Some((id, cols, rows, frame_viewport, viewport_known))
             })
             .collect();
 
-        for (tile_id, cols, rows, viewport_known) in tiles_to_update {
+        for (tile_id, cols, rows, frame_viewport, viewport_known) in tiles_to_update {
             let layout_started = Instant::now();
             let existing_layout = self.tile_root.find_leaf(tile_id).and_then(|leaf| {
                 let layout = leaf.cached_layout.clone()?;
                 let current_tree = leaf.cached_layout_widget_tree_revision == widget_tree_revision;
                 let current_viewport = !viewport_known
-                    || leaf_cached_layout_matches_viewport(leaf, &layout, cols, rows);
+                    || leaf_cached_layout_matches_geometry(
+                        leaf,
+                        &layout,
+                        cols,
+                        rows,
+                        frame_viewport,
+                    );
                 Some((layout, current_tree, current_viewport))
             });
             let cached_layout = existing_layout
@@ -6808,9 +7276,10 @@ impl Editor {
                 }
                 let layout = tree.as_ref().and_then(|tree| {
                     self.runtime
-                        .layout_snapshot_for_tree_with_viewport_and_offset(
+                        .layout_snapshot_for_tree_with_geometry_and_offset(
                             tree,
                             Some((cols, rows)),
+                            frame_viewport,
                             buffer_id * 100_000,
                         )
                 });
@@ -6830,6 +7299,7 @@ impl Editor {
                 };
                 leaf.widget_viewport_width = cols;
                 leaf.widget_viewport_height = rows;
+                leaf.layout_frame_viewport = frame_viewport;
                 leaf.dirty_widget_ids = dirty_widget_ids;
                 leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
                 leaf.cached_inactive_frame = None;
@@ -6874,7 +7344,7 @@ impl Editor {
         let widget_tree_revision = self.buffers[buffer_idx].widget_tree_revision;
         let tile_ids = self.tile_root.leaf_ids();
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
-        let tiles_to_update: Vec<(TileId, f32, f32)> = tile_ids
+        let tiles_to_update: Vec<(TileId, f32, f32, Option<crate::layout::Rect>)> = tile_ids
             .into_iter()
             .filter(|id| *id != self.active_tile)
             .filter_map(|id| {
@@ -6904,32 +7374,71 @@ impl Editor {
                         self.runtime.layout_rows_exact(),
                     ),
                 };
-                Some((id, cols, rows))
+                Some((id, cols, rows, self.tile_layout_frame_viewport(id)))
             })
             .collect();
 
-        for (tile_id, cols, rows) in tiles_to_update {
+        for (tile_id, cols, rows, frame_viewport) in tiles_to_update {
             let layout_started = Instant::now();
             let buffer_name = self.buffers[buffer_idx].name.clone();
-            let existing_layout = self
+            // Move the cached layout out of the tile (and drop the cached
+            // inactive frame, which this refresh invalidates anyway) so this
+            // update owns the only reference: the batched in-place reuse below
+            // can then mutate the path nodes instead of rebuilding the tree.
+            // Every exit from this iteration reassigns `leaf.cached_layout`.
+            let mut layout = self
                 .tile_root
-                .find_leaf(tile_id)
-                .and_then(|leaf| leaf.cached_layout.clone());
+                .find_leaf_mut(tile_id)
+                .and_then(|leaf| {
+                    leaf.cached_inactive_frame = None;
+                    leaf.cached_layout.take()
+                });
             let mut dirty_widget_ids = Vec::new();
             let mut reuse_mode = "targeted";
             let mut miss_reason = None::<String>;
-            let reusable_existing_layout = existing_layout;
-            let mut layout = reusable_existing_layout.clone();
             let mut targeted = layout.is_some();
             let subtree_paths = layout
                 .as_ref()
                 .map(|layout| crate::layout::subtree_root_paths(layout.as_ref()));
+            // Fast path: apply every subtree replacement in one traversal.
+            // The per-root loop below rebuilds the full layout tree once per
+            // root, so N changed subtrees cost N full-tree clones; the batched
+            // reuse keeps it at one, and at zero when this tile owns its
+            // layout. Any miss falls through to the per-root loop, which
+            // preserves the targeted-relayout and full-relayout fallbacks (and
+            // their diagnostics) unchanged.
+            let mut batched_applied = false;
+            if let (Some(existing), Some(paths_by_root)) =
+                (layout.as_mut(), subtree_paths.as_ref())
+            {
+                let batched_paths: Option<Vec<&[usize]>> = subtree_roots
+                    .iter()
+                    .map(|root_id| paths_by_root.get(root_id).map(|path| path.as_slice()))
+                    .collect();
+                if let Some(batched_paths) = batched_paths
+                    && crate::layout::reuse_layout_node_for_subtree_paths_in_place(
+                        existing,
+                        tree,
+                        &batched_paths,
+                        &mut dirty_widget_ids,
+                    )
+                    .is_ok()
+                {
+                    batched_applied = true;
+                }
+                if !batched_applied {
+                    dirty_widget_ids.clear();
+                }
+            }
             for subtree_root_id in subtree_roots {
-                let Some(existing) = layout.as_ref() else {
+                if batched_applied {
+                    break;
+                }
+                if layout.is_none() {
                     targeted = false;
                     miss_reason.get_or_insert_with(|| "missing-layout".to_string());
                     break;
-                };
+                }
                 let Some(child_path) = subtree_paths
                     .as_ref()
                     .and_then(|paths| paths.get(subtree_root_id))
@@ -6938,34 +7447,38 @@ impl Editor {
                     miss_reason = Some(format!("missing-subtree-path:{subtree_root_id}"));
                     break;
                 };
-                let updated = match crate::layout::reuse_layout_node_for_subtree_path_result(
-                    existing.as_ref(),
+                // Reuse in place first (no tree copy when this tile owns its
+                // layout); the plan phase fails before touching anything, so
+                // the relayout fallback still sees the untouched layout.
+                let reuse_result = crate::layout::reuse_layout_node_for_subtree_paths_in_place(
+                    layout.as_mut().expect("layout checked above"),
                     tree,
-                    child_path,
+                    &[child_path.as_slice()],
                     &mut dirty_widget_ids,
-                ) {
-                    Ok(updated) => updated,
-                    Err(reuse_reason) => {
-                        reuse_mode = "targeted-relayout";
-                        match self.runtime.relayout_subtree_for_tree_with_viewport(
-                            existing.as_ref(),
-                            tree,
-                            child_path,
-                            Some((cols, rows)),
-                            &mut dirty_widget_ids,
-                        ) {
-                            Ok(updated) => updated,
-                            Err(relayout_reason) => {
-                                targeted = false;
-                                miss_reason = Some(format!(
-                                    "subtree:{subtree_root_id}:{reuse_reason}; partial-relayout:{relayout_reason}"
-                                ));
-                                break;
-                            }
+                );
+                if let Err(reuse_reason) = reuse_result {
+                    reuse_mode = "targeted-relayout";
+                    let relayout_result = self.runtime.relayout_subtree_for_tree_with_viewport(
+                        layout.as_ref().expect("layout checked above").as_ref(),
+                        tree,
+                        child_path,
+                        Some((cols, rows)),
+                        frame_viewport,
+                        &mut dirty_widget_ids,
+                    );
+                    match relayout_result {
+                        Ok(updated) => {
+                            layout = Some(std::sync::Arc::new(updated));
+                        }
+                        Err(relayout_reason) => {
+                            targeted = false;
+                            miss_reason = Some(format!(
+                                "subtree:{subtree_root_id}:{reuse_reason}; partial-relayout:{relayout_reason}"
+                            ));
+                            break;
                         }
                     }
-                };
-                layout = Some(std::sync::Arc::new(updated));
+                }
             }
             let (layout, dirty_widget_ids) = if targeted {
                 (layout, dirty_widget_ids)
@@ -6973,9 +7486,10 @@ impl Editor {
                 reuse_mode = "full";
                 let layout = self
                     .runtime
-                    .layout_snapshot_for_tree_with_viewport_and_offset(
+                    .layout_snapshot_for_tree_with_geometry_and_offset(
                         tree,
                         Some((cols, rows)),
+                        frame_viewport,
                         buffer_id * 100_000,
                     );
                 (layout, Vec::new())
@@ -6998,6 +7512,7 @@ impl Editor {
                 };
                 leaf.widget_viewport_width = cols;
                 leaf.widget_viewport_height = rows;
+                leaf.layout_frame_viewport = frame_viewport;
                 leaf.dirty_widget_ids = dirty_widget_ids;
                 leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
                 leaf.cached_inactive_frame = None;
@@ -7732,6 +8247,26 @@ impl Editor {
                             ),
                         )
                     });
+                    // A rerun subtree whose rendered tree (including captured
+                    // callback environments) is identical to the committed
+                    // content changes nothing: skip the splice, snapshot
+                    // re-index, layout refresh, and retained repaint for it.
+                    if self.buffers[buffer_idx]
+                        .committed_ui_snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| {
+                            snapshot.subtree_replacement_is_noop(
+                                subtree_root_id,
+                                &tree,
+                                &reactive_dependencies,
+                            )
+                        })
+                    {
+                        self.trace_ui_tree_event_with(&buffer_name, "noop-subtree", || {
+                            format!("root={subtree_root_id}")
+                        });
+                        continue;
+                    }
                     let is_active = self.active_buffer_idx() == buffer_idx;
                     if is_active {
                         active_subtree_replacements.push(EditorSubtreeReplacement {
@@ -7904,6 +8439,9 @@ impl Editor {
             );
         }
         let inactive_started = std::time::Instant::now();
+        // The visible-binding scan walks every visible layout; defer it so
+        // refreshing N buffers in this flush pays for one scan, not N.
+        self.visible_binding_sync_deferred = true;
         for (buffer_idx, subtree_roots) in inactive_buffers_to_refresh {
             match subtree_roots {
                 Some(subtree_roots) => {
@@ -7933,6 +8471,17 @@ impl Editor {
                         );
                     }
                 }
+            }
+        }
+        self.visible_binding_sync_deferred = false;
+        if std::mem::take(&mut self.visible_binding_sync_pending) {
+            let bindings_started = std::time::Instant::now();
+            self.sync_reactive_bindings_for_visible_layouts();
+            if scene_trace {
+                eprintln!(
+                    "[side-effects-trace] deferred-bindings {:.3}ms",
+                    bindings_started.elapsed().as_secs_f64() * 1000.0
+                );
             }
         }
         if scene_trace {
@@ -8811,24 +9360,57 @@ fn find_definition_in_text(text: &str, symbol: &str) -> Option<(usize, usize)> {
     None
 }
 
+/// Inspect hit test. Returns the hit node plus the accumulated scroll
+/// offset between layout coordinates and rendered position, so callers can
+/// place the hover highlight where the widget is actually drawn.
 fn inspect_hit_test_layout(
     node: &crate::layout::LayoutNode,
     row: f32,
     col: f32,
-) -> Option<&crate::layout::LayoutNode> {
+) -> Option<(&crate::layout::LayoutNode, f32)> {
+    inspect_hit_test_layout_impl(node, row, col, 0.0)
+}
+
+fn inspect_hit_test_layout_impl(
+    node: &crate::layout::LayoutNode,
+    row: f32,
+    col: f32,
+    scroll_dy: f32,
+) -> Option<(&crate::layout::LayoutNode, f32)> {
+    // An open modal has a zero-size layout node (zero parent footprint);
+    // its children are anchored to the frame viewport with real rects, so
+    // descend without the containment gate.
+    if node.widget_type == "modal" {
+        return node
+            .children
+            .iter()
+            .rev()
+            .find_map(|child| inspect_hit_test_layout_impl(child, row, col, scroll_dy));
+    }
     if !rect_contains_point(node.rect, row, col) {
         return None;
     }
+    // Scroll containers: children are hit at their rendered position
+    // (mirrors hit_test_layout), and the offset is carried so hover rects
+    // can be mapped back.
+    let (child_row, child_dy) = if node.widget_type == "scroll" {
+        let state = crate::widget_render::scroll::get_scroll_state(
+            crate::widget_render::scroll::scroll_state_key(node),
+        );
+        (row + state.offset_y, scroll_dy + state.offset_y)
+    } else {
+        (row, scroll_dy)
+    };
     let deepest = node
         .children
         .iter()
         .rev()
-        .find_map(|child| inspect_hit_test_layout(child, row, col));
+        .find_map(|child| inspect_hit_test_layout_impl(child, child_row, col, child_dy));
     match deepest {
-        Some(hit) if inspect_node_has_source_identity(hit) => Some(hit),
-        Some(_) if inspect_node_has_source_identity(node) => Some(node),
+        Some(hit) if inspect_node_has_source_identity(hit.0) => Some(hit),
+        Some(_) if inspect_node_has_source_identity(node) => Some((node, scroll_dy)),
         Some(hit) => Some(hit),
-        None => Some(node),
+        None => Some((node, scroll_dy)),
     }
 }
 
@@ -9335,6 +9917,25 @@ fn find_layout_node_by_stable_key<'a>(
     node.children
         .iter()
         .find_map(|child| find_layout_node_by_stable_key(child, stable_key))
+}
+
+/// Map dirty scroll state keys (stable ids) to the layout widget ids of the
+/// scroll nodes that own them, so scroll changes ride the dirty-widget-id
+/// invalidation path scoped to the owning subtree.
+fn collect_scroll_widget_ids_for_keys(
+    node: &crate::layout::LayoutNode,
+    keys: &std::collections::HashSet<u64>,
+    out: &mut Vec<u64>,
+) {
+    if node.widget_type == "scroll"
+        && keys.contains(&crate::widget_render::scroll::scroll_state_key(node))
+        && !out.contains(&node.widget_id)
+    {
+        out.push(node.widget_id);
+    }
+    for child in &node.children {
+        collect_scroll_widget_ids_for_keys(child, keys, out);
+    }
 }
 
 fn find_patcher_layout_node(node: &crate::layout::LayoutNode) -> Option<crate::layout::LayoutNode> {

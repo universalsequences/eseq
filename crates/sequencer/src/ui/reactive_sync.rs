@@ -84,7 +84,6 @@ pub(super) fn sync_after_instrument_track_apply(
 
 pub(super) fn refresh_visible_track_topology_layouts(editor: &mut Editor) {
     for buffer_name in [
-        "*metal*",
         "*sequencer*",
         "*samples*",
         "*mixer*",
@@ -383,6 +382,52 @@ pub(super) fn sync_track_step_param_list_bindings(
         }
     }
     dirty
+}
+
+/// The per-track slice of `sync_track_step_param_list_bindings` for a SINGLE
+/// param, minus the current-track flat list.
+///
+/// `sync_single_step_param_binding` already writes the flat
+/// `SEQ.{velocities,durations,...}` list at the edited INDEX, which is the
+/// cheap index-aware write; rewriting the whole list here would re-dirty every
+/// effect that reads it (that whole-list rewrite is exactly what made a
+/// velocity drag cost ~4.4ms of reactive cycle under the old ui_epoch resync).
+/// The list-of-lists `SEQ.track-{velocities,durations,...}` has no per-index
+/// writer, though, and `seqv-track-param-values` reads it for every
+/// non-current track's expanded lane, so it still needs the per-track write.
+pub(super) fn sync_track_step_param_list_binding_for_param(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+    param: StepParam,
+) -> bool {
+    let Some((_, track_field, _)) = step_param_fields(param) else {
+        return false;
+    };
+    rt.set_reactive_list_index(
+        "SEQ",
+        track_field,
+        track,
+        build_param_list(state, track, param),
+    )
+    .effects_dirty
+}
+
+/// `track-duration-spans` at one track index — the list-of-lists half of the
+/// duration-bar surface whose per-step half is
+/// `sync_track_duration_span_binding_fields`.
+pub(super) fn sync_track_duration_spans_list_binding(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+) -> bool {
+    rt.set_reactive_list_index(
+        "SEQ",
+        "track-duration-spans",
+        track,
+        build_track_duration_spans_value(state, track),
+    )
+    .effects_dirty
 }
 
 pub(super) fn sync_single_step_param_binding(
@@ -729,23 +774,7 @@ pub(super) fn sync_step_batch_structural_bindings(
                 Value::Bool(visible && track == current_track_idx && selected.contains(&step)),
             )
             .effects_dirty;
-        let render = render_values[step];
-        dirty |= rt
-            .set_reactive(
-                "SEQ",
-                &track_step_plock_kind_field(track, step),
-                Value::Number(render.kind as f64),
-            )
-            .effects_dirty;
-        for (channel, value) in ['r', 'g', 'b'].into_iter().zip(render.color) {
-            dirty |= rt
-                .set_reactive(
-                    "SEQ",
-                    &track_step_variant_color_field(track, step, channel),
-                    Value::Number(value as f64),
-                )
-                .effects_dirty;
-        }
+        dirty |= sync_track_step_plock_render_fields(rt, track, step, render_values[step]);
         for viewport in expanded_step_projection.viewports_for_track(track) {
             if let Some(slot) = visible_slot_for_step(viewport, step) {
                 dirty |= sync_expanded_step_slot(
@@ -771,6 +800,55 @@ pub(super) fn sync_step_batch_structural_bindings(
             selected.iter().copied().min(),
             selected.len(),
         );
+    }
+    dirty
+}
+
+/// Accumulate a `(track, steps)` entry for a deferred per-track fan-out inside
+/// `apply_ui_invalidations`, de-duplicating both the track and the step.
+fn push_deferred_track_step(entries: &mut Vec<(usize, Vec<usize>)>, track: usize, step: usize) {
+    match entries.iter_mut().find(|(entry, _)| *entry == track) {
+        Some((_, steps)) => {
+            if !steps.contains(&step) {
+                steps.push(step);
+            }
+        }
+        None => entries.push((track, vec![step])),
+    }
+}
+
+/// Write the compact step shell's per-step p-lock *render* bindings
+/// (`seq-track-step-plock-kind-{track}-{step}` plus the three
+/// `seq-track-step-variant-{r,g,b}-{track}-{step}` fields).
+///
+/// These are the fields the compact grid's tick and variant tint bind to. They
+/// are otherwise only published by the full `ui_epoch`-driven sync
+/// (`sync_all_track_step_binding_fields_inner`) and by
+/// `sync_step_batch_structural_bindings`; the p-lock authoring path publishes
+/// them through this helper so the tick appears on the first knob touch.
+/// Values/gating match the full sync exactly (render values are written
+/// ungated by step visibility, like the full sync does).
+pub(super) fn sync_track_step_plock_render_fields(
+    rt: &mut Runtime,
+    track: usize,
+    step: usize,
+    render: PlockVariantStepRender,
+) -> bool {
+    let mut dirty = rt
+        .set_reactive(
+            "SEQ",
+            &track_step_plock_kind_field(track, step),
+            Value::Number(render.kind as f64),
+        )
+        .effects_dirty;
+    for (channel, value) in ['r', 'g', 'b'].into_iter().zip(render.color) {
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &track_step_variant_color_field(track, step, channel),
+                Value::Number(value as f64),
+            )
+            .effects_dirty;
     }
     dirty
 }
@@ -1028,10 +1106,11 @@ pub(super) fn sync_instrument_plock_presence_fields(
             build_step_has_plocks(state, track, effect_descriptors),
         )
         .effects_dirty;
-    let step_plock_kinds = build_step_plock_kinds(state, track);
-    let step_variant_r = build_step_variant_color_channel(state, track, 0);
-    let step_variant_g = build_step_variant_color_channel(state, track, 1);
-    let step_variant_b = build_step_variant_color_channel(state, track, 2);
+    let render_values = plock_variant_step_render_values(state, track);
+    let step_plock_kinds = build_step_plock_kinds_from_render(&render_values);
+    let step_variant_r = build_step_variant_color_channel_from_render(&render_values, 0);
+    let step_variant_g = build_step_variant_color_channel_from_render(&render_values, 1);
+    let step_variant_b = build_step_variant_color_channel_from_render(&render_values, 2);
     dirty |= rt
         .set_reactive("SEQ", "step-plock-kinds", step_plock_kinds.clone())
         .effects_dirty;
@@ -1063,17 +1142,32 @@ pub(super) fn sync_instrument_plock_presence_fields(
             build_track_plock_variants_value(state, track, selected_steps),
         )
         .effects_dirty;
+    // Per-step compact-grid bindings for the touched steps. The compact step
+    // shell binds its p-lock tick to the per-step `-plock-kind-` number and its
+    // tint to the per-step `-variant-{r,g,b}-` fields, not to the list forms
+    // published above, so those must be written here too — otherwise the tick
+    // only appears on the next `ui_epoch`-driven full sync (i.e. after an
+    // unrelated selection change).
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .min(MAX_STEPS);
     for step in steps {
         if step >= MAX_STEPS {
             continue;
         }
+        // `visible` gating matches the full sync (out-of-range steps report no
+        // p-lock); previously this write was ungated.
+        let visible = step < num_steps;
         dirty |= rt
             .set_reactive(
                 "SEQ",
                 &track_step_plocked_field(track, step),
-                Value::Bool(track_step_has_plock(state, track, effect_descriptors, step)),
+                Value::Bool(
+                    visible && track_step_has_plock(state, track, effect_descriptors, step),
+                ),
             )
             .effects_dirty;
+        dirty |= sync_track_step_plock_render_fields(rt, track, step, render_values[step]);
     }
     dirty
 }
@@ -1193,12 +1287,45 @@ pub(super) struct InstrumentParamDisplaySync<'a> {
     pub(super) state: &'a Arc<SequencerState>,
     pub(super) selected_steps: &'a Arc<Mutex<HashSet<usize>>>,
     pub(super) selection: &'a BTreeSet<sequencer::lisp_host::SelectedNeuralNeuron>,
+    pub(super) expanded_step_projection: &'a Arc<ExpandedStepProjectionRegistry>,
     pub(super) track: usize,
     pub(super) param_idx: usize,
     pub(super) display_step: Option<usize>,
     pub(super) sync_plock_list: bool,
     pub(super) sync_plock_presence: bool,
     pub(super) sync_sampler_times: bool,
+}
+
+/// Republish every p-lock *presence* surface an instrument p-lock write can
+/// change: the compact grid values plus the expanded lanes' per-slot p-lock
+/// ticks. The expanded ticks used to be refreshed by the reactive tick's
+/// `ui_epoch`-driven full viewport resync, which the p-lock authoring path no
+/// longer triggers (see `sync_expanded_step_plocked_fields_for_steps`).
+pub(super) fn sync_instrument_plock_presence_display_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &app::App,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+    track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) -> bool {
+    let mut dirty = sync_instrument_plock_presence_fields(
+        rt,
+        state,
+        &app.graph.effect_descriptors,
+        track,
+        selected_steps,
+    );
+    let steps: Vec<usize> = selected_steps.lock().unwrap().iter().copied().collect();
+    dirty |= sync_expanded_step_plocked_fields_for_steps(
+        rt,
+        state,
+        app,
+        expanded_step_projection,
+        track,
+        &steps,
+    );
+    dirty
 }
 
 pub(super) fn sync_instrument_param_authoring_display(
@@ -1217,10 +1344,11 @@ pub(super) fn sync_instrument_param_authoring_display(
         );
     }
     if sync.sync_plock_presence {
-        ui_dirty |= sync_instrument_plock_presence_fields(
+        ui_dirty |= sync_instrument_plock_presence_display_fields(
             editor.runtime_mut(),
             sync.state,
-            &sync.app.graph.effect_descriptors,
+            sync.app,
+            sync.expanded_step_projection,
             sync.track,
             sync.selected_steps,
         );
@@ -1373,6 +1501,59 @@ pub(super) fn sync_expanded_step_viewports_for_track(
     dirty
 }
 
+/// Repaint just the p-lock ticks of the expanded lanes that show `steps` on
+/// `track`.
+///
+/// `seqv-slot-plocked-*` used to be refreshed by the reactive tick's
+/// `sync_all_expanded_step_viewports`, which rode along with the `ui_epoch`
+/// bump the instrument p-lock authoring path used to do on every drag update.
+/// That bump is gone (it rebuilt the whole fx widget source per drag event),
+/// so the authoring path writes the affected slots itself instead of paying
+/// for a full viewport sync.
+pub(super) fn sync_expanded_step_plocked_fields_for_steps(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &app::App,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+    track: usize,
+    steps: &[usize],
+) -> bool {
+    if track >= app.tracks.len() {
+        return false;
+    }
+    let viewports = expanded_step_projection.viewports_for_track(track);
+    if viewports.is_empty() {
+        return false;
+    }
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .min(MAX_STEPS);
+    let mut dirty = false;
+    for viewport in viewports {
+        for &step in steps {
+            let Some(slot) = visible_slot_for_step(viewport, step) else {
+                continue;
+            };
+            dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &expanded_step_slot_plocked_field(viewport.track_id, slot),
+                    Value::Bool(
+                        step < num_steps
+                            && track_step_has_plock(
+                                state,
+                                track,
+                                &app.graph.effect_descriptors,
+                                step,
+                            ),
+                    ),
+                )
+                .effects_dirty;
+        }
+    }
+    dirty
+}
+
 pub(super) fn sync_all_expanded_step_viewports(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -1463,6 +1644,31 @@ pub(super) fn apply_ui_invalidations(
 
     let mut needs_reactive_cycle = false;
     let mut bus_state_pulled = false;
+    // Step-param edits fan out to two surfaces that have no per-step writer:
+    // the `SEQ.track-{velocities,durations,...}` list-of-lists (read by every
+    // non-current track's expanded lane) and `SEQ.track-duration-spans`. Both
+    // are per-TRACK rewrites, so a drag over a 64-step selection must not do
+    // them once per step — collect the distinct (track, param) pairs here and
+    // flush them once after the loop. `set-step-param-history` used to reach
+    // them by bumping ui_epoch, which resynced every track instead.
+    let mut step_param_track_lists: Vec<(usize, StepParam)> = Vec::new();
+    let mut duration_span_tracks: Vec<usize> = Vec::new();
+    // The compact step shell's p-lock tick/variant tint is derived from
+    // `live_track_has_seq_lock`, which is true as soon as ANY StepParam leaves
+    // its default — so a transpose/velocity/duration edit flips the step's
+    // render kind. Computing the render vector needs a per-track registry
+    // reconcile over all MAX_STEPS, so collect the touched steps here and do
+    // one reconcile per track after the loop.
+    let mut plock_render_steps: Vec<(usize, Vec<usize>)> = Vec::new();
+    // Drum-rack lanes place a hit on the pad row named by the step's Transpose,
+    // so a transpose edit moves the hit between rows. `drum_rack_sound_options`
+    // needs a rack-track lock plus a SEQ namespace read, so this is likewise
+    // batched to one call per track.
+    let mut drum_lane_transpose_steps: Vec<(usize, Vec<usize>)> = Vec::new();
+    // The piano roll renders notes from transpose/velocity/duration, so a
+    // step-param edit on the current track moves them. One sync per apply,
+    // never one per step.
+    let mut piano_roll_step_params_dirty = false;
     let active_track_count = state.active_track_count().min(app.tracks.len());
     let legacy_step_grid_visible = editor_has_visible_buffer(editor, "*metal*");
     let rt = editor.runtime_mut();
@@ -1595,22 +1801,36 @@ pub(super) fn apply_ui_invalidations(
                 change,
             } => match change {
                 StepInvalidation::Param(param) => {
+                    let param = param.to_step_param();
                     needs_reactive_cycle |= sync_single_step_param_binding(
                         rt,
                         state,
                         track,
                         step,
-                        param.to_step_param(),
+                        param,
                         current_track_idx,
                         selected_steps,
                         expanded_step_projection,
                     );
+                    if !step_param_track_lists.contains(&(track, param)) {
+                        step_param_track_lists.push((track, param));
+                    }
+                    push_deferred_track_step(&mut plock_render_steps, track, step);
+                    if param == StepParam::Transpose {
+                        push_deferred_track_step(&mut drum_lane_transpose_steps, track, step);
+                    }
+                    if track == current_track_idx {
+                        piano_roll_step_params_dirty = true;
+                    }
                 }
                 StepInvalidation::DurationSpan => {
                     needs_reactive_cycle |=
                         sync_track_duration_span_binding_fields(rt, state, track, step);
                     needs_reactive_cycle |=
                         sync_drum_lane_duration_span_binding_fields(rt, state, app, track, step);
+                    if !duration_span_tracks.contains(&track) {
+                        duration_span_tracks.push(track);
+                    }
                 }
                 StepInvalidation::Active
                 | StepInvalidation::Payload
@@ -1662,13 +1882,13 @@ pub(super) fn apply_ui_invalidations(
                             track,
                             selected_plock_step(selected_steps),
                         );
-                        let previous_display = match rt.global_value("SEQ") {
-                            Some(Value::Map(fields)) => fields
-                                .get("fx-step-display-step")
-                                .and_then(|value| match &*value.borrow() {
-                                    Value::Number(step) if *step >= 0.0 => Some(*step as usize),
-                                    _ => None,
-                                }),
+                        // Read the single field directly: `global_value("SEQ")`
+                        // clones the entire SEQ namespace map (thousands of
+                        // per-track/per-step fields) just to look at one entry.
+                        let previous_display = match rt
+                            .reactive_field_value("SEQ", "fx-step-display-step")
+                        {
+                            Some(Value::Number(step)) if *step >= 0.0 => Some(*step as usize),
                             _ => None,
                         };
                         needs_reactive_cycle |= sync_track_plocks_for_neural_selection(
@@ -2101,6 +2321,39 @@ pub(super) fn apply_ui_invalidations(
                 needs_reactive_cycle = true;
             }
         }
+    }
+
+    // Deferred per-track fan-out of the step-param invalidations (see the
+    // declarations above): one write per distinct (track, param), not one per
+    // invalidated step.
+    for (track, param) in step_param_track_lists {
+        needs_reactive_cycle |=
+            sync_track_step_param_list_binding_for_param(rt, state, track, param);
+    }
+    for track in duration_span_tracks {
+        needs_reactive_cycle |= sync_track_duration_spans_list_binding(rt, state, track);
+    }
+    // One registry reconcile per track, then per-step writes only: the p-lock
+    // tick has no other writer on a step-param edit now that the funnel does
+    // not bump ui_epoch.
+    for (track, steps) in plock_render_steps {
+        let render_values = plock_variant_step_render_values(state, track);
+        for step in steps {
+            if let Some(render) = render_values.get(step).copied() {
+                needs_reactive_cycle |=
+                    sync_track_step_plock_render_fields(rt, track, step, render);
+            }
+        }
+    }
+    // Cheap no-op on non-drum tracks (`drum_rack_sound_options` returns empty
+    // before any namespace read).
+    for (track, steps) in drum_lane_transpose_steps {
+        needs_reactive_cycle |=
+            sync_drum_lane_step_binding_fields_for_steps(rt, state, app, track, &steps);
+    }
+    if piano_roll_step_params_dirty {
+        sync_piano_roll_state(rt, app, state, current_track_idx, piano_roll_selection);
+        needs_reactive_cycle = true;
     }
 
     if needs_reactive_cycle {

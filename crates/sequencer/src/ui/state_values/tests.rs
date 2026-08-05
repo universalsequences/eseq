@@ -863,6 +863,45 @@
     }
 
     #[test]
+    fn every_sequencer_theme_defines_the_step_surface_palette_once() {
+        let step_surface_slots = [
+            "sequencer-step-border",
+            "sequencer-step-selected-border",
+            "sequencer-step-off-fill",
+            "sequencer-step-off-fill-alt",
+        ];
+
+        for path in [
+            "ui/themes/mac-osx-dark.lisp",
+            "ui/themes/mac-osx-light-theme.lisp",
+            "ui/themes/ableton-mid.lisp",
+            "ui/themes/mac-osx-graphite.lisp",
+            "ui/themes/mac-osx-haze.lisp",
+            "ui/themes/mac-osx-midnight.lisp",
+            "ui/themes/mac-osx-midnight-50.lisp",
+            "ui/themes/black-ir-theme.lisp",
+            "ui/themes/mac-osx-ember.lisp",
+            "ui/themes/mac-osx-violet.lisp",
+        ] {
+            let src = std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("read {path}: {error}"));
+            for slot in step_surface_slots {
+                let definition = format!(":{slot}");
+                assert_eq!(
+                    src.lines()
+                        .filter(|line| {
+                            line.trim_start().split_ascii_whitespace().next()
+                                == Some(definition.as_str())
+                        })
+                        .count(),
+                    1,
+                    "{path} must define :{slot} exactly once"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn mac_osx_light_theme_is_available_through_the_theme_registry() {
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor
@@ -7511,11 +7550,19 @@
         state: &Arc<SequencerState>,
     ) {
         for channel in 0..3 {
-            let field = track_color_channel_effective_field(channel);
-            let actual = number_list_values(&reactive_field_value(runtime, "SEQ", field));
-            let expected =
-                number_list_values(&build_track_color_channel_effective(app, state, channel));
-            assert_number_lists_close(&actual, &expected);
+            for (field, expected) in [
+                (
+                    track_color_channel_effective_field(channel),
+                    build_track_color_channel_effective(app, state, channel),
+                ),
+                (
+                    step_color_channel_effective_field(channel),
+                    build_step_color_channel_effective(app, state, channel),
+                ),
+            ] {
+                let actual = number_list_values(&reactive_field_value(runtime, "SEQ", field));
+                assert_number_lists_close(&actual, &number_list_values(&expected));
+            }
         }
     }
 
@@ -7617,6 +7664,18 @@
                     "track-color-b-effective",
                     build_track_color_channel_effective(&app, &state, 2),
                 ),
+                (
+                    "step-color-r-effective",
+                    build_step_color_channel_effective(&app, &state, 0),
+                ),
+                (
+                    "step-color-g-effective",
+                    build_step_color_channel_effective(&app, &state, 1),
+                ),
+                (
+                    "step-color-b-effective",
+                    build_step_color_channel_effective(&app, &state, 2),
+                ),
             ],
             true,
         );
@@ -7646,6 +7705,28 @@
             vec![false, false]
         );
         assert_effective_color_reactives_match_builders(&runtime, &app, &state);
+        for channel in 0..3 {
+            let track_colors = number_list_values(&reactive_field_value(
+                &runtime,
+                "SEQ",
+                track_color_channel_effective_field(channel),
+            ));
+            let step_colors = number_list_values(&reactive_field_value(
+                &runtime,
+                "SEQ",
+                step_color_channel_effective_field(channel),
+            ));
+            assert_eq!(
+                track_colors[1],
+                track_color_channel_effective_value(&app, 1, channel, true),
+                "muted row chrome should retain its existing dimmed track color"
+            );
+            assert_eq!(
+                step_colors[1],
+                track_color_channel_effective_value(&app, 1, channel, false),
+                "muted step shaders should receive the raw track color alongside :muted"
+            );
+        }
 
         state.pattern.track_params[0].set_solo(true);
         sync_track_mute_visual_binding_fields(&mut runtime, &app, &state, 0..2, true);
@@ -8081,6 +8162,129 @@
         );
         assert_eq!(value_map_string(row, "name").as_deref(), Some("cutoff"));
         assert_eq!(value_map_number(row, "value"), Some(900.0));
+    }
+
+    // A continuous instrument p-lock row must read its LOCK cell from the
+    // per-param SEQV field rather than the row's own number. That is what lets
+    // a knob drag repaint the row through the binding path instead of
+    // republishing SEQ.track-plocks (which reruns the whole *step* panel on
+    // every mouse move — the 43ms p-lock drag). Enum/boolean rows render a
+    // dropdown off `:text-value`, so they deliberately stay unbound.
+    #[test]
+    fn continuous_instrument_plock_rows_bind_their_lock_value_to_the_param_field() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let mode_idx = desc
+            .params
+            .iter()
+            .position(|param| matches!(param.kind, sequencer::effects::ParamKind::Enum { .. }))
+            .expect("filter descriptor should include an enum param");
+        let app = test_app_with_instrument_descriptor(desc.clone());
+        app.state.pattern.instrument_slots[0].set_plock(2, cutoff_idx, 900.0);
+        app.state.pattern.instrument_slots[0].set_plock(2, mode_idx, 1.0);
+        let selected_steps = Arc::new(Mutex::new(HashSet::from([2])));
+
+        let rows = value_list_maps(&build_track_plocks_value(
+            &app,
+            &app.state,
+            0,
+            &selected_steps,
+        ));
+        let cutoff_row = rows
+            .iter()
+            .find(|row| value_map_string(row, "name").as_deref() == Some("cutoff"))
+            .expect("cutoff p-lock row");
+        assert_eq!(
+            value_map_string(cutoff_row, "value-field").as_deref(),
+            Some(
+                instrument_param_value_field(0, cutoff_idx, &desc.params[cutoff_idx].name).as_str()
+            ),
+            "continuous instrument p-lock rows must bind to the per-param SEQV value field"
+        );
+
+        let enum_row = rows
+            .iter()
+            .find(|row| {
+                value_map_string(row, "name").as_deref() == Some(&desc.params[mode_idx].name)
+            })
+            .expect("enum p-lock row");
+        assert!(
+            value_map_string(enum_row, "value-field").is_none(),
+            "enum p-lock rows render a dropdown off :text-value and must stay unbound"
+        );
+    }
+
+    // The instrument p-lock authoring path no longer bumps `ui_epoch` per drag
+    // update, so the reactive tick's full expanded-viewport resync no longer
+    // repaints the expanded lane's p-lock tick. The presence sync must write
+    // the affected `seqv-slot-plocked-*` fields itself, or the first lock on a
+    // selected step lights the compact grid but not the expanded lane.
+    #[test]
+    fn instrument_plock_presence_sync_lights_the_expanded_lane_plock_tick() {
+        const TRACK_ID: usize = 7;
+        const STEP: usize = 2;
+        let desc = sequencer::effects::EffectDescriptor::builtin_filter();
+        let cutoff_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name == "cutoff")
+            .expect("filter descriptor should include cutoff");
+        let app = test_app_with_instrument_descriptor(desc.clone());
+        let selected_steps = Arc::new(Mutex::new(HashSet::from([STEP])));
+        let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
+        expanded_step_projection.set_viewport(ExpandedStepViewport {
+            track: 0,
+            track_id: TRACK_ID,
+            page: 0,
+            mode: 0,
+            cursor_step: 0,
+        });
+        let field = expanded_step_slot_plocked_field(TRACK_ID, STEP);
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], true);
+        runtime.register_reactive("SEQV", vec![], true);
+        let plocked = |runtime: &Runtime| {
+            let Some(Value::Map(map)) = runtime.global_value("SEQ") else {
+                return None;
+            };
+            map.get(&field).and_then(|value| match &*value.borrow() {
+                Value::Bool(value) => Some(*value),
+                _ => None,
+            })
+        };
+
+        sync_instrument_plock_presence_display_fields(
+            &mut runtime,
+            &app.state,
+            &app,
+            &expanded_step_projection,
+            0,
+            &selected_steps,
+        );
+        assert_eq!(
+            plocked(&runtime),
+            Some(false),
+            "an unlocked step must publish an unlit expanded p-lock tick"
+        );
+
+        app.state.pattern.instrument_slots[0].set_plock(STEP, cutoff_idx, 900.0);
+        sync_instrument_plock_presence_display_fields(
+            &mut runtime,
+            &app.state,
+            &app,
+            &expanded_step_projection,
+            0,
+            &selected_steps,
+        );
+        assert_eq!(
+            plocked(&runtime),
+            Some(true),
+            "the first p-lock write must light the expanded lane's tick without an epoch bump"
+        );
     }
 
     #[test]
@@ -16535,7 +16739,7 @@
     }
 
     #[test]
-    fn metal_seq_selecting_different_track_closes_lower_piano_roll() {
+    fn metal_seq_selecting_different_track_preserves_lower_piano_roll() {
         let mut editor = full_grid_editor_for_scroll_tests();
         set_full_grid_track_count(&mut editor, 2, 16);
         editor.runtime_mut().run_reactive_cycle();
@@ -16566,14 +16770,59 @@
             .expect("select a different track");
         assert_eq!(
             editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
-            Some(Value::String("*fx*".to_string())),
-            "selecting a different track should restore the FX lower pane"
+            Some(Value::String("*piano-roll*".to_string())),
+            "selecting a different track should preserve the lower piano roll"
         );
         assert_eq!(
             editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string())),
             "selecting a different track should leave the main sequencer panel visible"
         );
+    }
+
+    #[test]
+    fn metal_seq_selecting_different_track_preserves_hidden_panels() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        editor.runtime_mut().run_reactive_cycle();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (do
+                  (set! samples-sidebar-visible false)
+                  (set! mixer-panel-visible false)
+                  (set! lower-panel-visible false)
+                  (seq-apply-fx-layout))
+                "#,
+            )
+            .expect("hide browser, mixer, and FX panels");
+        editor.refresh_runtime_side_effects();
+
+        editor
+            .runtime_mut()
+            .eval_str("(seqv-select-track-for-edit 1)")
+            .expect("select a different track");
+        editor.refresh_runtime_side_effects();
+
+        for state in [
+            "samples-sidebar-visible",
+            "mixer-panel-visible",
+            "lower-panel-visible",
+        ] {
+            assert_eq!(
+                editor.runtime_mut().eval_str(state).unwrap(),
+                Some(Value::Bool(false)),
+                "track selection must preserve hidden panel state for {state}"
+            );
+        }
+        let tile_buffers = collect_tile_buffer_names(&editor);
+        for hidden in ["*samples*", "*mixer*", "*fx*"] {
+            assert!(
+                !tile_buffers.contains(&hidden.to_string()),
+                "track selection must not restore {hidden}: {tile_buffers:?}"
+            );
+        }
     }
 
     #[test]
@@ -19179,6 +19428,7 @@
     }
 
     #[test]
+    #[ignore = "the legacy *metal* step grid is no longer loaded by ui/main.lisp (step-grid.lisp kept on disk for reference)"]
     fn metal_seq_empty_metal_buffer_centers_prompt_without_overflow() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
@@ -19518,6 +19768,93 @@
         );
     }
 
+    // The drag contract behind the p-lock knob fix: once a row exists, moving
+    // the knob only rewrites the row's bound SEQV field. SEQ.track-plocks is
+    // NOT republished, so the panel's widget tree must not change identity —
+    // only the bound value the LOCK picker reads.
+    #[test]
+    fn bound_plock_row_lock_value_follows_the_param_field_without_republishing_the_list() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let value_field = "track-0-instrument-param-2-cutoff";
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", value_field, Value::Number(900.0));
+        let plocks = test_list(vec![map_value([
+            ("target", Value::String("instrument".to_string())),
+            ("domain", Value::String("inst".to_string())),
+            ("step-idx", Value::Number(2.0)),
+            ("param-idx", Value::Number(2.0)),
+            ("group", Value::String("inst".to_string())),
+            ("name", Value::String("cutoff".to_string())),
+            ("value", Value::Number(900.0)),
+            ("value-field", Value::String(value_field.to_string())),
+            ("default", Value::Number(5000.0)),
+            ("text-value", Value::String("900.00".to_string())),
+            ("default-text", Value::String("5000.00".to_string())),
+            ("min", Value::Number(20.0)),
+            ("max", Value::Number(20000.0)),
+        ])]);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-plocks", plocks);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-plock-variants", test_list(vec![]));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(def seqv-param-name (mode) "")"#)
+            .expect("stub sequencer param name helper");
+        editor
+            .runtime_mut()
+            .eval_str(r#"(effect-buffer "*plock-panel-binding-test*" (fx-track-plocks-panel))"#)
+            .expect("create p-lock binding test buffer");
+        editor.refresh_runtime_side_effects();
+        let buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*plock-panel-binding-test*")
+            .expect("p-lock binding test buffer")
+            .id;
+        editor.set_active_buffer(buffer_id);
+        editor.set_layout_viewport(24, 60);
+        editor.refresh_visible_layouts_for_buffer_named("*plock-panel-binding-test*");
+
+        let lock_widget_id = {
+            let layout = editor.widget_layout().expect("p-lock panel layout");
+            let lock = find_layout_node_by_stable_key(&layout, "track-plock-row-0-lock")
+                .expect("bound p-lock row lock cell");
+            assert_eq!(
+                layout_prop_number(lock, "value"),
+                Some(900.0),
+                "the LOCK picker must render the bound field's value"
+            );
+            lock.widget_id
+        };
+
+        // Exactly what a knob drag does now: rewrite only the bound field.
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", value_field, Value::Number(1234.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*plock-panel-binding-test*");
+
+        let layout = editor.widget_layout().expect("p-lock panel layout");
+        let lock = find_layout_node_by_stable_key(&layout, "track-plock-row-0-lock")
+            .expect("bound p-lock row lock cell survives the value change");
+        assert_eq!(
+            layout_prop_number(lock, "value"),
+            Some(1234.0),
+            "a bound p-lock row must follow its bound field without republishing SEQ.track-plocks"
+        );
+        assert_eq!(
+            lock.widget_id, lock_widget_id,
+            "the row must repaint in place, not be rebuilt"
+        );
+    }
+
     #[test]
     fn metal_seq_track_plock_panel_renders_preview_rows_read_only() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -19719,6 +20056,10 @@
             ("target-kind", Value::String("take".to_string())),
             ("target-id", Value::Number(1.0)),
             (
+                "instrument-name",
+                Value::String("ultrakick".to_string()),
+            ),
+            (
                 "entries",
                 test_list(vec![
                     map_value([
@@ -19729,6 +20070,10 @@
                         ("base", Value::Bool(true)),
                         ("current", Value::Bool(false)),
                         ("color", Value::Nil),
+                        ("preset", Value::Nil),
+                        ("sample", Value::Nil),
+                        ("diff-up", Value::Number(3.0)),
+                        ("diff-down", Value::Number(1.0)),
                     ]),
                     map_value([
                         ("patch-id", Value::Number(3.0)),
@@ -19741,6 +20086,14 @@
                         ("color-r", Value::Number(0.909_803_9)),
                         ("color-g", Value::Number(0.643_137_3)),
                         ("color-b", Value::Number(0.309_803_93)),
+                        (
+                            "glyph-key",
+                            Value::String("sound-glyph:track:0:patch:3".to_string()),
+                        ),
+                        ("preset", Value::String("Warm Keys.json".to_string())),
+                        ("sample", Value::Nil),
+                        ("diff-up", Value::Number(0.0)),
+                        ("diff-down", Value::Number(0.0)),
                     ]),
                 ]),
             ),
@@ -19748,8 +20101,9 @@
     }
 
     /// Takes spec 18.3 exit criterion: the palette overlay renders — header,
-    /// both entry rows (gray base + colored current), and the per-entry
-    /// action buttons — all inside the panel; closed (Nil) it collapses.
+    /// both entry rows (gray base + colored current), the preset/sample
+    /// source line, and the param diff badges — all inside the panel;
+    /// closed (Nil) it collapses. Apply is the row click itself.
     #[test]
     fn metal_seq_sound_palette_overlay_layout() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -19779,19 +20133,31 @@
             .expect("gray base entry should render");
         let current_row = find_layout_node_by_stable_key(&layout, "sound-palette-entry-3")
             .expect("current entry should render");
-        let apply = find_layout_node_by_stable_key(&layout, "sound-palette-apply-3")
-            .expect("apply button should render");
-        let apply_mix = find_layout_node_by_stable_key(&layout, "sound-palette-apply-mix-3")
-            .expect("apply-with-mix button should render");
+        let source = find_layout_node_by_stable_key(&layout, "sound-palette-source-3")
+            .expect("preset/sample source label should render");
+        let diff_up = find_layout_node_by_stable_key(&layout, "sound-palette-diff-up-0")
+            .expect("diff badge should render");
         assert_finite_nonzero_rect(panel, "sound palette panel");
         assert_finite_nonzero_rect(base_row, "gray base entry");
         assert_finite_nonzero_rect(current_row, "current entry");
-        assert_finite_nonzero_rect(apply, "apply button");
         assert_layout_inside(header, panel, "palette header");
         assert_layout_inside(base_row, panel, "gray base entry");
         assert_layout_inside(current_row, panel, "current entry");
-        assert_layout_inside(apply, current_row, "apply button");
-        assert_layout_inside(apply_mix, current_row, "apply-with-mix button");
+        assert_layout_inside(source, current_row, "preset/sample source label");
+        assert_layout_inside(diff_up, base_row, "diff badge");
+
+        // Sound-glyph spec P2: each box carries the plant glyph as its
+        // center region, fed by the host-published frame key.
+        let glyph = find_layout_node_by_stable_key(&layout, "sound-palette-glyph-3")
+            .expect("sound glyph widget should render");
+        assert_eq!(glyph.widget_type, "sound-glyph");
+        assert_finite_nonzero_rect(glyph, "sound glyph");
+        assert_layout_inside(glyph, current_row, "sound glyph");
+        assert_eq!(
+            glyph.props.get("source").map(|value| value.clone()),
+            Some(Value::String("sound-glyph:track:0:patch:3".to_string())),
+            "glyph source key comes from the entry's glyph-key"
+        );
 
         // Closed again: the reactive Nil collapses the panel to nothing.
         editor
@@ -19804,6 +20170,99 @@
         assert!(
             find_layout_node_by_stable_key(&layout, "sound-palette-entry-3").is_none(),
             "a closed palette renders no entries"
+        );
+    }
+
+    /// Inspect mode over the open sound palette (real tiled UI): every
+    /// hover hit must land inside the modal subtree — never on the widgets
+    /// behind the panel — and hovering the panel must hit something.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_seq_inspect_mode_hits_sound_palette_modal_not_behind_it() {
+        fn find_modal<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.widget_type == "modal" && !node.children.is_empty() {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_modal)
+        }
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        assert!(
+            editor.switch_active_tile_to_buffer_named("*step*"),
+            "step tile must exist in the startup grid"
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "sound-palette", sound_palette_fixture());
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 140, 36);
+
+        let layout = editor.widget_layout().expect("step layout");
+        let modal = find_modal(&layout).expect("open sound palette modal").clone();
+
+        // Register the overlay entry exactly as a live frame draw would.
+        let _ = eseqlisp::widget_render::collect_metal_primitives(
+            &layout,
+            eseqlisp::widget_render::WidgetViewport {
+                cell_w: 10.0,
+                cell_h: 20.0,
+                vp_w: 1400.0,
+                vp_h: 720.0,
+                time_seconds: 0.0,
+                focused_widget_id: None,
+                focused_branch: false,
+                overlay_viewport_bottom: 36.0,
+                scroll_top: 0.0,
+                scroll_left: 0.0,
+                inherited_hover: false,
+            },
+            0.0,
+            36,
+        );
+        assert!(
+            eseqlisp::widget_render::topmost_overlay().is_some(),
+            "the open palette must register a modal overlay entry"
+        );
+
+        editor.toggle_inspect_mode();
+        let mut hits_inside = 0usize;
+        let mut hits_outside = Vec::new();
+        for row_step in 0..18 {
+            for col_step in 0..35 {
+                let precise_col = col_step as f32 * 4.0 + 2.0;
+                let precise_row = row_step as f32 * 2.0 + 1.0;
+                editor.handle_tiled_mouse_precise(
+                    crossterm::event::MouseEvent {
+                        kind: crossterm::event::MouseEventKind::Moved,
+                        column: precise_col as u16,
+                        row: precise_row as u16,
+                        modifiers: crossterm::event::KeyModifiers::NONE,
+                    },
+                    precise_col,
+                    precise_row,
+                    0,
+                );
+                let Some(hover_id) = editor.inspect_hovered_widget_id() else {
+                    continue;
+                };
+                if eseqlisp::layout::layout_contains_widget_id(&modal, hover_id) {
+                    hits_inside += 1;
+                } else {
+                    hits_outside.push((precise_col, precise_row, hover_id));
+                }
+            }
+        }
+        eseqlisp::widget_render::clear_overlay();
+        assert!(
+            hits_outside.is_empty(),
+            "inspect hover must never select widgets behind the open palette: {hits_outside:?}"
+        );
+        assert!(
+            hits_inside > 0,
+            "inspect hover over the panel must select palette widgets"
         );
     }
 
@@ -24576,6 +25035,7 @@
     }
 
     #[test]
+    #[ignore = "the legacy *metal* step grid is no longer loaded by ui/main.lisp (step-grid.lisp kept on disk for reference)"]
     fn metal_seq_duration_mode_renders_all_steps_above_two() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
@@ -24774,9 +25234,115 @@
             assert_eq!(
                 shell.props.get("hide"),
                 Some(&expected_hide),
-                "step shell {step} should reflect the pattern-length visibility boundary"
+                "step shell {step} should hide in the shader without becoming a UI diagnostic"
+            );
+            assert!(matches!(
+                shell.props.get("muted"),
+                Some(Value::ReactiveRef {
+                    namespace,
+                    field,
+                    index: Some(0),
+                    ..
+                }) if namespace == "SEQ" && field == "track-muted-effective"
+            ));
+            if step < 8 {
+                let expected_fill = if (4..8).contains(&step) {
+                    "sequencer-step-off-fill-alt"
+                } else {
+                    "sequencer-step-off-fill"
+                };
+                assert_eq!(
+                    shell.props.get("off-fill"),
+                    Some(&Value::Keyword(expected_fill.to_string())),
+                    "step shell {step} should preserve four-step rhythmic shading"
+                );
+            }
+            assert_eq!(
+                shell.props.get("selected-color"),
+                Some(&Value::Keyword(
+                    "sequencer-step-selected-border".to_string()
+                )),
+                "step shell {step} should use the themed selected-step rim"
             );
         }
+
+        let shell_def = eseqlisp::widget_render::sdf_widget::sdf_widget_def("seqv-step-shell")
+            .expect("seqv-step-shell should be registered");
+        assert!(shell_def.state_uniforms.iter().any(|name| name == "muted"));
+        assert!(shell_def.state_uniforms.iter().any(|name| name == "hide"));
+        assert!(
+            shell_def.state_uniforms.len()
+                <= eseqlisp::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS,
+            "seqv-step-shell must keep every declared shader state within the GPU uniform budget"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_seq_selected_step_uses_the_themed_sdf_input_color() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(reactive-set "SEQ" "seq-track-step-selected-0-4" 1)"#)
+            .expect("select step through its production reactive field");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(140, 20);
+        let layout = editor.widget_layout().expect("sequencer layout should build");
+        let cell = find_layout_node_by_stable_key(&layout, "seqv-step-cell-0-4")
+            .expect("selected step cell should exist");
+        let shell = compact_step_shell(cell);
+        assert!(eseqlisp::widget_render::get_bool_prop(
+            &shell.props,
+            "selected",
+            false
+        ));
+
+        let primitives =
+            eseqlisp::widget_render::sdf_widget::sdf_widget_background_primitives(
+                "seqv-step-shell",
+                shell.widget_id,
+                shell.rect,
+                eseqlisp::widget_render::WidgetViewport {
+                    cell_w: 10.0,
+                    cell_h: 20.0,
+                    vp_w: 1400.0,
+                    vp_h: 400.0,
+                    time_seconds: 0.0,
+                    focused_widget_id: None,
+                    focused_branch: false,
+                    overlay_viewport_bottom: 20.0,
+                    scroll_top: 0.0,
+                    scroll_left: 0.0,
+                    inherited_hover: false,
+                },
+                &shell.props,
+            );
+        let input_color = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                eseqlisp::widget_render::MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    ..
+                } if widget_type == "seqv-step-shell" => Some(instance.color_a),
+                _ => None,
+            })
+            .expect("selected step shell should emit its SDF primitive");
+        assert_eq!(
+            input_color,
+            eseqlisp::theme::named_color("sequencer-step-selected-border")
+                .expect("selected-step border theme slot")
+                .to_rgba()
+        );
     }
 
     #[test]
@@ -29705,6 +30271,22 @@
             Some(true),
             "fixture generation 0 should render track 0 pattern 1 active"
         );
+        let initial_glyph = find_layout_node_by_widget_type(initial_cell, "sound-glyph")
+            .expect("active mixer pattern cell should contain its sound glyph");
+        assert_finite_nonzero_rect(initial_glyph, "active mixer pattern sound glyph");
+        assert_layout_inside(initial_glyph, initial_cell, "active mixer pattern sound glyph");
+        assert_eq!(
+            layout_prop_number(initial_glyph, "play-glyph-padding"),
+            Some(0.14)
+        );
+        assert_eq!(
+            layout_prop_number(initial_glyph, "play-glyph-opacity"),
+            Some(0.4)
+        );
+        assert_eq!(
+            initial_glyph.props.get("play-color"),
+            Some(&Value::Keyword("white".to_string()))
+        );
 
         let _ = editor.take_dirty_widget_ids();
         apply_mixer_v2_perf_pattern(&mut editor, track_count, cell_count, 1);
@@ -31354,6 +31936,135 @@
         assert_layout_inside(filter_actions, filter_header, "filter action menu");
     }
 
+    // The Filter curve used to mirror every drag event into `defstate` globals
+    // so the knobs could show the in-flight value. Those `set!`s dirtied the
+    // enclosing panel effect, so `VM::invoke`'s synchronous reactive pass
+    // re-evaluated the whole Filter panel on every mouse move (7.5ms/event,
+    // 12x a plain knob drag). The echo is gone; the curve's band must instead
+    // carry the params' reactive bindings, so a host param sync repaints the
+    // curve in place with no panel rerun.
+    #[test]
+    fn metal_seq_fx_filter_curve_band_is_bound_to_the_param_value_fields() {
+        let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
+        let cutoff_field = "track-0-effect-0-param-2-cutoff";
+        let resonance_field = "track-0-effect-0-param-3-resonance";
+        let mut params = test_filter_params();
+        for (idx, field) in [(2usize, cutoff_field), (3usize, resonance_field)] {
+            let Some(Value::Map(param)) = params.get_mut(idx) else {
+                panic!("filter fixture param {idx} should be a map");
+            };
+            param.insert(
+                "value-field".to_string(),
+                Rc::new(RefCell::new(Value::String(field.to_string()))),
+            );
+        }
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Filter".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map("Filter", 0, params))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+                (cutoff_field, Value::Number(1000.0)),
+                (resonance_field, Value::Number(1.0)),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(120, 18);
+
+        fn curve_band_number(layout: &eseqlisp::layout::LayoutNode, key: &str) -> Option<f64> {
+            let curve = find_layout_node_by_widget_type(layout, "response-curve-editor")?;
+            let Value::List(bands) = curve.props.get("bands")? else {
+                return None;
+            };
+            let first = bands.first()?.borrow().clone();
+            let Value::Map(band) = first else {
+                return None;
+            };
+            let entry = band.get(key)?.borrow().clone();
+            match entry {
+                Value::ReactiveRef { ref slot, .. } => {
+                    Some(eseqlisp::reactive::read_float_slot(slot) as f64)
+                }
+                other => panic!("band {key} must stay a reactive binding, got {other:?}"),
+            }
+        }
+
+        let curve_widget_id = {
+            let layout = editor.widget_layout().expect("filter fx layout");
+            let curve = find_layout_node_by_widget_type(&layout, "response-curve-editor")
+                .expect("filter panel renders a response curve editor");
+            assert_eq!(curve_band_number(&layout, "freq"), Some(1000.0));
+            assert_eq!(curve_band_number(&layout, "q"), Some(1.0));
+            curve.widget_id
+        };
+
+        // What `set-effect-param-batch` -> `sync_effect_param_batch_display`
+        // does per drag event: rewrite only the per-param value fields.
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", cutoff_field, Value::Number(4200.0));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", resonance_field, Value::Number(3.5));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("filter fx layout");
+        let curve = find_layout_node_by_widget_type(&layout, "response-curve-editor")
+            .expect("the curve survives a param value change");
+        assert_eq!(
+            curve.widget_id, curve_widget_id,
+            "a param value change must repaint the curve in place, not rebuild the panel"
+        );
+        assert_eq!(curve_band_number(&layout, "freq"), Some(4200.0));
+        assert_eq!(curve_band_number(&layout, "q"), Some(3.5));
+    }
+
     #[test]
     fn metal_seq_fx_eq8_layout_contains_eq8_editor() {
         let src = std::fs::read_to_string("ui/effects.lisp").expect("read fx lisp");
@@ -31949,6 +32660,10 @@
             ],
             true,
         );
+        // The p-lock presence projection (param-controls.lisp) publishes into
+        // the Lisp-writable SEQV namespace, which init_runtime always
+        // registers in production.
+        editor.runtime_mut().register_reactive("SEQV", vec![], true);
         editor
             .runtime_mut()
             .eval_str(
@@ -45222,4 +45937,150 @@
                 "{fx_name} did not dispatch to a custom audio FX UI"
             );
         }
+    }
+
+    // ── rack glyph feeds (docs/rack-glyph-spec.md §4) ─────────────────────
+    //
+    // Both feeds published EMPTY glyphs for rack tracks before the composite
+    // surface existed: the track's descriptor is `empty_custom_slot()`, so the
+    // schema, the skeleton and the values were all empty.
+    //
+    // These assert on the frames the collectors RETURN, never on
+    // `sound_glyph_data`'s process-wide store: `retain_sound_glyph_frames`
+    // deletes every key under a prefix that is not in the caller's active set,
+    // and `sync_pattern_cell_glyph_frames` is reached from
+    // `reactive_tick_and_render` by many parallel `metal_seq_*` harness tests,
+    // so a store read here would be timing luck.
+
+    fn rack_cell_frame(
+        pending: &[(String, eseqlisp::sound_glyph_data::SoundGlyphFrame)],
+        pattern: u64,
+    ) -> eseqlisp::sound_glyph_data::SoundGlyphFrame {
+        let key = format!("pattern-glyph:track:0:pattern:{pattern}");
+        pending
+            .iter()
+            .find(|(published, _)| *published == key)
+            .unwrap_or_else(|| panic!("no frame published for {key}"))
+            .1
+            .clone()
+    }
+
+    /// The mixer pattern-cell feed publishes a real, compatible frame for a
+    /// rack track (substrate ink from the grafted identity + slot params, no
+    /// incompatible ring), goes quiet in the steady state, and re-publishes a
+    /// RINGED frame once the live rack's slot lineup diverges from the stored
+    /// patch's — §2.4's structural-incompatibility rule.
+    ///
+    /// One test rather than three because the invalidation claims only mean
+    /// something against a WARM `GlyphFrames`: a fresh one per phase would
+    /// bypass `cell_published`/`descriptor_hashes`/`identity`, i.e. exactly
+    /// the caches the rack arms were added to.
+    #[test]
+    fn rack_track_pattern_cell_glyph_publishes_then_rings_on_a_slot_change() {
+        let app = test_app_with_rack_panel();
+        let pattern = app.state.track_pattern_cells(0)[0].pattern_id.0;
+        let mut glyphs = super::sound_palette::GlyphFrames::default();
+
+        let first = super::sound_palette::collect_pattern_cell_glyph_frames(&app, &mut glyphs);
+        let frame = rack_cell_frame(&first, pattern);
+        assert!(
+            frame.substrate.iter().any(|slot| *slot > 0),
+            "rack glyph substrate is empty: {:?}",
+            frame.substrate
+        );
+        assert!(!frame.incompatible, "the live rack IS the patch's rack");
+
+        // Steady state: nothing changed, nothing is republished.
+        assert!(
+            super::sound_palette::collect_pattern_cell_glyph_frames(&app, &mut glyphs).is_empty(),
+            "an unchanged rack track must not republish"
+        );
+
+        {
+            let mut racks = app.state.pattern.rack_tracks.lock().unwrap();
+            let rack = racks[0].as_mut().expect("live rack");
+            let extra = rack.slots[0].clone();
+            rack.slots.push(extra);
+        }
+
+        let second = super::sound_palette::collect_pattern_cell_glyph_frames(&app, &mut glyphs);
+        let ringed = rack_cell_frame(&second, pattern);
+        assert!(
+            ringed.incompatible,
+            "a 1-slot patch against a 2-slot live rack must ring"
+        );
+        assert!(
+            ringed.revision > frame.revision,
+            "the ringed frame must be a new revision ({} -> {})",
+            frame.revision,
+            ringed.revision
+        );
+
+        // And back to quiet: the rack arms of the fingerprint caches settle.
+        assert!(
+            super::sound_palette::collect_pattern_cell_glyph_frames(&app, &mut glyphs).is_empty(),
+            "a rack track must go quiet again once its change is published"
+        );
+    }
+
+    /// The palette feed does the same for the open overlay's tiles.
+    #[test]
+    fn rack_track_palette_glyph_publishes_then_goes_quiet() {
+        let app = test_app_with_rack_panel();
+        let entries =
+            app.sound_palette_entries(0, sequencer::app::sound_palette::PaletteTarget::Cell);
+        assert!(!entries.is_empty(), "rack track pool should expose a patch");
+        let mut glyphs = super::sound_palette::GlyphFrames::default();
+
+        let pending = super::sound_palette::collect_glyph_frames(&app, 0, &entries, &mut glyphs);
+        let key = format!("sound-glyph:track:0:patch:{}", entries[0].patch.0);
+        let frame = pending
+            .iter()
+            .find(|(published, _)| *published == key)
+            .unwrap_or_else(|| panic!("no palette frame published for {key}"))
+            .1
+            .clone();
+        assert!(
+            frame.substrate.iter().any(|slot| *slot > 0),
+            "rack palette glyph substrate is empty: {:?}",
+            frame.substrate
+        );
+        assert!(!frame.incompatible);
+
+        assert!(
+            super::sound_palette::collect_glyph_frames(&app, 0, &entries, &mut glyphs).is_empty(),
+            "an unchanged palette must not republish"
+        );
+    }
+
+    /// §2.3/§2.4: the rack GLYPH signature is deliberately looser than
+    /// `rack_topology_signature`, which folds in fx-chain node ids that churn
+    /// on every graph rebuild. Node ids, fx chains and mix values must not
+    /// move it — only the slot lineup does — or every graph rebuild would
+    /// throw away the cached identity silhouettes.
+    #[test]
+    fn rack_glyph_signature_ignores_fx_chain_and_node_id_churn() {
+        let app = test_app_with_rack_panel();
+        let signature = |app: &app::App| {
+            let racks = app.state.pattern.rack_tracks.lock().unwrap();
+            super::sound_palette::rack_snapshot_glyph_signature(
+                app,
+                racks[0].as_ref().expect("live rack"),
+            )
+        };
+        let before = signature(&app);
+
+        {
+            let ott = sequencer::effects::EffectDescriptor::builtin_ott();
+            let mut racks = app.state.pattern.rack_tracks.lock().unwrap();
+            let slot = &mut racks[0].as_mut().expect("live rack").slots[0];
+            slot.instrument_slot.node_id += 7;
+            slot.effect_slots[0] = sequencer::effects::EffectSlotSnapshot::new_default(&ott, 99);
+            slot.effect_descriptors[0] = ott;
+            slot.custom_effect_names[0] = Some("builtin:OTT".to_string());
+            slot.gain = 0.125;
+            slot.mute = true;
+        }
+
+        assert_eq!(before, signature(&app));
     }

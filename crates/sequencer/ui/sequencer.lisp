@@ -145,27 +145,14 @@
     (lambda (track) (seqv-sync-track-cursor-to-global track))
     (range 0 (len SEQ.track-ids))))
 
-(def seqv-select-track-for-edit-with-panel-policy (track show-fx-on-change)
+;; Selecting an edit target must not change workspace layout. Opening FX is an
+;; explicit gesture owned by seqv-show-fx-for-track (track-name double-click).
+(def seqv-select-track-for-edit (track)
   (do
     (set! selected-bus -1)
-    (if (= SEQ.current-track track)
-      nil
-      (do
-        (seq-clear-selection)
-        (if show-fx-on-change
-          (seq-show-fx-lower-panel)
-          nil)))
+    (if (= SEQ.current-track track) nil (seq-clear-selection))
     (seq-set-track track)
     (seqv-sync-track-cursor-to-global track)))
-
-(def seqv-select-track-for-edit (track)
-  (seqv-select-track-for-edit-with-panel-policy track true))
-
-;; Arrangement clip/background gestures change the current track without
-;; changing the lower-panel mode. In arrangement, entering FX is reserved for
-;; the explicit track-header double-click.
-(def seqv-select-track-for-edit-preserving-lower-panel (track)
-  (seqv-select-track-for-edit-with-panel-policy track false))
 
 (def seqv-activate-track-for-edit (track)
   (seqv-select-track-for-edit track))
@@ -179,7 +166,7 @@
 
 (def seqv-show-fx-for-track (track)
   (do
-    (seqv-select-track-for-edit-preserving-lower-panel track)
+    (seqv-select-track-for-edit track)
     (seq-show-fx-lower-panel)))
 
 (def seqv-track-expanded? (track-id)
@@ -428,13 +415,8 @@
   :shader
   (sdf/layer
     (sdf/fill (sdf/rounded-rect width height 0.28)
-      (material
-        :lighting (lighting :edge-min -0.38 :edge-max 0.45
-          :light (vec3 0.0 -1.1 2.8) :shininess 54.0)
-        :color
-          (aqua-color
-            (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 1.0)
-            (rgba track-r track-g track-b 1.0))))))
+      (rgba track-r track-g track-b 1.0)))
+  )
 
 (defwidget seqv-track-volume-meter
   :width 8.2 :height 1.05
@@ -600,70 +582,79 @@
 
 (defwidget seqv-step-shell
   :width 1.5 :height 1.5
-  :state (active odd plocked plock-kind selected duration hide track-r track-g track-b variant-r variant-g variant-b)
-  :bindable (active plocked plock-kind selected duration hide track-r track-g track-b variant-r variant-g variant-b)
+  :paint-margin 1
+  :state (active plock-kind selected duration muted hide track-r track-g track-b variant-r variant-g variant-b off-fill-r off-fill-g off-fill-b)
+  :bindable (active plock-kind selected duration muted hide track-r track-g track-b variant-r variant-g variant-b)
   :shader
   (if (= hide 1)
     (rgba 0 0 0 0)
     (let ((vcol (rgba variant-r variant-g variant-b 1.0))
         (seqcol (rgba 0.545 0.545 0.588 0.95))
-        (border (if (= selected 1)
-            (rgba 0.90 0.92 0.96 1.0)
-            (if (= odd 1) 
-              (rgba 0.28 0.28 0.28 1.0) 
-              (rgba 0.18 0.18 0.18 1.0)))))
-    (sdf/layer
-      (sdf/fill
-        (sdf/translate 0 0.0
-          (sdf/rounded-rect (* 1.0 width) (* 1.00 height) 0.1))
-        (material
-          :lighting (lighting :edge-min -0.3 :edge-max 0.393
-            :light (vec3 0.8 -1.8 4.5) :shininess 92.0)
-          :color (if (= duration 1)
-            (aqua-color
-               (mix :white (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 0.5) (if (= selected 1) 0.8 1))
-              (if (= selected 1) :white (rgba track-r track-g track-b 1)))
-            (rgba 0 0 0 0))))
-      (sdf/fill (sdf/circle (if (= selected 1) 0.76 0.75))
-        (material
-          :lighting (lighting :edge-min -0.3 :edge-max 1.0
-            :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
-          :color (aqua-color border (rgba 0.9 0.1 0.5 1.0))))
-      (sdf/fill (sdf/circle (if (= selected 1) 0.64 0.69))
-        (material
-          :color (if (= odd 1)
-            (rgba 0.15 0.155 0.155 0.6)
-            (rgba 0.015 0.016 0.025 0.8))))
-      (sdf/fill
-        (sdf/translate 0 0.82
-          (sdf/rounded-rect 0.52 0.10 0.05))
-        (material
-          :color (if (= active 1)
-            (if (= plock-kind 2)
-              vcol
-              (if (= plock-kind 1)
-                seqcol
-                (rgba 0 0 0 0)))
-            (rgba 0 0 0 0))
-          :shadow (shadow
+        (radius (if (= active 1) 1 0.7))
+        (border input-color)
+        (offcol (rgba off-fill-r off-fill-g off-fill-b 1)))
+      (sdf/layer
+        (sdf/fill
+          (sdf/translate 0 0.0
+            (sdf/rounded-rect (* 8.0 width) (* 1.00 height) 0.1))
+          (material
+            :lighting (lighting :edge-min -0.3 :edge-max 0.393
+              :light (vec3 0.8 -1.8 4.5) :shininess 92.0)
+            :color (if (= duration 1)
+              (if (= muted 1)
+                (rgba 0 0 0 0)
+                (aqua-color
+                  (mix border (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 0.5) (if (= selected 1) 0.8 1))
+                  (if (= selected 1) border (rgba track-r track-g track-b 1))))
+              (rgba 0 0 0 0))))
+        (sdf/fill (sdf/circle (* radius 0.85))
+          (material
+            :lighting (lighting :edge-min -0.3 :edge-max 1.0
+              :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
+            :color (* (if (= selected 1) 1 (if (= muted 1) 0.6 1)) (aqua-color border border))))
+        (sdf/fill (sdf/circle (* radius (if (= selected 1) 0.64 0.69)))
+          (material
+            :lighting (lighting :edge-min -0.1 :edge-max 1.0
+              :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
+            :color (* (if (= muted 1) 0.3 1) (aqua-color offcol offcol))))
+        (sdf/fill
+          (sdf/translate 0 0.82
+            (sdf/rounded-rect 0.52 0.10 0.05))
+          (material
             :color (if (= active 1)
-              (if (= plock-kind 2)
-                (rgba variant-r variant-g variant-b 0.70)
-                (rgba 0 0 0 0))
+              (if (= muted 1)
+                border
+                (if (= plock-kind 2)
+                  vcol
+                  (if (= plock-kind 1)
+                    seqcol
+                    (rgba 0 0 0 0))))
               (rgba 0 0 0 0))
-            :blur (if (= active 1)
-              (if (= plock-kind 2) 0.12 0.0)
-              0.0)
-            :offset (vec2 0 0))))
-      (sdf/fill (sdf/circle (if (= selected 1) 0.35 0.5))
-        (material
-          :lighting (lighting :edge-min -0.25 :edge-max 1.95
-            :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
-          :color (if (= active 1)
-            (aqua-color
-              (rgba (* track-r 0.72) (* track-g 0.72) (* track-b 0.82) 1.0)
-              (rgba track-r track-g track-b 1.0))
-            (rgba 0 0 0 0))))))))
+            :shadow (shadow
+              :color (if (= active 1)
+                (if (= muted 1)
+                  (rgba 0 0 0 0)
+                  (if (= plock-kind 2)
+                    (rgba variant-r variant-g variant-b 0.70)
+                    (rgba 0 0 0 0)))
+                (rgba 0 0 0 0))
+              :blur (if (= active 1)
+                (if (= muted 1)
+                  0.0
+                  (if (= plock-kind 2) 0.12 0.0))
+                0.0)
+              :offset (vec2 0 0))))
+        (sdf/fill (sdf/circle (if (= selected 1) 0.35 0.5))
+          (material
+            :lighting (lighting :edge-min -0.25 :edge-max 1.95
+              :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
+            :color (if (= active 1)
+              (if (= muted 1)
+                (* 0.7 (aqua-color offcol border))
+                (aqua-color
+                  (rgba (* track-r 0.72) (* track-g 0.72) (* track-b 0.82) 1.0)
+                  (rgba track-r track-g track-b 1.0)))
+              (rgba 0 0 0 0))))))))
 
 ;; SEQ.song-track-governed carries one number per track (takes spec 10 UX):
 ;; 0 = the lane is not playing a take (pattern lanes stay fully editable —
@@ -715,6 +706,29 @@
             (rgba 0.32 0.33 0.37 0.5)
             (rgba 0 0 0 0))))
 
+;; The expanded-lane step tick. Moved verbatim from ui/step-grid.lisp when
+;; the legacy *metal* buffer was unplugged from main.lisp — this widget is
+;; the one piece of that file the live UI still renders. If step-grid.lisp
+;; is ever reloaded, its identical copy is harmless (this one loads later
+;; and wins).
+(defwidget metal-track-tick
+  :width 1.5 :height 1.5
+  :state (active plocked selected track-r track-g track-b)
+  :bindable (active plocked selected track-r track-g track-b)
+  :shader
+  (let ((sel-y (if (= selected 1) (* 0.1 (cos (* 3 itime))) 0)))
+    (sdf/translate 0 sel-y
+      (sdf/layer
+        (sdf/fill (sdf/circle 1)
+          (material
+            :lighting (lighting :edge-min -0.35 :edge-max 0.5
+              :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
+            :color
+            (* (if (= active 1) 1 0.3)
+               (aqua-color
+                 (rgba (* track-r 0.82) (* track-g 0.82) (* track-b 0.82) 1.0)
+                 (rgba track-r track-g track-b 1.0)))))))))
+
 (def seqv-mute-bg (active)
   (if active
     (rgba 0.08 0.09 0.10 1.0)
@@ -757,7 +771,7 @@
       (h-stack :gap 0.4 :align :center
         (box
           :key (str "seqv-color-badge-" i)
-          :width 0.68 :height 1.85
+          :width 0.68 :height 2.0
           :background "seqv-track-color-badge"
           :track-r (seqv-track-color-r-binding i)
           :track-g (seqv-track-color-g-binding i)
@@ -797,7 +811,7 @@
             :highlight-color :transparent
             :shadow-color :transparent
             :color (if (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i))
-              :dark-gray
+              (rgba 0.4 0.4 0.4 0.6)
               :dim)
             :bg :transparent))
         (seqv-track-volume-control i)
@@ -1000,11 +1014,13 @@
 
 (def seqv-step-cell (track step visible)
   ;; Step cells use the step-color channels: same as the track color but
-  ;; additionally dimmed while the lane is take-governed (the header keeps
-  ;; its full color — only the actual steps go translucent).
+  ;; additionally dimmed while the lane is take-governed. Muting is passed
+  ;; separately so the shader can replace colored layers with opaque neutral
+  ;; materials instead of receiving an already-dimmed track color.
   (let ((track-r (bind-seq-nth "step-color-r-effective" track))
       (track-g (bind-seq-nth "step-color-g-effective" track))
       (track-b (bind-seq-nth "step-color-b-effective" track))
+      (muted (bind-seq-nth "track-muted-effective" track))
       (plock-kind (bind-seq (str "seq-track-step-plock-kind-" track "-" step)))
       (variant-r (bind-seq (str "seq-track-step-variant-r-" track "-" step)))
       (variant-g (bind-seq (str "seq-track-step-variant-g-" track "-" step)))
@@ -1035,21 +1051,26 @@
       (box
         :width 3.05 :height 1.55
         :align :center
-        :odd (seqv-step-odd step)
         :active (bind-seq (str "seq-track-step-active-" track "-" step))
-        :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
         :plock-kind plock-kind
         :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
         :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
+        :muted muted
         :hide (if visible 0 1)
         :track-r track-r :track-g track-g :track-b track-b
         :variant-r variant-r :variant-g variant-g :variant-b variant-b
+        :color :sequencer-step-border
+        :selected-color :sequencer-step-selected-border
+        :off-fill (if (= (seqv-step-odd step) 1)
+          :sequencer-step-off-fill-alt
+          :sequencer-step-off-fill)
         :background "seqv-step-shell"))))
 
 (def seqv-drum-lane-step-cell (track slot-idx pad-note step visible)
   (let ((track-r (bind-seq-nth "step-color-r-effective" track))
       (track-g (bind-seq-nth "step-color-g-effective" track))
       (track-b (bind-seq-nth "step-color-b-effective" track))
+      (muted (bind-seq-nth "track-muted-effective" track))
       (plock-kind (bind-seq (str "seq-track-step-plock-kind-" track "-" step)))
       (variant-r (bind-seq (str "seq-track-step-variant-r-" track "-" step)))
       (variant-g (bind-seq (str "seq-track-step-variant-g-" track "-" step)))
@@ -1084,17 +1105,21 @@
       (box
         :width 3.05 :height 1.55
         :align :center
-        :odd (seqv-step-odd step)
         :active (bind-seq (str "drum-lane-step-active-" track "-" pad-note "-" step))
-        :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
         :plock-kind plock-kind
         :selected (bind-seq
           (str "drum-lane-step-selected-" track "-" pad-note "-" step))
         :duration (bind-seq
           (str "drum-lane-step-duration-" track "-" pad-note "-" step))
+        :muted muted
         :hide (if visible 0 1)
         :track-r track-r :track-g track-g :track-b track-b
         :variant-r variant-r :variant-g variant-g :variant-b variant-b
+        :color :sequencer-step-border
+        :selected-color :sequencer-step-selected-border
+        :off-fill (if (= (seqv-step-odd step) 1)
+          :sequencer-step-off-fill-alt
+          :sequencer-step-off-fill)
         :background "seqv-step-shell"))))
 
 (def seqv-playhead-row (track track-id row)
@@ -1881,7 +1906,8 @@
                   (seqv-track-actions i))
                 (seqv-drum-track-grid i))
               (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
-                (seqv-track-header i)
+                (v-stack (box :height 0.1)
+                (seqv-track-header i))
                 (seqv-track-grid i)
                 (box :flex 1 :width 0 :height 0.1 :bg :transparent)
                 (seqv-track-actions i)))))))

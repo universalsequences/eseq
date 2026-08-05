@@ -385,30 +385,32 @@
   :bindable (active assigned override selected track-r track-g track-b)
   :shader
   (let ((track-col (rgba track-r track-g track-b 1.0))
-        (outer (if (= selected 1)
+      (track-r (if (= active 1) (* 1.10 track-r) track-r))
+      (track-g (if (= active 1) (* 1.1 track-g) track-g))
+      (track-b (if (= active 1) (* 1.1 track-b) track-b))
+      (outer (if (= selected 1)
           (rgba 0.94 0.96 1.0 1.0)
           (rgba track-r track-g track-b 1.0)))
-        (middle (rgba track-r track-g track-b 1.0))
-        (inner (if (= active 1)
-          (rgba 0.02 0.025 0.03 1.0)
-          track-col))
-        (play-col (if (= active 1)
-          (rgba 0.1 0.95 0.38 1.0)
-          (rgba 0 0 0 0))))
+      (middle (rgba track-r track-g track-b 1.0))
+      (inner (if (= active 0)
+          (rgba 0.02 0.025 0.03 0.7)
+          (rgba 0.1 0.1 0.1 0.3)
+          )))
+    ;; The play triangle moved into the sound-glyph shader (it must sit ON TOP
+    ;; of the glyph; this background always draws underneath it). Liveness
+    ;; comes from the host play-key store (sync_pattern_cell_glyph_frames),
+    ;; and patch-less patterns still get an empty glyph frame published, so
+    ;; every active cell renders the glyph-drawn triangle — no bg fallback.
     (sdf/layer
-      (sdf/fill (sdf/rounded-rect width height 0.2)
+      (sdf/fill (sdf/rounded-rect width height 0.3)
         (material :color outer))
-      (sdf/fill (sdf/rounded-rect (* width 0.84) (* height 0.84) 0.2)
+      (sdf/fill (sdf/rounded-rect (* width 0.94) (* height 0.94) 0.2)
         (material :color middle))
-      (sdf/fill (sdf/rounded-rect (* width 0.66) (* height 0.68) 0.22)
-        (material :color inner))
-      (sdf/fill
-        (let ((p1x -0.26) (p1y -0.36) (p2x -0.26) (p2y 0.36) (p3x 0.36) (p3y 0.0))
-          (let ((d1 (- (* (- p2x p1x) (- y p1y)) (* (- p2y p1y) (- x p1x))))
-                (d2 (- (* (- p3x p2x) (- y p2y)) (* (- p3y p2y) (- x p2x))))
-                (d3 (- (* (- p1x p3x) (- y p3y)) (* (- p1y p3y) (- x p3x)))))
-            (max (max d1 d2) d3)))
-        (material :color play-col)))))
+      (sdf/fill (sdf/rounded-rect (* width (if (= active 1) 0.8 0.92)) 
+          (* (if (= active 1) 0.8 0.92) height) (if (= active 1) 0.1 0.22))
+        (material :color inner)))))
+
+
 
 (def mixer-v2-track-pattern-cells (track)
   (if (< track (len SEQ.track-pattern-cells))
@@ -428,24 +430,53 @@
 
 (def mixer-v2-track-pattern-grid (track)
   (let ((cells (mixer-v2-track-pattern-cells track)))
-    (box :width :fill :height 3.02 :align :top :bg :black :background-color :buffer-bg
-      (grid :cols 8 :col-width 1.5 :row-height 0.75 :align :center
+    (box :width :fill :height 4.0 :align :top :bg :black :background-color :buffer-bg
+      (grid :cols 6 :col-width 2.0 :row-height 1.0 :align :center
         (each cells |cell cell-idx|
           (let ((pattern-id (get cell :id)))
-          (box
-            :key (str "mixer-v2-track-pattern-cell-" track "-" pattern-id)
-            :width 1.47 :height 0.73  
-            :padding 0
-            :bg :transparent
-            :background "track-pattern-cell-bg"
-            :active (mixer-v2-track-pattern-cell-active-binding track pattern-id)
-            :assigned (mixer-v2-track-pattern-cell-assigned-binding track pattern-id)
-            :override (mixer-v2-track-pattern-cell-override-binding track pattern-id)
-            :selected (mixer-v2-track-pattern-cell-selected-binding track pattern-id)
-            :track-r (mixer-v2-track-color-r track false)
-            :track-g (mixer-v2-track-color-g track false)
-            :track-b (mixer-v2-track-color-b track false)
-            :on-click (lambda (event) (mixer-v2-launch-track-pattern track cell)))))))))
+            (box
+              :key (str "mixer-v2-track-pattern-cell-" track "-" pattern-id)
+              :width 1.90 :height 0.95
+              :padding 0.35
+              :bg :transparent
+              :background "track-pattern-cell-bg"
+              :active (mixer-v2-track-pattern-cell-active-binding track pattern-id)
+              :assigned (mixer-v2-track-pattern-cell-assigned-binding track pattern-id)
+              :override (mixer-v2-track-pattern-cell-override-binding track pattern-id)
+              :selected (mixer-v2-track-pattern-cell-selected-binding track pattern-id)
+              ;; Dimmed so the sound glyph on top carries the cell's identity;
+              ;; the launch/selection states still read through the shader.
+              :track-r (* 0.95 (mixer-v2-track-color-r track false))
+              :track-g (* 0.95 (mixer-v2-track-color-g track false))
+              :track-b (* 0.95 (mixer-v2-track-color-b track false))
+              :on-click (lambda (event) (mixer-v2-launch-track-pattern track cell))
+              ;; The pattern's bound sound, as its palette glyph (host feed:
+              ;; sync_pattern_cell_glyph_frames). The tuned shader styling is
+              ;; the widget default (TUNING_PROPS); the substrate body tints
+              ;; with the track color so cells keep their track identity.
+              (sound-glyph
+                :key (str "mixer-v2-cell-glyph-" track "-" pattern-id)
+                :source (str "pattern-glyph:track:" track ":pattern:" pattern-id)
+                ;; Quantize to a coarse virtual-pixel grid: the mixer shows ~50
+                ;; glyphs at once, so the palette's hi-def gooey rendering reads
+                ;; as noise at this size. Odd count keeps a cell centered.
+                :pixelate 2
+                :edge-soft 0.1
+                :white-damp 0
+                :height-in 0.3
+                :height-out -0.08
+                :height-amp 3
+                :diffuse 0.8
+                :rim-width 0.1
+                ;; Leave the active launch mark visually dominant: its host-
+                ;; driven play state shrinks and dims only the identity glyph.
+                :play-glyph-padding 0.14
+                :play-glyph-opacity 0.4
+                :play-color :white
+                :tint-r (* 0.4 (mixer-v2-track-color-r track false))
+                :tint-g (* 0.4 (mixer-v2-track-color-g track false))
+                :tint-b (* 0.4 (mixer-v2-track-color-b track false))
+                ))))))))
 
 (def mixer-v2-mod-output-style
   (ui/style
@@ -606,7 +637,7 @@
         ;;(seq-set-bus-volume i (mixer-v2-event-volume event))
         ))
     (v-stack
-      (box :width :fill :height 4.7)
+      (box :width :fill :height 6.5)
       (h-stack :gap 0.06 
         (box :width 2 )
         (mixer-v2-volume-triangle
@@ -658,7 +689,7 @@
     ;; dead space at the bottom inside the group container.
     ;; Mute/name/output reads live in bindings or nested subtrees so those
     ;; changes don't rerun the whole strip.
-    (box :width 12.9 :height (if (mixer-v2-track-grouped? i) 12.85 13.15)
+    (box :width 12.9 :height (if (mixer-v2-track-grouped? i) 13.5 13.8)
       :selected (mixer-v2-track-selected-binding i)
       :muted (bind-seq-nth "track-muted-effective" i)
       :background-color :mixer-strip-bg
@@ -716,7 +747,7 @@
           
           (mixer-v2-track-meter-control i))
         
-        (box :width :fill :height 0.25)
+        (box :width :fill :height 0.05)
         (subtree :key (str "mixer-v2-strip-buttons-" i)
           (mixer-v2-strip-buttons i))
         (mixer-v2-mod-port-row i)
@@ -919,7 +950,7 @@
 (def mixer-v2-bus-strip (i)
   (let ((selected (= selected-bus i)))
     (box :key (str "mixer-v2-bus-strip-" i)
-      :width 10.3 :height 13.0
+      :width 10.3 :height 13.8
       :background-color (mixer-v2-strip-bg selected (nth SEQ.bus-mutes i))
       :border-width 2
       :corner-radius 10
@@ -938,7 +969,7 @@
         ;  (box :height 0.8 :width :fill :bg :transparent)
         ;  )
         (h-stack :gap 0.45 :align :center
-          (box :width 3.0 :height 3.6)
+          (box :width 3.0 :height 5.0)
           (mixer-v2-bus-meter-control i))
         (box :height 2.8)
         (h-stack :gap 0.35
@@ -1048,7 +1079,7 @@
       (c (mixer-v2-group-color gidx))
       (bus-idx (mixer-v2-bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
     (box :key (str "mixer-v2-group-bus-strip-" bus-idx)
-      :width 9.0 :height 13.05
+      :width 9.0 :height 13.72
       :corner-radius 12
       :padding 0.0
       :background-color :mixer-strip-bg
@@ -1067,7 +1098,7 @@
           (box  :width :fill :height 9.55
             (mixer-v2-bus-meter-control bus-idx))
           (box :width 0.0 :height 0.0 :bg :transparent))
-        (box :height 0.25)
+        (box :height 0.95)
         (mixer-v2-bus-mod-port-row (get group :bus-id))
         (box :corner-radius 16 :background-color c :width 8.5 :padding 0.2
           :key (str "mixer-v2-group-badge-" (get group :id))
@@ -1161,7 +1192,7 @@
 
 (def mixer-v2-sample-drop-zone ()
   (box :key "mixer-v2-sample-drop-zone"
-    :width 11.8 :height 13.0
+    :width 11.8 :height 13.8
     :background-color :buffer-bg
     :drop-hover-background-color :mixer-control-bg
     :border-width 2

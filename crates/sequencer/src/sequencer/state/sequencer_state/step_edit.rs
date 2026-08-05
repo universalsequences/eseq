@@ -826,6 +826,7 @@ impl SequencerState {
                 .sounds
                 .patches
                 .get_mut(&refs.patch)
+                .map(Arc::make_mut)
                 .ok_or_else(|| "stored effect patch is missing".to_string())?;
             for (offset, ((descriptor, (node_id, modulator_node_id)), values)) in descriptors
                 .iter()
@@ -1002,7 +1003,7 @@ impl SequencerState {
             .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
         // Non-idempotent index remap: visit each Patch entity once (take
         // chunks share one), never once per pattern.
-        for patch in pool.sounds.patches.values_mut() {
+        for patch in pool.sounds.patches.values_mut().map(Arc::make_mut) {
             remap_chain(&mut patch.process_chain, old_to_new);
             crate::process::rebind_track_process_chain_effect_param_ids(
                 &mut patch.process_chain,
@@ -1112,6 +1113,7 @@ impl SequencerState {
                 .sounds
                 .patches
                 .get_mut(&refs.patch)
+                .map(Arc::make_mut)
                 .ok_or_else(|| "stored effect patch is missing".to_string())?;
             let mut chain = saved_chain.clone();
             crate::process::refresh_track_process_chain_binding_param_ids(
@@ -1127,9 +1129,11 @@ impl SequencerState {
             }
         }
         for (id, saved) in &snapshot.project_process_lane_overrides {
-            pool.patterns
-                .get_mut(id)
-                .expect("pattern set was validated")
+            Arc::make_mut(
+                pool.patterns
+                    .get_mut(id)
+                    .expect("pattern set was validated"),
+            )
                 .seq
                 .project_process_lane_overrides = saved.clone();
             if *id == effective {
@@ -1307,6 +1311,7 @@ impl SequencerState {
                 .sounds
                 .patches
                 .get_mut(&refs.patch)
+                .map(Arc::make_mut)
                 .ok_or_else(|| "stored MIDI-FX patch is missing".to_string())?;
             patch.params.midi_fx_chain = names.to_vec();
             for slot_idx in 0..crate::lisp_host::MAX_MIDI_FX_SLOTS {
@@ -1371,7 +1376,7 @@ impl SequencerState {
             .get_mut(track)
             .ok_or_else(|| format!("Track {} has no pattern pool", track + 1))?;
         // Non-idempotent remap: once per Patch entity.
-        for patch in pool.sounds.patches.values_mut() {
+        for patch in pool.sounds.patches.values_mut().map(Arc::make_mut) {
             remap_chain(&mut patch.process_chain, old_to_new);
         }
         drop(scenes);
@@ -1448,6 +1453,7 @@ impl SequencerState {
                 .sounds
                 .patches
                 .get_mut(&refs.patch)
+                .map(Arc::make_mut)
                 .ok_or_else(|| "stored process patch is missing".to_string())?;
             patch.process_chain = chain.clone();
             if *id == effective {
@@ -1491,7 +1497,7 @@ impl SequencerState {
             .get_mut(track)
             .and_then(|pool| {
                 let refs = pool.refs(pattern_id)?;
-                pool.sounds.patches.get_mut(&refs.patch)
+                pool.sounds.patches.get_mut(&refs.patch).map(Arc::make_mut)
             })
             .ok_or_else(|| "Track Pattern target no longer exists".to_string())
             .and_then(|patch| {
@@ -1573,7 +1579,7 @@ impl SequencerState {
             .get_mut(track)
             .and_then(|pool| {
                 let refs = pool.refs(pattern_id)?;
-                pool.sounds.patches.get_mut(&refs.patch)
+                pool.sounds.patches.get_mut(&refs.patch).map(Arc::make_mut)
             })
             .and_then(|patch| patch.rack_track.as_mut())
             .and_then(|rack| rack.slots.get_mut(slot_idx))
@@ -1618,7 +1624,7 @@ impl SequencerState {
         let stored = scenes
             .track_pools
             .get_mut(track)
-            .and_then(|pool| pool.patterns.get_mut(&pattern_id))
+            .and_then(|pool| pool.patterns.get_mut(&pattern_id).map(Arc::make_mut))
             .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
         stored.seq.params.num_steps = num_steps;
         if is_effective {

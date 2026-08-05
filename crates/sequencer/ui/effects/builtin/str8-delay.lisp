@@ -1,21 +1,13 @@
 ;; STR8 Delay built-in FX panel.
-(defstate builtin-fx-str8-delay-live-slot -1)
-(defstate builtin-fx-str8-delay-live-freq 0)
-(defstate builtin-fx-str8-delay-live-q 0)
-(defstate builtin-fx-str8-delay-live-active false)
-
-(def builtin-fx-str8-delay-live? (fx)
-  (and builtin-fx-str8-delay-live-active
-       (not (get fx :rack-fx))
-       (not (get fx :bus-fx))
-       (not (get fx :midi-fx))
-       (= builtin-fx-str8-delay-live-slot (get fx :slot-idx))))
+;; See filter-core.lisp: the curve drag deliberately keeps no `defstate` echo.
+;; The widget draws its own in-flight band and the host's targeted SEQV param
+;; fields repaint the bound readouts, so a mouse move never reruns this panel.
 
 (def builtin-fx-str8-delay-freq-value (fx freq-p)
-  (if (builtin-fx-str8-delay-live? fx) builtin-fx-str8-delay-live-freq (fx-param-value freq-p)))
+  (fx-param-value freq-p))
 
 (def builtin-fx-str8-delay-q-value (fx q-p)
-  (if (builtin-fx-str8-delay-live? fx) builtin-fx-str8-delay-live-q (fx-param-value q-p)))
+  (fx-param-value q-p))
 
 (def builtin-fx-str8-delay-band (fx freq-p q-p)
   (dict
@@ -37,10 +29,6 @@
   (if (or (= (get event :type) :change-band) (= (get event :type) :commit-band))
     (do
       (fx-clear-selected-effect)
-      (set! builtin-fx-str8-delay-live-slot (get fx :slot-idx))
-      (set! builtin-fx-str8-delay-live-freq (get event :freq))
-      (set! builtin-fx-str8-delay-live-q (get event :q))
-      (set! builtin-fx-str8-delay-live-active (= (get event :type) :change-band))
       (if (or (get fx :rack-fx) (get fx :bus-fx) (get fx :midi-fx))
         (do
           (fx-set-effect-value fx freq-p (get event :freq))
@@ -55,16 +43,17 @@
     nil))
 
 (def builtin-fx-str8-delay-sync-button (fx p)
-  (button "Sync"
-    :width 4.95 :height 0.88 :padding 0 :font-size 8.5
-    :background-color (if (fx-param-on-for? fx p) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
-    :color (if (fx-param-on-for? fx p) :black :dim)
-        :border-color :transparent
-    :plock-active (if (param-plock-active? fx p) 1 0)
-    :plock-color-r (param-plock-color-r)
-    :plock-color-g (param-plock-color-g)
-    :plock-color-b (param-plock-color-b)
-    :on-click |x y r| (fx-toggle-effect-value fx p)))
+  (subtree :key (builtin-fx-param-subtree-key fx p "s8-sync")
+    (button "Sync"
+      :width 4.95 :height 0.88 :padding 0 :font-size 8.5
+      :background-color (if (fx-param-on-for? fx p) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
+      :color (if (fx-param-on-for? fx p) :black :dim)
+          :border-color :transparent
+      :plock-active (if (param-plock-active? fx p) 1 0)
+      :plock-color-r (param-plock-color-r)
+      :plock-color-g (param-plock-color-g)
+      :plock-color-b (param-plock-color-b)
+      :on-click |x y r| (fx-toggle-effect-value fx p))))
 
 (def builtin-fx-str8-delay-div-button (fx p label-text)
   (button label-text
@@ -79,25 +68,26 @@
     :on-click |x y r| (builtin-fx-set-effect-option fx p label-text)))
 
 (def builtin-fx-str8-delay-div-grid (fx p)
-  (v-stack :gap 0.11
-    (h-stack :gap 0.12
-      (builtin-fx-str8-delay-div-button fx p "1/32")
-      (builtin-fx-str8-delay-div-button fx p "1/16"))
-    (h-stack :gap 0.12
-      (builtin-fx-str8-delay-div-button fx p "1/16t")
-      (builtin-fx-str8-delay-div-button fx p "1/8"))
-    (h-stack :gap 0.12
-      (builtin-fx-str8-delay-div-button fx p "1/8t")
-      (builtin-fx-str8-delay-div-button fx p "1/8."))
-    (h-stack :gap 0.12
-      (builtin-fx-str8-delay-div-button fx p "1/4")
-      (builtin-fx-str8-delay-div-button fx p "1/4t"))
-    (h-stack :gap 0.12
-      (builtin-fx-str8-delay-div-button fx p "1/4.")
-      (builtin-fx-str8-delay-div-button fx p "1/2"))
-    (h-stack :gap 0.12
-      (builtin-fx-str8-delay-div-button fx p "1")
-      (box :width 2.72 :height 0.82))))
+  (subtree :key (builtin-fx-param-subtree-key fx p "s8-div")
+    (v-stack :gap 0.11
+      (h-stack :gap 0.12
+        (builtin-fx-str8-delay-div-button fx p "1/32")
+        (builtin-fx-str8-delay-div-button fx p "1/16"))
+      (h-stack :gap 0.12
+        (builtin-fx-str8-delay-div-button fx p "1/16t")
+        (builtin-fx-str8-delay-div-button fx p "1/8"))
+      (h-stack :gap 0.12
+        (builtin-fx-str8-delay-div-button fx p "1/8t")
+        (builtin-fx-str8-delay-div-button fx p "1/8."))
+      (h-stack :gap 0.12
+        (builtin-fx-str8-delay-div-button fx p "1/4")
+        (builtin-fx-str8-delay-div-button fx p "1/4t"))
+      (h-stack :gap 0.12
+        (builtin-fx-str8-delay-div-button fx p "1/4.")
+        (builtin-fx-str8-delay-div-button fx p "1/2"))
+      (h-stack :gap 0.12
+        (builtin-fx-str8-delay-div-button fx p "1")
+        (box :width 2.72 :height 0.82)))))
 
 (def builtin-fx-str8-delay-side (fx title sync-p div-p offset-p time-p)
   (box :width 6.15 :height 7.45 :padding 0.18
@@ -178,6 +168,8 @@
         (builtin-fx-str8-delay-side fx "Right" right-sync-p right-div-p right-offset-p right-time-p)
         (v-stack :gap 0.18
           (box :width 20.4 :height 7.5
+            ;; See filter-panel.lisp: keep the curve in its own subtree.
+            (subtree :key (builtin-fx-param-subtree-key fx filter-freq-p "curve")
             (response-curve-editor
               :mode :filter
               :bands (list (builtin-fx-str8-delay-band fx filter-freq-p filter-q-p))
@@ -192,7 +184,7 @@
               :grid-color (rgba 0.34 0.34 0.36 0.55)
               :stroke-color :blue
               :point-color (rgba 1.0 0.62 0.25 1.0)
-              :on-action |event| (builtin-fx-handle-str8-delay-curve-action fx filter-freq-p filter-q-p event)))
+              :on-action |event| (builtin-fx-handle-str8-delay-curve-action fx filter-freq-p filter-q-p event))))
           (box :width 20.4 :height 1.92 :padding 0.36
                :background-color :fx-inner-panel-bg :corner-radius 7
             (h-stack :gap 0.38 :align :baseline

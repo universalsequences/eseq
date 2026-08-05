@@ -1001,6 +1001,30 @@ pub(crate) fn reactive_tick_and_render(
             refresh_visible_mixer_after_cycle |= mixer_visible;
             profile_pattern_reactive_cycle = profile_switch;
         }
+        // Delete-target arm/clear rides its own version counter instead of
+        // ui_epoch: the gesture only moves the delete-target read surfaces,
+        // and a full project resync per clip-launch click (which arms the
+        // launched cell as the delete target) costs ~7ms at 20-clip pools.
+        let delete_target_version = ctx
+            .shared
+            .active_delete_target_version
+            .load(Ordering::Relaxed);
+        if delete_target_version != ctx.frame.prev_delete_target_version {
+            ctx.frame.prev_delete_target_version = delete_target_version;
+            let rt = editor.runtime_mut();
+            rt.set_reactive(
+                "SEQ",
+                "delete-target-version",
+                Value::Number(delete_target_version as f64),
+            );
+            sync_mixer_delete_target_binding_fields(
+                rt,
+                app.tracks.len(),
+                &ctx.shared.state,
+                ctx.shared.active_delete_target.lock().unwrap().as_ref(),
+            );
+            needs_reactive_cycle = true;
+        }
         let ui_ep = ctx.shared.ui_epoch.load(Ordering::Relaxed);
         if ui_ep != ctx.frame.prev_ui_epoch {
             if std::env::var_os("ESEQLISP_TRACE_UI").is_some() {

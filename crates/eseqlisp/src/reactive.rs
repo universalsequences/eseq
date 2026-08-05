@@ -436,6 +436,57 @@ impl ReactiveRegistry {
         self.bump_widget_bindings_revision();
     }
 
+    /// Rebuilds the binding table from pre-extracted per-layout entry lists.
+    /// Lets callers cache `collect_widget_binding_entries` output per visible
+    /// tile so only layouts that actually changed get rescanned.
+    pub fn replace_widget_bindings_from_entry_lists<'a>(
+        &mut self,
+        entry_lists: impl IntoIterator<Item = &'a [(ReactiveBindingKey, u64)]>,
+    ) {
+        self.field_to_widgets.clear();
+        for entries in entry_lists {
+            for (key, widget_id) in entries {
+                self.field_to_widgets
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(*widget_id);
+            }
+        }
+        self.bump_widget_bindings_revision();
+    }
+
+    /// Applies a per-layout delta to the binding table instead of rebuilding
+    /// it. Widget ids are globally unique, so a `(field, widget_id)` pair can
+    /// only be contributed by one layout: removing the pairs of the layouts
+    /// that changed and inserting the pairs of their replacements leaves the
+    /// same table `replace_widget_bindings_from_entry_lists` would produce,
+    /// at a cost proportional to what changed rather than to total UI size.
+    pub fn update_widget_bindings_with_tile_delta<'a>(
+        &mut self,
+        removed: impl IntoIterator<Item = &'a [(ReactiveBindingKey, u64)]>,
+        added: impl IntoIterator<Item = &'a [(ReactiveBindingKey, u64)]>,
+    ) {
+        for entries in removed {
+            for (key, widget_id) in entries {
+                if let Some(widgets) = self.field_to_widgets.get_mut(key) {
+                    widgets.remove(widget_id);
+                    if widgets.is_empty() {
+                        self.field_to_widgets.remove(key);
+                    }
+                }
+            }
+        }
+        for entries in added {
+            for (key, widget_id) in entries {
+                self.field_to_widgets
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(*widget_id);
+            }
+        }
+        self.bump_widget_bindings_revision();
+    }
+
     pub fn widget_bindings_revision(&self) -> u64 {
         self.widget_bindings_revision
     }
@@ -459,6 +510,51 @@ impl ReactiveRegistry {
         }
         for child in &node.children {
             self.collect_widget_bindings(child);
+        }
+    }
+
+    /// Extracts a layout's widget bindings as a flat entry list, matching the
+    /// traversal `collect_widget_bindings` performs, so the result can be
+    /// cached per layout and merged via
+    /// `replace_widget_bindings_from_entry_lists`.
+    pub fn collect_widget_binding_entries(
+        node: &LayoutNode,
+        out: &mut Vec<(ReactiveBindingKey, u64)>,
+    ) {
+        fn collect_value(widget_id: u64, value: &Value, out: &mut Vec<(ReactiveBindingKey, u64)>) {
+            match value {
+                Value::ReactiveRef {
+                    namespace,
+                    field,
+                    index,
+                    ..
+                } => {
+                    let key = match index {
+                        Some(index) => {
+                            ReactiveBindingKey::indexed(namespace.clone(), field.clone(), *index)
+                        }
+                        None => ReactiveBindingKey::field(namespace.clone(), field.clone()),
+                    };
+                    out.push((key, widget_id));
+                }
+                Value::List(items) => {
+                    for item in items {
+                        collect_value(widget_id, &item.borrow(), out);
+                    }
+                }
+                Value::Map(map) => {
+                    for item in map.values() {
+                        collect_value(widget_id, &item.borrow(), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for value in node.props.values() {
+            collect_value(node.widget_id, value, out);
+        }
+        for child in &node.children {
+            Self::collect_widget_binding_entries(child, out);
         }
     }
 
@@ -506,6 +602,16 @@ impl ReactiveRegistry {
         Some(Value::Map(namespace.map.clone()))
     }
 
+    /// Borrows a single field of a reactive namespace.
+    ///
+    /// Reading one field through `Vm::global_value` clones the whole namespace
+    /// map (every key `String` plus an `Rc` bump per field), which is
+    /// proportional to total UI state rather than to the field being read.
+    /// Callers that only need one field must use this instead.
+    pub fn field_value(&self, namespace: &str, field: &str) -> Option<&Value> {
+        self.namespaces.get(namespace)?.fields.get(field)
+    }
+
     pub fn is_writable(&self, namespace: &str) -> bool {
         self.namespaces
             .get(namespace)
@@ -518,5 +624,76 @@ fn collect_layout_widget_ids(node: &LayoutNode, ids: &mut HashSet<u64>) {
     ids.insert(node.widget_id);
     for child in &node.children {
         collect_layout_widget_ids(child, ids);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(field: &str, widget_id: u64) -> (ReactiveBindingKey, u64) {
+        (ReactiveBindingKey::field("SEQ", field), widget_id)
+    }
+
+    /// The delta path must produce exactly the table a full rebuild would.
+    #[test]
+    fn widget_binding_tile_delta_matches_a_full_rebuild() {
+        let unchanged_tile = vec![entry("volume", 1), entry("pan", 2)];
+        let before_tile = vec![entry("steps", 3), entry("selected", 4)];
+        let after_tile = vec![entry("steps", 5), entry("mute", 6)];
+
+        let mut incremental = ReactiveRegistry::new();
+        incremental.replace_widget_bindings_from_entry_lists([
+            unchanged_tile.as_slice(),
+            before_tile.as_slice(),
+        ]);
+        incremental.update_widget_bindings_with_tile_delta(
+            [before_tile.as_slice()],
+            [after_tile.as_slice()],
+        );
+
+        let mut rebuilt = ReactiveRegistry::new();
+        rebuilt.replace_widget_bindings_from_entry_lists([
+            unchanged_tile.as_slice(),
+            after_tile.as_slice(),
+        ]);
+
+        assert_eq!(
+            incremental.widget_bindings_snapshot(),
+            rebuilt.widget_bindings_snapshot()
+        );
+    }
+
+    /// Removing a tile whose fields are shared with a surviving tile must keep
+    /// the surviving tile's widgets bound.
+    #[test]
+    fn widget_binding_tile_delta_keeps_shared_fields_bound_when_a_tile_goes_away() {
+        let kept_tile = vec![entry("steps", 1)];
+        let closed_tile = vec![entry("steps", 2), entry("only-here", 3)];
+
+        let mut registry = ReactiveRegistry::new();
+        registry.replace_widget_bindings_from_entry_lists([
+            kept_tile.as_slice(),
+            closed_tile.as_slice(),
+        ]);
+        registry.update_widget_bindings_with_tile_delta([closed_tile.as_slice()], []);
+
+        let snapshot = registry.widget_bindings_snapshot();
+        assert_eq!(
+            snapshot.get(&ReactiveBindingKey::field("SEQ", "steps")),
+            Some(&HashSet::from([1]))
+        );
+        assert!(
+            !snapshot.contains_key(&ReactiveBindingKey::field("SEQ", "only-here")),
+            "a field with no remaining widgets must be dropped, not left empty"
+        );
+    }
+
+    #[test]
+    fn widget_binding_tile_delta_bumps_the_revision() {
+        let mut registry = ReactiveRegistry::new();
+        let before = registry.widget_bindings_revision();
+        registry.update_widget_bindings_with_tile_delta([], [[entry("steps", 1)].as_slice()]);
+        assert_ne!(registry.widget_bindings_revision(), before);
     }
 }

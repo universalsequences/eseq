@@ -2055,12 +2055,14 @@
         let track_one_original = scenes.scenes[0].cells[1].unwrap();
 
         let track_one_override = scenes.fork_track_pattern(1).unwrap();
-        scenes.track_pools[1]
-            .patterns
-            .get_mut(&track_one_override)
-            .unwrap()
-            .seq
-            .track_bits[0] = 77;
+        Arc::make_mut(
+            scenes.track_pools[1]
+                .patterns
+                .get_mut(&track_one_override)
+                .unwrap(),
+        )
+        .seq
+        .track_bits[0] = 77;
 
         let new_scene = scenes.new_scene();
 
@@ -2101,7 +2103,7 @@
 
         let shared = scenes.scenes[0].cells[0].unwrap();
         assert!(scenes.set_cell(1, 0, shared));
-        scenes.track_pools[0].patterns.get_mut(&shared).unwrap().seq.track_bits[0] = 123;
+        Arc::make_mut(scenes.track_pools[0].patterns.get_mut(&shared).unwrap()).seq.track_bits[0] = 123;
 
         assert_eq!(
             scenes.effective_track_pattern(0).unwrap().track_bits[0],
@@ -2109,7 +2111,7 @@
         );
 
         let forked = scenes.fork_track_pattern(0).unwrap();
-        scenes.track_pools[0].patterns.get_mut(&forked).unwrap().seq.track_bits[0] = 999;
+        Arc::make_mut(scenes.track_pools[0].patterns.get_mut(&forked).unwrap()).seq.track_bits[0] = 999;
 
         assert_eq!(
             scenes.track_pools[0].get(shared).unwrap().track_bits[0],

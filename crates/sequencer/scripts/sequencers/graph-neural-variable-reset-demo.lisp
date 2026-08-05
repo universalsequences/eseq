@@ -164,6 +164,7 @@
       (range 0 count))))
 
 (defstate gvr-weights (list))
+(defstate gvr-selected-neuron -1)
 (defstate gvr-threshold 0.55)
 (defstate gvr-global-transpose 0)
 (defstate gvr-dur-factor 1)
@@ -371,7 +372,7 @@
      (* (max 0 (- count 1)) gvr-row-gap)))
 
 (def gvr-matrix-header-spacer-height ()
-  (max 0 (- (+ gvr-row-panel-padding gvr-row-height gvr-row-gap) gvr-matrix-column-gap)))
+  (+ -0.5 (max 0 (- (+ gvr-row-panel-padding gvr-row-height gvr-row-gap) gvr-matrix-column-gap))))
 
 (def gvr-num (key value lo hi stp dec on-change)
   (number-picker
@@ -444,45 +445,53 @@
       :track-b (bind "GRAPH" (gvr-route-color-field n "b")))))
 
 (def gvr-row (n track-colors)
-  (h-stack :gap 0.4 :align :center
-    (gvr-route-bar n track-colors)
-    (label (str n) :width gvr-node-width :height gvr-row-height :font-size 9 :h-align :center :color :dim :bg :transparent)
-    (gvr-pick (str "graph-variable-reset-route-" n)
-      (bind-graph gvr-name n :route gvr-route-options) gvr-route-options
-      (lambda (v) (gvr-edit-route n v track-colors)))
-    (gvr-seed-toggle (str "graph-variable-reset-seed-route-" n)
-      (gvr-seed-route-value n)
-      (lambda (v) (gvr-edit-seed-route n v)))
-    (gvr-seed-toggle (str "graph-variable-reset-reset-seed-" n)
-      (gvr-reset-seed-value n)
-      (lambda (v) (gvr-edit-reset-seed n v)))
-    (gvr-num (str "graph-variable-reset-delay-" n)
-      (bind-graph gvr-name n :delay) 0 16 1 0
-      (lambda (v) (gvr-edit-num n :delay v)))
-    (gvr-num (str "graph-variable-reset-transpose-" n)
-      (bind-graph gvr-name n :transpose) -48 48 1 0
-      (lambda (v) (gvr-edit-param n :transpose v)))
-    (gvr-toggle (str "graph-variable-reset-transpose-reset-" n)
-      (gvr-reset-value n :transpose-reset)
-      (lambda (v) (gvr-edit-param n :transpose-reset (if v 1 0))))
-    (gvr-num (str "graph-variable-reset-vel-decay-" n)
-      (bind-graph gvr-name n :vel-decay) 0 2 0.01 2
-      (lambda (v) (gvr-edit-param n :vel-decay v)))
-    (gvr-toggle (str "graph-variable-reset-vel-reset-" n)
-      (gvr-reset-value n :vel-reset)
-      (lambda (v) (gvr-edit-param n :vel-reset (if v 1 0))))
-    (gvr-num (str "graph-variable-reset-dampening-" n)
-      (bind-graph gvr-name n :dampening) 0 1 0.01 2
-      (lambda (v) (gvr-edit-param n :dampening v)))
-    (gvr-num (str "graph-variable-reset-recovery-" n)
-      (bind-graph gvr-name n :recovery) 0 1 0.01 2
-      (lambda (v) (gvr-edit-param n :recovery v)))
-    (gvr-pick (str "graph-variable-reset-resolution-" n)
-      (bind-graph gvr-name n :resolution gvr-res-options) gvr-res-options
-      (lambda (v) (gvr-edit-enum n :resolution gvr-res-options v v)))
-    (gvr-pick (str "graph-variable-reset-quantize-" n)
-      (bind-graph gvr-name n :quantize gvr-quant-options) gvr-quant-options
-      (lambda (v) (gvr-edit-enum n :quantize gvr-quant-options v v)))))
+  (box
+    :key (str "graph-variable-reset-row-" n)
+    :height gvr-row-height
+    :padding 0
+    :selected (= gvr-selected-neuron n)
+    :background-color :transparent
+    :selected-background-color :mixer-strip-selected-bg
+    :corner-radius 4
+    (h-stack :gap 0.4 :align :center
+      (gvr-route-bar n track-colors)
+      (label (str n) :width gvr-node-width :height gvr-row-height :font-size 9 :h-align :center :color :dim :bg :transparent)
+      (gvr-pick (str "graph-variable-reset-route-" n)
+        (bind-graph gvr-name n :route gvr-route-options) gvr-route-options
+        (lambda (v) (gvr-edit-route n v track-colors)))
+      (gvr-seed-toggle (str "graph-variable-reset-seed-route-" n)
+        (gvr-seed-route-value n)
+        (lambda (v) (gvr-edit-seed-route n v)))
+      (gvr-seed-toggle (str "graph-variable-reset-reset-seed-" n)
+        (gvr-reset-seed-value n)
+        (lambda (v) (gvr-edit-reset-seed n v)))
+      (gvr-num (str "graph-variable-reset-delay-" n)
+        (bind-graph gvr-name n :delay) 0 16 1 0
+        (lambda (v) (gvr-edit-num n :delay v)))
+      (gvr-num (str "graph-variable-reset-transpose-" n)
+        (bind-graph gvr-name n :transpose) -48 48 1 0
+        (lambda (v) (gvr-edit-param n :transpose v)))
+      (gvr-toggle (str "graph-variable-reset-transpose-reset-" n)
+        (gvr-reset-value n :transpose-reset)
+        (lambda (v) (gvr-edit-param n :transpose-reset (if v 1 0))))
+      (gvr-num (str "graph-variable-reset-vel-decay-" n)
+        (bind-graph gvr-name n :vel-decay) 0 2 0.01 2
+        (lambda (v) (gvr-edit-param n :vel-decay v)))
+      (gvr-toggle (str "graph-variable-reset-vel-reset-" n)
+        (gvr-reset-value n :vel-reset)
+        (lambda (v) (gvr-edit-param n :vel-reset (if v 1 0))))
+      (gvr-num (str "graph-variable-reset-dampening-" n)
+        (bind-graph gvr-name n :dampening) 0 1 0.01 2
+        (lambda (v) (gvr-edit-param n :dampening v)))
+      (gvr-num (str "graph-variable-reset-recovery-" n)
+        (bind-graph gvr-name n :recovery) 0 1 0.01 2
+        (lambda (v) (gvr-edit-param n :recovery v)))
+      (gvr-pick (str "graph-variable-reset-resolution-" n)
+        (bind-graph gvr-name n :resolution gvr-res-options) gvr-res-options
+        (lambda (v) (gvr-edit-enum n :resolution gvr-res-options v v)))
+      (gvr-pick (str "graph-variable-reset-quantize-" n)
+        (bind-graph gvr-name n :quantize gvr-quant-options) gvr-quant-options
+        (lambda (v) (gvr-edit-enum n :quantize gvr-quant-options v v))))))
 
 (def gvr-header ()
   (h-stack :gap 0.4 :align :center
@@ -512,14 +521,14 @@
     (set! gvr-global-transpose (graph-param-value gvr-name 0 :global-transpose))
     (set! gvr-dur-factor (graph-param-value gvr-name 0 :dur-factor))
     (let ((active-count (gvr-node-count))
-          (viz (gvr-viz graph-visualizations)))
+        (viz (gvr-viz graph-visualizations)))
       (box 
         :padding 0.85
         :gap 0.6
         (v-stack :gap 0.5
           ;; ── sequencer-level config (on top) ──
           (box 
-            :width 105.5
+            :width 90.5
             :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 1 :corner-radius 16
             
             (h-stack
@@ -569,28 +578,14 @@
                       (do
                         (set! gvr-dur-factor v)
                         (gvr-edit-global-param :dur-factor v)))))
-                (h-stack :gap 0.6 :align :center
-                  (label "delay x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
-                  (gvr-pick "graph-variable-reset-delay-factor"
-                    gvr-delay-factor-index gvr-factor-options
-                    (lambda (v) (gvr-apply-delay-factor v)))
-                  (label "res/q x" :width 6 :height 1.2 :font-size 9 :h-align :right :color :dim :bg :transparent)
-                  (gvr-pick "graph-variable-reset-timebase-factor"
-                    gvr-timebase-factor-index gvr-factor-options
-                    (lambda (v) (gvr-apply-timebase-factor v)))
-                  (button "commit" :key "graph-variable-reset-delta-commit"
-                    :width 4.8 :height 1.2 :font-size 8
-                    :on-click (lambda (event) (graph-commit-deltas! gvr-name)))
-                  (button "clear" :key "graph-variable-reset-delta-clear"
-                    :width 4.8 :height 1.2 :font-size 8
-                    :on-click (lambda (event) (graph-clear-deltas! gvr-name))))
+                
                 )
               (matrix
                 :key "graph-variable-reset-dampening-matrix"
                 :rows active-count
                 :cols active-count
-                :width (max 11 (* active-count 0.75))
-                :height (max 5 (* active-count 0.35))
+                :width 16 
+                :height 7
                 
                 :control :grid
                 :background (rgba 0.1 0.1 0.1 0.6)
@@ -599,21 +594,6 @@
                 :max 1
                 :value (gvr-viz-matrix viz :dampening-matrix (gvr-zero-matrix) active-count active-count)
                 )
-              (matrix
-                :key "graph-variable-reset-delta-matrix"
-                :rows active-count
-                :cols active-count
-                :width (max 11 (* active-count 0.75))
-                :height (max 5 (* active-count 0.35))
-                :control :grid
-                :diverging true
-                :zero 0
-                :background (rgba 0.1 0.1 0.1 0.6)
-                :fill :primary
-                :negative-fill "#ff9f43"
-                :min -1
-                :max 1
-                :value (gvr-viz-matrix viz :delta-matrix (gvr-zero-matrix) active-count active-count))
               
               (event-view
                 :key "graph-variable-reset-event-view"
@@ -633,27 +613,27 @@
                 :auto-rotate true
                 :window-beats 16
                 :brightness :velocity
-                :background (rgba 0.1 0.1 0.1 0.7)
+                :background :mixer-strip-bg
+                :width 16
+                :height 7)              
+              	(spectrogram
+                :key "graph-variable-reset-master-spectrogram"
+                :source :master
+                :mode :waterfall
+                :freq-scale :log
+                :fft-size 2048
+                :time-slices 180
+                :min-db -64
+                :max-db 0
+                :smoothing 0.68
                 :width 20
-                :height 8)              
-	(spectrogram
-                  :key "graph-variable-reset-master-spectrogram"
-                  :source :master
-                  :mode :waterfall
-                  :freq-scale :log
-                  :fft-size 2048
-                  :time-slices 180
-                  :min-db -64
-                  :max-db 0
-                  :smoothing 0.68
-                  :width 20
-                  :height 8.0
-                  :background-color (rgba 0.13 0.13 0.13 1.00)
-                  :min-color (rgba 0.05 0.05 0.11 1)
-                  :mid-color (rgba 0.16 0.66 0.88 1)
-                  :max-color (rgba 1.0 0.72 0.28 1)
-		  )
-
+                :height 7.0
+                :background-color :mixer-strip-bg
+                :min-color (rgba 0.05 0.05 0.11 1)
+                :mid-color (rgba 0.16 0.66 0.88 1)
+                :max-color (rgba 1.0 0.72 0.28 1)
+                		  )
+              
               ))
           
           (h-stack
@@ -661,9 +641,9 @@
               :padding gvr-row-panel-padding
               :border-color :mixer-strip-border
               :background-color :mixer-strip-bg :corner-radius 16
-                (v-stack :gap 0.5
-                  (v-stack :gap gvr-row-gap
-                    (gvr-header)
+              (v-stack :gap 0.5
+                (v-stack :gap gvr-row-gap
+                  (gvr-header)
                   (each (range 0 active-count) |n| (gvr-row n track-colors)))))
             
             (v-stack :gap gvr-matrix-column-gap 
@@ -689,17 +669,7 @@
                 :min 0
                 :max 4
                 :value (gvr-viz-matrix viz :energy-matrix (gvr-zero-column-matrix) active-count 1)))            
-            (v-stack :gap gvr-matrix-column-gap
-              (label "" :width 0.1 :height (gvr-matrix-header-spacer-height) :font-size 1 :bg :transparent)
-              (matrix
-                :key "graph-variable-reset-node-delta-column"
-                :rows active-count
-                :cols 1
-                :width 2
-                :height (gvr-matrix-data-height active-count)
-                :min 0
-                :max 4
-                :value (gvr-viz-matrix viz :node-delta-column (gvr-zero-column-matrix) active-count 1)))
+           
             (v-stack :gap gvr-matrix-column-gap
               (label "" :width 0.1 :height (gvr-matrix-header-spacer-height) :font-size 1 :bg :transparent)
               (matrix
@@ -709,9 +679,14 @@
                 :width (max 26 (* active-count 3.25))
                 :height (gvr-matrix-data-height active-count)
                 :min 0
-                :color :blue
+                :background :mixer-strip-bg
+                :color (rgba 0.14 0.3 0.9 1)
                 :max 1
                 :value gvr-weights
+                :on-cell-press (lambda (r c)
+                  (set! gvr-selected-neuron c))
+                :on-cell-release (lambda (r c)
+                  (set! gvr-selected-neuron -1))
                 :on-cell-change (lambda (r c v)
                   (do
                     (set! gvr-weights (gvr-set-cell gvr-weights r c v))

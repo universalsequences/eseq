@@ -45,7 +45,8 @@
 (def agent-close-panel ()
   (do
     (set-window-buffer-for "*agent-artifacts*" "*track*")
-    (switch-to-buffer "*metal*")))
+    ;; *metal* (legacy step grid) is no longer loaded; land on the live view.
+    (switch-to-buffer "*sequencer*")))
 
 (def agent-new-conversation ()
   (do

@@ -45,6 +45,7 @@ pub mod tree;
 pub mod virtual_vstack;
 pub mod vslider;
 pub mod vstack;
+pub mod sound_glyph;
 pub mod waveform;
 pub mod wavetable_viewer;
 pub mod wrap;
@@ -1052,6 +1053,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &transport_clock::TRANSPORT_CLOCK_WIDGET,
     &waveform::WAVEFORM_WIDGET,
     &wavetable_viewer::WAVETABLE_VIEWER_WIDGET,
+    &sound_glyph::SOUND_GLYPH_WIDGET,
     &spectrogram::SPECTROGRAM_WIDGET,
     &eq8_editor::EQ8_EDITOR_WIDGET,
     &phaser_notch::PHASER_NOTCH_WIDGET,
@@ -1536,6 +1538,48 @@ pub fn collect_metal_primitives(
 }
 
 #[cfg(target_os = "macos")]
+/// Vertical band (top, bottom in layout rows, in the coordinate space of the
+/// nodes being visited) that can be visible inside the innermost enclosing
+/// scroll clip. `None` means unclipped. Nodes fully outside the band are
+/// culled: everything they would emit is discarded by the scroll clip anyway.
+type ScrollCullBand = Option<(f32, f32)>;
+
+#[cfg(target_os = "macos")]
+fn scroll_cull_band_excludes(node: &LayoutNode, band: ScrollCullBand) -> bool {
+    let Some((top, bottom)) = band else {
+        return false;
+    };
+    let node_top = node.rect.row;
+    let node_bottom = node.rect.row + node.rect.height;
+    if node_bottom > top && node_top < bottom {
+        return false;
+    }
+    // Modal subtrees must be visited every collection — visiting is what
+    // registers the overlay, independent of where the anchor scrolled to.
+    !subtree_contains_modal(node)
+}
+
+#[cfg(target_os = "macos")]
+fn subtree_contains_modal(node: &LayoutNode) -> bool {
+    node.widget_type == "modal" || node.children.iter().any(subtree_contains_modal)
+}
+
+/// The cull band for children of a scroll container: the intersection of the
+/// incoming band with the scroll clip rect, translated into content
+/// coordinates (children are laid out unshifted; the offset is applied to
+/// their primitives after collection).
+#[cfg(target_os = "macos")]
+fn scroll_child_cull_band(
+    node: &LayoutNode,
+    offset_y: f32,
+    band: ScrollCullBand,
+) -> ScrollCullBand {
+    let (band_top, band_bottom) = band.unwrap_or((f32::NEG_INFINITY, f32::INFINITY));
+    let top = node.rect.row.max(band_top) + offset_y;
+    let bottom = (node.rect.row + node.rect.height).min(band_bottom) + offset_y;
+    Some((top, bottom))
+}
+
 pub fn collect_metal_primitive_runs(
     node: &LayoutNode,
     viewport: WidgetViewport,
@@ -1550,6 +1594,7 @@ pub fn collect_metal_primitive_runs(
         scroll_top,
         max_rows,
         &[],
+        None,
         &mut run_ordinals,
         &mut runs,
     );
@@ -1592,6 +1637,7 @@ pub fn collect_metal_primitive_runs_retained(
         scroll_top,
         max_rows,
         &[],
+        None,
         false,
         &previous_by_key,
         &dirty_widget_ids,
@@ -1692,6 +1738,7 @@ pub fn refresh_metal_primitive_runs_retained_in_place(
         scroll_top,
         max_rows,
         &[],
+        None,
         false,
         runs,
         run_indices,
@@ -2027,15 +2074,20 @@ fn collect_metal_primitives_recursive(
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn collect_metal_primitive_runs_recursive(
     node: &LayoutNode,
     viewport: WidgetViewport,
     _scroll_top: f32,
     _max_rows: u16,
     ancestor_widget_ids: &[u64],
+    cull_band: ScrollCullBand,
     run_ordinals: &mut HashMap<u64, u16>,
     runs: &mut Vec<MetalPrimitiveRun>,
 ) {
+    if scroll_cull_band_excludes(node, cull_band) {
+        return;
+    }
     let node_is_focused = node.focusable && viewport.focused_widget_id == Some(node.widget_id);
     let focused_branch = viewport.focused_branch || node_is_focused;
     let suppresses_default_focus = suppresses_default_focus(node);
@@ -2074,6 +2126,7 @@ fn collect_metal_primitive_runs_recursive(
             own,
         );
 
+        let child_cull_band = scroll_child_cull_band(node, offset_y, cull_band);
         let mut child_ancestor_widget_ids = ancestor_widget_ids.to_vec();
         child_ancestor_widget_ids.push(node.widget_id);
         for child in &node.children {
@@ -2084,6 +2137,7 @@ fn collect_metal_primitive_runs_recursive(
                 _scroll_top,
                 _max_rows,
                 &child_ancestor_widget_ids,
+                child_cull_band,
                 run_ordinals,
                 runs,
             );
@@ -2144,6 +2198,7 @@ fn collect_metal_primitive_runs_recursive(
                 _scroll_top,
                 _max_rows,
                 &child_ancestor_widget_ids,
+                cull_band,
                 run_ordinals,
                 runs,
             );
@@ -2186,6 +2241,7 @@ fn collect_metal_primitive_runs_recursive(
             _scroll_top,
             _max_rows,
             &child_ancestor_widget_ids,
+            cull_band,
             run_ordinals,
             runs,
         );
@@ -2200,6 +2256,7 @@ fn collect_metal_primitive_runs_retained_recursive(
     _scroll_top: f32,
     _max_rows: u16,
     ancestor_widget_ids: &[u64],
+    cull_band: ScrollCullBand,
     dirty_ancestor: bool,
     previous_by_key: &HashMap<MetalPrimitiveRunKey, &MetalPrimitiveRun>,
     dirty_widget_ids: &HashSet<u64>,
@@ -2207,6 +2264,9 @@ fn collect_metal_primitive_runs_retained_recursive(
     stats: &mut RetainedMetalPrimitiveRunStats,
     runs: &mut Vec<MetalPrimitiveRun>,
 ) {
+    if scroll_cull_band_excludes(node, cull_band) {
+        return;
+    }
     let node_is_dirty = dirty_widget_ids.contains(&node.widget_id);
     let subtree_dirty = dirty_ancestor || node_is_dirty;
     let node_is_focused = node.focusable && viewport.focused_widget_id == Some(node.widget_id);
@@ -2255,6 +2315,7 @@ fn collect_metal_primitive_runs_retained_recursive(
             },
         );
 
+        let child_cull_band = scroll_child_cull_band(node, offset_y, cull_band);
         let mut child_ancestor_widget_ids = ancestor_widget_ids.to_vec();
         child_ancestor_widget_ids.push(node.widget_id);
         for child in &node.children {
@@ -2265,6 +2326,7 @@ fn collect_metal_primitive_runs_retained_recursive(
                 _scroll_top,
                 _max_rows,
                 &child_ancestor_widget_ids,
+                child_cull_band,
                 subtree_dirty,
                 previous_by_key,
                 dirty_widget_ids,
@@ -2342,6 +2404,7 @@ fn collect_metal_primitive_runs_retained_recursive(
                 _scroll_top,
                 _max_rows,
                 &child_ancestor_widget_ids,
+                cull_band,
                 subtree_dirty,
                 previous_by_key,
                 dirty_widget_ids,
@@ -2399,6 +2462,7 @@ fn collect_metal_primitive_runs_retained_recursive(
             _scroll_top,
             _max_rows,
             &child_ancestor_widget_ids,
+            cull_band,
             subtree_dirty,
             previous_by_key,
             dirty_widget_ids,
@@ -2417,6 +2481,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
     _scroll_top: f32,
     _max_rows: u16,
     ancestor_widget_ids: &[u64],
+    cull_band: ScrollCullBand,
     dirty_ancestor: bool,
     runs: &mut [MetalPrimitiveRun],
     run_indices: &MetalPrimitiveRunIndex,
@@ -2427,6 +2492,9 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
     visited_indices: &mut Vec<usize>,
     stats: &mut RetainedMetalPrimitiveRunStats,
 ) {
+    if scroll_cull_band_excludes(node, cull_band) {
+        return;
+    }
     if !dirty_ancestor
         && relevant_widget_ids.is_some_and(|relevant| !relevant.contains(&node.widget_id))
     {
@@ -2475,6 +2543,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
             },
         );
 
+        let child_cull_band = scroll_child_cull_band(node, offset_y, cull_band);
         let mut child_ancestor_widget_ids = ancestor_widget_ids.to_vec();
         child_ancestor_widget_ids.push(node.widget_id);
         for child in &node.children {
@@ -2485,6 +2554,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
                 _scroll_top,
                 _max_rows,
                 &child_ancestor_widget_ids,
+                child_cull_band,
                 subtree_dirty,
                 runs,
                 run_indices,
@@ -2569,6 +2639,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
                 _scroll_top,
                 _max_rows,
                 &child_ancestor_widget_ids,
+                cull_band,
                 subtree_dirty,
                 runs,
                 run_indices,
@@ -2633,6 +2704,7 @@ fn refresh_metal_primitive_runs_retained_in_place_recursive(
             _scroll_top,
             _max_rows,
             &child_ancestor_widget_ids,
+            cull_band,
             subtree_dirty,
             runs,
             run_indices,
@@ -3485,7 +3557,7 @@ mod tests {
                 row: 0.0,
                 col: 0.0,
                 width: 10.0,
-                height: 4.0,
+                height: 6.0,
             },
             HashMap::new(),
             vec![label, button],
@@ -3502,6 +3574,66 @@ mod tests {
             primitive_tokens(&flatten_metal_primitive_runs(&retained_runs)),
             primitive_tokens(&flatten_metal_primitive_runs(&full_runs))
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scrolled_collection_culls_fully_offscreen_children() {
+        let visible = test_node(
+            2,
+            "label",
+            Rect {
+                row: 1.0,
+                col: 1.0,
+                width: 8.0,
+                height: 1.0,
+            },
+            HashMap::from([("text".to_string(), Value::String("Visible".to_string()))]),
+            Vec::new(),
+        );
+        let offscreen = test_node(
+            3,
+            "label",
+            Rect {
+                row: 10.0,
+                col: 1.0,
+                width: 8.0,
+                height: 1.0,
+            },
+            HashMap::from([("text".to_string(), Value::String("Offscreen".to_string()))]),
+            Vec::new(),
+        );
+        let root = test_node(
+            1,
+            "scroll",
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 10.0,
+                height: 4.0,
+            },
+            HashMap::from([("_content_height".to_string(), Value::Number(20.0))]),
+            vec![visible, offscreen],
+        );
+        let viewport = test_viewport();
+
+        let (runs, _) = collect_metal_primitive_runs(&root, viewport, 0.0, 24);
+        assert!(runs.iter().any(|run| run.widget_id == 2));
+        assert!(!runs.iter().any(|run| run.widget_id == 3));
+
+        // Scroll down: the culled child enters the viewport, the first leaves.
+        scroll::set_scroll_state(
+            1,
+            scroll::ScrollState {
+                offset_y: 9.0,
+                content_height: 20.0,
+                viewport_height: 4.0,
+                ..Default::default()
+            },
+        );
+        let (runs, _) = collect_metal_primitive_runs(&root, viewport, 0.0, 24);
+        assert!(!runs.iter().any(|run| run.widget_id == 2));
+        assert!(runs.iter().any(|run| run.widget_id == 3));
     }
 
     #[cfg(target_os = "macos")]
@@ -3671,7 +3803,7 @@ mod tests {
                 row: 0.0,
                 col: 0.0,
                 width: 10.0,
-                height: 4.0,
+                height: 6.0,
             },
             HashMap::new(),
             vec![label, button],

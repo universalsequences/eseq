@@ -334,7 +334,7 @@ impl SequencerState {
                 ));
             };
             state.restore_to_patch(patch, descriptor, node_id, modulator_node_id);
-            if let Some(stored) = pool.patterns.get_mut(id) {
+            if let Some(stored) = pool.patterns.get_mut(id).map(Arc::make_mut) {
                 state.restore_to_seq(&mut stored.seq);
             }
         }
@@ -494,6 +494,7 @@ impl SequencerState {
             let Some(slot) = sounds
                 .patches
                 .get_mut(&stored.sound.patch)
+                .map(Arc::make_mut)
                 .and_then(|patch| patch.rack_track.as_mut())
                 .and_then(|rack| rack.slots.get_mut(rack_slot_idx))
             else {
@@ -545,7 +546,7 @@ impl SequencerState {
         };
         if let Some(pool) = scenes.track_pools.get_mut(track) {
             if let Some(refs) = pool.refs(id) {
-                if let Some(patch) = pool.sounds.patches.get_mut(&refs.patch) {
+                if let Some(patch) = pool.sounds.patches.get_mut(&refs.patch).map(Arc::make_mut) {
                     patch.instrument_run_mode = run_mode;
                 }
             }

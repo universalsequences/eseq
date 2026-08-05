@@ -134,6 +134,7 @@ enum CaptureTrackKind {
 struct CaptureTrackSpec {
     kind: CaptureTrackKind,
     display_name: Option<String>,
+    solo: bool,
     num_steps: Option<usize>,
     /// `(step, transpose)` pairs authored via `:steps (0 (4 12) 8 ...)`;
     /// applied to the live pattern and persisted into the scene's pattern
@@ -294,6 +295,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
     };
 
     let mut display_name = None;
+    let mut solo = false;
     let mut num_steps = None;
     let mut steps = Vec::new();
     let mut samples = Vec::new();
@@ -313,6 +315,10 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
                         .ok_or_else(|| ":name expects a string".to_string())?
                         .to_string(),
                 );
+            }
+            "solo" => {
+                solo = expression_bool(value)
+                    .ok_or_else(|| ":solo expects true or false".to_string())?;
             }
             "num-steps" => {
                 let steps = expression_usize(value)
@@ -354,6 +360,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
     Ok(CaptureTrackSpec {
         kind,
         display_name,
+        solo,
         num_steps,
         steps,
         samples,
@@ -437,6 +444,14 @@ fn expression_usize(expression: &Expression) -> Option<usize> {
     }
 }
 
+fn expression_bool(expression: &Expression) -> Option<bool> {
+    match expression_name(Some(expression))? {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
 fn expression_string_list(expression: &Expression, option: &str) -> Result<Vec<String>, String> {
     let items = match expression {
         Expression::List(items) | Expression::QuoteList(items) => items,
@@ -466,6 +481,7 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
         if let Some(name) = &spec.display_name {
             app.tracks[track] = name.clone();
         }
+        app.state.pattern.track_params[track].set_solo(spec.solo);
         if let Some(num_steps) = spec.num_steps {
             app.state.pattern.track_params[track].set_num_steps(num_steps);
         }
@@ -625,6 +641,101 @@ fn apply_capture_macro_host_commands(
         }
     }
     Ok(applied)
+}
+
+/// Optional standalone delta-glyph gallery feed. Entries sharing an
+/// instrument form a cohort; the first entry is its reference. Thin source
+/// metadata degrades exactly as the spec requires: linear taper, one group.
+fn publish_capture_sound_glyphs(editor: &mut Editor) -> Result<(), String> {
+    use eseqlisp::vm::Value;
+    use sequencer::delta_glyph::{
+        DeltaGlyphCohort, IdentityBranch, ParamGroup, ParamKind, ParamSchema, ParamTaper,
+    };
+
+    let Ok(Some(Value::List(entries))) = editor.runtime_mut().eval_str("capture-sound-glyphs") else {
+        return Ok(());
+    };
+    let get_string = |map: &std::collections::HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>, key: &str| {
+        map.get(key).and_then(|value| match &*value.borrow() {
+            Value::String(value) => Some(value.clone()),
+            _ => None,
+        })
+    };
+    struct Captured {
+        key: String,
+        instrument: String,
+        schema: Vec<ParamSchema>,
+        values: Vec<f32>,
+        identity: Vec<IdentityBranch>,
+    }
+    let mut captured = Vec::new();
+    for entry in &entries {
+        let entry = entry.borrow();
+        let Value::Map(map) = &*entry else { return Err("capture-sound-glyphs expects dict entries".to_string()) };
+        let key = get_string(map, "key").ok_or("capture-sound-glyphs entry missing :key")?;
+        let instrument = get_string(map, "instrument").ok_or("capture-sound-glyphs entry missing :instrument")?;
+        let source = sequencer::lisp_host::load_instrument_source(&instrument)
+            .map_err(|error| format!("capture-sound-glyphs: load {instrument}: {error}"))?;
+        let specs = sequencer::sound_glyph::param_specs(&source);
+        let mut schema = specs.iter().enumerate().map(|(order, (name, spec))| {
+            let lower = name.to_ascii_lowercase();
+            let group = if lower.contains("osc") || lower.contains("wave") || lower.contains("pitch") {
+                ParamGroup::Osc
+            } else if lower.contains("filter") || lower.contains("cutoff") || lower.contains("reson") {
+                ParamGroup::Filter
+            } else if lower.contains("env") || lower.contains("attack") || lower.contains("decay") || lower.contains("release") {
+                ParamGroup::Env
+            } else if lower.contains("mod") || lower.contains("lfo") {
+                ParamGroup::Mod
+            } else if lower.contains("delay") || lower.contains("reverb") || lower.contains("fx") {
+                ParamGroup::Fx
+            } else if lower.contains("level") || lower.contains("gain") || lower.contains("pan") || lower.contains("mix") {
+                ParamGroup::Mix
+            } else {
+                ParamGroup::Other("other".to_string())
+            };
+            ParamSchema {
+            id: name.clone(), kind: ParamKind::Continuous, range: (spec.min, spec.max),
+            taper: ParamTaper::Linear, group,
+            order, link: None, visible: true, audio: true, default: spec.default, weight: 1.0,
+        }}).collect::<Vec<_>>();
+        schema.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut values = schema.iter().map(|param| param.default).collect::<Vec<_>>();
+        if let Some(params) = map.get("params") {
+            if let Value::Map(params) = &*params.borrow() {
+                for (name, value) in params {
+                    if let (Some(index), Value::Number(number)) = (
+                        schema.iter().position(|param| &param.id == name), &*value.borrow()
+                    ) { values[index] = *number as f32; }
+                }
+            }
+        }
+        // Identity tier (spec §5.1a): an all-identical fixture cohort still
+        // renders the instrument's AST silhouette instead of a void.
+        let identity = sequencer::sound_glyph::identity_branches(
+            &sequencer::sound_glyph::extract_skeleton(&source).skeleton,
+        );
+        captured.push(Captured { key, instrument, schema, values, identity });
+    }
+    for item in &captured {
+        let cohort = captured.iter().filter(|other| other.instrument == item.instrument)
+            .map(|other| other.values.clone()).collect::<Vec<_>>();
+        let reference = cohort.first().cloned().unwrap_or_default();
+        let delta =
+            DeltaGlyphCohort::new_with_identity(&item.schema, &cohort, &reference, &item.identity)
+                .build(&item.values, item.values == reference);
+        eseqlisp::sound_glyph_data::publish_sound_glyph_frame(item.key.clone(), eseqlisp::sound_glyph_data::SoundGlyphFrame {
+            revision: 1, cols: delta.cols, rows: delta.rows,
+            substrate: delta.substrate,
+            pieces: delta.pieces.into_iter().map(|piece| eseqlisp::sound_glyph_data::SoundGlyphPiece {
+                slot: piece.slot, piece: piece.piece, hue: piece.hue,
+                magnitude: piece.magnitude, mirror: piece.mirror, negative: piece.negative,
+            }).collect(),
+            anchor: delta.anchor,
+            incompatible: false,
+        });
+    }
+    Ok(())
 }
 
 /// Optional `(def capture-click-widgets (list "dropdown"))` in a capture
@@ -853,6 +964,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         &mut SoundPaletteFrameState::default(),
         true,
     );
+    publish_capture_sound_glyphs(&mut editor)?;
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
 
@@ -899,7 +1011,7 @@ mod tests {
     fn parses_project_tracks_and_preserves_non_project_source() {
         let source = r#"
             (capture-project
-              (track :sampler :name "Drums" :num-steps 8 :midi-fx ("arp") :audio-fx '("filter"))
+              (track :sampler :name "Drums" :solo true :num-steps 8 :midi-fx ("arp") :audio-fx '("filter"))
               (track :layer-rack :samples ("kick.wav" "snare.wav"))
               (track :instrument "core/drift"))
 
@@ -913,6 +1025,7 @@ mod tests {
             CaptureTrackSpec {
                 kind: CaptureTrackKind::Sampler,
                 display_name: Some("Drums".to_string()),
+                solo: true,
                 num_steps: Some(8),
                 steps: vec![],
                 samples: vec![],

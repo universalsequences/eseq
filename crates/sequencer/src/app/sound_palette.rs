@@ -6,7 +6,9 @@
 //! silently kills p-locks/key locks and engaged macro overrides. Each
 //! gesture is one undo entry (§17.4).
 
-use crate::sequencer::{MixId, PatchId, PatternId, SoundRefs, TakeId, SOUND_COLOR_SET};
+use crate::sequencer::{
+    InstrumentType, MixId, PatchId, PatternId, SoundRefs, TakeId, SOUND_COLOR_SET,
+};
 
 use super::sound_binding::BoundSource;
 use super::App;
@@ -40,10 +42,77 @@ pub struct PaletteEntry {
     /// "Scene 1, Pattern 5, Take 2" — the reverse index of the refs, or
     /// "unused" for a library orphan (§17.4 palette-as-library).
     pub referents: String,
+    /// The same index abbreviated for the compact palette card:
+    /// "S1 P5 T2".
+    pub referents_short: String,
     /// The scene-effective sound (§17.6): rendered as the gray base entry.
     pub is_base: bool,
     /// The open target's current patch.
     pub is_current: bool,
+    /// The instrument preset the patch was loaded from (a `*` suffix marks
+    /// it edited since), when one is known.
+    pub preset: Option<String>,
+    /// The loaded sample's name for a sampler patch — the sampler
+    /// equivalent of a preset name.
+    pub sample: Option<String>,
+    /// Git-diff-style summary vs the open target's current patch: how many
+    /// visible instrument params sit higher / lower than the current sound.
+    /// Both zero for the current entry itself and for incompatible patches.
+    pub params_up: usize,
+    pub params_down: usize,
+}
+
+/// "Scene 12" → "S12", "Pattern 5" → "P5", "Take 2" → "T2"; a custom name
+/// keeps its first 6 chars.
+fn short_referent(name: &str) -> String {
+    for (prefix, letter) in [("Scene ", "S"), ("Pattern ", "P"), ("Take ", "T")] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            return format!("{letter}{rest}");
+        }
+    }
+    name.chars().take(6).collect()
+}
+
+/// Mirror of the glyph pipeline's hidden-param filter: modulation plumbing
+/// and `hidden`/`ui`/`non-audio`-tagged params don't count toward the diff.
+fn diffable_param(param: &crate::effects::ParamDescriptor) -> bool {
+    let plumbing = param.name.starts_with("__dgen_mod_active__")
+        || (param.name.starts_with("mod ")
+            && param.name.contains(" slot ")
+            && param.name.ends_with(" amt"));
+    !plumbing
+        && !param.ui_metadata.as_ref().is_some_and(|metadata| {
+            metadata
+                .tags
+                .iter()
+                .any(|tag| matches!(tag.as_str(), "hidden" | "ui" | "non-audio"))
+        })
+}
+
+/// Count how many visible params sit higher / lower in `candidate` than in
+/// `current`. The caller guarantees the two default vectors describe the
+/// same instrument (equal lengths).
+fn param_diff_counts(
+    descriptor: Option<&crate::effects::EffectDescriptor>,
+    current: &[f32],
+    candidate: &[f32],
+) -> (usize, usize) {
+    let mut up = 0;
+    let mut down = 0;
+    for (index, (current, candidate)) in current.iter().zip(candidate).enumerate() {
+        if descriptor
+            .and_then(|descriptor| descriptor.params.get(index))
+            .is_some_and(|param| !diffable_param(param))
+        {
+            continue;
+        }
+        if candidate > current {
+            up += 1;
+        } else if candidate < current {
+            down += 1;
+        }
+    }
+    (up, down)
 }
 
 /// What a palette gesture re-links (§17.6). `Cell` means "the track's
@@ -308,6 +377,7 @@ impl App {
             .resolve_palette_target(track, target)
             .ok()
             .map(|resolved| resolved.current.patch);
+        let descriptor = self.graph.instrument_descriptors.get(track);
         self.state.with_project_scenes(|scenes| {
             let Some(pool) = scenes.track_pools.get(track) else {
                 return Vec::new();
@@ -360,11 +430,24 @@ impl App {
             }
             let mut patch_ids: Vec<PatchId> = pool.sounds.patches.keys().copied().collect();
             patch_ids.sort();
+            let current_defaults = current_patch
+                .and_then(|patch| pool.sounds.patches.get(&patch))
+                .map(|patch| patch.instrument_slot.defaults.clone());
             patch_ids
                 .into_iter()
                 .map(|patch| {
                     let meta = pool.sounds.patch_meta.get(&patch);
                     let names = referents.remove(&patch).unwrap_or_default();
+                    let data = pool.sounds.patches.get(&patch);
+                    let (params_up, params_down) = match (&current_defaults, data) {
+                        (Some(current), Some(data))
+                            if Some(patch) != current_patch
+                                && data.instrument_slot.defaults.len() == current.len() =>
+                        {
+                            param_diff_counts(descriptor, current, &data.instrument_slot.defaults)
+                        }
+                        _ => (0, 0),
+                    };
                     PaletteEntry {
                         patch,
                         mix: paired_mix.get(&patch).copied(),
@@ -377,8 +460,35 @@ impl App {
                         } else {
                             names.join(", ")
                         },
+                        referents_short: if names.is_empty() {
+                            "unused".to_string()
+                        } else {
+                            names
+                                .iter()
+                                .map(|name| short_referent(name))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        },
                         is_base: Some(patch) == base_patch,
                         is_current: Some(patch) == current_patch,
+                        preset: data
+                            .and_then(|data| data.track_sound_state.loaded_preset.as_deref())
+                            .filter(|name| !name.is_empty())
+                            .map(|name| {
+                                let dirty =
+                                    data.is_some_and(|data| data.track_sound_state.dirty);
+                                if dirty {
+                                    format!("{name}*")
+                                } else {
+                                    name.to_string()
+                                }
+                            }),
+                        sample: data
+                            .filter(|data| data.instrument_type == InstrumentType::Sampler)
+                            .map(|data| data.sample_id.1.clone())
+                            .filter(|name| !name.is_empty()),
+                        params_up,
+                        params_down,
                     }
                 })
                 .collect()
@@ -758,7 +868,7 @@ mod tests {
     /// neither playback row transitions nor take splices can toggle dots.
     #[test]
     fn clip_dots_mark_patch_identity_and_ignore_the_effective_refs() {
-        let (mut app, take, _scene_pattern, _chunks) = app_with_take();
+        let (app, take, _scene_pattern, _chunks) = app_with_take();
         let lanes = app.song_clip_sounds();
         assert!(
             lanes[0].iter().all(|(_, dot, _)| *dot),

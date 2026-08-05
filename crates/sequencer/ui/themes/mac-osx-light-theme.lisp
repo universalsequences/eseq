@@ -134,6 +134,10 @@
       :widget-toggle-off     '(0.710 0.710 0.729)
       :widget-toggle-knob-on '(1.00 1.00 1.00)
       :widget-toggle-knob-off '(1.00 1.00 1.00)
+      :sequencer-step-border          '(0.58 0.58 0.60)
+      :sequencer-step-selected-border '(0.00 0.478 1.00)
+      :sequencer-step-off-fill        '(0.78 0.78 0.80)
+      :sequencer-step-off-fill-alt    '(0.68 0.68 0.70)
 
       ;; Patcher canvas, nodes, cables, editing, and navigation
       :patcher-bg                    '(0.949 0.949 0.957)

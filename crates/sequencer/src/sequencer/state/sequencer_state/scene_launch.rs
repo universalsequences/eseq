@@ -56,9 +56,28 @@ impl SequencerState {
         // must not be re-launched from the scene until the latch clears.
         let latched = self.song_manual_latch_mask();
         let mut scenes = self.pattern.scenes.lock().unwrap();
+        // The latch survives the stop, and so must its override pin:
+        // `launch_scene` clears every override, but a latched lane that
+        // loses its pin is stale with no self-write carve-out — every
+        // masked save-back skips it, device edits made while stopped never
+        // reach the pool entity, and the next Play re-launches the pool's
+        // stale sound over them.
+        let pinned: Vec<(usize, PatternId)> = scenes
+            .track_overrides
+            .iter()
+            .enumerate()
+            .take(64)
+            .filter(|(track, _)| latched >> track & 1 == 1)
+            .filter_map(|(track, id)| id.map(|id| (track, id)))
+            .collect();
         let Some(launched) = scenes.launch_scene(scene_idx) else {
             return;
         };
+        for (track, id) in pinned {
+            if let Some(slot) = scenes.track_overrides.get_mut(track) {
+                *slot = Some(id);
+            }
+        }
         for (track, data) in launched.into_iter().enumerate() {
             if latched >> track.min(63) & 1 == 1 {
                 continue;

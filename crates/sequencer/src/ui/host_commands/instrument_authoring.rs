@@ -918,7 +918,7 @@ pub(super) fn handle(
                             Ok(()) => {
                                 // Success — close editor
                                 editor
-                                    .swap_buffer_in_tile_showing(&buf_name, "*metal*");
+                                    .swap_buffer_in_tile_showing(&buf_name, "*sequencer*");
                                 editor.remove_buffer_by_name(&buf_name);
                                 ctx.sessions.editor_buffer_name = None;
                                 ctx.sessions.editor_mode = None;
@@ -2246,7 +2246,7 @@ pub(super) fn handle(
                     }
                     editor.refresh_runtime_side_effects();
                 } else {
-                    editor.swap_buffer_in_tile_showing(&buf_name, "*metal*");
+                    editor.swap_buffer_in_tile_showing(&buf_name, "*sequencer*");
                 }
                 editor.remove_buffer_by_name(&buf_name);
             }

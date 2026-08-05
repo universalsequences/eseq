@@ -111,8 +111,11 @@ pub const SOUND_COLOR_SET: u8 = 8;
 /// patterns automatically.
 #[derive(Clone, Debug, Default)]
 pub struct TrackSoundPool {
-    pub patches: HashMap<PatchId, Patch>,
-    pub mixes: HashMap<MixId, Mix>,
+    /// `Arc` for structural sharing with history snapshots — see
+    /// `TrackPatternPool::patterns`. Mutations copy-on-write through
+    /// `Arc::make_mut`.
+    pub patches: HashMap<PatchId, Arc<Patch>>,
+    pub mixes: HashMap<MixId, Arc<Mix>>,
     pub next_patch_id: u64,
     pub next_mix_id: u64,
     /// §17.11 display metadata, parallel to `patches`/`mixes`. Entries are
@@ -126,7 +129,7 @@ impl TrackSoundPool {
     pub fn insert_patch(&mut self, patch: Patch) -> PatchId {
         let id = PatchId(self.next_patch_id);
         self.next_patch_id = self.next_patch_id.saturating_add(1);
-        self.patches.insert(id, patch);
+        self.patches.insert(id, Arc::new(patch));
         let color = self.allocate_patch_color();
         self.patch_meta.insert(
             id,
@@ -141,7 +144,7 @@ impl TrackSoundPool {
     pub fn insert_mix(&mut self, mix: Mix) -> MixId {
         let id = MixId(self.next_mix_id);
         self.next_mix_id = self.next_mix_id.saturating_add(1);
-        self.mixes.insert(id, mix);
+        self.mixes.insert(id, Arc::new(mix));
         let color = self.allocate_mix_color();
         self.mix_meta.insert(
             id,
@@ -237,9 +240,13 @@ impl TrackSoundPool {
         let patch = self
             .patches
             .get(&refs.patch)
-            .cloned()
+            .map(|patch| Patch::clone(patch))
             .unwrap_or_else(Patch::new_default);
-        let mix = self.mixes.get(&refs.mix).cloned().unwrap_or_default();
+        let mix = self
+            .mixes
+            .get(&refs.mix)
+            .map(|mix| Mix::clone(mix))
+            .unwrap_or_default();
         self.insert(patch, mix)
     }
 

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::vm::{Value, format_lisp_value};
 use crate::widget_render;
@@ -134,35 +135,54 @@ pub struct LayoutEngine<'a> {
 }
 
 std::thread_local! {
-    /// The frame viewport for the layout pass currently running on this
-    /// thread. Installed by the `LayoutEngine` entry points so container
-    /// definitions (which only see node/area/children) can anchor against
-    /// the whole window.
-    static FRAME_VIEWPORT: std::cell::Cell<Option<Rect>> = const { std::cell::Cell::new(None) };
+    /// Frame and cell geometry for the layout pass currently running on this
+    /// thread. Installed by `LayoutEngine` entry points so container
+    /// definitions can resolve frame-anchored and pixel-sized geometry.
+    static LAYOUT_PASS_GEOMETRY: std::cell::Cell<Option<LayoutPassGeometry>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[derive(Clone, Copy)]
+struct LayoutPassGeometry {
+    frame_viewport: Rect,
+    cell_w: f32,
+    cell_h: f32,
 }
 
 /// The frame viewport of the in-progress layout pass, if any.
 pub(crate) fn current_frame_viewport() -> Option<Rect> {
-    FRAME_VIEWPORT.with(|slot| slot.get())
+    LAYOUT_PASS_GEOMETRY.with(|slot| slot.get().map(|geometry| geometry.frame_viewport))
+}
+
+pub(crate) fn current_layout_cell_dims() -> Option<(f32, f32)> {
+    LAYOUT_PASS_GEOMETRY.with(|slot| {
+        slot.get()
+            .map(|geometry| (geometry.cell_w, geometry.cell_h))
+    })
 }
 
 /// Installs a frame viewport for the duration of a layout pass; restores the
 /// previous value on drop so nested/snapshot layouts do not leak state.
-struct FrameViewportGuard {
-    previous: Option<Rect>,
+struct LayoutPassGeometryGuard {
+    previous: Option<LayoutPassGeometry>,
 }
 
-impl FrameViewportGuard {
-    fn install(frame_viewport: Option<Rect>) -> Self {
-        let previous = FRAME_VIEWPORT.with(|slot| slot.replace(frame_viewport));
+impl LayoutPassGeometryGuard {
+    fn install(frame_viewport: Rect, cell_w: f32, cell_h: f32) -> Self {
+        let geometry = LayoutPassGeometry {
+            frame_viewport,
+            cell_w,
+            cell_h,
+        };
+        let previous = LAYOUT_PASS_GEOMETRY.with(|slot| slot.replace(Some(geometry)));
         Self { previous }
     }
 }
 
-impl Drop for FrameViewportGuard {
+impl Drop for LayoutPassGeometryGuard {
     fn drop(&mut self) {
         let previous = self.previous;
-        FRAME_VIEWPORT.with(|slot| slot.set(previous));
+        LAYOUT_PASS_GEOMETRY.with(|slot| slot.set(previous));
     }
 }
 
@@ -225,7 +245,9 @@ impl<'a> LayoutEngine<'a> {
     }
 
     pub fn layout_with_id_offset(&self, tree: &Value, widget_id_offset: u64) -> Option<LayoutNode> {
-        let _frame_viewport = FrameViewportGuard::install(Some(self.effective_frame_viewport()));
+        let _layout_geometry = LayoutPassGeometryGuard::install(
+            self.effective_frame_viewport(), self.cell_w, self.cell_h,
+        );
         let size = self.measure(tree, self.root_constraints(), DEFAULT_FONT_SIZE)?;
         let root_rect = self.root_rect(tree, size, 0.0, 0.0);
         let mut layout =
@@ -1078,6 +1100,213 @@ pub fn reuse_layout_node_for_subtree_path_result(
     )
 }
 
+/// Applies several subtree replacements in ONE traversal of the layout tree.
+///
+/// Equivalent to calling `reuse_layout_node_for_subtree_path_result` once per
+/// path, but the per-call cost of that loop is a deep clone of every sibling
+/// along the path — effectively the whole layout tree — so N subtree flushes
+/// into the same buffer paid N full-tree clones. Batching keeps the cost at
+/// one tree rebuild regardless of how many subtrees changed.
+///
+/// A path that is a prefix of another covers the deeper replacement (both are
+/// rebuilt from the same source `tree`), matching the sequential outcome.
+/// Any failure returns Err without partial results; callers keep the per-path
+/// loop as the fallback so failure semantics (per-root partial relayout) are
+/// unchanged.
+pub fn reuse_layout_node_for_subtree_paths_result(
+    existing: &LayoutNode,
+    tree: &Value,
+    child_paths: &[&[usize]],
+    dirty_widget_ids: &mut Vec<u64>,
+) -> Result<LayoutNode, String> {
+    // Clone first, then run the in-place update on the private copy: the
+    // clone preserves the "no partial results on Err" contract for callers
+    // that still hold the original.
+    let mut node = Arc::new(existing.clone());
+    reuse_layout_node_for_subtree_paths_in_place(&mut node, tree, child_paths, dirty_widget_ids)?;
+    Ok(Arc::try_unwrap(node).unwrap_or_else(|shared| (*shared).clone()))
+}
+
+/// A planned subtree replacement: what phase two will write into the layout.
+enum SubtreeReusePlan {
+    /// Nothing below this node changes.
+    Keep,
+    /// This node is a replaced subtree root; swap in the rebuilt node.
+    Replace(Box<LayoutNode>),
+    /// This node is on the path to one; update its props and recurse.
+    Descend {
+        props: HashMap<String, Value>,
+        children: Vec<(usize, SubtreeReusePlan)>,
+    },
+}
+
+/// In-place variant of [`reuse_layout_node_for_subtree_paths_result`].
+///
+/// `reuse_layout_node_for_subtree_paths_result` must clone every sibling of
+/// every node on the path — in practice the whole layout tree — because it
+/// builds a fresh `LayoutNode` from a shared `&LayoutNode`. When the caller
+/// owns the only reference to the layout, none of that copying is required:
+/// only the nodes on the path and the replaced subtrees actually change.
+///
+/// The work is split so failure semantics stay identical: phase one plans the
+/// whole update read-only (running exactly the same identity, size-prop and
+/// subtree-rebuild checks) and can fail without touching the layout; phase two
+/// applies the finished plan and cannot fail. `Arc::make_mut` keeps this sound
+/// when the layout is shared after all — it then falls back to one clone,
+/// which is what the cloning variant always paid.
+pub fn reuse_layout_node_for_subtree_paths_in_place(
+    existing: &mut Arc<LayoutNode>,
+    tree: &Value,
+    child_paths: &[&[usize]],
+    dirty_widget_ids: &mut Vec<u64>,
+) -> Result<(), String> {
+    let mut trace_path = Vec::new();
+    let mut planned_dirty = Vec::new();
+    let plan = plan_layout_reuse_at_paths(
+        existing.as_ref(),
+        tree,
+        child_paths,
+        &mut planned_dirty,
+        &mut trace_path,
+    )?;
+    apply_layout_reuse_plan(Arc::make_mut(existing), plan);
+    dirty_widget_ids.append(&mut planned_dirty);
+    Ok(())
+}
+
+fn plan_layout_reuse_at_paths(
+    existing: &LayoutNode,
+    tree: &Value,
+    child_paths: &[&[usize]],
+    dirty_widget_ids: &mut Vec<u64>,
+    trace_path: &mut Vec<String>,
+) -> Result<SubtreeReusePlan, String> {
+    if child_paths.is_empty() {
+        return Ok(SubtreeReusePlan::Keep);
+    }
+    if child_paths.iter().any(|path| path.is_empty()) {
+        // This node itself is one of the replaced subtree roots; rebuilding it
+        // from `tree` also covers any deeper replacement paths.
+        return reuse_layout_node_impl(existing, tree, dirty_widget_ids, trace_path)
+            .map(|node| SubtreeReusePlan::Replace(Box::new(node)));
+    }
+
+    let (props, effective_children_values) =
+        plan_layout_reuse_node(existing, tree, dirty_widget_ids)?;
+
+    let mut groups: std::collections::BTreeMap<usize, Vec<&[usize]>> =
+        std::collections::BTreeMap::new();
+    for path in child_paths {
+        groups.entry(path[0]).or_default().push(&path[1..]);
+    }
+
+    let mut children = Vec::with_capacity(groups.len());
+    for (child_idx, tails) in groups {
+        let child_layout = existing
+            .children
+            .get(child_idx)
+            .ok_or_else(|| format!("missing-layout-child:{}[{child_idx}]", existing.widget_type))?;
+        let child_tree = effective_children_values
+            .get(child_idx)
+            .ok_or_else(|| format!("missing-tree-child:{}[{child_idx}]", existing.widget_type))?;
+        trace_path.push(format!("{}[{child_idx}]", existing.widget_type));
+        let plan = plan_layout_reuse_at_paths(
+            child_layout,
+            child_tree,
+            &tails,
+            dirty_widget_ids,
+            trace_path,
+        )?;
+        trace_path.pop();
+        children.push((child_idx, plan));
+    }
+
+    Ok(SubtreeReusePlan::Descend { props, children })
+}
+
+/// Shared validation for a node on the path to a replaced subtree: checks that
+/// the incoming widget tree node still matches the cached layout node's
+/// identity and size-affecting props, and returns its new props plus the
+/// effective child values.
+fn plan_layout_reuse_node(
+    existing: &LayoutNode,
+    tree: &Value,
+    dirty_widget_ids: &mut Vec<u64>,
+) -> Result<(HashMap<String, Value>, Vec<Value>), String> {
+    let widget_type = get_widget_type(tree).ok_or_else(|| "not-widget".to_string())?;
+    if widget_type != existing.widget_type {
+        return Err(format!(
+            "widget-type:{}->{}",
+            existing.widget_type, widget_type
+        ));
+    }
+
+    let new_stable_widget_id = get_stable_widget_id(tree);
+    let new_subtree_root_id = get_prop_u64(tree, "__subtree-root-id");
+    let new_parent_subtree_root_id = get_prop_u64(tree, "__parent-subtree-root-id");
+    let new_stable_key = get_stable_widget_key(tree);
+    let is_explicit_subtree_root =
+        existing.subtree_root_id.is_some() && existing.subtree_root_id == new_subtree_root_id;
+    let identity_mismatch = if is_explicit_subtree_root {
+        existing.subtree_root_id != new_subtree_root_id || existing.stable_key != new_stable_key
+    } else {
+        existing.stable_widget_id != new_stable_widget_id
+            || existing.subtree_root_id != new_subtree_root_id
+            || existing.parent_subtree_root_id != new_parent_subtree_root_id
+            || existing.stable_key != new_stable_key
+    };
+    if identity_mismatch {
+        return Err(format!("stable-identity:{widget_type}"));
+    }
+
+    let mut new_props = collect_props(tree);
+    preserve_layout_internal_props(&existing.props, &mut new_props);
+    if !size_affecting_props_equal(&widget_type, &existing.props, &new_props) {
+        return Err(format!("size-props:{widget_type}"));
+    }
+    if existing.props != new_props {
+        dirty_widget_ids.push(existing.widget_id);
+    }
+
+    let mut children_values = get_children(tree);
+    let effective_children_values: Vec<Value> = if widget_type == "tabs" {
+        let selected = (get_prop_num(tree, "value").map(f64_to_f32).unwrap_or(0.0) as usize)
+            .min(children_values.len().saturating_sub(1));
+        if selected < children_values.len() {
+            vec![children_values.swap_remove(selected)]
+        } else {
+            Vec::new()
+        }
+    } else {
+        children_values
+    };
+    if effective_children_values.len() != existing.children.len() {
+        return Err(format!("children-len:{widget_type}"));
+    }
+
+    Ok((new_props, effective_children_values))
+}
+
+fn apply_layout_reuse_plan(node: &mut LayoutNode, plan: SubtreeReusePlan) {
+    match plan {
+        SubtreeReusePlan::Keep => {}
+        SubtreeReusePlan::Replace(replacement) => {
+            *node = *replacement;
+        }
+        SubtreeReusePlan::Descend { props, children } => {
+            node.focusable = matches!(props.get("focusable"), Some(Value::Bool(true)));
+            node.props = props;
+            for (child_idx, child_plan) in children {
+                if let Some(child) = node.children.get_mut(child_idx) {
+                    apply_layout_reuse_plan(child, child_plan);
+                }
+            }
+            node.animation = LayoutAnimationHints::default();
+            widget_render::cache_layout_animation_hints(node);
+        }
+    }
+}
+
 pub fn relayout_subtree_path_result(
     existing: &LayoutNode,
     tree: &Value,
@@ -1085,7 +1314,11 @@ pub fn relayout_subtree_path_result(
     dirty_widget_ids: &mut Vec<u64>,
     engine: &LayoutEngine<'_>,
 ) -> Result<LayoutNode, String> {
-    let _frame_viewport = FrameViewportGuard::install(Some(engine.effective_frame_viewport()));
+    let _layout_geometry = LayoutPassGeometryGuard::install(
+        engine.effective_frame_viewport(),
+        engine.cell_w,
+        engine.cell_h,
+    );
     let mut trace_path = Vec::new();
     let mut next_widget_id = max_layout_widget_id(existing).wrapping_add(1);
     let root_size = engine.measure_node_at_path(
@@ -1859,6 +2092,181 @@ mod tests {
         );
 
         assert_eq!(subtree_root_paths(&layout).get(&11), Some(&vec![0]));
+    }
+
+    /// Full structural signature of a layout node: identity, geometry, every
+    /// prop and every child. `LayoutNode` is not `PartialEq`, and these tests
+    /// need to prove that nothing outside the replaced path changed.
+    fn node_signature(node: &LayoutNode) -> String {
+        let mut props = node
+            .props
+            .iter()
+            .map(|(key, value)| format!("{key}={}", format_lisp_value(value)))
+            .collect::<Vec<_>>();
+        props.sort();
+        let children = node
+            .children
+            .iter()
+            .map(node_signature)
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{}#{}/{:?}/{:?}/{:?}/{:?}@[{},{},{},{}]focus={}{{{}}}({children})",
+            node.widget_type,
+            node.widget_id,
+            node.stable_widget_id,
+            node.subtree_root_id,
+            node.parent_subtree_root_id,
+            node.stable_key,
+            node.rect.row,
+            node.rect.col,
+            node.rect.width,
+            node.rect.height,
+            node.focusable,
+            props.join(" "),
+        )
+    }
+
+    fn subtree_box(stable_id: f64, subtree_root_id: f64, height: f64, color: &str) -> Value {
+        build_widget(
+            "box",
+            vec![
+                kw("__stable-widget-id"),
+                num(stable_id),
+                kw("__subtree-root-id"),
+                num(subtree_root_id),
+                kw("width"),
+                kw("fill"),
+                kw("height"),
+                num(height),
+                kw("background"),
+                s(color),
+            ],
+        )
+    }
+
+    fn paint_only_stack(first_color: &str, second_color: &str) -> Value {
+        build_widget(
+            "v-stack",
+            vec![
+                kw("width"),
+                kw("fill"),
+                subtree_box(1.0, 11.0, 2.0, first_color),
+                subtree_box(2.0, 12.0, 2.0, second_color),
+            ],
+        )
+    }
+
+    #[test]
+    fn in_place_subtree_reuse_updates_only_the_replaced_paths() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let first = paint_only_stack("red", "blue");
+        let mut layout = Arc::new(engine.layout(&first).expect("initial layout"));
+        let untouched_sibling_id = layout.children[1].widget_id;
+        let untouched_sibling = node_signature(&layout.children[1]);
+        let root_rect = layout.rect;
+
+        let second = paint_only_stack("green", "blue");
+        let paths = subtree_root_paths(layout.as_ref());
+        let first_path = paths.get(&11).expect("first subtree path").clone();
+        let mut dirty_widget_ids = Vec::new();
+        reuse_layout_node_for_subtree_paths_in_place(
+            &mut layout,
+            &second,
+            &[first_path.as_slice()],
+            &mut dirty_widget_ids,
+        )
+        .expect("paint-only subtree replacement should reuse the layout");
+
+        assert_eq!(
+            layout.children[0].props.get("background"),
+            Some(&s("green"))
+        );
+        assert_eq!(node_signature(&layout.children[1]), untouched_sibling);
+        assert_eq!(
+            (layout.rect.width, layout.rect.height),
+            (root_rect.width, root_rect.height)
+        );
+        assert!(
+            !dirty_widget_ids.contains(&untouched_sibling_id),
+            "an untouched sibling must not be reported dirty"
+        );
+        assert!(!dirty_widget_ids.is_empty(), "the repainted box is dirty");
+    }
+
+    #[test]
+    fn in_place_subtree_reuse_matches_the_cloning_variant() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let first = paint_only_stack("red", "blue");
+        let layout = engine.layout(&first).expect("initial layout");
+        let second = paint_only_stack("green", "orange");
+        let paths = subtree_root_paths(&layout);
+        let first_path = paths.get(&11).expect("first subtree path").clone();
+        let second_path = paths.get(&12).expect("second subtree path").clone();
+        let batched = [first_path.as_slice(), second_path.as_slice()];
+
+        let mut cloned_dirty = Vec::new();
+        let cloned = reuse_layout_node_for_subtree_paths_result(
+            &layout,
+            &second,
+            &batched,
+            &mut cloned_dirty,
+        )
+        .expect("cloning variant should reuse the layout");
+
+        let mut in_place = Arc::new(layout);
+        let mut in_place_dirty = Vec::new();
+        reuse_layout_node_for_subtree_paths_in_place(
+            &mut in_place,
+            &second,
+            &batched,
+            &mut in_place_dirty,
+        )
+        .expect("in-place variant should reuse the layout");
+
+        assert_eq!(node_signature(&in_place), node_signature(&cloned));
+        assert_eq!(in_place_dirty, cloned_dirty);
+    }
+
+    #[test]
+    fn in_place_subtree_reuse_leaves_the_layout_untouched_when_planning_fails() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let first = paint_only_stack("red", "blue");
+        let mut layout = Arc::new(engine.layout(&first).expect("initial layout"));
+        let before = node_signature(layout.as_ref());
+        let paths = subtree_root_paths(layout.as_ref());
+        let first_path = paths.get(&11).expect("first subtree path").clone();
+
+        // Height is size-affecting, so the reuse must be rejected — and the
+        // caller's relayout fallback must still see the original layout.
+        let resized = build_widget(
+            "v-stack",
+            vec![
+                kw("width"),
+                kw("fill"),
+                subtree_box(1.0, 11.0, 9.0, "red"),
+                subtree_box(2.0, 12.0, 2.0, "blue"),
+            ],
+        );
+        let mut dirty_widget_ids = Vec::new();
+        let error = reuse_layout_node_for_subtree_paths_in_place(
+            &mut layout,
+            &resized,
+            &[first_path.as_slice()],
+            &mut dirty_widget_ids,
+        )
+        .expect_err("a size-affecting prop change must not be reused");
+
+        assert!(error.starts_with("size-props:"), "unexpected reason {error}");
+        assert_eq!(
+            node_signature(layout.as_ref()),
+            before,
+            "a failed plan must not mutate the layout"
+        );
+        assert!(
+            dirty_widget_ids.is_empty(),
+            "a failed plan must not report dirty widgets"
+        );
     }
 
     #[test]

@@ -2154,6 +2154,14 @@ impl Runtime {
         self.vm.global_value(name)
     }
 
+    /// Borrows one field of a reactive namespace without cloning the whole
+    /// namespace map. `global_value("SEQ")` clones every key/value pair in the
+    /// namespace, so its cost grows with total UI state; prefer this whenever
+    /// only a single field is needed.
+    pub fn reactive_field_value(&self, namespace: &str, field: &str) -> Option<&Value> {
+        self.reactive_registry.field_value(namespace, field)
+    }
+
     pub fn register_reactive(&mut self, name: &str, fields: Vec<(&str, Value)>, writable: bool) {
         let map = self.reactive_registry.register(name, fields, writable);
         self.vm.set_global_value(name, map);
@@ -2326,6 +2334,10 @@ impl Runtime {
         self.replace_dirty_widget_ids_for_layout(previous_layout.as_deref(), []);
         self.current_layout = None;
         self.force_layout_revision_bump = true;
+    }
+
+    pub fn layout_frame_viewport(&self) -> Option<crate::layout::Rect> {
+        self.layout_frame_viewport
     }
 
     /// Force a full relayout on the next render pass.
@@ -2647,6 +2659,23 @@ impl Runtime {
             .replace_widget_bindings_from_layouts(layouts);
     }
 
+    pub fn replace_widget_bindings_from_entry_lists<'a>(
+        &mut self,
+        entry_lists: impl IntoIterator<Item = &'a [(crate::vm::ReactiveBindingKey, u64)]>,
+    ) {
+        self.reactive_registry
+            .replace_widget_bindings_from_entry_lists(entry_lists);
+    }
+
+    pub fn update_widget_bindings_with_tile_delta<'a>(
+        &mut self,
+        removed: impl IntoIterator<Item = &'a [(crate::vm::ReactiveBindingKey, u64)]>,
+        added: impl IntoIterator<Item = &'a [(crate::vm::ReactiveBindingKey, u64)]>,
+    ) {
+        self.reactive_registry
+            .update_widget_bindings_with_tile_delta(removed, added);
+    }
+
     pub fn widget_bindings_revision(&self) -> u64 {
         self.reactive_registry.widget_bindings_revision()
     }
@@ -2891,6 +2920,21 @@ impl Runtime {
         viewport: Option<(f32, f32)>,
         widget_id_offset: u64,
     ) -> Option<Arc<LayoutNode>> {
+        self.layout_snapshot_for_tree_with_geometry_and_offset(
+            tree,
+            viewport,
+            self.layout_frame_viewport,
+            widget_id_offset,
+        )
+    }
+
+    pub fn layout_snapshot_for_tree_with_geometry_and_offset(
+        &mut self,
+        tree: &Value,
+        viewport: Option<(f32, f32)>,
+        frame_viewport: Option<crate::layout::Rect>,
+        widget_id_offset: u64,
+    ) -> Option<Arc<LayoutNode>> {
         let saved_tree = self.current_widget_tree.clone();
         let saved_committed_snapshot = self.current_committed_ui_snapshot.clone();
         let saved_committed_snapshot_generation = self.current_committed_ui_snapshot_generation;
@@ -2903,12 +2947,14 @@ impl Runtime {
         let saved_rendered_layouts = self.rendered_layouts.clone();
         let saved_cols = self.layout_cols;
         let saved_rows = self.layout_rows;
+        let saved_frame_viewport = self.layout_frame_viewport;
         let saved_widget_id_offset = self.widget_id_offset;
 
         if let Some((cols, rows)) = viewport {
             self.layout_cols = cols;
             self.layout_rows = rows;
         }
+        self.layout_frame_viewport = frame_viewport;
         self.widget_id_offset = widget_id_offset;
 
         // Snapshotting an arbitrary buffer/tree should not try to reuse against
@@ -2939,6 +2985,7 @@ impl Runtime {
         }
         self.layout_cols = saved_cols;
         self.layout_rows = saved_rows;
+        self.layout_frame_viewport = saved_frame_viewport;
         self.widget_id_offset = saved_widget_id_offset;
         snapshot
     }
@@ -2949,6 +2996,7 @@ impl Runtime {
         tree: &Value,
         child_path: &[usize],
         viewport: Option<(f32, f32)>,
+        frame_viewport: Option<crate::layout::Rect>,
         dirty_widget_ids: &mut Vec<u64>,
     ) -> Result<LayoutNode, String> {
         let (cols, rows) = viewport.unwrap_or((self.layout_cols, self.layout_rows));
@@ -2964,7 +3012,7 @@ impl Runtime {
         } else {
             LayoutEngine::new_exact(cols, rows, self.layout_aspect)
         };
-        engine.frame_viewport = self.layout_frame_viewport;
+        engine.frame_viewport = frame_viewport;
         relayout_subtree_path_result(existing, tree, child_path, dirty_widget_ids, &engine)
     }
 
@@ -3214,6 +3262,7 @@ impl Runtime {
                         tree,
                         child_path,
                         None,
+                        self.layout_frame_viewport,
                         &mut dirty_widget_ids,
                     )
                     .map_err(|relayout_reason| {

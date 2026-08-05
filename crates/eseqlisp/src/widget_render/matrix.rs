@@ -322,6 +322,26 @@ fn cell_change_value(row: usize, col: usize, value: f32) -> Value {
     ])
 }
 
+fn cell_gesture_value(kind: &str, row: usize, col: usize) -> Value {
+    Value::List(vec![
+        value_cell(Value::Keyword(kind.to_string())),
+        value_cell(Value::Number(row as f64)),
+        value_cell(Value::Number(col as f64)),
+    ])
+}
+
+fn cell_gesture_args(value: &Value, expected_kind: &str) -> Option<Vec<Value>> {
+    let Value::List(items) = value else {
+        return None;
+    };
+    if items.len() != 3
+        || !matches!(&*items[0].borrow(), Value::Keyword(kind) if kind == expected_kind)
+    {
+        return None;
+    }
+    Some(vec![items[1].borrow().clone(), items[2].borrow().clone()])
+}
+
 fn handle_toggle(node: &LayoutNode, local_col: f32, local_row: f32) -> MouseEventOutcome {
     let rows = matrix_rows_from_props(&node.props);
     let cols = matrix_cols_from_props(&node.props);
@@ -577,7 +597,15 @@ impl WidgetDefinition for MatrixWidget {
                     state.drag_start_row = local_row;
                     state.drag_start_value = matrix[cell / cols][cell % cols];
                 });
-                MouseEventOutcome::Consume
+                if has_callback(node, "on-cell-press") {
+                    MouseEventOutcome::Dispatch(WidgetEvent::Custom(cell_gesture_value(
+                        "cell-press",
+                        cell / cols,
+                        cell % cols,
+                    )))
+                } else {
+                    MouseEventOutcome::Consume
+                }
             }
             MouseEventKind::Drag(MouseButton::Left)
                 if get_bool_prop(&node.props, "toggle", false) =>
@@ -592,12 +620,24 @@ impl WidgetDefinition for MatrixWidget {
                 handle_drag(node, local_row)
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                let selected_cell = get_state(node.widget_id).active_cell;
                 update_state(node.widget_id, |state| {
                     state.active_cell = None;
                     state.release_time =
                         crate::widget_render::sdf_widget::current_sdf_time_fallback_seconds();
                 });
-                MouseEventOutcome::Consume
+                if let Some(cell) = selected_cell
+                    && has_callback(node, "on-cell-release")
+                {
+                    let cols = matrix_cols_from_props(&node.props);
+                    MouseEventOutcome::Dispatch(WidgetEvent::Custom(cell_gesture_value(
+                        "cell-release",
+                        cell / cols,
+                        cell % cols,
+                    )))
+                } else {
+                    MouseEventOutcome::Consume
+                }
             }
             _ => MouseEventOutcome::Ignore,
         }
@@ -615,6 +655,16 @@ impl WidgetDefinition for MatrixWidget {
         let WidgetEvent::Custom(value) = event else {
             return None;
         };
+        // Gesture affordances are distinct from mutation: press/release bracket
+        // the full drag, while drags continue to emit value changes independently.
+        if let Some(args) = cell_gesture_args(&value, "cell-press") {
+            let callback = node.props.get("on-cell-press")?.clone();
+            return Some(EventOutput { callback, args });
+        }
+        if let Some(args) = cell_gesture_args(&value, "cell-release") {
+            let callback = node.props.get("on-cell-release")?.clone();
+            return Some(EventOutput { callback, args });
+        }
         // Per-cell path: `dispatch_cell_change` packed a `(row col value)` list and
         // the widget declares `on-cell-change`. Spread it into three positional args.
         if has_callback(node, "on-cell-change") {
@@ -1077,6 +1127,68 @@ mod tests {
         assert_eq!(output.args[0], Value::Number(0.0));
         assert_eq!(output.args[1], Value::Number(1.0));
         assert_eq!(output.args[2], Value::Number(0.75));
+    }
+
+    #[test]
+    fn cell_gesture_dispatches_press_on_mouse_down_and_release_on_mouse_up() {
+        let mut props = HashMap::new();
+        props.insert("rows".to_string(), Value::Number(2.0));
+        props.insert("cols".to_string(), Value::Number(4.0));
+        props.insert(
+            "on-cell-press".to_string(),
+            Value::String("press-cell".to_string()),
+        );
+        props.insert(
+            "on-cell-release".to_string(),
+            Value::String("release-cell".to_string()),
+        );
+        let node = matrix_node(props);
+
+        let down = MATRIX_WIDGET.mouse_event(
+            &node,
+            MouseEventKind::Down(MouseButton::Left),
+            7.0,
+            6.0,
+            None,
+            None,
+            KeyModifiers::empty(),
+            1.0,
+            1.0,
+        );
+        let MouseEventOutcome::Dispatch(WidgetEvent::Custom(payload)) = down else {
+            panic!("expected cell selection on mouse-down");
+        };
+        let output = MATRIX_WIDGET
+            .handle_event(&node, WidgetEvent::Custom(payload))
+            .expect("cell-press output");
+        assert_eq!(output.callback, Value::String("press-cell".to_string()));
+        assert_eq!(
+            output.args,
+            vec![Value::Number(1.0), Value::Number(3.0)]
+        );
+
+        let up = MATRIX_WIDGET.mouse_event(
+            &node,
+            MouseEventKind::Up(MouseButton::Left),
+            7.0,
+            6.0,
+            None,
+            None,
+            KeyModifiers::empty(),
+            1.0,
+            1.0,
+        );
+        let MouseEventOutcome::Dispatch(WidgetEvent::Custom(payload)) = up else {
+            panic!("expected cell release on mouse-up");
+        };
+        let output = MATRIX_WIDGET
+            .handle_event(&node, WidgetEvent::Custom(payload))
+            .expect("cell-release output");
+        assert_eq!(output.callback, Value::String("release-cell".to_string()));
+        assert_eq!(
+            output.args,
+            vec![Value::Number(1.0), Value::Number(3.0)]
+        );
     }
 
     #[cfg(target_os = "macos")]

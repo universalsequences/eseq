@@ -836,6 +836,19 @@ pub(super) fn build_selected_neural_plocks_value(
     Value::List(items)
 }
 
+/// Builds the `SEQ.track-plocks` rows for the selected step.
+///
+/// INVARIANT — one row per projected key. The `*plock-sync*` effect buffer
+/// (`ui/effects/param-controls.lisp`) reduces these rows into per-param `SEQV`
+/// scalars keyed by `(target, slot-idx, rack-slot, param-idx)` — or by
+/// `target` alone for the rows that carry no param index (timebase, swing,
+/// swing resolution). It writes `<key>-on` / `<key>-def` once per row and then
+/// clears the keys that dropped out of the list, so two rows collapsing onto
+/// the same key would make a control's displayed default depend on row order
+/// and could leave a stale `-on` after one of them disappears. Every row
+/// emitted below must therefore be unique in that tuple: each track-level lock
+/// appears at most once, and the step-param / instrument / effect / rack-macro
+/// / rack-effect rows are each emitted once per distinct parameter slot.
 pub(crate) fn build_track_plocks_value(
     app: &app::App,
     state: &Arc<SequencerState>,
@@ -934,7 +947,8 @@ pub(crate) fn build_track_plocks_value(
                     ParamKind::Boolean => Some(vec!["off".to_string(), "on".to_string()]),
                     ParamKind::Continuous { .. } => None,
                 };
-                items.push(plock_entry(
+                let continuous = options.is_none();
+                let entry = plock_entry(
                     step,
                     "instrument",
                     "inst",
@@ -946,7 +960,27 @@ pub(crate) fn build_track_plocks_value(
                     None,
                     Some(param_idx),
                     options,
-                ));
+                );
+                if continuous {
+                    // Bind the LOCK readout to the per-param SEQV field the
+                    // authoring syncs already maintain (it carries the
+                    // displayed step's p-lock value). With the value bound,
+                    // a knob drag repaints this row without republishing
+                    // SEQ.track-plocks — which would rerun the whole *step*
+                    // panel on every mouse move. `fx-plock-row-value` prefers
+                    // :value-field and falls back to :value.
+                    if let Value::Map(map) = &mut *entry.borrow_mut() {
+                        map.insert(
+                            "value-field".to_string(),
+                            value_cell(Value::String(instrument_param_value_field(
+                                track,
+                                param_idx,
+                                &param.name,
+                            ))),
+                        );
+                    }
+                }
+                items.push(entry);
             }
         }
     }
@@ -1374,9 +1408,13 @@ pub(crate) fn plock_variant_step_render_values(
 }
 
 pub(crate) fn build_step_plock_kinds(state: &Arc<SequencerState>, track: usize) -> Value {
+    build_step_plock_kinds_from_render(&plock_variant_step_render_values(state, track))
+}
+
+pub(crate) fn build_step_plock_kinds_from_render(render_values: &[PlockVariantStepRender]) -> Value {
     Value::List(
-        plock_variant_step_render_values(state, track)
-            .into_iter()
+        render_values
+            .iter()
             .map(|render| Rc::new(RefCell::new(Value::Number(render.kind as f64))))
             .collect(),
     )
@@ -1387,9 +1425,19 @@ pub(crate) fn build_step_variant_color_channel(
     track: usize,
     channel: usize,
 ) -> Value {
+    build_step_variant_color_channel_from_render(
+        &plock_variant_step_render_values(state, track),
+        channel,
+    )
+}
+
+pub(crate) fn build_step_variant_color_channel_from_render(
+    render_values: &[PlockVariantStepRender],
+    channel: usize,
+) -> Value {
     Value::List(
-        plock_variant_step_render_values(state, track)
-            .into_iter()
+        render_values
+            .iter()
             .map(|render| {
                 Rc::new(RefCell::new(Value::Number(
                     render.color.get(channel).copied().unwrap_or(0.0) as f64,

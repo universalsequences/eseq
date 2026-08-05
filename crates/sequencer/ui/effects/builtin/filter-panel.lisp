@@ -22,6 +22,10 @@
                 (builtin-fx-filter-cutoff-knob fx cutoff-p)
                 (builtin-fx-filter-resonance-knob fx resonance-p)))
               (box :width 28.8 :height 6.30
+                ;; Own subtree: the curve's band dict reads param state, so any
+                ;; future body-level read reruns one widget instead of the whole
+                ;; Filter panel (which is what made curve drags 12x a knob).
+                (subtree :key (builtin-fx-param-subtree-key fx cutoff-p "curve")
                 (response-curve-editor
                   :mode :filter
                   :bands (list (builtin-fx-filter-band fx mode-p cutoff-p resonance-p))
@@ -36,20 +40,21 @@
                   :grid-color (rgba 0.34 0.34 0.36 0.55)
                   :stroke-color :blue
                   :point-color (rgba 1.0 0.62 0.25 1.0)
-                  :on-action |event| (builtin-fx-handle-filter-curve-action fx cutoff-p resonance-p event)))
+                  :on-action |event| (builtin-fx-handle-filter-curve-action fx cutoff-p resonance-p event))))
               (box :width 8.3 :height 6.30  :padding 0.28
                 :background-color :fx-inner-panel-bg :corner-radius 7
                 (v-stack :gap 0.2
                   (if drive-p (builtin-fx-filter-mini-percent fx "drive" drive-p) (box :width 0 :height 0))
                   (if wet-p (builtin-fx-filter-mini-percent fx "wet" wet-p) (box :width 0 :height 0))
-                  (dropdown :value (get mode-p :text-value)
-                    :options (get mode-p :options)
-                    :on-change (lambda (v) (builtin-fx-set-effect-option fx mode-p v))
-                    :plock-active (if (param-plock-active? fx mode-p) 1 0)
-                    :plock-color-r (param-plock-color-r)
-                    :plock-color-g (param-plock-color-g)
-                    :plock-color-b (param-plock-color-b)
-                    :width 7.7 :height 1.05 :font-size 9.5)
+                  (subtree :key (builtin-fx-param-subtree-key fx mode-p "mode")
+                    (dropdown :value (get mode-p :text-value)
+                      :options (get mode-p :options)
+                      :on-change (lambda (v) (builtin-fx-set-effect-option fx mode-p v))
+                      :plock-active (if (param-plock-active? fx mode-p) 1 0)
+                      :plock-color-r (param-plock-color-r)
+                      :plock-color-g (param-plock-color-g)
+                      :plock-color-b (param-plock-color-b)
+                      :width 7.7 :height 1.05 :font-size 9.5))
                   (if slope-p (builtin-fx-filter-mini-option fx slope-p) (box :width 0 :height 0)))))
           (box :width 43.2 :height 1.4 :padding 0.2
             :background-color :fx-inner-panel-bg :corner-radius 7
@@ -57,14 +62,15 @@
               (label "LFO" :font-size 9.0 :width 2.4 :color :dim :bg :transparent)
               (if lfo-amt-p (builtin-fx-filter-mini-percent fx "amt" lfo-amt-p) (box :width 0 :height 0))
               (if lfo-sync-p
-                (dropdown :value (builtin-fx-filter-sync-label fx lfo-sync-p)
-                  :options '("free" "sync")
-                  :on-change (lambda (v) (fx-set-effect-value fx lfo-sync-p (if (= v "sync") 1 0)))
-                  :plock-active (if (param-plock-active? fx lfo-sync-p) 1 0)
-                  :plock-color-r (param-plock-color-r)
-                  :plock-color-g (param-plock-color-g)
-                  :plock-color-b (param-plock-color-b)
-                  :width 4.8 :height 1.05 :font-size 9.5)
+                (subtree :key (builtin-fx-param-subtree-key fx lfo-sync-p "lfo-sync")
+                  (dropdown :value (builtin-fx-filter-sync-label fx lfo-sync-p)
+                    :options '("free" "sync")
+                    :on-change (lambda (v) (fx-set-effect-value fx lfo-sync-p (if (= v "sync") 1 0)))
+                    :plock-active (if (param-plock-active? fx lfo-sync-p) 1 0)
+                    :plock-color-r (param-plock-color-r)
+                    :plock-color-g (param-plock-color-g)
+                    :plock-color-b (param-plock-color-b)
+                    :width 4.8 :height 1.05 :font-size 9.5))
                 (box :width 0 :height 0))
               (if (and lfo-sync-p (fx-param-on-for? fx lfo-sync-p) lfo-div-p)
                 (builtin-fx-filter-mini-option fx lfo-div-p)

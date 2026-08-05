@@ -100,6 +100,10 @@ pub fn close_dropdown(widget_id: u64) {
     });
 }
 
+pub fn is_dropdown_open(widget_id: u64) -> bool {
+    get_state(widget_id).open
+}
+
 /// Update hovered item based on mouse position in tile-local overlay space.
 /// Returns true if the hover state changed.
 pub fn hover_overlay(widget_id: u64, local_row: f32) -> bool {

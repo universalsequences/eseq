@@ -73,6 +73,7 @@ pub mod live_audio;
 pub mod mode;
 pub mod reactive;
 pub mod runtime;
+pub mod sound_glyph_data;
 pub mod text;
 pub mod tile;
 pub mod widget_render;
@@ -3470,6 +3471,32 @@ mod modal_layout_tests {
         assert!((child.rect.height - 26.6).abs() < 0.01, "height {}", child.rect.height);
         // The subtree escapes the 30x8 tile: content extends past row 8.
         assert!(child.rect.row + child.rect.height > 8.0);
+    }
+
+    #[test]
+    fn modal_pixel_dimensions_are_stable_in_layout_cells() {
+        let tree = run_prog(
+            r#"
+            (modal :is-open true :width-px 960 :height-px 800
+              (box :width :fill :height :fill))
+            "#,
+        )
+        .unwrap()
+        .unwrap();
+        let mut engine = LayoutEngine::new(200, 100, 1.0);
+        engine.cell_w = 10.0;
+        engine.cell_h = 20.0;
+
+        let layout = engine.layout(&tree).expect("layout");
+        let modal = find_widget(&layout, "modal").expect("modal node");
+        let child = &modal.children[0];
+
+        // 960x800 px becomes 96x40 cells, centered in the 200x100 frame,
+        // then inset by the modal's 1.5x0.7-cell content padding.
+        assert!((child.rect.col - 53.5).abs() < 0.01, "col {}", child.rect.col);
+        assert!((child.rect.row - 30.7).abs() < 0.01, "row {}", child.rect.row);
+        assert!((child.rect.width - 93.0).abs() < 0.01, "width {}", child.rect.width);
+        assert!((child.rect.height - 38.6).abs() < 0.01, "height {}", child.rect.height);
     }
 
     #[cfg(target_os = "macos")]

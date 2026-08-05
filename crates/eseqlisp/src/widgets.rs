@@ -49,6 +49,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "transport-clock",
     "waveform",
     "wavetable-viewer",
+    "sound-glyph",
     "spectrogram",
     "scope",
     "multiband-meter",

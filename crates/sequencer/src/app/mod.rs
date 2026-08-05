@@ -280,9 +280,19 @@ pub struct EngineDescriptor {
 pub struct EngineRegistry {
     pub engines: Vec<EngineDescriptor>,
     instrument_descriptors: Vec<EffectDescriptor>,
+    /// Bumped on every registration/replacement. Every instrument compile or
+    /// reload funnels through `replace_at`/`upsert`, so per-frame consumers
+    /// (the glyph feeds' identity + descriptor-hash caches) can key on this
+    /// epoch instead of re-hashing engine sources or descriptor params each
+    /// tick.
+    epoch: u64,
 }
 
 impl EngineRegistry {
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
     pub fn find_by_name_and_source(&self, name: &str, source: &str) -> Option<usize> {
         self.engines
             .iter()
@@ -303,12 +313,14 @@ impl EngineRegistry {
                 crate::lisp_host::instrument_descriptor_from_manifest(&entry.name, &entry.manifest);
             self.engines[engine_id] = entry;
             self.instrument_descriptors[engine_id] = descriptor;
+            self.epoch += 1;
         }
     }
 
     pub fn upsert(&mut self, entry: EngineDescriptor) -> usize {
         let descriptor =
             crate::lisp_host::instrument_descriptor_from_manifest(&entry.name, &entry.manifest);
+        self.epoch += 1;
         if !entry.shared_runtime {
             self.engines.push(entry);
             self.instrument_descriptors.push(descriptor);

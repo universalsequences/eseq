@@ -91,6 +91,7 @@ pub(crate) fn run_event_loop(
         prev_ui_epoch: 0,
         prev_fx_epoch: 0,
         prev_sound_binding_epoch: 0,
+        prev_delete_target_version: 0,
         track_param_sync_revision: None,
         fx_param_sync_revision: None,
         prev_focus_clip_surface: (None, None, u64::MAX),
@@ -407,6 +408,27 @@ pub(crate) fn run_event_loop(
                 BackendEvent::Terminal(Event::Key(raw_key)) => {
                     if raw_key.kind == crossterm::event::KeyEventKind::Release {
                         app::edit::finish_active_gesture(&mut app);
+                    }
+                    if raw_key.kind == crossterm::event::KeyEventKind::Press
+                        && editor.modal_is_open()
+                    {
+                        // Transport stays global while a modal is open; the
+                        // focused-text-input guard inside keeps typed spaces
+                        // in the modal's edit fields.
+                        let key = normalize_command_shortcuts(raw_key);
+                        if should_toggle_play_on_space(&editor, &key) {
+                            let _ = editor.runtime_mut().eval_str("(seq-toggle-play)");
+                            editor.refresh_runtime_side_effects();
+                            ui_loop_stats.note_event(event_started.elapsed());
+                            continue;
+                        }
+                        // Every other app-level shortcut yields to the modal.
+                        // Editor routing sends the key to the modal's owning
+                        // tile and consumes it there even when no modal
+                        // control handles it.
+                        editor.handle_key(key);
+                        ui_loop_stats.note_event(event_started.elapsed());
+                        continue;
                     }
                     if editor.active_buffer().name == "*sample-import*" {
                         let key = normalize_command_shortcuts(raw_key);

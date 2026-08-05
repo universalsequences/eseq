@@ -315,7 +315,7 @@ mod tests {
         );
         app.state.with_scenes_mut(|scenes| {
             let pool = scenes.track_pools.get_mut(0).expect("track pool");
-            for pattern in pool.patterns.values_mut() {
+            for pattern in pool.patterns.values_mut().map(Arc::make_mut) {
                 pattern.seq.params.timebase = crate::sequencer::Timebase::Eighth;
             }
         });

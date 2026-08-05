@@ -523,7 +523,16 @@ pub(super) fn handle(
                             });
                         }
                     }
-                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    // No ui_epoch bump: the targeted Step invalidations above
+                    // are the complete UI path for a step-param edit (per-step
+                    // slider/haptic fields, the flat + per-track param lists,
+                    // the duration bar, the expanded-lane viewports, the
+                    // *step* panel readouts and the piano roll — see
+                    // `apply_ui_invalidations`). Bumping the epoch instead ran
+                    // `sync_all_track_sequencer_state` + a whole-list
+                    // `sync_step_param_lists` on EVERY drag update, which cost
+                    // ~7ms of epoch sync plus (for velocity) ~4.4ms of
+                    // reactive cycle per event.
                     editor.show_transient_message(result.label);
                 }
                 Ok((app::edit::EditOutcome::NoOp, ..)) => {}
@@ -1543,5 +1552,617 @@ pub(super) fn handle(
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::{BTreeSet, HashSet};
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    const TRACK: usize = 0;
+    const STEP: usize = 5;
+
+    struct Harness {
+        app: app::App,
+        editor: Editor,
+        state: Arc<SequencerState>,
+        shared: SharedHandles,
+        sessions: EditSessionState,
+        frame: FrameDiffState,
+        gesture: GestureState,
+        meters: MeterCache,
+        track_names: Vec<String>,
+        selected_steps: Arc<Mutex<HashSet<usize>>>,
+        piano_roll_selection: Arc<Mutex<HashSet<u64>>>,
+        track_collapsed: Arc<Mutex<Vec<bool>>>,
+        bus_state: Arc<Mutex<Vec<app::BusChannelState>>>,
+        accumulator_names: Arc<Mutex<Vec<String>>>,
+        record_armed: Arc<Mutex<Vec<bool>>>,
+        active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
+        active_delete_target_version: Arc<AtomicUsize>,
+        expanded_step_projection: Arc<ExpandedStepProjectionRegistry>,
+        ui_epoch: Arc<AtomicUsize>,
+        ui_invalidations: Arc<UiInvalidationQueue>,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let state = Arc::new(sequencer::sequencer::SequencerState::new(
+                1,
+                vec![sequencer::sequencer::default_empty_effect_chain()],
+            ));
+            state.pattern.track_params[TRACK].set_num_steps(16);
+            // An ACTIVE step: the duration bar and the piano roll only render
+            // steps that are on.
+            state.pattern.patterns[TRACK].set_step_active(STEP, true);
+            let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+            let mut app = app::App::new(
+                state.clone(),
+                sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+                44_100,
+                app::AudioBuses {
+                    bus_l_id: 0,
+                    bus_r_id: 0,
+                    default_bus_nodes: Vec::new(),
+                    bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
+                    bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                    reverb_bus_id: 0,
+                    reverb_node_id: 0,
+                },
+                Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+                keyboard_tx.clone(),
+            );
+            app.tracks = vec!["Track 1".to_string()];
+            app.track_registry =
+                sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+
+            let mut runtime = Runtime::new();
+            runtime.register_reactive("SEQ", Vec::new(), true);
+            // `sync_single_step_param_binding` resolves the *step* panel's
+            // "parameter step" from the lisp `cursor-step` global, exactly as
+            // ui/main.lisp defines it. Park the cursor on the edited step,
+            // which is what dragging that panel's picker means.
+            runtime
+                .eval_str(&format!("(def cursor-step {STEP})"))
+                .expect("seed the lisp cursor-step global");
+            let editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
+
+            let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+            let piano_roll_selection = Arc::new(Mutex::new(HashSet::new()));
+            let track_collapsed = Arc::new(Mutex::new(app.track_collapsed.clone()));
+            let bus_state = Arc::new(Mutex::new(app.buses.clone()));
+            let accumulator_names = Arc::new(Mutex::new(Vec::new()));
+            let record_armed = Arc::new(Mutex::new(vec![false]));
+            let active_delete_target = Arc::new(Mutex::new(None));
+            let active_delete_target_version = Arc::new(AtomicUsize::new(0));
+            let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
+            let ui_epoch = Arc::new(AtomicUsize::new(0));
+            let ui_invalidations = Arc::new(UiInvalidationQueue::new());
+            let sample_db = Rc::new(
+                sequencer::sample_db::SampleDb::open_in_memory().expect("in-memory sample db"),
+            );
+            let shared = SharedHandles {
+                state: state.clone(),
+                lg_raw: std::ptr::null_mut(),
+                current_track: Arc::new(AtomicUsize::new(TRACK)),
+                selected_tracks: Arc::new(Mutex::new(HashSet::new())),
+                selected_steps: selected_steps.clone(),
+                selected_neural_neurons: Arc::new(Mutex::new(BTreeSet::new())),
+                piano_roll_selection: piano_roll_selection.clone(),
+                piano_roll_move_state: Arc::new(Mutex::new(None)),
+                piano_roll_focus: super::super::super::new_shared_piano_roll_focus(),
+                step_clipboard: Arc::new(Mutex::new(None)),
+                ui_epoch: ui_epoch.clone(),
+                fx_epoch: Arc::new(AtomicUsize::new(0)),
+                ui_invalidations: ui_invalidations.clone(),
+                expanded_step_projection: expanded_step_projection.clone(),
+                active_delete_target: active_delete_target.clone(),
+                active_delete_target_version: active_delete_target_version.clone(),
+                auto_follow_override_until: Arc::new(Mutex::new(None)),
+                track_pan_ids: Arc::new(Mutex::new(Vec::new())),
+                track_collapsed: track_collapsed.clone(),
+                bus_state: bus_state.clone(),
+                bus_node_ids: Arc::new(Mutex::new(app.graph.bus_node_ids.clone())),
+                track_groups: Arc::new(Mutex::new(app.groups.clone())),
+                record_armed: record_armed.clone(),
+                recording: Arc::new(AtomicBool::new(false)),
+                master_recording: Arc::new(AtomicBool::new(false)),
+                held_notes: Arc::new(Mutex::new(Vec::new())),
+                keyboard_octave: Arc::new(AtomicI32::new(0)),
+                sample_browser: Rc::new(RefCell::new(DebouncedSampleBrowser::new(
+                    sample_db,
+                    Duration::from_millis(100),
+                ))),
+                keyboard_tx,
+                accumulator_names: accumulator_names.clone(),
+                piano_roll_clipboard: super::super::super::new_piano_roll_clipboard(),
+                arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
+                selected_drum_lane_steps: Arc::new(Mutex::new(HashSet::new())),
+            };
+            Self {
+                app,
+                editor,
+                state,
+                shared,
+                sessions: EditSessionState::default(),
+                frame: FrameDiffState::default(),
+                gesture: GestureState::default(),
+                meters: MeterCache {
+                    cached_peak_l_level: 0.0,
+                    cached_peak_r_level: 0.0,
+                    cached_track_peak_levels: vec![0.0],
+                    cached_rack_slot_peak_levels: Vec::new(),
+                    cached_bus_peak_levels: Vec::new(),
+                    cached_modulator_phases: Vec::new(),
+                    cached_modulator_levels: Vec::new(),
+                    cached_cpu_load_bits: 0.0f32.to_bits(),
+                    last_meter_poll_at: Instant::now(),
+                    last_cpu_ui_poll_at: Instant::now(),
+                    last_neural_visualization_poll_at: Instant::now(),
+                    visualization_liveness: VisualizationLiveness::default(),
+                    last_voice_count_log_at: Instant::now(),
+                },
+                track_names: vec!["Track 1".to_string()],
+                selected_steps,
+                piano_roll_selection,
+                track_collapsed,
+                bus_state,
+                accumulator_names,
+                record_armed,
+                active_delete_target,
+                active_delete_target_version,
+                expanded_step_projection,
+                ui_epoch,
+                ui_invalidations,
+            }
+        }
+
+        /// The real seam: `dispatch_custom_host_command` -> this module's
+        /// `handle`, then the reactive tick's invalidation drain. Nothing here
+        /// mirrors handler policy — if the handler stops publishing a surface,
+        /// the assertions below stop seeing it.
+        fn set_step_param(&mut self, param: &str, value: f64) {
+            let payload = Value::Map(
+                [
+                    (
+                        "track".to_string(),
+                        Rc::new(RefCell::new(Value::Number(TRACK as f64))),
+                    ),
+                    (
+                        "param".to_string(),
+                        Rc::new(RefCell::new(Value::Keyword(param.to_string()))),
+                    ),
+                    (
+                        "value".to_string(),
+                        Rc::new(RefCell::new(Value::Number(value))),
+                    ),
+                    (
+                        "steps".to_string(),
+                        Rc::new(RefCell::new(Value::List(vec![Rc::new(RefCell::new(
+                            Value::Number(STEP as f64),
+                        ))]))),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            );
+            {
+                let mut ctx = LoopCtx {
+                    sessions: &mut self.sessions,
+                    meters: &mut self.meters,
+                    frame: &mut self.frame,
+                    gesture: &mut self.gesture,
+                    track_names: &mut self.track_names,
+                    shared: &self.shared,
+                };
+                dispatch_custom_host_command(
+                    "set-step-param-history",
+                    payload,
+                    &mut self.app,
+                    &mut self.editor,
+                    &mut ctx,
+                );
+            }
+            let invalidations = self.ui_invalidations.drain();
+            assert!(
+                !invalidations.is_empty(),
+                "a step-param edit must queue targeted invalidations"
+            );
+            let neural = BTreeSet::new();
+            let peaks = vec![0.0f64];
+            let bus_peaks: Vec<f64> = Vec::new();
+            apply_ui_invalidations(
+                invalidations,
+                UiInvalidationApplyCtx {
+                    app: &mut self.app,
+                    editor: &mut self.editor,
+                    state: &self.state,
+                    track_collapsed: &self.track_collapsed,
+                    bus_state: &self.bus_state,
+                    current_track_idx: TRACK,
+                    selected_steps: &self.selected_steps,
+                    selected_neural_neurons: &neural,
+                    piano_roll_selection: &self.piano_roll_selection,
+                    accumulator_names: &self.accumulator_names,
+                    cached_track_peak_levels: &peaks,
+                    cached_bus_peak_levels: &bus_peaks,
+                    record_armed: &self.record_armed,
+                    active_delete_target: &self.active_delete_target,
+                    active_delete_target_version: &self.active_delete_target_version,
+                    expanded_step_projection: &self.expanded_step_projection,
+                    fx_visible: true,
+                    sequencer_visible: true,
+                    mixer_visible: true,
+                },
+            );
+        }
+
+        fn number(&self, field: &str) -> f64 {
+            match self.editor.runtime().reactive_field_value("SEQ", field) {
+                Some(Value::Number(value)) => *value,
+                other => panic!("SEQ.{field} should be a number, got {other:?}"),
+            }
+        }
+
+        fn list_number(&self, field: &str, index: usize) -> f64 {
+            match self.editor.runtime().reactive_field_value("SEQ", field) {
+                Some(Value::List(items)) => match items.get(index).map(|item| item.borrow().clone())
+                {
+                    Some(Value::Number(value)) => value,
+                    other => panic!("SEQ.{field}[{index}] should be a number, got {other:?}"),
+                },
+                other => panic!("SEQ.{field} should be a list, got {other:?}"),
+            }
+        }
+
+        fn nested_list_number(&self, field: &str, outer: usize, inner: usize) -> f64 {
+            match self.editor.runtime().reactive_field_value("SEQ", field) {
+                Some(Value::List(rows)) => match rows.get(outer).map(|row| row.borrow().clone()) {
+                    Some(Value::List(items)) => {
+                        match items.get(inner).map(|item| item.borrow().clone()) {
+                            Some(Value::Number(value)) => value,
+                            other => panic!(
+                                "SEQ.{field}[{outer}][{inner}] should be a number, got {other:?}"
+                            ),
+                        }
+                    }
+                    other => panic!("SEQ.{field}[{outer}] should be a list, got {other:?}"),
+                },
+                other => panic!("SEQ.{field} should be a list of lists, got {other:?}"),
+            }
+        }
+
+        fn piano_roll_lanes(&self) -> Vec<f64> {
+            match self
+                .editor
+                .runtime()
+                .reactive_field_value("SEQ", "piano-roll-items")
+            {
+                Some(Value::List(items)) => items
+                    .iter()
+                    .filter_map(|item| match &*item.borrow() {
+                        Value::Map(map) => map.get("lane").and_then(|cell| match &*cell.borrow() {
+                            Value::Number(lane) => Some(*lane),
+                            _ => None,
+                        }),
+                        _ => None,
+                    })
+                    .collect(),
+                other => panic!("SEQ.piano-roll-items should be a list, got {other:?}"),
+            }
+        }
+
+        fn nested_list_bool(&self, field: &str, outer: usize, inner: usize) -> bool {
+            match self.editor.runtime().reactive_field_value("SEQ", field) {
+                Some(Value::List(rows)) => match rows.get(outer).map(|row| row.borrow().clone()) {
+                    Some(Value::List(items)) => {
+                        match items.get(inner).map(|item| item.borrow().clone()) {
+                            Some(Value::Bool(value)) => value,
+                            other => panic!(
+                                "SEQ.{field}[{outer}][{inner}] should be a bool, got {other:?}"
+                            ),
+                        }
+                    }
+                    other => panic!("SEQ.{field}[{outer}] should be a list, got {other:?}"),
+                },
+                other => panic!("SEQ.{field} should be a list of lists, got {other:?}"),
+            }
+        }
+
+        /// Turn TRACK into a by-pitch drum rack with one slot per pad note, so
+        /// the expanded lane grid renders one row per pad. The lane grid places
+        /// a hit on the row named by the step's `StepParam::Transpose`.
+        fn install_drum_rack(&mut self, pad_notes: &[i32]) {
+            let sampler_desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+            let slots = pad_notes
+                .iter()
+                .map(|pad_note| sequencer::sequencer::RackSlotSnapshot {
+                    instrument_type: sequencer::sequencer::InstrumentType::Sampler,
+                    instrument_run_mode: sequencer::sequencer::CustomInstrumentRunMode::Instrument,
+                    instrument_base_note_offset: 0.0,
+                    pad_note: Some(*pad_note),
+                    choke_group: None,
+                    gain: 1.0,
+                    pan: 0.0,
+                    mute: false,
+                    solo: false,
+                    max_polyphony: 1,
+                    param_plocks: sequencer::sequencer::RackSlotParamPlocks::new(),
+                    instrument_slot:
+                        sequencer::effects::EffectSlotSnapshot::new_default_with_modulator(
+                            &sampler_desc,
+                            0,
+                            0,
+                        ),
+                    effect_slots: sequencer::sequencer::RackSlotSnapshot::empty_effect_slots(),
+                    effect_descriptors: sequencer::effects::EffectDescriptor::default_full_chain(),
+                    custom_effect_names:
+                        sequencer::sequencer::RackSlotSnapshot::empty_effect_names(),
+                    track_sound_state: sequencer::sequencer::TrackSoundState::default(),
+                    sample_id: Some((42, "DS FM".to_string(), 48_000)),
+                })
+                .collect::<Vec<_>>();
+            self.state.set_rack_track_for_all_pattern_snapshots(
+                TRACK,
+                sequencer::sequencer::RackTrackSnapshot::new(
+                    sequencer::sequencer::RackRouting::ByPitch,
+                    slots,
+                    sequencer::sequencer::default_rack_macros(),
+                ),
+            );
+        }
+
+        fn bool_field(&self, field: &str) -> bool {
+            match self.editor.runtime().reactive_field_value("SEQ", field) {
+                Some(Value::Bool(value)) => *value,
+                other => panic!("SEQ.{field} should be a bool, got {other:?}"),
+            }
+        }
+    }
+
+    /// Every surface a Transpose / Velocity edit from the `*step*` panel feeds.
+    ///
+    /// `set-step-param-history` no longer bumps `ui_epoch` (that bump cost
+    /// ~7ms of `sync_all_track_sequencer_state` + a whole-list
+    /// `sync_step_param_lists` per drag update), so the targeted invalidations
+    /// are now the ONLY writer for all of these:
+    ///   - `SEQ.{transposes,velocities}` — read by the `*step*` panel's
+    ///     `fx-step-param-value`, `set-cursor-step-value`, and `*metal*`.
+    ///   - `SEQ.track-{transposes,velocities}` — read by
+    ///     `seqv-track-param-values` for every non-current expanded lane.
+    ///   - `seq-track-step-param-{slider,haptic}-{track}-{mode}-{step}`.
+    ///   - `fx-step-value-{param}` — the number-picker readout being dragged.
+    ///   - `SEQ.piano-roll-items` — note pitch comes from the step transpose.
+    #[test]
+    fn set_step_param_publishes_every_step_panel_surface_without_a_ui_epoch_bump() {
+        let mut harness = Harness::new();
+        let epoch_before = harness.ui_epoch.load(Ordering::Relaxed);
+
+        harness.set_step_param("transpose", 7.0);
+
+        assert_eq!(
+            harness.state.pattern.step_data[TRACK].get(STEP, StepParam::Transpose),
+            7.0,
+            "precondition: the handler wrote the model"
+        );
+        assert_eq!(
+            harness.ui_epoch.load(Ordering::Relaxed),
+            epoch_before,
+            "a step-param edit must stay on the targeted path — a ui_epoch bump \
+             resyncs every track on every drag update"
+        );
+        assert_eq!(
+            harness.list_number("transposes", STEP),
+            7.0,
+            "the current track's flat transpose list must be published"
+        );
+        assert_eq!(
+            harness.nested_list_number("track-transposes", TRACK, STEP),
+            7.0,
+            "the per-track transpose list-of-lists (seqv-track-param-values) \
+             must be published"
+        );
+        assert_eq!(
+            harness.number(&track_step_param_slider_field(TRACK, 3, STEP)),
+            7.0,
+            "the per-step transpose slider binding must be published"
+        );
+        assert_eq!(
+            harness.number(&track_step_param_haptic_field(TRACK, 3, STEP)),
+            7.0,
+            "the per-step transpose haptic binding must be published"
+        );
+        assert_eq!(
+            harness.number("fx-step-value-transpose"),
+            7.0,
+            "the *step* panel's Transpose number-picker readout must be published"
+        );
+        let lanes_at_7 = harness.piano_roll_lanes();
+        assert!(
+            !lanes_at_7.is_empty(),
+            "the active step must render a piano-roll note"
+        );
+        harness.set_step_param("transpose", -5.0);
+        let lanes_at_minus_5 = harness.piano_roll_lanes();
+        assert_eq!(
+            lanes_at_minus_5.len(),
+            lanes_at_7.len(),
+            "the note count must not change"
+        );
+        for (before, after) in lanes_at_7.iter().zip(lanes_at_minus_5.iter()) {
+            // The lane axis runs top-down (lane 0 is the highest pitch), so a
+            // 12-semitone drop moves the note 12 lanes DOWN the list.
+            assert_eq!(
+                after - before,
+                12.0,
+                "the piano roll must follow the step transpose (its note pitch \
+                 comes from StepParam::Transpose), lanes {lanes_at_7:?} -> \
+                 {lanes_at_minus_5:?}"
+            );
+        }
+        harness.set_step_param("transpose", 7.0);
+
+        // Velocity shares the funnel but a different mode index / list.
+        harness.set_step_param("velocity", 0.25);
+        assert_eq!(harness.list_number("velocities", STEP), 0.25);
+        assert_eq!(
+            harness.nested_list_number("track-velocities", TRACK, STEP),
+            0.25
+        );
+        assert_eq!(
+            harness.number(&track_step_param_slider_field(TRACK, 0, STEP)),
+            0.25
+        );
+        assert_eq!(
+            harness.number(&track_step_param_haptic_field(TRACK, 0, STEP)),
+            0.25
+        );
+        assert_eq!(
+            harness.number("fx-step-value-velocity"),
+            0.25,
+            "the *step* panel's Velocity number-picker readout must be published"
+        );
+        assert_eq!(
+            harness.ui_epoch.load(Ordering::Relaxed),
+            epoch_before,
+            "velocity edits must stay off the epoch path too"
+        );
+    }
+
+    /// Duration additionally paints the compact grid's duration bar, which is
+    /// a SEPARATE surface with a separate writer: the per-step
+    /// `seq-track-step-duration-{track}-{step}` bools cover every cell the
+    /// note now reaches, and `SEQ.track-duration-spans` is the list form.
+    #[test]
+    fn set_step_duration_publishes_the_duration_bar_surfaces_without_a_ui_epoch_bump() {
+        let mut harness = Harness::new();
+        let epoch_before = harness.ui_epoch.load(Ordering::Relaxed);
+
+        harness.set_step_param("duration", 4.0);
+
+        assert_eq!(
+            harness.state.pattern.step_data[TRACK].get(STEP, StepParam::Duration),
+            4.0,
+            "precondition: the handler wrote the model"
+        );
+        assert_eq!(
+            harness.ui_epoch.load(Ordering::Relaxed),
+            epoch_before,
+            "duration edits must stay on the targeted path"
+        );
+        assert_eq!(harness.list_number("durations", STEP), 4.0);
+        assert_eq!(
+            harness.nested_list_number("track-durations", TRACK, STEP),
+            4.0
+        );
+        assert_eq!(
+            harness.number("fx-step-value-duration"),
+            4.0,
+            "the *step* panel's Duration number-picker readout must be published"
+        );
+        // The duration bar: the note now reaches STEP..STEP+4.
+        for step in STEP..STEP + 4 {
+            assert!(
+                harness.bool_field(&track_step_duration_field(TRACK, step)),
+                "step {step} must be marked as covered by the duration bar"
+            );
+        }
+        assert!(
+            !harness.bool_field(&track_step_duration_field(TRACK, STEP + 4)),
+            "the cell past the note's reach must not be marked covered"
+        );
+        assert!(
+            harness.nested_list_bool("track-duration-spans", TRACK, STEP + 3),
+            "the list form of the duration span must be published too"
+        );
+
+        // Shortening it must clear the cells it no longer reaches.
+        harness.set_step_param("duration", 1.0);
+        for step in STEP + 1..STEP + 4 {
+            assert!(
+                !harness.bool_field(&track_step_duration_field(TRACK, step)),
+                "step {step} must be released when the note is shortened"
+            );
+        }
+    }
+
+    /// A drum-rack track's expanded lane grid derives its pad row from the
+    /// step's `StepParam::Transpose` (`drum_lane_step_active`), and BOTH
+    /// production sound pickers — the `*step*` panel's Sound dropdown and the
+    /// expanded lane's own dropdown — lower to `set-step-param-history` with
+    /// `:transpose`. The removed `ui_epoch` bump used to be the only writer for
+    /// `drum-lane-step-active-{track}-{pad}-{step}`, so the targeted Param
+    /// invalidation must publish it now or the hit stays drawn on the old pad.
+    #[test]
+    fn set_step_transpose_moves_the_drum_lane_hit_to_the_new_pad_row() {
+        let mut harness = Harness::new();
+        harness.install_drum_rack(&[0, 7]);
+        let epoch_before = harness.ui_epoch.load(Ordering::Relaxed);
+
+        harness.set_step_param("transpose", 7.0);
+
+        assert!(
+            harness.bool_field(&drum_lane_step_active_field(TRACK, 7, STEP)),
+            "the hit must appear on the pad the new transpose names"
+        );
+        assert!(
+            !harness.bool_field(&drum_lane_step_active_field(TRACK, 0, STEP)),
+            "the hit must leave the pad row it was drawn on before"
+        );
+
+        // ...and back, so the write is a real re-derivation and not a one-shot.
+        harness.set_step_param("transpose", 0.0);
+        assert!(
+            harness.bool_field(&drum_lane_step_active_field(TRACK, 0, STEP)),
+            "returning to the default transpose must move the hit back"
+        );
+        assert!(
+            !harness.bool_field(&drum_lane_step_active_field(TRACK, 7, STEP)),
+            "the pad row the hit left must be cleared"
+        );
+        assert_eq!(
+            harness.ui_epoch.load(Ordering::Relaxed),
+            epoch_before,
+            "the drum-lane grid must be reached by the targeted path, not an \
+             epoch resync"
+        );
+    }
+
+    /// The compact step shell's p-lock tick / variant tint is
+    /// `plock_variant_step_render_values`, whose `live_track_has_seq_lock` term
+    /// is true as soon as ANY `StepParam` departs from its default — so a
+    /// transpose edit flips `seq-track-step-plock-kind-{track}-{step}` 0 -> 1
+    /// and restoring the default flips it back. Nothing else writes that field
+    /// on a step-param edit now that the funnel skips `ui_epoch`.
+    #[test]
+    fn set_step_param_flips_the_compact_shell_seq_lock_tick() {
+        let mut harness = Harness::new();
+        let epoch_before = harness.ui_epoch.load(Ordering::Relaxed);
+
+        harness.set_step_param("transpose", 7.0);
+        assert_eq!(
+            harness.number(&track_step_plock_kind_field(TRACK, STEP)),
+            1.0,
+            "a step param off its default must light the compact shell's \
+             seq-lock tick"
+        );
+
+        harness.set_step_param("transpose", 0.0);
+        assert_eq!(
+            harness.number(&track_step_plock_kind_field(TRACK, STEP)),
+            0.0,
+            "restoring the default must clear the tick again"
+        );
+        assert_eq!(
+            harness.ui_epoch.load(Ordering::Relaxed),
+            epoch_before,
+            "the tick must be reached by the targeted path, not an epoch resync"
+        );
     }
 }

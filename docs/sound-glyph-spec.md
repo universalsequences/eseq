@@ -42,9 +42,12 @@ source* (never the expanded DSP graph, which is thousands of nodes):
    `defun`s / `make-history` forms.
 2. **Cluster params by name prefix** (`opa_*`, `lfo_*`, `filter_*`, `fenv_*`,
    `shaper_*`, …): longest shared `snake_case` prefix with ≥2 members;
-   singletons (e.g. `tone`, `transpose`) fold into a `global` cluster. This
-   matches how authors already group params (declaration blocks, ui.lisp
-   sections) and lands naturally at ~8–30 clusters.
+   singletons (e.g. `tone`, `transpose`) fold into a `global` cluster. A
+   sub-prefix cluster folds into its parent cluster when one exists
+   (`lfo_to_*` joins `lfo`); sub-groups only stand alone when no parent
+   cluster formed (`env_loop_*` / `env_sync_*` with no bare `env_*` params).
+   This matches how authors already group params (declaration blocks,
+   ui.lisp sections) and lands naturally at ~8–30 clusters.
 3. Build the def-reference graph; assign each def to the cluster(s) whose
    params (transitively) feed it; collapse linear chains. Branch order =
    source order of each cluster's first param (stable across edits that don't
