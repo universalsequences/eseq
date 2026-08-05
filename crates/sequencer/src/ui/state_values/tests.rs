@@ -863,6 +863,45 @@
     }
 
     #[test]
+    fn every_sequencer_theme_defines_the_step_surface_palette_once() {
+        let step_surface_slots = [
+            "sequencer-step-border",
+            "sequencer-step-selected-border",
+            "sequencer-step-off-fill",
+            "sequencer-step-off-fill-alt",
+        ];
+
+        for path in [
+            "ui/themes/mac-osx-dark.lisp",
+            "ui/themes/mac-osx-light-theme.lisp",
+            "ui/themes/ableton-mid.lisp",
+            "ui/themes/mac-osx-graphite.lisp",
+            "ui/themes/mac-osx-haze.lisp",
+            "ui/themes/mac-osx-midnight.lisp",
+            "ui/themes/mac-osx-midnight-50.lisp",
+            "ui/themes/black-ir-theme.lisp",
+            "ui/themes/mac-osx-ember.lisp",
+            "ui/themes/mac-osx-violet.lisp",
+        ] {
+            let src = std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("read {path}: {error}"));
+            for slot in step_surface_slots {
+                let definition = format!(":{slot}");
+                assert_eq!(
+                    src.lines()
+                        .filter(|line| {
+                            line.trim_start().split_ascii_whitespace().next()
+                                == Some(definition.as_str())
+                        })
+                        .count(),
+                    1,
+                    "{path} must define :{slot} exactly once"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn mac_osx_light_theme_is_available_through_the_theme_registry() {
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor
@@ -7511,11 +7550,19 @@
         state: &Arc<SequencerState>,
     ) {
         for channel in 0..3 {
-            let field = track_color_channel_effective_field(channel);
-            let actual = number_list_values(&reactive_field_value(runtime, "SEQ", field));
-            let expected =
-                number_list_values(&build_track_color_channel_effective(app, state, channel));
-            assert_number_lists_close(&actual, &expected);
+            for (field, expected) in [
+                (
+                    track_color_channel_effective_field(channel),
+                    build_track_color_channel_effective(app, state, channel),
+                ),
+                (
+                    step_color_channel_effective_field(channel),
+                    build_step_color_channel_effective(app, state, channel),
+                ),
+            ] {
+                let actual = number_list_values(&reactive_field_value(runtime, "SEQ", field));
+                assert_number_lists_close(&actual, &number_list_values(&expected));
+            }
         }
     }
 
@@ -7617,6 +7664,18 @@
                     "track-color-b-effective",
                     build_track_color_channel_effective(&app, &state, 2),
                 ),
+                (
+                    "step-color-r-effective",
+                    build_step_color_channel_effective(&app, &state, 0),
+                ),
+                (
+                    "step-color-g-effective",
+                    build_step_color_channel_effective(&app, &state, 1),
+                ),
+                (
+                    "step-color-b-effective",
+                    build_step_color_channel_effective(&app, &state, 2),
+                ),
             ],
             true,
         );
@@ -7646,6 +7705,28 @@
             vec![false, false]
         );
         assert_effective_color_reactives_match_builders(&runtime, &app, &state);
+        for channel in 0..3 {
+            let track_colors = number_list_values(&reactive_field_value(
+                &runtime,
+                "SEQ",
+                track_color_channel_effective_field(channel),
+            ));
+            let step_colors = number_list_values(&reactive_field_value(
+                &runtime,
+                "SEQ",
+                step_color_channel_effective_field(channel),
+            ));
+            assert_eq!(
+                track_colors[1],
+                track_color_channel_effective_value(&app, 1, channel, true),
+                "muted row chrome should retain its existing dimmed track color"
+            );
+            assert_eq!(
+                step_colors[1],
+                track_color_channel_effective_value(&app, 1, channel, false),
+                "muted step shaders should receive the raw track color alongside :muted"
+            );
+        }
 
         state.pattern.track_params[0].set_solo(true);
         sync_track_mute_visual_binding_fields(&mut runtime, &app, &state, 0..2, true);
@@ -25151,9 +25232,115 @@
             assert_eq!(
                 shell.props.get("hide"),
                 Some(&expected_hide),
-                "step shell {step} should reflect the pattern-length visibility boundary"
+                "step shell {step} should hide in the shader without becoming a UI diagnostic"
+            );
+            assert!(matches!(
+                shell.props.get("muted"),
+                Some(Value::ReactiveRef {
+                    namespace,
+                    field,
+                    index: Some(0),
+                    ..
+                }) if namespace == "SEQ" && field == "track-muted-effective"
+            ));
+            if step < 8 {
+                let expected_fill = if (4..8).contains(&step) {
+                    "sequencer-step-off-fill-alt"
+                } else {
+                    "sequencer-step-off-fill"
+                };
+                assert_eq!(
+                    shell.props.get("off-fill"),
+                    Some(&Value::Keyword(expected_fill.to_string())),
+                    "step shell {step} should preserve four-step rhythmic shading"
+                );
+            }
+            assert_eq!(
+                shell.props.get("selected-color"),
+                Some(&Value::Keyword(
+                    "sequencer-step-selected-border".to_string()
+                )),
+                "step shell {step} should use the themed selected-step rim"
             );
         }
+
+        let shell_def = eseqlisp::widget_render::sdf_widget::sdf_widget_def("seqv-step-shell")
+            .expect("seqv-step-shell should be registered");
+        assert!(shell_def.state_uniforms.iter().any(|name| name == "muted"));
+        assert!(shell_def.state_uniforms.iter().any(|name| name == "hide"));
+        assert!(
+            shell_def.state_uniforms.len()
+                <= eseqlisp::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS,
+            "seqv-step-shell must keep every declared shader state within the GPU uniform budget"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_seq_selected_step_uses_the_themed_sdf_input_color() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(r#"(reactive-set "SEQ" "seq-track-step-selected-0-4" 1)"#)
+            .expect("select step through its production reactive field");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(140, 20);
+        let layout = editor.widget_layout().expect("sequencer layout should build");
+        let cell = find_layout_node_by_stable_key(&layout, "seqv-step-cell-0-4")
+            .expect("selected step cell should exist");
+        let shell = compact_step_shell(cell);
+        assert!(eseqlisp::widget_render::get_bool_prop(
+            &shell.props,
+            "selected",
+            false
+        ));
+
+        let primitives =
+            eseqlisp::widget_render::sdf_widget::sdf_widget_background_primitives(
+                "seqv-step-shell",
+                shell.widget_id,
+                shell.rect,
+                eseqlisp::widget_render::WidgetViewport {
+                    cell_w: 10.0,
+                    cell_h: 20.0,
+                    vp_w: 1400.0,
+                    vp_h: 400.0,
+                    time_seconds: 0.0,
+                    focused_widget_id: None,
+                    focused_branch: false,
+                    overlay_viewport_bottom: 20.0,
+                    scroll_top: 0.0,
+                    scroll_left: 0.0,
+                    inherited_hover: false,
+                },
+                &shell.props,
+            );
+        let input_color = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                eseqlisp::widget_render::MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    ..
+                } if widget_type == "seqv-step-shell" => Some(instance.color_a),
+                _ => None,
+            })
+            .expect("selected step shell should emit its SDF primitive");
+        assert_eq!(
+            input_color,
+            eseqlisp::theme::named_color("sequencer-step-selected-border")
+                .expect("selected-step border theme slot")
+                .to_rgba()
+        );
     }
 
     #[test]

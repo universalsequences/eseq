@@ -648,6 +648,23 @@ fn prop_uniform_value(props: &HashMap<String, Value>, name: &str) -> f32 {
         .unwrap_or(0.0) as f32
 }
 
+/// Resolve the shader's `input-color`. SDF widgets may provide a
+/// `selected-color` alongside a literal or reactive `selected` prop without
+/// consuming three of the fixed state-uniform slots.
+fn resolve_sdf_input_color(
+    props: &HashMap<String, Value>,
+    default: crate::backend::Color,
+) -> crate::backend::Color {
+    let key = if super::get_bool_prop(props, "selected", false)
+        && props.contains_key("selected-color")
+    {
+        "selected-color"
+    } else {
+        "color"
+    };
+    super::resolve_named_color(props, key, default)
+}
+
 fn resolve_color_component_prop(props: &HashMap<String, Value>, name: &str) -> Option<f64> {
     let (base, component) = name
         .strip_suffix("-r")
@@ -784,7 +801,7 @@ pub fn sdf_widget_metal_primitives(
     let px_h = node.rect.height * viewport.cell_h;
 
     let value_t = super::get_f32_prop(&node.props, "value", 0.0);
-    let color_a = super::resolve_named_color(&node.props, "color", crate::theme::GREEN()).to_rgba();
+    let color_a = resolve_sdf_input_color(&node.props, crate::theme::GREEN()).to_rgba();
 
     let pixel_aspect = if px_h > 0.0 { px_w / px_h } else { 1.0 };
     let hit = get_sdf_hit_state(node.widget_id);
@@ -904,9 +921,8 @@ pub fn sdf_widget_background_primitives(
             uniform_b,
             uniform_c,
             uniform_d,
-            color_a: super::resolve_named_color(
+            color_a: resolve_sdf_input_color(
                 props,
-                "color",
                 crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
             )
             .to_rgba(),
@@ -952,6 +968,28 @@ mod tests {
                 .map(|(key, value)| (key.to_string(), Rc::new(RefCell::new(value.clone()))))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn sdf_input_color_uses_selected_color_only_while_selected() {
+        let mut props = HashMap::from([
+            ("color".to_string(), Value::Keyword("red".to_string())),
+            (
+                "selected-color".to_string(),
+                Value::Keyword("blue".to_string()),
+            ),
+            ("selected".to_string(), Value::Number(0.0)),
+        ]);
+
+        assert_eq!(
+            resolve_sdf_input_color(&props, crate::theme::GREEN()),
+            crate::theme::RED()
+        );
+        props.insert("selected".to_string(), Value::Number(1.0));
+        assert_eq!(
+            resolve_sdf_input_color(&props, crate::theme::GREEN()),
+            crate::theme::BLUE()
+        );
     }
 
     #[test]

@@ -423,10 +423,8 @@ pub(crate) fn build_track_muted_effective(state: &Arc<SequencerState>) -> Value 
     Value::List(items)
 }
 
-/// Per-track step-cell color channel with the mute dim baked in, matching the
-/// Lisp seqv-track-color-r/g/b formulas. Published as flat per-channel lists
-/// so step-cell shader props can use `bind-seq-nth` instead of reading
-/// SEQ.track-mutes/track-colors in the row subtree.
+/// Per-track UI color channel with the mute dim baked in, matching the Lisp
+/// seqv-track-color-r/g/b formulas used by row chrome and compact controls.
 pub(crate) fn build_track_color_channel_effective(
     app: &app::App,
     state: &Arc<SequencerState>,
@@ -444,22 +442,19 @@ pub(crate) fn build_track_color_channel_effective(
     Value::List(items)
 }
 
-/// Step-cell color channel: the track color with the dim applied for muted
-/// OR take-governed lanes (takes spec 10 UX — only the steps dim while a
-/// take plays; the header keeps its full track color, which is why this is
-/// a separate field set from `track-color-*-effective`).
+/// Step-cell color channel: the raw track color, dimmed only for take-governed
+/// lanes (takes spec 10 UX). Muting is a separate shader state so muted steps
+/// can use fully opaque neutral materials instead of translucent track colors.
 pub(crate) fn build_step_color_channel_effective(
     app: &app::App,
     state: &Arc<SequencerState>,
     channel: usize,
 ) -> Value {
     let count = state.active_track_count();
-    let has_solo = any_track_solo(state);
     let take_states = super::song_state::song_take_lane_states(app);
     let items: Vec<Rc<RefCell<Value>>> = (0..count)
         .map(|track| {
-            let dimmed = track_effectively_muted(state, track, has_solo)
-                || take_states.get(track) == Some(&1);
+            let dimmed = take_states.get(track) == Some(&1);
             let value = track_color_channel_effective_value(app, track, channel, dimmed);
             Rc::new(RefCell::new(Value::Number(value)))
         })
@@ -556,8 +551,9 @@ pub(crate) fn sync_track_mute_visual_binding_fields(
                 )
                 .effects_dirty;
         }
-        // Step-cell channels additionally dim take-governed lanes.
-        let step_dimmed = muted || take_states.get(track) == Some(&1);
+        // Step-cell channels only dim take-governed lanes. Effective mute is
+        // passed independently to the step shader above.
+        let step_dimmed = take_states.get(track) == Some(&1);
         for channel in 0..3 {
             effects_dirty |= rt
                 .set_reactive_list_index(

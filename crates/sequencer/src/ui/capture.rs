@@ -134,6 +134,7 @@ enum CaptureTrackKind {
 struct CaptureTrackSpec {
     kind: CaptureTrackKind,
     display_name: Option<String>,
+    solo: bool,
     num_steps: Option<usize>,
     /// `(step, transpose)` pairs authored via `:steps (0 (4 12) 8 ...)`;
     /// applied to the live pattern and persisted into the scene's pattern
@@ -294,6 +295,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
     };
 
     let mut display_name = None;
+    let mut solo = false;
     let mut num_steps = None;
     let mut steps = Vec::new();
     let mut samples = Vec::new();
@@ -313,6 +315,10 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
                         .ok_or_else(|| ":name expects a string".to_string())?
                         .to_string(),
                 );
+            }
+            "solo" => {
+                solo = expression_bool(value)
+                    .ok_or_else(|| ":solo expects true or false".to_string())?;
             }
             "num-steps" => {
                 let steps = expression_usize(value)
@@ -354,6 +360,7 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
     Ok(CaptureTrackSpec {
         kind,
         display_name,
+        solo,
         num_steps,
         steps,
         samples,
@@ -437,6 +444,14 @@ fn expression_usize(expression: &Expression) -> Option<usize> {
     }
 }
 
+fn expression_bool(expression: &Expression) -> Option<bool> {
+    match expression_name(Some(expression))? {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
 fn expression_string_list(expression: &Expression, option: &str) -> Result<Vec<String>, String> {
     let items = match expression {
         Expression::List(items) | Expression::QuoteList(items) => items,
@@ -466,6 +481,7 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
         if let Some(name) = &spec.display_name {
             app.tracks[track] = name.clone();
         }
+        app.state.pattern.track_params[track].set_solo(spec.solo);
         if let Some(num_steps) = spec.num_steps {
             app.state.pattern.track_params[track].set_num_steps(num_steps);
         }
@@ -995,7 +1011,7 @@ mod tests {
     fn parses_project_tracks_and_preserves_non_project_source() {
         let source = r#"
             (capture-project
-              (track :sampler :name "Drums" :num-steps 8 :midi-fx ("arp") :audio-fx '("filter"))
+              (track :sampler :name "Drums" :solo true :num-steps 8 :midi-fx ("arp") :audio-fx '("filter"))
               (track :layer-rack :samples ("kick.wav" "snare.wav"))
               (track :instrument "core/drift"))
 
@@ -1009,6 +1025,7 @@ mod tests {
             CaptureTrackSpec {
                 kind: CaptureTrackKind::Sampler,
                 display_name: Some("Drums".to_string()),
+                solo: true,
                 num_steps: Some(8),
                 steps: vec![],
                 samples: vec![],
