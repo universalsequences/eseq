@@ -77,7 +77,7 @@ impl SequencerState {
         live_chain[slot_idx] = name.clone();
         self.pattern.track_params[track].set_midi_fx_chain(live_chain);
         self.pattern.midi_fx_slots[track][slot_idx].apply_descriptor(descriptor, 0);
-        for (id, patch) in pool.sounds.patches.iter_mut() {
+        for (id, patch) in pool.sounds.patches.iter_mut().map(|(id, entity)| (id, Arc::make_mut(entity))) {
             if !referenced.contains(id) {
                 continue;
             }
@@ -111,7 +111,7 @@ impl SequencerState {
         // entity is harmless.
         let mut scenes = self.pattern.scenes.lock().unwrap();
         for pool in &mut scenes.track_pools {
-            for mix in pool.sounds.mixes.values_mut() {
+            for mix in pool.sounds.mixes.values_mut().map(Arc::make_mut) {
                 if mix.output == TrackOutput::Bus(bus_id) {
                     mix.output = TrackOutput::Mix;
                 }
@@ -132,7 +132,7 @@ impl SequencerState {
         let mut scenes = self.pattern.scenes.lock().unwrap();
         let mut changed = false;
         if let Some(pool) = scenes.track_pools.get_mut(track) {
-            for mix in pool.sounds.mixes.values_mut() {
+            for mix in pool.sounds.mixes.values_mut().map(Arc::make_mut) {
                 if mix.output != output {
                     mix.output = output.clone();
                     changed = true;

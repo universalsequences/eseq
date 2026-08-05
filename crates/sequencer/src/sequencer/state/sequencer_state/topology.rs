@@ -521,7 +521,7 @@ impl SequencerState {
             let Some(patch) = scenes.track_pools.get_mut(saved.owner_track)
                 .and_then(|pool| {
                     let refs = pool.refs(saved.pattern)?;
-                    pool.sounds.patches.get_mut(&refs.patch)
+                    pool.sounds.patches.get_mut(&refs.patch).map(Arc::make_mut)
                 }) else {
                 return Err(format!(
                     "Sidechain history target track {} pattern {:?} is missing",
@@ -602,7 +602,7 @@ impl SequencerState {
                 };
                 // Non-idempotent index remap: visit each Patch entity once
                 // (take chunks share one), never once per pattern.
-                for patch in pool.sounds.patches.values_mut() {
+                for patch in pool.sounds.patches.values_mut().map(Arc::make_mut) {
                     patch.remap_sidechain_references_after_track_delete(
                         owner_track,
                         track_descs,

@@ -1933,12 +1933,13 @@ fn active_delete_target_kind(target: Option<&ActiveDeleteTarget>) -> Value {
     }
 }
 
-fn bump_delete_target_version(
-    active_delete_target_version: &Arc<AtomicUsize>,
-    ui_epoch: &Arc<AtomicUsize>,
-) {
+/// Arming/clearing a delete target only moves the delete-target read
+/// surfaces (`SEQ.delete-target-version` + the mixer/rack binding fields),
+/// which the reactive tick republishes off the version counter alone — a
+/// `ui_epoch` bump here would buy nothing but a whole-project resync per
+/// clip-launch click (~7ms at 20-clip pool scale).
+fn bump_delete_target_version(active_delete_target_version: &Arc<AtomicUsize>) {
     active_delete_target_version.fetch_add(1, Ordering::Relaxed);
-    ui_epoch.fetch_add(1, Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -2935,7 +2936,7 @@ pub(crate) fn init_runtime(
 
     let delete_target = active_delete_target.clone();
     let delete_target_version = active_delete_target_version.clone();
-    let ui_ep = ui_epoch.clone();
+    
     runtime.register_native("seq-set-delete-target", move |args, _ctx| {
         let (Some(kind), Some(payload)) = (args.first(), args.get(1)) else {
             return Err("seq-set-delete-target: expected (kind payload)".into());
@@ -2944,18 +2945,18 @@ pub(crate) fn init_runtime(
         let mut guard = delete_target.lock().unwrap();
         if guard.as_ref() != Some(&target) {
             *guard = Some(target);
-            bump_delete_target_version(&delete_target_version, &ui_ep);
+            bump_delete_target_version(&delete_target_version);
         }
         Ok(Value::Bool(true))
     });
 
     let delete_target = active_delete_target.clone();
     let delete_target_version = active_delete_target_version.clone();
-    let ui_ep = ui_epoch.clone();
+    
     runtime.register_native("seq-clear-delete-target", move |_args, _ctx| {
         let mut guard = delete_target.lock().unwrap();
         if guard.take().is_some() {
-            bump_delete_target_version(&delete_target_version, &ui_ep);
+            bump_delete_target_version(&delete_target_version);
         }
         Ok(Value::Bool(true))
     });
@@ -3035,7 +3036,7 @@ pub(crate) fn init_runtime(
     let ct = current_track.clone();
     let delete_target = active_delete_target.clone();
     let delete_target_version = active_delete_target_version.clone();
-    let ui_ep = ui_epoch.clone();
+    
     runtime.register_native("seq-delete-active-target", move |_args, ctx| {
         let target = delete_target.lock().unwrap().clone();
         let Some(target) = target else {
@@ -3057,7 +3058,7 @@ pub(crate) fn init_runtime(
                     ctx.set_status(format!("Cannot delete missing track {}", track + 1));
                     let mut guard = delete_target.lock().unwrap();
                     if guard.take().is_some() {
-                        bump_delete_target_version(&delete_target_version, &ui_ep);
+                        bump_delete_target_version(&delete_target_version);
                     }
                     return Ok(Value::Bool(false));
                 }
@@ -3084,7 +3085,7 @@ pub(crate) fn init_runtime(
                     ctx.set_status("Cannot delete missing track pattern");
                     let mut guard = delete_target.lock().unwrap();
                     if guard.take().is_some() {
-                        bump_delete_target_version(&delete_target_version, &ui_ep);
+                        bump_delete_target_version(&delete_target_version);
                     }
                     return Ok(Value::Bool(false));
                 }
@@ -3118,7 +3119,7 @@ pub(crate) fn init_runtime(
                 if !route_exists {
                     let mut guard = delete_target.lock().unwrap();
                     if guard.take().is_some() {
-                        bump_delete_target_version(&delete_target_version, &ui_ep);
+                        bump_delete_target_version(&delete_target_version);
                     }
                     return Ok(Value::Bool(false));
                 }
@@ -3167,7 +3168,7 @@ pub(crate) fn init_runtime(
                             ctx.set_status("Cannot delete missing audio effect");
                             let mut guard = delete_target.lock().unwrap();
                             if guard.take().is_some() {
-                                bump_delete_target_version(&delete_target_version, &ui_ep);
+                                bump_delete_target_version(&delete_target_version);
                             }
                             return Ok(Value::Bool(false));
                         }
@@ -3190,7 +3191,7 @@ pub(crate) fn init_runtime(
                             ctx.set_status("Cannot delete missing MIDI effect");
                             let mut guard = delete_target.lock().unwrap();
                             if guard.take().is_some() {
-                                bump_delete_target_version(&delete_target_version, &ui_ep);
+                                bump_delete_target_version(&delete_target_version);
                             }
                             return Ok(Value::Bool(false));
                         }
@@ -3241,7 +3242,7 @@ pub(crate) fn init_runtime(
                     ctx.set_status("Cannot delete missing rack-slot effect");
                     let mut guard = delete_target.lock().unwrap();
                     if guard.take().is_some() {
-                        bump_delete_target_version(&delete_target_version, &ui_ep);
+                        bump_delete_target_version(&delete_target_version);
                     }
                     return Ok(Value::Bool(false));
                 }
@@ -3280,7 +3281,7 @@ pub(crate) fn init_runtime(
                     ctx.set_status("Cannot delete missing rack layer");
                     let mut guard = delete_target.lock().unwrap();
                     if guard.take().is_some() {
-                        bump_delete_target_version(&delete_target_version, &ui_ep);
+                        bump_delete_target_version(&delete_target_version);
                     }
                     return Ok(Value::Bool(false));
                 }
@@ -3302,7 +3303,7 @@ pub(crate) fn init_runtime(
 
         let mut guard = delete_target.lock().unwrap();
         if guard.take().is_some() {
-            bump_delete_target_version(&delete_target_version, &ui_ep);
+            bump_delete_target_version(&delete_target_version);
         }
         Ok(Value::Bool(true))
     });
@@ -3310,7 +3311,7 @@ pub(crate) fn init_runtime(
     let st = state.clone();
     let delete_target = active_delete_target.clone();
     let delete_target_version = active_delete_target_version.clone();
-    let ui_ep = ui_epoch.clone();
+    
     runtime.register_native("seq-clone-active-track-pattern", move |_args, ctx| {
         let target = delete_target.lock().unwrap().clone();
         let Some(ActiveDeleteTarget::TrackPattern { track, pattern_id }) = target else {
@@ -3329,7 +3330,7 @@ pub(crate) fn init_runtime(
             ctx.set_status("Cannot clone missing track pattern");
             let mut guard = delete_target.lock().unwrap();
             if guard.take().is_some() {
-                bump_delete_target_version(&delete_target_version, &ui_ep);
+                bump_delete_target_version(&delete_target_version);
             }
             return Ok(Value::Bool(false));
         }
@@ -3996,7 +3997,7 @@ pub(crate) fn init_runtime(
                 Some(ActiveDeleteTarget::TrackPattern { .. })
             ) {
                 guard.take();
-                bump_delete_target_version(&delete_target_version, &ui_ep);
+                bump_delete_target_version(&delete_target_version);
             }
             ui_inv.push(UiInvalidation::CurrentTrack {
                 previous,

@@ -32,7 +32,13 @@ pub struct TrackPatternCellView {
 /// `store`/`edit` writes the device half through the pattern's refs.
 #[derive(Clone, Debug)]
 pub struct TrackPatternPool {
-    pub patterns: HashMap<PatternId, StoredPattern>,
+    /// `Arc` for structural sharing with history snapshots: cloning a pool
+    /// (undo capture at every scene-structure edit, including clip launches)
+    /// bumps refcounts instead of deep-copying every pattern, and mutation
+    /// sites copy-on-write exactly the patterns they touch via
+    /// `Arc::make_mut`. At 20-clip pools the eager deep clone cost ~30ms per
+    /// capture (×2 per edit, plus the same again freeing evicted patches).
+    pub patterns: HashMap<PatternId, Arc<StoredPattern>>,
     pub next_id: u64,
     pub sounds: TrackSoundPool,
 }
@@ -88,8 +94,8 @@ impl TrackPatternPool {
     /// unpopulated, in which case it seeds the entity.
     pub fn insert_with_refs(&mut self, data: TrackPatternData, sound: SoundRefs) -> PatternId {
         let (seq, patch, mix) = data.split();
-        self.sounds.patches.entry(sound.patch).or_insert(patch);
-        self.sounds.mixes.entry(sound.mix).or_insert(mix);
+        self.sounds.patches.entry(sound.patch).or_insert_with(|| Arc::new(patch));
+        self.sounds.mixes.entry(sound.mix).or_insert_with(|| Arc::new(mix));
         // If the defensive seed above actually fired, keep the mint cursors
         // ahead of the seeded ids — a later mint colliding with one would
         // silently replace the entity under every referent sharing it.
@@ -101,7 +107,7 @@ impl TrackPatternPool {
     fn insert_stored(&mut self, stored: StoredPattern) -> PatternId {
         let id = PatternId(self.next_id.max(1));
         self.next_id = id.0.saturating_add(1).max(1);
-        self.patterns.insert(id, stored);
+        self.patterns.insert(id, Arc::new(stored));
         id
     }
 
@@ -128,14 +134,17 @@ impl TrackPatternPool {
     }
 
     pub fn patch(&self, id: PatternId) -> Option<&Patch> {
-        self.sounds.patches.get(&self.patterns.get(&id)?.sound.patch)
+        self.sounds
+            .patches
+            .get(&self.patterns.get(&id)?.sound.patch)
+            .map(Arc::as_ref)
     }
 
     /// Mutable access to the Patch entity a pattern references. Device edits
     /// through this write the entity — every pattern sharing it hears them.
     pub fn patch_mut(&mut self, id: PatternId) -> Option<&mut Patch> {
         let sound = self.patterns.get(&id)?.sound;
-        self.sounds.patches.get_mut(&sound.patch)
+        self.sounds.patches.get_mut(&sound.patch).map(Arc::make_mut)
     }
 
     /// Replace a pattern wholesale: the sequence half lands on the stored
@@ -147,9 +156,9 @@ impl TrackPatternPool {
         };
         let (seq, patch, mix) = data.split();
         let sound = stored.sound;
-        stored.seq = seq;
-        self.sounds.patches.insert(sound.patch, patch);
-        self.sounds.mixes.insert(sound.mix, mix);
+        Arc::make_mut(stored).seq = seq;
+        self.sounds.patches.insert(sound.patch, Arc::new(patch));
+        self.sounds.mixes.insert(sound.mix, Arc::new(mix));
         true
     }
 
@@ -184,7 +193,7 @@ impl TrackPatternPool {
         }
         match self.patterns.get_mut(&id) {
             Some(stored) if stored.sound != refs => {
-                stored.sound = refs;
+                Arc::make_mut(stored).sound = refs;
                 true
             }
             _ => false,
@@ -1168,8 +1177,8 @@ impl ProjectScenes {
             };
             edit(&mut data);
             let (_seq, patch, mix) = data.split();
-            pool.sounds.patches.insert(refs.patch, patch);
-            pool.sounds.mixes.insert(refs.mix, mix);
+            pool.sounds.patches.insert(refs.patch, Arc::new(patch));
+            pool.sounds.mixes.insert(refs.mix, Arc::new(mix));
         }
         true
     }

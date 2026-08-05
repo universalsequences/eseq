@@ -584,8 +584,8 @@
                 :key "graph-variable-reset-dampening-matrix"
                 :rows active-count
                 :cols active-count
-                :width (max 11 (* active-count 0.75))
-                :height (max 5 (* active-count 0.35))
+                :width 16 
+                :height 7
                 
                 :control :grid
                 :background (rgba 0.1 0.1 0.1 0.6)
@@ -594,21 +594,6 @@
                 :max 1
                 :value (gvr-viz-matrix viz :dampening-matrix (gvr-zero-matrix) active-count active-count)
                 )
-              (matrix
-                :key "graph-variable-reset-delta-matrix"
-                :rows active-count
-                :cols active-count
-                :width (max 11 (* active-count 0.75))
-                :height (max 5 (* active-count 0.35))
-                :control :grid
-                :diverging true
-                :zero 0
-                :background (rgba 0.1 0.1 0.1 0.6)
-                :fill :primary
-                :negative-fill "#ff9f43"
-                :min -1
-                :max 1
-                :value (gvr-viz-matrix viz :delta-matrix (gvr-zero-matrix) active-count active-count))
               
               (event-view
                 :key "graph-variable-reset-event-view"
@@ -628,7 +613,7 @@
                 :auto-rotate true
                 :window-beats 16
                 :brightness :velocity
-                :background (rgba 0.1 0.1 0.1 0.0)
+                :background :mixer-strip-bg
                 :width 16
                 :height 7)              
               	(spectrogram
@@ -643,7 +628,7 @@
                 :smoothing 0.68
                 :width 20
                 :height 7.0
-                :background-color (rgba 0.13 0.13 0.13 0.00)
+                :background-color :mixer-strip-bg
                 :min-color (rgba 0.05 0.05 0.11 1)
                 :mid-color (rgba 0.16 0.66 0.88 1)
                 :max-color (rgba 1.0 0.72 0.28 1)
@@ -684,17 +669,7 @@
                 :min 0
                 :max 4
                 :value (gvr-viz-matrix viz :energy-matrix (gvr-zero-column-matrix) active-count 1)))            
-            (v-stack :gap gvr-matrix-column-gap
-              (label "" :width 0.1 :height (gvr-matrix-header-spacer-height) :font-size 1 :bg :transparent)
-              (matrix
-                :key "graph-variable-reset-node-delta-column"
-                :rows active-count
-                :cols 1
-                :width 2
-                :height (gvr-matrix-data-height active-count)
-                :min 0
-                :max 4
-                :value (gvr-viz-matrix viz :node-delta-column (gvr-zero-column-matrix) active-count 1)))
+           
             (v-stack :gap gvr-matrix-column-gap
               (label "" :width 0.1 :height (gvr-matrix-header-spacer-height) :font-size 1 :bg :transparent)
               (matrix

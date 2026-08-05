@@ -791,7 +791,7 @@ impl SequencerState {
                 let canonical_patch = *patch_map.entry(file_patch).or_insert(live.patch);
                 let canonical_mix = *mix_map.entry(file_mix).or_insert(live.mix);
                 if canonical_patch != live.patch || canonical_mix != live.mix {
-                    if let Some(stored) = pool.patterns.get_mut(&pattern_id) {
+                    if let Some(stored) = pool.patterns.get_mut(&pattern_id).map(Arc::make_mut) {
                         stored.sound = SoundRefs {
                             patch: canonical_patch,
                             mix: canonical_mix,
@@ -828,7 +828,7 @@ impl SequencerState {
                     .unwrap_or_default();
                 if let Some(pool) = scenes.track_pools.get_mut(track) {
                     for chunk in chunk_ids {
-                        if let Some(stored) = pool.patterns.get_mut(&chunk) {
+                        if let Some(stored) = pool.patterns.get_mut(&chunk).map(Arc::make_mut) {
                             stored.sound = canonical;
                         }
                     }
@@ -1649,7 +1649,7 @@ impl SequencerState {
         let mut updated = 0;
         let mut seen: HashSet<PatchId> = HashSet::new();
         for stored in patterns.values() {
-            let Some(patch) = sounds.patches.get_mut(&stored.sound.patch) else {
+            let Some(patch) = sounds.patches.get_mut(&stored.sound.patch).map(Arc::make_mut) else {
                 continue;
             };
             let Some(slot) = patch.effect_slots.get_mut(slot_idx) else {
@@ -1685,7 +1685,7 @@ impl SequencerState {
         let mut updated = 0;
         let mut seen: HashSet<PatchId> = HashSet::new();
         for stored in patterns.values() {
-            let Some(patch) = sounds.patches.get_mut(&stored.sound.patch) else {
+            let Some(patch) = sounds.patches.get_mut(&stored.sound.patch).map(Arc::make_mut) else {
                 continue;
             };
             let Some(slot) = patch.midi_fx_slots.get_mut(slot_idx) else {
@@ -1722,7 +1722,7 @@ impl SequencerState {
             if !seen.insert(stored.sound.patch) {
                 continue;
             }
-            if let Some(patch) = sounds.patches.get_mut(&stored.sound.patch) {
+            if let Some(patch) = sounds.patches.get_mut(&stored.sound.patch).map(Arc::make_mut) {
                 patch.instrument_slot.copy_base_values_from(&source_slot);
                 patch.instrument_base_note_offset = source_base_note;
             }

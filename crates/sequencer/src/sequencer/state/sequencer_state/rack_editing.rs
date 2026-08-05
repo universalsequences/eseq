@@ -214,7 +214,7 @@ impl SequencerState {
             .collect();
         let seeded = unseeded.len();
         for patch_id in unseeded {
-            if let Some(patch) = pool.sounds.patches.get_mut(&patch_id) {
+            if let Some(patch) = pool.sounds.patches.get_mut(&patch_id).map(Arc::make_mut) {
                 patch.sample_id = sample_id.clone();
             }
         }
@@ -233,7 +233,7 @@ impl SequencerState {
         let Some(pool) = scenes.track_pools.get_mut(track) else {
             return;
         };
-        for patch in pool.sounds.patches.values_mut() {
+        for patch in pool.sounds.patches.values_mut().map(Arc::make_mut) {
             prepare_patch_for_rack(patch);
             patch.rack_track = Some(rack_track.clone());
         }
@@ -361,7 +361,7 @@ impl SequencerState {
             // ENTITY in place (once each; take chunks share one), so scene
             // cells and the launched-pattern override keep their mappings.
             let effective_patch = pool.refs(effective_id).map(|refs| refs.patch);
-            for (patch_id, patch) in pool.sounds.patches.iter_mut() {
+            for (patch_id, patch) in pool.sounds.patches.iter_mut().map(|(id, entity)| (id, Arc::make_mut(entity))) {
                 let slot = make_slot(patch);
                 if Some(*patch_id) == effective_patch {
                     effective_rack = Some(RackTrackSnapshot {
@@ -507,7 +507,7 @@ impl SequencerState {
         let Some(pool) = scenes.track_pools.get_mut(track) else {
             return;
         };
-        for patch in pool.sounds.patches.values_mut() {
+        for patch in pool.sounds.patches.values_mut().map(Arc::make_mut) {
             prepare_patch_for_rack(patch);
             match patch.rack_track.as_mut() {
                 Some(rack_track) => rack_track.slots.push(slot.clone()),
@@ -544,7 +544,7 @@ impl SequencerState {
 
         let mut scenes = self.pattern.scenes.lock().unwrap();
         if let Some(pool) = scenes.track_pools.get_mut(track) {
-            for patch in pool.sounds.patches.values_mut() {
+            for patch in pool.sounds.patches.values_mut().map(Arc::make_mut) {
                 if let Some(rack_track) = patch.rack_track.as_mut() {
                     if slot_idx < rack_track.slots.len() {
                         rack_track.slots.remove(slot_idx);
@@ -690,7 +690,7 @@ impl SequencerState {
 
         let mut scenes = self.pattern.scenes.lock().unwrap();
         if let Some(pool) = scenes.track_pools.get_mut(track) {
-            for patch in pool.sounds.patches.values_mut() {
+            for patch in pool.sounds.patches.values_mut().map(Arc::make_mut) {
                 if let Some(rack_track) = patch.rack_track.as_mut() {
                     if let Some(slot) = rack_track.slots.get_mut(slot_idx) {
                         replace_rack_slot_source_preserving_controls(slot, &replacement);
@@ -786,7 +786,7 @@ impl SequencerState {
         }) {
             return false;
         }
-        for patch in pool.sounds.patches.values_mut() {
+        for patch in pool.sounds.patches.values_mut().map(Arc::make_mut) {
             if let Some(rack) = patch.rack_track.as_mut() {
                 if rack.slots.len() == bindings.len() {
                     sync_slots(&mut rack.slots);
@@ -939,7 +939,7 @@ impl SequencerState {
             .track_pools
             .get_mut(track)
         {
-            for patch in pool.sounds.patches.values_mut() {
+            for patch in pool.sounds.patches.values_mut().map(Arc::make_mut) {
                 if let Some(rack) = patch.rack_track.as_mut() {
                     update(&mut rack.macros);
                 }
@@ -1054,7 +1054,7 @@ impl SequencerState {
             .track_pools
             .get_mut(track)
             .expect("validated rack pattern pool before structural mutation");
-        for patch in pool.sounds.patches.values_mut() {
+        for patch in pool.sounds.patches.values_mut().map(Arc::make_mut) {
             let Some(slot) = patch
                 .rack_track
                 .as_mut()

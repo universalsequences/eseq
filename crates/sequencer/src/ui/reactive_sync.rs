@@ -84,7 +84,6 @@ pub(super) fn sync_after_instrument_track_apply(
 
 pub(super) fn refresh_visible_track_topology_layouts(editor: &mut Editor) {
     for buffer_name in [
-        "*metal*",
         "*sequencer*",
         "*samples*",
         "*mixer*",

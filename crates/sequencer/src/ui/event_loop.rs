@@ -91,6 +91,7 @@ pub(crate) fn run_event_loop(
         prev_ui_epoch: 0,
         prev_fx_epoch: 0,
         prev_sound_binding_epoch: 0,
+        prev_delete_target_version: 0,
         track_param_sync_revision: None,
         fx_param_sync_revision: None,
         prev_focus_clip_surface: (None, None, u64::MAX),

@@ -706,6 +706,29 @@
             (rgba 0.32 0.33 0.37 0.5)
             (rgba 0 0 0 0))))
 
+;; The expanded-lane step tick. Moved verbatim from ui/step-grid.lisp when
+;; the legacy *metal* buffer was unplugged from main.lisp — this widget is
+;; the one piece of that file the live UI still renders. If step-grid.lisp
+;; is ever reloaded, its identical copy is harmless (this one loads later
+;; and wins).
+(defwidget metal-track-tick
+  :width 1.5 :height 1.5
+  :state (active plocked selected track-r track-g track-b)
+  :bindable (active plocked selected track-r track-g track-b)
+  :shader
+  (let ((sel-y (if (= selected 1) (* 0.1 (cos (* 3 itime))) 0)))
+    (sdf/translate 0 sel-y
+      (sdf/layer
+        (sdf/fill (sdf/circle 1)
+          (material
+            :lighting (lighting :edge-min -0.35 :edge-max 0.5
+              :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
+            :color
+            (* (if (= active 1) 1 0.3)
+               (aqua-color
+                 (rgba (* track-r 0.82) (* track-g 0.82) (* track-b 0.82) 1.0)
+                 (rgba track-r track-g track-b 1.0)))))))))
+
 (def seqv-mute-bg (active)
   (if active
     (rgba 0.08 0.09 0.10 1.0)

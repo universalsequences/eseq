@@ -307,6 +307,8 @@ pub(super) fn handle(
                 handle("launch-track-pattern", payload, app, editor, ctx);
                 return;
             }
+            let profile = pattern_switch_profile_enabled();
+            let profile_started = Instant::now();
             let num_tracks = app.tracks.len();
             let shared = app.apply_recorded_scene_structure_mutation(
                 "Assign scene cell",
@@ -346,6 +348,8 @@ pub(super) fn handle(
                 )));
                 return;
             }
+            let mutation_elapsed = profile_started.elapsed();
+            let run_modes_started = Instant::now();
             if let Err(error) = app
                 .graph_controller()
                 .sync_track_instrument_run_modes_from_live_state()
@@ -353,7 +357,11 @@ pub(super) fn handle(
                 app.editor.status_message =
                     Some((format!("Scene cell share failed: {error}"), Instant::now()));
             }
+            let run_modes_elapsed = run_modes_started.elapsed();
+            let defaults_started = Instant::now();
             app.push_all_restored_defaults();
+            let defaults_elapsed = defaults_started.elapsed();
+            let launch_observe_started = Instant::now();
             // Clicking a clip in the mixer grid IS the clip-launch gesture
             // (`launch-track-pattern` is a dead command — this is the live
             // path): latch the lane during song playback (takes spec 10,
@@ -363,40 +371,29 @@ pub(super) fn handle(
             if scene == app.state.current_scene_index() {
                 app.observe_manual_clip_launch(track, PatternId(pattern_id));
             }
-            // Assigning into the current scene live-restores the
-            // pattern's params + sample; the generic pattern-epoch
-            // sync covers steps/params/mixer but not the fx and
-            // instrument-panel bindings, so refresh those here.
+            let launch_observe_elapsed = launch_observe_started.elapsed();
+            let fx_resync_started = Instant::now();
+            // Assigning into the current scene live-restores the pattern's
+            // params + sample; the generic pattern-epoch sync covers
+            // steps/params/mixer but not the fx and instrument-panel
+            // values, so bump fx_epoch and let the SAME tick cycle carry
+            // them. (This used to resync inline with its own reactive
+            // cycle + side-effects pass when *fx* was visible — a whole
+            // extra ~35ms cycle at 20-clip pool scale for surfaces the
+            // tick's fx-epoch branch republishes anyway.)
             if scene == app.state.current_scene_index() {
-                if editor_has_visible_buffer(&editor, "*fx*") {
-                    let ct = current_track_for_app(&mut app, &current_track)
-                        .unwrap_or(track);
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "effects",
-                        build_effects_value(
-                            &state,
-                            ct,
-                            &app.graph.effect_descriptors,
-                            &selected_steps,
-                        ),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "midi-effects",
-                        build_midi_effects_value(&state, ct, &selected_steps),
-                    );
-                    rt.set_reactive(
-                        "SEQ",
-                        "instrument-panel",
-                        build_instrument_panel_value(&app, ct, &selected_steps),
-                    );
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
-                } else {
-                    fx_epoch.fetch_add(1, Ordering::Relaxed);
-                }
+                fx_epoch.fetch_add(1, Ordering::Relaxed);
+            }
+            if profile {
+                eprintln!(
+                    "[set-scene-cell-profile] total={:.2}ms mutation={:.2}ms run_modes={:.2}ms defaults={:.2}ms launch_observe={:.2}ms fx_resync={:.2}ms",
+                    duration_ms(profile_started.elapsed()),
+                    duration_ms(mutation_elapsed),
+                    duration_ms(run_modes_elapsed),
+                    duration_ms(defaults_elapsed),
+                    duration_ms(launch_observe_elapsed),
+                    duration_ms(fx_resync_started.elapsed()),
+                );
             }
             editor.handle_host_event(HostEvent::Status(format!(
                 "Shared track {} pattern {} into scene {}",

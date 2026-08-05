@@ -93,6 +93,10 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_ui_epoch: usize,
     pub(crate) prev_fx_epoch: usize,
     pub(crate) prev_sound_binding_epoch: usize,
+    /// Arming/clearing a delete target republishes only the delete-target
+    /// read surfaces (version reactive + mixer/rack binding fields) off this
+    /// counter — it deliberately does NOT ride `ui_epoch`.
+    pub(crate) prev_delete_target_version: usize,
     pub(crate) track_param_sync_revision: Option<ParamSyncRevision>,
     pub(crate) fx_param_sync_revision: Option<ParamSyncRevision>,
     /// Identity of the CLIP-derived piano-roll surfaces (clip panel, window

@@ -1733,7 +1733,11 @@ impl App {
         label: &'static str,
         mutate: impl FnOnce(&mut App) -> Result<T, String>,
     ) -> Result<T, String> {
+        let profile = std::env::var_os("METAL_SEQ_PROFILE_PATTERN_SWITCH").is_some();
+        let profile_started = Instant::now();
         let before = self.capture_synchronized_scene_structure_state()?;
+        let capture_before_elapsed = profile_started.elapsed();
+        let mutate_started = Instant::now();
         let result = match mutate(self) {
             Ok(result) => result,
             Err(error) => {
@@ -1745,6 +1749,8 @@ impl App {
                 };
             }
         };
+        let mutate_elapsed = mutate_started.elapsed();
+        let save_started = Instant::now();
         self.save_current_bus_pattern();
         if !self.state.save_current_pattern_snapshot(
             self.tracks.len(),
@@ -1763,10 +1769,25 @@ impl App {
                 )),
             };
         }
+        let save_elapsed = save_started.elapsed();
+        let capture_after_started = Instant::now();
         let after = self.state.capture_project_scenes();
+        let capture_after_elapsed = capture_after_started.elapsed();
+        let commit_started = Instant::now();
         let patch = SceneStructurePatch { before, after };
         let retained_bytes = patch.retained_bytes();
         self.history.commit(label, None, EditPatch::SceneStructure(patch), retained_bytes);
+        if profile {
+            eprintln!(
+                "[scene-structure-profile] label={label} total={:.2}ms capture_before={:.2}ms mutate={:.2}ms save_after={:.2}ms capture_after={:.2}ms commit={:.2}ms",
+                profile_started.elapsed().as_secs_f64() * 1000.0,
+                capture_before_elapsed.as_secs_f64() * 1000.0,
+                mutate_elapsed.as_secs_f64() * 1000.0,
+                save_elapsed.as_secs_f64() * 1000.0,
+                capture_after_elapsed.as_secs_f64() * 1000.0,
+                commit_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         Ok(result)
     }
 

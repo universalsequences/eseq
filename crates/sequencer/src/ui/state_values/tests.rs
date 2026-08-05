@@ -19428,6 +19428,7 @@
     }
 
     #[test]
+    #[ignore = "the legacy *metal* step grid is no longer loaded by ui/main.lisp (step-grid.lisp kept on disk for reference)"]
     fn metal_seq_empty_metal_buffer_centers_prompt_without_overflow() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
@@ -25034,6 +25035,7 @@
     }
 
     #[test]
+    #[ignore = "the legacy *metal* step grid is no longer loaded by ui/main.lisp (step-grid.lisp kept on disk for reference)"]
     fn metal_seq_duration_mode_renders_all_steps_above_two() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
