@@ -324,6 +324,87 @@ fn value_change_scope(old: &Value, new: &Value) -> Option<ValueChange> {
     }
 }
 
+/// Release-mode probe for the reactive-clone-elimination effort
+/// (docs/reactive-clone-elimination-spec.md §3.3 / P0). Set
+/// `ESEQLISP_PROFILE_CLONES=1` to log, once per second, cumulative clone
+/// time and allocation counts per site (each cloned Value node allocates
+/// one `Rc<RefCell<..>>`, so the node count is the allocation proxy).
+pub fn clone_probe_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ESEQLISP_PROFILE_CLONES").is_some())
+}
+
+thread_local! {
+    static CLONE_PROBE: RefCell<CloneProbeWindow> = RefCell::new(CloneProbeWindow {
+        window_start: Instant::now(),
+        sites: HashMap::new(),
+    });
+}
+
+struct CloneProbeWindow {
+    window_start: Instant,
+    sites: HashMap<&'static str, (u64, u64, Duration)>,
+}
+
+/// Count the Value nodes a `deep_clone` of `value` allocates.
+pub fn value_alloc_nodes(value: &Value) -> u64 {
+    match value {
+        Value::List(items) => {
+            1 + items
+                .iter()
+                .map(|item| value_alloc_nodes(&item.borrow()))
+                .sum::<u64>()
+        }
+        Value::Map(map) => {
+            1 + map
+                .values()
+                .map(|item| value_alloc_nodes(&item.borrow()))
+                .sum::<u64>()
+        }
+        _ => 1,
+    }
+}
+
+pub fn clone_probe_record(site: &'static str, elapsed: Duration, nodes: u64) {
+    if !clone_probe_enabled() {
+        return;
+    }
+    CLONE_PROBE.with(|probe| {
+        let mut probe = probe.borrow_mut();
+        let entry = probe.sites.entry(site).or_insert((0, 0, Duration::ZERO));
+        entry.0 += 1;
+        entry.1 += nodes;
+        entry.2 += elapsed;
+        let secs = probe.window_start.elapsed().as_secs_f64();
+        if secs < 1.0 {
+            return;
+        }
+        let mut sites = probe.sites.drain().collect::<Vec<_>>();
+        sites.sort_by(|a, b| b.1.2.cmp(&a.1.2));
+        for (site, (calls, nodes, total)) in sites {
+            eprintln!(
+                "[clone-probe] site={site} calls/s={:.1} allocs/s={:.0} ms/s={:.3}",
+                calls as f64 / secs,
+                nodes as f64 / secs,
+                total.as_secs_f64() * 1000.0 / secs,
+            );
+        }
+        probe.window_start = Instant::now();
+    });
+}
+
+/// `value.deep_clone()` wrapped in the clone probe; near-zero cost when
+/// `ESEQLISP_PROFILE_CLONES` is unset.
+pub fn probed_deep_clone(site: &'static str, value: &Value) -> Value {
+    if !clone_probe_enabled() {
+        return value.deep_clone();
+    }
+    let started = Instant::now();
+    let cloned = value.deep_clone();
+    clone_probe_record(site, started.elapsed(), value_alloc_nodes(&cloned));
+    cloned
+}
+
 /// Which part of a reactive source a dependent actually read.
 #[derive(Clone, Debug)]
 pub enum ReadScope {
@@ -4095,7 +4176,53 @@ impl VM {
             let Some(change) = value_change_scope(current_value, &value) else {
                 return;
             };
-            *current_value = value.deep_clone();
+            let probe_started = clone_probe_enabled().then(Instant::now);
+            let mut probe_allocs = 0u64;
+            // Update the stored value. The store must stay a private deep
+            // copy — never share Rcs with the caller's value. For list→list
+            // changes patch only the changed indices; everything else keeps
+            // the whole-value deep clone. The patch-vs-full decision is made
+            // by this single match (never a partial patch then a Full
+            // fallback), and `changed` may contain LEN_READ_SENTINEL, which
+            // is not an index: length changes are handled by the explicit
+            // truncate/extend below.
+            match (&change, &mut *current_value, &value) {
+                (ValueChange::Indices(changed), Value::List(old_items), Value::List(new_items)) => {
+                    for &index in changed {
+                        if index == LEN_READ_SENTINEL || index >= old_items.len() {
+                            continue;
+                        }
+                        let Some(new_item) = new_items.get(index) else {
+                            continue;
+                        };
+                        let cloned = new_item.borrow().deep_clone();
+                        if probe_started.is_some() {
+                            probe_allocs += value_alloc_nodes(&cloned);
+                        }
+                        old_items[index] = Rc::new(RefCell::new(cloned));
+                    }
+                    if old_items.len() > new_items.len() {
+                        old_items.truncate(new_items.len());
+                    } else {
+                        for new_item in &new_items[old_items.len()..] {
+                            let cloned = new_item.borrow().deep_clone();
+                            if probe_started.is_some() {
+                                probe_allocs += value_alloc_nodes(&cloned);
+                            }
+                            old_items.push(Rc::new(RefCell::new(cloned)));
+                        }
+                    }
+                }
+                _ => {
+                    *current_value = value.deep_clone();
+                    if probe_started.is_some() {
+                        probe_allocs = value_alloc_nodes(current_value);
+                    }
+                }
+            }
+            if let Some(started) = probe_started {
+                clone_probe_record("w1:dag-source-store", started.elapsed(), probe_allocs);
+            }
             let dependents = dependents.clone().into_iter().collect::<Vec<_>>();
             for dependent in dependents {
                 let affected = match (&change, self.dag.dependency_scope(dependent, source_id)) {
@@ -5345,9 +5472,9 @@ mod tests {
     use std::{cell::RefCell, collections::HashSet, rc::Rc};
 
     use super::{
-        EffectTarget, PendingUiUpdate, ReactiveDag, ReactiveNode, ReactiveSource,
-        SOURCE_BUFFER_ID_PROP, SOURCE_END_BYTE_PROP, SOURCE_MODULE_PATH_PROP, SOURCE_REVISION_PROP,
-        SOURCE_START_BYTE_PROP, SOURCE_SYMBOL_PROP, VM, Value,
+        EffectTarget, LEN_READ_SENTINEL, NodeId, PendingUiUpdate, ReactiveDag, ReactiveNode,
+        ReactiveSource, SOURCE_BUFFER_ID_PROP, SOURCE_END_BYTE_PROP, SOURCE_MODULE_PATH_PROP,
+        SOURCE_REVISION_PROP, SOURCE_START_BYTE_PROP, SOURCE_SYMBOL_PROP, VM, Value,
     };
 
     fn map_prop<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
@@ -5987,5 +6114,170 @@ mod tests {
         assert_eq!(dag.find_source_node(&source), Some(8));
         dag.remove_node(8);
         assert_eq!(dag.find_source_node(&source), None);
+    }
+
+    fn number_list(items: &[f64]) -> Value {
+        Value::List(
+            items
+                .iter()
+                .map(|n| Rc::new(RefCell::new(Value::Number(*n))))
+                .collect(),
+        )
+    }
+
+    fn add_source(vm: &mut VM, value: Value) -> NodeId {
+        let id = vm.dag.alloc_id();
+        vm.dag.add_node(ReactiveNode::Source {
+            id,
+            source: ReactiveSource::LocalState {
+                name: format!("test-source-{id}"),
+            },
+            value,
+            dependents: HashSet::new(),
+        });
+        id
+    }
+
+    fn add_effect_dependent(vm: &mut VM) -> NodeId {
+        let id = vm.dag.alloc_id();
+        vm.dag.add_node(ReactiveNode::Effect {
+            id,
+            chunk_idx: 0,
+            callable: None,
+            source_buffer_id: None,
+            source_module: None,
+            source_revision: None,
+            target: EffectTarget::BufferId(None),
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            symbol_dependencies: HashSet::new(),
+            dirty: false,
+        });
+        id
+    }
+
+    fn stored_source_list(vm: &VM, id: NodeId) -> Vec<Rc<RefCell<Value>>> {
+        match vm.dag.nodes.get(&id) {
+            Some(ReactiveNode::Source {
+                value: Value::List(items),
+                ..
+            }) => items.clone(),
+            _ => panic!("source {id} does not hold a list"),
+        }
+    }
+
+    fn stored_source_value(vm: &VM, id: NodeId) -> Value {
+        match vm.dag.nodes.get(&id) {
+            Some(ReactiveNode::Source { value, .. }) => value.clone(),
+            _ => panic!("missing source {id}"),
+        }
+    }
+
+    #[test]
+    fn list_source_single_index_write_patches_only_that_element() {
+        let mut vm = VM::new(Vec::new());
+        let source = add_source(&mut vm, number_list(&[1.0, 2.0, 3.0]));
+        let reads_index_1 = add_effect_dependent(&mut vm);
+        let reads_index_2 = add_effect_dependent(&mut vm);
+        vm.dag.add_edge_indexed(source, reads_index_1, 1);
+        vm.dag.add_edge_indexed(source, reads_index_2, 2);
+
+        let before = stored_source_list(&vm, source);
+        let new_value = number_list(&[1.0, 9.0, 3.0]);
+        let Value::List(caller_items) = new_value.clone() else {
+            unreachable!();
+        };
+        vm.mark_source_dependents_dirty(source, new_value);
+
+        let after = stored_source_list(&vm, source);
+        assert_eq!(stored_source_value(&vm, source), number_list(&[1.0, 9.0, 3.0]));
+        // Unchanged elements keep their existing Rcs; only index 1 is replaced.
+        assert!(Rc::ptr_eq(&before[0], &after[0]));
+        assert!(!Rc::ptr_eq(&before[1], &after[1]));
+        assert!(Rc::ptr_eq(&before[2], &after[2]));
+        // The store never aliases the caller's value.
+        assert!(!Rc::ptr_eq(&caller_items[1], &after[1]));
+        // Dirty scope unchanged: only the index-1 reader is affected.
+        assert!(vm.dag.is_dirty(reads_index_1));
+        assert!(!vm.dag.is_dirty(reads_index_2));
+    }
+
+    #[test]
+    fn list_source_length_grow_and_shrink_patch_the_stored_list() {
+        let mut vm = VM::new(Vec::new());
+        let source = add_source(&mut vm, number_list(&[1.0, 2.0]));
+        let reads_len = add_effect_dependent(&mut vm);
+        vm.dag.add_edge_indexed(source, reads_len, LEN_READ_SENTINEL);
+
+        let before = stored_source_list(&vm, source);
+        let grown = number_list(&[1.0, 2.0, 3.0, 4.0]);
+        let Value::List(caller_items) = grown.clone() else {
+            unreachable!();
+        };
+        vm.mark_source_dependents_dirty(source, grown);
+
+        let after = stored_source_list(&vm, source);
+        assert_eq!(
+            stored_source_value(&vm, source),
+            number_list(&[1.0, 2.0, 3.0, 4.0])
+        );
+        assert!(Rc::ptr_eq(&before[0], &after[0]));
+        assert!(Rc::ptr_eq(&before[1], &after[1]));
+        assert!(!Rc::ptr_eq(&caller_items[2], &after[2]));
+        assert!(!Rc::ptr_eq(&caller_items[3], &after[3]));
+        assert!(vm.dag.is_dirty(reads_len));
+
+        vm.dag.clear_dirty(reads_len);
+        vm.mark_source_dependents_dirty(source, number_list(&[1.0]));
+        let shrunk = stored_source_list(&vm, source);
+        assert_eq!(stored_source_value(&vm, source), number_list(&[1.0]));
+        assert_eq!(shrunk.len(), 1);
+        assert!(Rc::ptr_eq(&after[0], &shrunk[0]));
+        assert!(vm.dag.is_dirty(reads_len));
+    }
+
+    #[test]
+    fn shape_change_between_list_and_scalar_falls_back_to_full_clone() {
+        let mut vm = VM::new(Vec::new());
+        let source = add_source(&mut vm, number_list(&[1.0, 2.0]));
+        let reads_index_0 = add_effect_dependent(&mut vm);
+        vm.dag.add_edge_indexed(source, reads_index_0, 0);
+
+        vm.mark_source_dependents_dirty(source, Value::Number(5.0));
+        assert_eq!(stored_source_value(&vm, source), Value::Number(5.0));
+        // Full change dirties even index-scoped readers.
+        assert!(vm.dag.is_dirty(reads_index_0));
+
+        vm.dag.clear_dirty(reads_index_0);
+        let back_to_list = number_list(&[7.0, 8.0]);
+        let Value::List(caller_items) = back_to_list.clone() else {
+            unreachable!();
+        };
+        vm.mark_source_dependents_dirty(source, back_to_list);
+        let after = stored_source_list(&vm, source);
+        assert_eq!(stored_source_value(&vm, source), number_list(&[7.0, 8.0]));
+        assert!(!Rc::ptr_eq(&caller_items[0], &after[0]));
+        assert!(!Rc::ptr_eq(&caller_items[1], &after[1]));
+        assert!(vm.dag.is_dirty(reads_index_0));
+    }
+
+    #[test]
+    fn unchanged_write_marks_nothing_dirty_and_leaves_the_store_untouched() {
+        let mut vm = VM::new(Vec::new());
+        let source = add_source(&mut vm, number_list(&[1.0, 2.0]));
+        let reads_index_0 = add_effect_dependent(&mut vm);
+        let reads_all = add_effect_dependent(&mut vm);
+        vm.dag.add_edge_indexed(source, reads_index_0, 0);
+        vm.dag.add_edge(source, reads_all);
+
+        let before = stored_source_list(&vm, source);
+        vm.mark_source_dependents_dirty(source, number_list(&[1.0, 2.0]));
+
+        let after = stored_source_list(&vm, source);
+        assert!(Rc::ptr_eq(&before[0], &after[0]));
+        assert!(Rc::ptr_eq(&before[1], &after[1]));
+        assert!(!vm.dag.is_dirty(reads_index_0));
+        assert!(!vm.dag.is_dirty(reads_all));
     }
 }

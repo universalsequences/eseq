@@ -947,7 +947,9 @@ impl Buffer {
             );
             return;
         }
-        self.widget_tree = tree.as_ref().map(Value::deep_clone);
+        self.widget_tree = tree
+            .as_ref()
+            .map(|tree| crate::vm::probed_deep_clone("w2:buffer-set-widget-tree", tree));
         self.widget_tree_source = source;
         self.widget_tree_revision = self.widget_tree_revision.wrapping_add(1);
         self.set_committed_ui_snapshot(
@@ -1904,7 +1906,10 @@ fn replace_subtree_in_value(
         return None;
     };
     if prop_u64_from_map(map, "__subtree-root-id") == Some(subtree_root_id) {
-        return Some(replacement_tree.deep_clone());
+        return Some(crate::vm::probed_deep_clone(
+            "w2:buffer-replace-subtree",
+            replacement_tree,
+        ));
     }
 
     let children_value = map.get("children")?;
@@ -1956,7 +1961,10 @@ fn replace_subtrees_in_value(
     if let Some(replacement_tree) = prop_u64_from_map(map, "__subtree-root-id")
         .and_then(|root_id| replacement_lookup.get(&root_id))
     {
-        return Some((*replacement_tree).deep_clone());
+        return Some(crate::vm::probed_deep_clone(
+            "w2:buffer-replace-subtrees",
+            replacement_tree,
+        ));
     }
 
     let children_value = map.get("children")?;
