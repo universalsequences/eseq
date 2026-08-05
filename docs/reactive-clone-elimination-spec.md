@@ -1,8 +1,10 @@
 # Reactive-Cycle Clone Elimination Spec
 
-Status: rev 3 (2026-08-05) — P0+P1 BUILT (commit e2db824b), audit clean,
-baseline captured (§P0 probe results below). W1 closed at its floor;
-P2 (widget-tree Rc-sharing, freeze-first) is the remaining work.
+Status: rev 4 (2026-08-05) — COMPLETE. P0+P1 BUILT (e2db824b), W1 closed
+at its floor; P2 BUILT (freeze registry + all §3.1 storage sites shallow);
+P3 probe re-run confirms W2 storage collapsed to ~0 (§P3 results below).
+Remaining cost is the intentionally-kept scoped replacement-subtree deep
+clone (bursts ~3 ms/s during interaction; possible follow-up in §P3).
 
 Eliminate the two per-tick `Value::deep_clone` hot paths found in the
 Instruments Allocations capture (2-track sampler project, ~28k allocs /
@@ -280,6 +282,32 @@ alone deep-copies a ~6k-node tree ~10×/s (~0.5 ms per call, landing as
 latency spikes inside reactive cycles that are already doing eval/layout
 work); with `buffer-replace-subtrees` bursts, W2 totals ~8–9 ms/s vs
 W1's ~2.3. Proceed with §3.2/§3.4, freeze assertions first.
+
+### Probe results (P3, after P2 conversion, 2026-08-05, same project, release)
+
+| site                       | calls/s | allocs/s | ms/s        | vs baseline |
+|----------------------------|---------|----------|-------------|-------------|
+| w2:buffer-set-widget-tree  | 9–11    | 9–11 (1/call) | 0.003–0.008 | was 4.4–5.7 |
+| w2:buffer-replace-subtrees | 20 (one interaction burst) | 33k | 3.2 | unchanged (kept deep, §3.2) |
+| w2:flush-* / snapshot-*    | 1       | 1/call   | ~0.001 each | was ~0.1–0.3 |
+| w1:patch                   | 9–18    | 16k–22k  | 1.8–2.7     | unchanged (floor) |
+| w1:full-other              | 141–164 | = calls  | ~0.03       | unchanged (free) |
+
+**Verdict: W2 closed.** Every converted storage site is one Rc bump per
+call; steady-state W2 copy work dropped from ~5–6 ms/s to ~0, total W2
+(including interaction bursts) from ~8–9 ms/s to ~3. The surviving cost
+is exactly the scoped replacement-subtree deep clone this spec chose to
+keep (buffer.rs:1917/1972). The freeze registry caught zero violations
+across the eseqlisp lib + UI-script suites, confirming the P0 audit.
+
+**Possible follow-up (not done, would need its own review):** under the
+freeze invariant the replacement trees arriving at buffer.rs:1917/1972
+are already frozen at the VM push, so the splice could share them
+instead of deep-cloning — erasing the remaining ~3 ms/s bursts. Kept
+deep for now because those sites are the scoped-to-mutation discipline
+this spec standardizes on; flipping them widens the invariant's blast
+radius from "storage copies" to "merged trees share replacement cells
+with pending-queue entries" and should be probed/justified separately.
 
 ### 3.4 Enforcement (debug-only)
 

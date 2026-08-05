@@ -405,6 +405,134 @@ pub fn probed_deep_clone(site: &'static str, value: &Value) -> Value {
     cloned
 }
 
+/// Shallow `value.clone()` (Rc bump on the top-level list/map) wrapped in the
+/// clone probe, so P3 re-runs can confirm the converted W2 sites collapsed to
+/// ~0; near-zero cost when `ESEQLISP_PROFILE_CLONES` is unset.
+pub fn probed_shallow_clone(site: &'static str, value: &Value) -> Value {
+    if !clone_probe_enabled() {
+        return value.clone();
+    }
+    let started = Instant::now();
+    let cloned = value.clone();
+    clone_probe_record(site, started.elapsed(), 1);
+    cloned
+}
+
+// ---------------------------------------------------------------------------
+// Widget-tree freeze registry (docs/reactive-clone-elimination-spec.md §3.4)
+//
+// Rendered widget trees are immutable from the moment they are handed to the
+// runtime (pending_widget_trees / current_widget_tree / Buffer::widget_tree);
+// storage sites share them by shallow clone. This debug-only registry records
+// every list/map cell of a frozen tree by Rc pointer identity; the (few) tree
+// mutation helpers call `debug_assert_cell_not_frozen` so a post-storage
+// mutation panics in dev/test runs instead of silently editing history for
+// every holder of the Rc. Zero cost in release builds.
+//
+// Closure upvalue cells are deliberately NOT frozen: `Value::deep_clone`
+// shares them too, and handler-captured state is legitimately mutated when
+// handlers run. Freezing covers tree *structure* (list/map cells), which is
+// exactly what the shallow-shared storage sites alias.
+// ---------------------------------------------------------------------------
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static FROZEN_TREE_CELLS: RefCell<HashMap<usize, std::rc::Weak<RefCell<Value>>>> =
+        RefCell::new(HashMap::new());
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static FROZEN_TREE_PRUNE_THRESHOLD: std::cell::Cell<usize> = const { std::cell::Cell::new(4096) };
+}
+
+/// Register every list/map cell reachable from `tree` as frozen. Idempotent
+/// and cheap on re-freeze: an already-registered live cell short-circuits its
+/// whole subtree (shared cells imply shared subtrees). No-op in release.
+pub fn freeze_widget_tree(tree: &Value) {
+    #[cfg(debug_assertions)]
+    FROZEN_TREE_CELLS.with(|cells| {
+        let mut cells = cells.borrow_mut();
+        // A live Weak pins its allocation's memory, so dead entries only
+        // release memory once pruned; prune when the registry doubles past
+        // the last high-water mark.
+        FROZEN_TREE_PRUNE_THRESHOLD.with(|threshold| {
+            if cells.len() > threshold.get() {
+                cells.retain(|_, weak| weak.strong_count() > 0);
+                threshold.set((cells.len() * 2).max(4096));
+            }
+        });
+        freeze_value_cells(tree, &mut cells);
+    });
+    #[cfg(not(debug_assertions))]
+    let _ = tree;
+}
+
+#[cfg(debug_assertions)]
+fn freeze_value_cells(
+    value: &Value,
+    cells: &mut HashMap<usize, std::rc::Weak<RefCell<Value>>>,
+) {
+    match value {
+        Value::List(items) => {
+            for cell in items {
+                freeze_tree_cell(cell, cells);
+            }
+        }
+        Value::Map(map) => {
+            for cell in map.values() {
+                freeze_tree_cell(cell, cells);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(debug_assertions)]
+fn freeze_tree_cell(
+    cell: &Rc<RefCell<Value>>,
+    cells: &mut HashMap<usize, std::rc::Weak<RefCell<Value>>>,
+) {
+    let ptr = Rc::as_ptr(cell) as usize;
+    if let Some(existing) = cells.get(&ptr) {
+        if existing.strong_count() > 0 {
+            // A live Weak pins its allocation, so a matching pointer is the
+            // same cell: this subtree is already frozen.
+            return;
+        }
+    }
+    cells.insert(ptr, Rc::downgrade(cell));
+    freeze_value_cells(&cell.borrow(), cells);
+}
+
+/// Panic (debug builds only) if `cell` belongs to a frozen widget tree.
+/// Mutation of a stored tree must instead deep-clone at the mutation site,
+/// scoped to the subtree it modifies (spec §3.2).
+#[inline]
+pub fn debug_assert_cell_not_frozen(cell: &Rc<RefCell<Value>>, context: &'static str) {
+    #[cfg(debug_assertions)]
+    FROZEN_TREE_CELLS.with(|cells| {
+        let mut cells = cells.borrow_mut();
+        let ptr = Rc::as_ptr(cell) as usize;
+        match cells.get(&ptr) {
+            Some(frozen) if frozen.strong_count() > 0 => panic!(
+                "widget-tree freeze violation: {context} mutating a cell of a stored \
+                 (frozen) widget tree; deep-clone the subtree at the mutation site \
+                 instead (docs/reactive-clone-elimination-spec.md §3.2/§3.4)"
+            ),
+            Some(_) => {
+                // The frozen cell died and this is a new allocation at a
+                // reused address (possible once the dead Weak is the only
+                // reference left after pruning kept it — clean it up).
+                cells.remove(&ptr);
+            }
+            None => {}
+        }
+    });
+    #[cfg(not(debug_assertions))]
+    let _ = (cell, context);
+}
+
 /// Which part of a reactive source a dependent actually read.
 #[derive(Clone, Debug)]
 pub enum ReadScope {
@@ -4025,9 +4153,11 @@ impl VM {
 
         match self.globals.get_mut(idx) {
             Some(Some(existing)) => {
+                debug_assert_cell_not_frozen(existing, "update_reactive_global");
                 let mut borrowed = existing.borrow_mut();
                 if let Value::Map(map) = &mut *borrowed {
                     if let Some(slot) = map.get(field) {
+                        debug_assert_cell_not_frozen(slot, "update_reactive_global");
                         *slot.borrow_mut() = value;
                     } else {
                         map.insert(field.to_string(), Rc::new(RefCell::new(value)));
@@ -4063,12 +4193,17 @@ impl VM {
             let slot = map
                 .entry(field.to_string())
                 .or_insert_with(|| Rc::new(RefCell::new(Value::List(Vec::new()))));
+            debug_assert_cell_not_frozen(slot, "update_reactive_global_list_index");
             let mut borrowed = slot.borrow_mut();
             match &mut *borrowed {
                 Value::List(items) => {
                     while items.len() <= index {
                         items.push(Rc::new(RefCell::new(Value::Nil)));
                     }
+                    debug_assert_cell_not_frozen(
+                        &items[index],
+                        "update_reactive_global_list_index",
+                    );
                     *items[index].borrow_mut() = value.clone();
                 }
                 other => {
@@ -4406,6 +4541,7 @@ impl VM {
                                 None,
                                 &mut path,
                             );
+                            freeze_widget_tree(&annotated_tree);
                             {
                                 static SCENE_TRACE: std::sync::OnceLock<bool> =
                                     std::sync::OnceLock::new();
@@ -4887,9 +5023,11 @@ impl VM {
                         }),
                         _ => None,
                     };
+                    debug_assert_cell_not_frozen(&target, "OpCode::StoreField");
                     match &mut *target.borrow_mut() {
                         Value::Map(map) => {
                             if let Some(slot) = map.get(&field) {
+                                debug_assert_cell_not_frozen(slot, "OpCode::StoreField");
                                 *slot.borrow_mut() = new_value.clone();
                             } else {
                                 map.insert(field.clone(), Rc::new(RefCell::new(new_value.clone())));
@@ -5416,6 +5554,7 @@ impl VM {
                             None,
                             &mut path,
                         );
+                        freeze_widget_tree(&annotated_tree);
                         if let Some((subtree_root_id, _stable_key)) =
                             explicit_subtree_root_metadata(&annotated_tree)
                         {
@@ -5475,12 +5614,17 @@ impl VM {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::HashSet, rc::Rc};
+    use std::{
+        cell::RefCell,
+        collections::{HashMap, HashSet},
+        rc::Rc,
+    };
 
     use super::{
         EffectTarget, LEN_READ_SENTINEL, NodeId, PendingUiUpdate, ReactiveDag, ReactiveNode,
         ReactiveSource, SOURCE_BUFFER_ID_PROP, SOURCE_END_BYTE_PROP, SOURCE_MODULE_PATH_PROP,
         SOURCE_REVISION_PROP, SOURCE_START_BYTE_PROP, SOURCE_SYMBOL_PROP, VM, Value,
+        debug_assert_cell_not_frozen, freeze_widget_tree,
     };
 
     fn map_prop<'a>(value: &'a Value, key: &str) -> Option<std::cell::Ref<'a, Value>> {
@@ -6285,5 +6429,65 @@ mod tests {
         assert!(Rc::ptr_eq(&before[1], &after[1]));
         assert!(!vm.dag.is_dirty(reads_index_0));
         assert!(!vm.dag.is_dirty(reads_all));
+    }
+
+    fn tree_with_label(label: &str) -> (Value, Rc<RefCell<Value>>) {
+        let label_cell = Rc::new(RefCell::new(Value::String(label.to_string())));
+        let child = {
+            let mut map = HashMap::new();
+            map.insert("label".to_string(), label_cell.clone());
+            Rc::new(RefCell::new(Value::Map(map)))
+        };
+        let mut root = HashMap::new();
+        root.insert(
+            "children".to_string(),
+            Rc::new(RefCell::new(Value::List(vec![child]))),
+        );
+        (Value::Map(root), label_cell)
+    }
+
+    #[test]
+    #[should_panic(expected = "widget-tree freeze violation")]
+    fn mutating_a_frozen_tree_cell_panics_in_debug() {
+        let (tree, label_cell) = tree_with_label("frozen");
+        freeze_widget_tree(&tree);
+        debug_assert_cell_not_frozen(&label_cell, "test mutation");
+    }
+
+    #[test]
+    fn deep_cloned_variant_of_a_frozen_tree_stays_mutable() {
+        let (tree, _) = tree_with_label("frozen");
+        freeze_widget_tree(&tree);
+        let variant = tree.deep_clone();
+        let Value::Map(map) = &variant else {
+            unreachable!();
+        };
+        // Every cell of the deep clone is fresh, so mutating it is allowed.
+        debug_assert_cell_not_frozen(&map["children"], "test mutation");
+        let Value::List(children) = &*map["children"].borrow() else {
+            unreachable!();
+        };
+        debug_assert_cell_not_frozen(&children[0], "test mutation");
+    }
+
+    #[test]
+    fn shallow_clone_of_a_frozen_tree_shares_frozen_cells() {
+        let (tree, label_cell) = tree_with_label("frozen");
+        freeze_widget_tree(&tree);
+        let shared = tree.clone();
+        let Value::Map(map) = &shared else {
+            unreachable!();
+        };
+        let Value::List(children) = &*map["children"].borrow() else {
+            unreachable!();
+        };
+        let Value::Map(child) = &*children[0].borrow() else {
+            unreachable!();
+        };
+        assert!(Rc::ptr_eq(&child["label"], &label_cell));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            debug_assert_cell_not_frozen(&child["label"], "test mutation");
+        }));
+        assert!(result.is_err(), "shared frozen cell must still assert");
     }
 }

@@ -229,6 +229,7 @@ impl ReactiveRegistry {
             .fields
             .insert(field.to_string(), value.clone());
         if let Some(slot) = namespace_entry.map.get(field) {
+            crate::vm::debug_assert_cell_not_frozen(slot, "ReactiveStore::set");
             *slot.borrow_mut() = value.clone();
         } else {
             namespace_entry
@@ -317,6 +318,10 @@ impl ReactiveRegistry {
                 while items.len() <= index {
                     items.push(Rc::new(RefCell::new(Value::Nil)));
                 }
+                crate::vm::debug_assert_cell_not_frozen(
+                    &items[index],
+                    "ReactiveStore::set_index (fields)",
+                );
                 *items[index].borrow_mut() = value.clone();
             }
             other => {
@@ -334,12 +339,17 @@ impl ReactiveRegistry {
             .entry(field.to_string())
             .or_insert_with(|| Rc::new(RefCell::new(Value::List(Vec::new()))));
         {
+            crate::vm::debug_assert_cell_not_frozen(map_slot, "ReactiveStore::set_index");
             let mut borrowed = map_slot.borrow_mut();
             match &mut *borrowed {
                 Value::List(items) => {
                     while items.len() <= index {
                         items.push(Rc::new(RefCell::new(Value::Nil)));
                     }
+                    crate::vm::debug_assert_cell_not_frozen(
+                        &items[index],
+                        "ReactiveStore::set_index (map)",
+                    );
                     *items[index].borrow_mut() = value.clone();
                 }
                 other => {

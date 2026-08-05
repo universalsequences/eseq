@@ -8078,7 +8078,7 @@ impl Editor {
                     self.runtime
                         .set_widget_id_offset(source_id as u64 * 100_000);
                     let buffer = self.active_buffer_mut();
-                    buffer.set_widget_tree(Some(tree.deep_clone()), Some(source_id));
+                    buffer.set_widget_tree(Some(tree.clone()), Some(source_id));
                     buffer.view_mode = ViewMode::UiOnly;
                     self.runtime.set_widget_tree(tree);
                     self.remap_focused_widget_after_layout_change();
