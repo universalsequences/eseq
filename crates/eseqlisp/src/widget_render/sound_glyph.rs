@@ -204,7 +204,15 @@ impl WidgetDefinition for SoundGlyphWidget {
         packed[16] = tune[6];
 
         let (ndc_min, ndc_max) = ndc_bounds(square, viewport);
-        let frame_flags = u8::from(frame.anchor) | (u8::from(frame.incompatible) << 1);
+        // `:pixelate` — virtual-resolution quantization, expressed as the cell
+        // count across the glyph (0 = off, the hi-def look). The shader snaps
+        // its sample coordinate to this grid before evaluating the SDF, so the
+        // whole render pixelates with no extra pass. Not one of the 16 packed
+        // TUNING_PROPS (those words are full); it rides the spare bits of the
+        // color_d.w flag word instead.
+        let pixelate = get_f32_prop(&node.props, "pixelate", 0.0).clamp(0.0, 255.0).round() as u32;
+        let frame_flags =
+            u32::from(frame.anchor) | (u32::from(frame.incompatible) << 1) | (pixelate << 2);
         metal_widget_instance(widget_type, WidgetInstance {
             ndc_min,
             ndc_max,
@@ -289,6 +297,10 @@ int dg_cols(WidgetVaryings in) { return clamp(int(round(in.color_d.x)), 1, 5); }
 int dg_rows(WidgetVaryings in) { return clamp(int(round(in.color_d.y)), 1, 5); }
 bool dg_anchor(WidgetVaryings in) { return (uint(round(in.color_d.w)) & 1u) != 0u; }
 bool dg_incompatible(WidgetVaryings in) { return (uint(round(in.color_d.w)) & 2u) != 0u; }
+// Virtual pixel count across the glyph (bits 2..9 of the flag word); 0 = off.
+float dg_pixelate(WidgetVaryings in) {
+    return float((uint(round(in.color_d.w)) >> 2) & 255u);
+}
 
 float3 dg_play_color(WidgetVaryings in) {
     uint rgb = uint(round(in.corner_radius));
@@ -533,6 +545,16 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) {
     float glyphScale = play ? 1.0 - 2.0 * clamp(in.itime, 0.0, 0.45) : 1.0;
     float glyphOpacity = play ? clamp(in.aspect, 0.0, 1.0) : 1.0;
     float2 glyphP = p / max(glyphScale, 0.10);
+    // Pixelation: snap the sample coordinate to an N-cell virtual grid before
+    // any field evaluation. Everything downstream (normals, lighting, rim,
+    // glow, interior shade) evaluates at the cell center, so the whole glyph
+    // quantizes coherently; the silhouette smoothstep then gives boundary
+    // cells partial coverage, which reads as a cleanly downsampled image. The
+    // play triangle deliberately stays on the raw coordinate (crisp on top).
+    float pixelCells = dg_pixelate(in);
+    if (pixelCells > 0.5) {
+        glyphP = (floor((glyphP * 0.5 + 0.5) * pixelCells) + 0.5) / pixelCells * 2.0 - 1.0;
+    }
     float fit = dg_fit(in);
     float4 color = float4(0.0);
 

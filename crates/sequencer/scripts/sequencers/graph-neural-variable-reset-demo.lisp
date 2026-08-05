@@ -372,7 +372,7 @@
      (* (max 0 (- count 1)) gvr-row-gap)))
 
 (def gvr-matrix-header-spacer-height ()
-  (max 0 (- (+ gvr-row-panel-padding gvr-row-height gvr-row-gap) gvr-matrix-column-gap)))
+  (+ -0.5 (max 0 (- (+ gvr-row-panel-padding gvr-row-height gvr-row-gap) gvr-matrix-column-gap))))
 
 (def gvr-num (key value lo hi stp dec on-change)
   (number-picker
@@ -578,7 +578,7 @@
                       (do
                         (set! gvr-dur-factor v)
                         (gvr-edit-global-param :dur-factor v)))))
-               
+                
                 )
               (matrix
                 :key "graph-variable-reset-dampening-matrix"
@@ -704,7 +704,8 @@
                 :width (max 26 (* active-count 3.25))
                 :height (gvr-matrix-data-height active-count)
                 :min 0
-                :color :blue
+                :background :mixer-strip-bg
+                :color (rgba 0.14 0.3 0.9 1)
                 :max 1
                 :value gvr-weights
                 :on-cell-press (lambda (r c)

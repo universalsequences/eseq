@@ -457,6 +457,10 @@
               (sound-glyph
                 :key (str "mixer-v2-cell-glyph-" track "-" pattern-id)
                 :source (str "pattern-glyph:track:" track ":pattern:" pattern-id)
+                ;; Quantize to a coarse virtual-pixel grid: the mixer shows ~50
+                ;; glyphs at once, so the palette's hi-def gooey rendering reads
+                ;; as noise at this size. Odd count keeps a cell centered.
+                :pixelate 2
                 :edge-soft 0.1
                 :white-damp 0
                 :height-in 0.3
