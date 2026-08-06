@@ -273,9 +273,11 @@ impl App {
     }
 
     /// The bound source's sound (§17.2): the `(patch_ref, mix_ref)` pair the
-    /// binding resolves to. Falls back to the track's effective refs, which
-    /// always resolve ("no steps" never means "no sound") — so this is `None`
-    /// only for an out-of-range track.
+    /// binding resolves to. Rule 3 splits on a bare lane (track-sound spec
+    /// §2.2): the effective scene pattern's refs when the cell (or override)
+    /// actually resolves a pattern — rule 3a — else the TRACK SOUND's — rule
+    /// 3b. Always resolves ("no steps" never means "no sound"), so this is
+    /// `None` only for an out-of-range track.
     pub(crate) fn bound_sound_refs(&self, track: usize) -> Option<SoundRefs> {
         let source = self.track_sound_binding(track).source;
         self.state.with_project_scenes(|scenes| {
@@ -291,7 +293,14 @@ impl App {
                     .and_then(|pool| pool.refs(id)),
                 None => None,
             };
-            from_source.or_else(|| scenes.effective_sound_refs(track))
+            from_source
+                .or_else(|| {
+                    scenes
+                        .effective_pattern_id(track)
+                        .and_then(|id| scenes.track_pools.get(track)?.refs(id))
+                })
+                .or_else(|| scenes.track_sound_refs(track))
+                .or_else(|| scenes.effective_sound_refs(track))
         })
     }
 
@@ -703,6 +712,12 @@ impl App {
             self.loaded_sound_binding[track] = None;
         }
         self.state.release_bound_track_device_state(track);
+        // Bare lane (track-sound spec §2.2 rule 3b): the mirror is the track
+        // sound and no cell restore exists to re-load it after a repoint —
+        // do it here so a palette Apply/Fork on a bare lane is audible.
+        if self.state.effective_track_pattern_id(track).is_none() {
+            self.state.restore_track_sound_to_mirror(track);
+        }
         self.sync_track_sound_bindings();
         // §3.6: re-route every restored default through the effective layer —
         // this also revalidates macro mappings and re-asserts engaged
@@ -1473,6 +1488,187 @@ pub(crate) mod tests {
             Some(BoundSource::Take(take)),
             "stopping re-binds the dormant selection for tuning"
         );
+    }
+
+    /// Empty every scene cell on track 0 (the takes-only workflow the
+    /// track-sound spec exists for): cells cleared, grid patterns deleted.
+    /// The track sound carrier survives in the pool.
+    fn empty_track_lane(app: &mut App) {
+        app.state.with_scenes_mut(|scenes| {
+            let scene_count = scenes.scenes.len();
+            for scene_idx in 0..scene_count {
+                if let Some(id) = scenes.clear_cell(scene_idx, 0) {
+                    scenes.delete_track_pattern(0, id);
+                }
+            }
+        });
+        assert!(app.state.effective_track_pattern_id(0).is_none());
+    }
+
+    /// Track-sound spec §2.2 (symptom 1): a knob touch on a bare lane mints
+    /// no scene cell — the edit lands on the TRACK SOUND's Patch entity.
+    #[test]
+    fn knob_touch_on_a_bare_lane_creates_no_cell_and_edits_the_track_sound() {
+        let (mut app, _take, _scene_pattern, chunks) = app_with_take();
+        empty_track_lane(&mut app);
+        let refs = app
+            .state
+            .with_project_scenes(|scenes| scenes.track_sound_refs(0))
+            .expect("the track sound resolves");
+
+        try_apply_command(
+            &mut app,
+            AppCommand::SetInstrumentParam {
+                track: 0,
+                param_idx: 0,
+                value: 0.123,
+            },
+        )
+        .expect("a bare-lane device edit applies");
+
+        app.state.with_project_scenes(|scenes| {
+            for (scene_idx, scene) in scenes.scenes.iter().enumerate() {
+                assert_eq!(
+                    scene.cells[0], None,
+                    "scene {} minted no cell for the knob touch",
+                    scene_idx + 1
+                );
+            }
+            let patch = &scenes.track_pools[0].sounds.patches[&refs.patch];
+            assert_eq!(
+                patch.instrument_slot.defaults.first().copied(),
+                Some(0.123),
+                "the edit landed on the track sound's Patch entity"
+            );
+            for chunk in &chunks {
+                assert_ne!(
+                    scenes.track_pools[0]
+                        .get(*chunk)
+                        .expect("chunk")
+                        .instrument_slot
+                        .defaults
+                        .first()
+                        .copied(),
+                    Some(0.123),
+                    "the committed take's sound is untouched"
+                );
+            }
+        });
+    }
+
+    /// Track-sound spec §2.3 (symptom 2): ghost live-grid steps left behind
+    /// by a deleted clip never re-materialize a cell when Play saves the
+    /// session.
+    #[test]
+    fn play_does_not_resurrect_a_deleted_clip_from_ghost_live_grid_steps() {
+        let (mut app, _take, _scene_pattern, chunks) = app_with_take();
+        empty_track_lane(&mut app);
+        // Simulate pre-fix leftovers: active steps sitting in the live grid.
+        app.state.pattern.patterns[0].set_step_active(3, true);
+
+        app.song_transport_play(false).expect("song playback starts");
+        app.song_transport_stop().expect("stop succeeds");
+
+        app.state.with_project_scenes(|scenes| {
+            for (scene_idx, scene) in scenes.scenes.iter().enumerate() {
+                assert_eq!(
+                    scene.cells[0], None,
+                    "scene {} resurrected a cell from ghost steps",
+                    scene_idx + 1
+                );
+            }
+            let grid_patterns = scenes.track_pools[0]
+                .patterns
+                .keys()
+                .filter(|id| Some(**id) != scenes.track_sounds[0])
+                .filter(|id| !chunks.contains(id))
+                .count();
+            assert_eq!(grid_patterns, 0, "no pool pattern was minted");
+        });
+    }
+
+    /// Track-sound spec §2.7 (symptom 3): Play/Pause on a bare lane moves
+    /// neither the audible device state nor the palette's resolved sound —
+    /// the track sound is transport- and scene-independent.
+    #[test]
+    fn pause_does_not_change_the_audible_sound_or_palette_selection_on_a_bare_lane() {
+        let (mut app, _take, _scene_pattern, _chunks) = app_with_take();
+        // Two scenes so arrangement playback actually moves current_scene.
+        app.state.with_scenes_mut(|scenes| {
+            scenes.new_scene();
+            scenes.current_scene = 0;
+        });
+        empty_track_lane(&mut app);
+        // An arrangement whose rows reference both scenes; the lane itself
+        // has no clips.
+        app.arr_replace_rows(
+            vec![
+                crate::app::song_edit::SongRowSpec {
+                    start_beat: 0.0,
+                    scene: 0,
+                    overrides: Vec::new(),
+                },
+                crate::app::song_edit::SongRowSpec {
+                    start_beat: 8.0,
+                    scene: 1,
+                    overrides: Vec::new(),
+                },
+            ],
+            16.0,
+            false,
+        )
+        .expect("rows replace");
+
+        try_apply_command(
+            &mut app,
+            AppCommand::SetInstrumentParam {
+                track: 0,
+                param_idx: 0,
+                value: 0.42,
+            },
+        )
+        .expect("bare-lane device edit applies");
+        let palette_before = app
+            .resolve_palette_target(
+                0,
+                app.palette_target_or_binding(0, None),
+            )
+            .expect("palette target resolves")
+            .current;
+
+        // Play from beat 9 — the cursor row's scene is scene 1, so the old
+        // bug re-owned the lane through scenes.current_scene.
+        app.arrangement_cursor_beat = 9.0;
+        app.song_transport_play(false).expect("song playback starts");
+        assert_eq!(
+            app.state.pattern.instrument_slots[0].defaults.get(0),
+            0.42,
+            "Play leaves the bare lane's audible device state alone"
+        );
+        app.song_transport_stop().expect("stop succeeds");
+        app.sync_track_sound_bindings();
+
+        assert_eq!(
+            app.state.pattern.instrument_slots[0].defaults.get(0),
+            0.42,
+            "Pause neither retunes the lane nor restores a scene cell"
+        );
+        let palette_after = app
+            .resolve_palette_target(
+                0,
+                app.palette_target_or_binding(0, None),
+            )
+            .expect("palette target resolves")
+            .current;
+        assert_eq!(
+            palette_before, palette_after,
+            "the palette's resolved sound does not flap across Play/Pause"
+        );
+        app.state.with_project_scenes(|scenes| {
+            for scene in &scenes.scenes {
+                assert_eq!(scene.cells[0], None, "the lane stays bare");
+            }
+        });
     }
 
     /// Regression (16.3 rule 2): a structural arrangement edit made DURING

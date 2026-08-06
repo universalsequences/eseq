@@ -5228,11 +5228,17 @@ fn resolve_device_value_target(
         .ok_or(EditError::TrackOutOfRange { track })?;
     // Device edits follow the track's sound binding (takes spec 16.4): a
     // bound take or track clip owns them, and only rule 3 falls back to the
-    // effective scene pattern (which is materialized on demand for a bare
-    // scene). No dual-write — a bound edit never touches the scene pattern.
+    // effective scene pattern. On a bare lane rule 3b (track-sound spec
+    // §2.2) writes to the TRACK SOUND's carrier instead — a device edit
+    // never materializes a scene cell. No dual-write — a bound edit never
+    // touches the scene pattern.
     let pattern = match app.bound_read_pattern(track) {
         Some(pattern) if !app.track_sound_binding(track).is_scene() => pattern,
-        _ => ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?,
+        _ => app
+            .state
+            .effective_track_pattern_id(track)
+            .or_else(|| app.state.track_sound_pattern_id(track))
+            .ok_or(EditError::MissingTrackPattern)?,
     };
     let (id, slot_idx) = match cmd {
         AppCommand::SetEffectParam { slot_idx, .. }
@@ -5703,12 +5709,16 @@ pub fn apply_recorded_instrument_values_mutation(
         .id_at(track)
         .ok_or(EditError::TrackOutOfRange { track })?;
     // Preset loads follow the sound binding like any other device edit
-    // (takes spec 16.4), including materializing the scene pattern when the
-    // current scene is bare for the track — same resolution as
-    // `resolve_device_value_target`.
+    // (takes spec 16.4); on a bare lane they land on the track sound
+    // (track-sound spec §2.2) — same resolution as
+    // `resolve_device_value_target`, never materializing a scene cell.
     let pattern = match app.bound_read_pattern(track) {
         Some(pattern) if !app.track_sound_binding(track).is_scene() => pattern,
-        _ => ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?,
+        _ => app
+            .state
+            .effective_track_pattern_id(track)
+            .or_else(|| app.state.track_sound_pattern_id(track))
+            .ok_or(EditError::MissingTrackPattern)?,
     };
     let target = ResolvedDeviceTarget {
         id: DeviceId::TrackInstrument(track_id),
@@ -8439,11 +8449,12 @@ mod tests {
         assert!(!app.state.capture_step_snapshot(1, 4).active);
     }
 
-    /// Regression: loading an instrument preset in a bare scene must
-    /// materialize the scene's pattern like every other device edit path
-    /// (takes spec 11.1/16.4) instead of failing with `MissingTrackPattern`.
+    /// Track-sound spec §2.2: loading an instrument preset on a bare lane
+    /// resolves the TRACK SOUND — it neither fails with
+    /// `MissingTrackPattern` nor mints a scene cell (the old lazy
+    /// materialization, spec §1.1).
     #[test]
-    fn instrument_preset_load_materializes_a_bare_scene_pattern() {
+    fn instrument_preset_load_on_a_bare_lane_edits_the_track_sound_without_minting() {
         let state = SequencerState::new(
             2,
             vec![default_empty_effect_chain(), default_empty_effect_chain()],
@@ -8482,10 +8493,14 @@ mod tests {
         assert!(app.state.effective_track_pattern_id(1).is_none());
 
         apply_recorded_instrument_values_mutation(&mut app, 1, "Load preset", |_app| Ok(()))
-            .expect("the preset load resolves a pattern in a bare scene");
+            .expect("the preset load resolves the track sound on a bare lane");
         assert!(
-            app.state.effective_track_pattern_id(1).is_some(),
-            "the bare scene's pattern is materialized on demand"
+            app.state.effective_track_pattern_id(1).is_none(),
+            "a device edit never materializes a scene cell (track-sound spec §2.2)"
+        );
+        assert!(
+            app.state.track_sound_pattern_id(1).is_some(),
+            "the track sound is the resolved write target"
         );
     }
 

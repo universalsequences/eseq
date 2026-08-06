@@ -63,6 +63,9 @@ pub struct TrackPatternLaneState {
     pub scene_cells: Vec<Option<PatternId>>,
     /// Per-scene cell sound refs for this lane, parallel to `scene_cells`.
     pub cell_sounds: Vec<SoundRefs>,
+    /// The lane's track-sound carrier pattern (track-sound spec §2.1); its
+    /// entities travel inside `pool`.
+    pub track_sound: Option<PatternId>,
     pub track_override: Option<PatternId>,
     pub scene_references: Vec<SceneTrackReferenceState>,
     pub sidechains: Vec<TrackSidechainPatternState>,
@@ -109,6 +112,22 @@ impl TrackPatternPool {
         self.next_id = id.0.saturating_add(1).max(1);
         self.patterns.insert(id, Arc::new(stored));
         id
+    }
+
+    /// Insert a hidden carrier pattern for an existing entity pair — the
+    /// track-sound representation (track-sound spec §2.1): a pool pattern
+    /// with an empty default sequence whose only job is to name the track's
+    /// own Patch/Mix so the whole device-edit machinery (capture, restore,
+    /// undo, re-link) works on the track sound through an ordinary
+    /// `PatternId`. Never assigned to a cell, hidden from the clip grid.
+    pub fn insert_bare_sound_pattern(&mut self, sound: SoundRefs) -> Option<PatternId> {
+        if !self.sounds.resolves(sound) {
+            return None;
+        }
+        Some(self.insert_stored(StoredPattern {
+            seq: TrackPatternSeq::new_default(),
+            sound,
+        }))
     }
 
     pub fn contains(&self, id: PatternId) -> bool {
@@ -259,6 +278,12 @@ pub struct ProjectScenes {
     pub scenes: Vec<Scene>,
     pub current_scene: usize,
     pub track_overrides: Vec<Option<PatternId>>,
+    /// Per-track **track sound** (track-sound spec §2.1): the hidden carrier
+    /// pattern whose Patch/Mix pair is the sound a bare lane monitors, edits,
+    /// and records with. Owned by the track, never resolved through
+    /// `current_scene`, unaffected by transport and scene launches. Kept
+    /// parallel to `track_pools`; `ensure_track_sounds` repairs gaps.
+    pub track_sounds: Vec<Option<PatternId>>,
     pub(super) next_scene_id: u64,
 }
 
@@ -330,16 +355,93 @@ impl ProjectScenes {
             });
         }
 
-        Self {
+        let mut built = Self {
             take_pools: vec![TrackTakePool::default(); track_pools.len()],
             track_pools,
             scenes,
             current_scene: current_scene.min(snapshots.len().saturating_sub(1)),
             track_overrides: vec![None; track_count],
+            track_sounds: vec![None; track_count],
             next_scene_id: u64::try_from(snapshots.len().max(1))
                 .expect("scene count exceeds stable identity space")
                 .checked_add(1)
                 .expect("scene identity space exhausted"),
+        };
+        built.ensure_track_sounds();
+        built
+    }
+
+    /// The track's own sound carrier pattern (track-sound spec §2.1).
+    pub fn track_sound_pattern(&self, track: usize) -> Option<PatternId> {
+        self.track_sounds.get(track).copied().flatten()
+    }
+
+    /// The track sound's `(patch_ref, mix_ref)` pair.
+    pub fn track_sound_refs(&self, track: usize) -> Option<SoundRefs> {
+        let id = self.track_sound_pattern(track)?;
+        self.track_pools.get(track)?.refs(id)
+    }
+
+    /// Seed one track's sound (track-sound spec §2.6): clone (fork) the refs
+    /// of the first resolving cell — scene-0-first scan — else fork the
+    /// newest take's sound (the takes-only workflow this feature exists for:
+    /// a default Patch would carry an empty device chain while the takes
+    /// hold the sound the user actually hears), else mint a fresh default
+    /// Patch/Mix. Always a fork, never an alias — edits to the track sound
+    /// must not retune the seeding cell or take. Replaces any existing
+    /// entry.
+    pub fn seed_track_sound(&mut self, track: usize) -> Option<PatternId> {
+        if track >= self.track_pools.len() {
+            return None;
+        }
+        let source_refs = self
+            .scenes
+            .iter()
+            .find_map(|scene| {
+                let id = scene.cells.get(track).copied().flatten()?;
+                self.track_pools.get(track)?.refs(id)
+            })
+            .or_else(|| {
+                self.take_pools
+                    .get(track)?
+                    .takes
+                    .iter()
+                    .max_by_key(|take| take.id.0)
+                    .map(|take| take.sound)
+            });
+        let pool = &mut self.track_pools[track];
+        let sound = match source_refs {
+            Some(refs) => pool.sounds.fork(refs),
+            None => pool.sounds.insert(Patch::new_default(), Mix::default()),
+        };
+        let id = pool.insert_bare_sound_pattern(sound)?;
+        while self.track_sounds.len() <= track {
+            self.track_sounds.push(None);
+        }
+        self.track_sounds[track] = Some(id);
+        Some(id)
+    }
+
+    /// Repair pass: every track holds a resolving track sound. Missing or
+    /// dangling entries are re-seeded per §2.6; run at construction, when
+    /// tracks grow, and after project-load reshaping.
+    pub fn ensure_track_sounds(&mut self) {
+        self.track_sounds.resize(self.track_pools.len(), None);
+        self.track_sounds.truncate(self.track_pools.len());
+        for track in 0..self.track_pools.len() {
+            let resolves = self
+                .track_sounds
+                .get(track)
+                .copied()
+                .flatten()
+                .is_some_and(|id| {
+                    self.track_pools
+                        .get(track)
+                        .is_some_and(|pool| pool.contains(id))
+                });
+            if !resolves {
+                self.seed_track_sound(track);
+            }
         }
     }
 
@@ -417,7 +519,7 @@ impl ProjectScenes {
     }
 
     pub fn save_scene_snapshot(&mut self, scene_idx: usize, snapshot: PatternSnapshot) -> bool {
-        self.save_scene_snapshot_masked(scene_idx, snapshot, 0)
+        self.save_scene_snapshot_masked(scene_idx, snapshot, 0, 0)
     }
 
     /// Save a live-grid snapshot into a scene, skipping lanes whose live
@@ -428,11 +530,18 @@ impl ProjectScenes {
     /// happens to be live. A stale lane is still saved when a track override
     /// pins its own pattern id — that write is a self-write into the pattern
     /// the lane is actually playing.
+    ///
+    /// `latched_mask` (a subset of `stale_mask`) marks manually latched
+    /// lanes: on a bare lane the mirror's device state normally belongs to
+    /// the track sound and is persisted there (track-sound spec §2.3), but a
+    /// latched lane's mirror is the performer's clip — its device deltas
+    /// must not leak into the track sound.
     pub fn save_scene_snapshot_masked(
         &mut self,
         scene_idx: usize,
         snapshot: PatternSnapshot,
         stale_mask: u64,
+        latched_mask: u64,
     ) -> bool {
         while self.track_pools.len() < snapshot.track_bits.len() {
             self.track_pools.push(TrackPatternPool::default());
@@ -449,6 +558,8 @@ impl ProjectScenes {
         while self.take_pools.len() < self.track_pools.len() {
             self.take_pools.push(TrackTakePool::default());
         }
+        // New tracks get a track sound with their pool (§2.1).
+        self.ensure_track_sounds();
         let Some(scene) = self.scenes.get_mut(scene_idx) else {
             return false;
         };
@@ -495,27 +606,30 @@ impl ProjectScenes {
                 continue;
             }
             let Some(id) = resolved else {
-                // Bare track (takes spec 11.1): no pattern exists anywhere
-                // for this lane — the pool is EMPTY, which distinguishes a
-                // bare track from a deliberately cleared cell (cleared
-                // cells must stay cleared). Materialize one lazily on the
-                // first real content (any active step) so live edits
-                // persist; an untouched bare track keeps its empty pool
-                // and None cell.
-                // Take chunks don't make a track non-bare: only grid-visible
-                // (unclaimed) patterns count.
-                let has_grid_pattern = self.track_pools[track].patterns.keys().any(|id| {
-                    !self
-                        .take_pools
-                        .get(track)
-                        .is_some_and(|takes| takes.is_claimed(*id))
-                });
-                if !has_grid_pattern && data.track_bits.iter().any(|bits| *bits != 0) {
-                    let id = self.track_pools[track].insert(data);
-                    scene.cells[track] = Some(id);
-                    if let Some(refs) = self.track_pools[track].refs(id) {
-                        scene.cell_sounds[track] = refs;
-                    }
+                // Sticky bare lane (track-sound spec §2.3): a lane the user
+                // emptied stays empty — never mint a cell from leftover live
+                // content (the ghost-step resurrection, spec §1.2). The live
+                // mirror's device/mixer state on a bare lane belongs to the
+                // TRACK SOUND, so persist it there instead of dropping the
+                // user's edits. A latched lane's mirror is the performer's
+                // clip, not the track's own sound — skip it. A cell holding
+                // a dangling pattern id is ambiguous, not bare — skip it too.
+                let latched = track < 64 && latched_mask >> track & 1 == 1;
+                let cell_dangling = scene.cells.get(track).copied().flatten().is_some();
+                if latched || cell_dangling {
+                    continue;
+                }
+                if let Some(refs) = self
+                    .track_sounds
+                    .get(track)
+                    .copied()
+                    .flatten()
+                    .and_then(|id| self.track_pools[track].refs(id))
+                {
+                    let (_seq, patch, mix) = data.split();
+                    let sounds = &mut self.track_pools[track].sounds;
+                    sounds.patches.insert(refs.patch, Arc::new(patch));
+                    sounds.mixes.insert(refs.mix, Arc::new(mix));
                 }
                 continue;
             };
@@ -770,12 +884,16 @@ impl ProjectScenes {
         let overridden = override_id.is_some();
         // Take chunks are hidden from the clip grid (takes spec 11.2):
         // ownership by a take is the single source of truth for "hidden".
+        // The track-sound carrier (track-sound spec §2.1) is not a clip
+        // either.
         let takes = self.take_pools.get(track);
+        let track_sound = self.track_sound_pattern(track);
         let mut ids = pool
             .patterns
             .keys()
             .copied()
             .filter(|id| !takes.is_some_and(|takes| takes.is_claimed(*id)))
+            .filter(|id| Some(*id) != track_sound)
             .collect::<Vec<_>>();
         ids.sort_by_key(|id| id.0);
         ids.into_iter()
@@ -875,6 +993,11 @@ impl ProjectScenes {
             .get(track)
             .is_some_and(|takes| takes.is_claimed(id))
         {
+            return false;
+        }
+        // The track-sound carrier is not user-deletable content (§2.1): it
+        // is the persistent sound of the track itself.
+        if self.track_sound_pattern(track) == Some(id) {
             return false;
         }
         let Some(pool) = self.track_pools.get_mut(track) else {
@@ -996,6 +1119,9 @@ impl ProjectScenes {
         if track < self.track_overrides.len() {
             self.track_overrides.remove(track);
         }
+        if track < self.track_sounds.len() {
+            self.track_sounds.remove(track);
+        }
         true
     }
 
@@ -1012,9 +1138,13 @@ impl ProjectScenes {
                 referenced.insert(id);
             }
             // Take chunks are referenced through take ownership, never scene
-            // cells (takes spec 6.1); purging must not drop them.
+            // cells (takes spec 6.1); purging must not drop them. The
+            // track-sound carrier is likewise a permanent referent (§2.1).
             if let Some(takes) = self.take_pools.get(track) {
                 referenced.extend(takes.claimed());
+            }
+            if let Some(id) = self.track_sound_pattern(track) {
+                referenced.insert(id);
             }
 
             let before = self.track_pools[track].patterns.len();
@@ -1116,6 +1246,23 @@ impl ProjectScenes {
                         take.id.0
                     ));
                 }
+            }
+        }
+        // The track sound (track-sound spec §2.1) always resolves: its
+        // carrier pattern exists in the pool (the pattern loop above then
+        // validates its refs).
+        for track in 0..self.track_pools.len() {
+            let resolves = self
+                .track_sounds
+                .get(track)
+                .copied()
+                .flatten()
+                .is_some_and(|id| self.track_pools[track].contains(id));
+            if !resolves {
+                return Err(format!(
+                    "Track {} has no resolving track sound",
+                    track + 1
+                ));
             }
         }
         Ok(())

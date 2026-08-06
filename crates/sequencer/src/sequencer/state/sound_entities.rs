@@ -774,6 +774,7 @@ mod tests {
             vec![(cell_refs.patch.0, cell_refs.mix.0, carrier_data)],
             Vec::new(),
             Vec::new(),
+            None,
         )]);
 
         loaded.with_project_scenes(|scenes| {
@@ -792,6 +793,181 @@ mod tests {
                 scenes.track_pools[0].refs(id),
                 Some(scenes.scenes[0].cell_sounds[0])
             );
+        });
+    }
+
+    /// Track-sound spec §2.5 (symptom-6 regression): the first cell created
+    /// on a formerly-bare lane seeds its sound FROM the track sound —
+    /// clone-by-default, never an alias.
+    #[test]
+    fn a_new_cell_on_a_formerly_bare_lane_seeds_its_sound_from_the_track_sound() {
+        let state = state_with_scenes(1, 1);
+        state.with_scenes_mut(|scenes| {
+            let id = scenes.scenes[0].cells[0].expect("cell");
+            assert!(scenes.delete_track_pattern(0, id));
+        });
+        // The bare lane's mirror IS the track sound (§2.3): a live edit sits
+        // there awaiting the next save-back.
+        state.pattern.instrument_base_note_offsets[0].store(9.0f32.to_bits(), Ordering::Relaxed);
+
+        // An explicit content gesture materializes a pattern (§2.5).
+        let snapshot = state.capture_current_pattern_snapshot(
+            1,
+            &[-1],
+            &[44_100],
+            &["Track 1".to_string()],
+            &[InstrumentType::Sampler],
+        );
+        let mut data = snapshot.track_pattern_data(0).expect("lane data");
+        data.track_bits[0] |= 1;
+        let id = state
+            .materialize_current_scene_pattern(0, data)
+            .expect("content gesture materializes a cell");
+
+        state.with_project_scenes(|scenes| {
+            let cell_refs = scenes.track_pools[0].refs(id).expect("cell refs");
+            let track_refs = scenes.track_sound_refs(0).expect("track sound");
+            assert_ne!(
+                cell_refs, track_refs,
+                "the new cell CLONES the track sound (§2.5), never aliases it"
+            );
+            let cell = scenes.track_pools[0].get(id).expect("cell data");
+            assert_eq!(
+                cell.instrument_base_note_offset.to_bits(),
+                9.0f32.to_bits(),
+                "the new cell's sound content comes from the track sound"
+            );
+            let absorbed = scenes.track_pools[0]
+                .compose_bare_sound(track_refs)
+                .expect("track sound composes");
+            assert_eq!(
+                absorbed.instrument_base_note_offset.to_bits(),
+                9.0f32.to_bits(),
+                "the mirror's un-saved edit was absorbed into the track sound"
+            );
+            scenes.validate_sound_refs().expect("refs resolve");
+        });
+    }
+
+    /// Track-sound spec §2.6: loading a project without the serialized track
+    /// sound seeds it from the first RESOLVING cell (post-presence), forked,
+    /// and from the newest take when no cell resolves anywhere.
+    #[test]
+    fn track_sound_seeding_prefers_first_resolving_cell_then_takes() {
+        // Scene 0 bare, scene 1 resolves: the seed comes from scene 1.
+        let state = state_with_scenes(1, 2);
+        state.with_scenes_mut(|scenes| {
+            let id = scenes.scenes[1].cells[0].expect("scene 1 cell");
+            assert!(scenes.track_pools[0].edit(id, |data| {
+                data.instrument_base_note_offset = 5.0;
+            }));
+        });
+        state.install_project_arrangement(&[vec![false], vec![true]], Vec::new());
+        state.with_project_scenes(|scenes| {
+            let refs = scenes.track_sound_refs(0).expect("track sound");
+            let data = scenes.track_pools[0]
+                .compose_bare_sound(refs)
+                .expect("track sound composes");
+            assert_eq!(
+                data.instrument_base_note_offset.to_bits(),
+                5.0f32.to_bits(),
+                "the seed forks the first resolving cell's sound"
+            );
+            let cell_refs = scenes.scenes[1].cells[0]
+                .and_then(|id| scenes.track_pools[0].refs(id))
+                .expect("cell refs");
+            assert_ne!(refs, cell_refs, "forked, never aliased");
+        });
+
+        // Takes-only project: the seed comes from the newest take's sound.
+        let takes_only = state_with_scenes(1, 1);
+        let take = takes_only
+            .register_track_take(0, None, vec![chunk_template(0.9, 12.0)], 16, None)
+            .expect("take registers");
+        takes_only.install_project_arrangement(&[vec![false]], Vec::new());
+        takes_only.with_project_scenes(|scenes| {
+            let refs = scenes.track_sound_refs(0).expect("track sound");
+            let data = scenes.track_pools[0]
+                .compose_bare_sound(refs)
+                .expect("track sound composes");
+            assert_eq!(
+                data.instrument_base_note_offset.to_bits(),
+                12.0f32.to_bits(),
+                "a takes-only lane seeds from the take's sound"
+            );
+            let take_sound = scenes.take_pools[0].get(take).expect("take").sound;
+            assert_ne!(refs, take_sound, "forked, never aliased");
+        });
+    }
+
+    /// Track-sound spec §2.1/§2.6: the track sound's refs and content
+    /// survive a save-shaped export → load through the sound model (the
+    /// `track` field plus an orphan carrier).
+    #[test]
+    fn track_sound_survives_round_trip_via_track_field_and_carrier() {
+        let names = ["Track 1".to_string()];
+        let types = [InstrumentType::Sampler];
+        let source = state_with_scenes(1, 1);
+        source.with_scenes_mut(|scenes| {
+            let id = scenes.scenes[0].cells[0].expect("cell");
+            assert!(scenes.delete_track_pattern(0, id));
+        });
+        // A live mixer move persists into the track sound via the bare-lane
+        // save-back (§2.3).
+        source.pattern.track_params[0].set_volume(0.77);
+        assert!(source.save_current_pattern_snapshot(1, &[-1], &[44_100], &names, &types));
+
+        // Save-shaped export: dense bank + presence + refs + carriers, the
+        // pieces `finish_project_load` reassembles.
+        let bank = source.export_pattern_repository();
+        let (cell_refs, cell_carrier, track_refs, track_carrier) =
+            source.with_project_scenes(|scenes| {
+                let cell_refs = scenes.scenes[0].cell_sounds[0];
+                let track_refs = scenes.track_sound_refs(0).expect("track sound");
+                (
+                    cell_refs,
+                    scenes.track_pools[0]
+                        .compose_bare_sound(cell_refs)
+                        .expect("cell carrier"),
+                    track_refs,
+                    scenes.track_pools[0]
+                        .compose_bare_sound(track_refs)
+                        .expect("track carrier"),
+                )
+            });
+
+        let loaded = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        loaded.replace_pattern_repository(bank, 0);
+        loaded.install_project_arrangement(&[vec![false]], Vec::new());
+        loaded.apply_project_sound_model(&[(
+            vec![(cell_refs.patch.0, cell_refs.mix.0)],
+            vec![None],
+            Vec::new(),
+            vec![
+                (cell_refs.patch.0, cell_refs.mix.0, cell_carrier),
+                (track_refs.patch.0, track_refs.mix.0, track_carrier),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Some((track_refs.patch.0, track_refs.mix.0)),
+        )]);
+
+        loaded.with_project_scenes(|scenes| {
+            scenes.validate_sound_refs().expect("refs resolve");
+            assert!(scenes.scenes[0].cells[0].is_none(), "the lane stays bare");
+            let refs = scenes.track_sound_refs(0).expect("track sound resolves");
+            let data = scenes.track_pools[0]
+                .compose_bare_sound(refs)
+                .expect("track sound composes");
+            assert_eq!(
+                data.track_params.volume.to_bits(),
+                0.77f32.to_bits(),
+                "the track sound's content survived the round trip"
+            );
+            // The cell's own sound is distinct and untouched by the track
+            // sound's value.
+            let cell = scenes.scenes[0].cell_sounds[0];
+            assert_ne!(cell, refs, "cell sound and track sound stay distinct");
         });
     }
 

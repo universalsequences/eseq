@@ -174,6 +174,14 @@ pub struct ProjectTrackSounds {
     /// defaults. One entry per uncarried `(patch, mix)` pair.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub orphan_sounds: Vec<ProjectOrphanSound>,
+    /// The TRACK SOUND's refs (track-sound spec §2.1/§2.6): the persistent
+    /// per-track Patch/Mix pair a bare lane monitors, edits, and records
+    /// with. Additive: absent (older files) means the loader seeds it from
+    /// the first resolving cell's refs, else a fresh default Patch. Content
+    /// rides an `orphan_sounds` carrier when no pattern or take carries the
+    /// pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<ProjectSoundRefs>,
     /// §17.11 display metadata (name + palette color) per Patch entity,
     /// keyed by file-local id — never positional, pool iteration order is
     /// nondeterministic. Empty for files predating the palette UI; the
@@ -3462,6 +3470,7 @@ mod tests {
             cells: vec![ProjectSoundRefs { patch: 5, mix: 6 }],
             patterns: vec![None],
             takes: Vec::new(),
+            track: None,
             orphan_sounds: vec![ProjectOrphanSound {
                 patch: 5,
                 mix: 6,
@@ -3508,6 +3517,7 @@ mod tests {
             cells: vec![ProjectSoundRefs { patch: 5, mix: 6 }],
             patterns: vec![None],
             takes: Vec::new(),
+            track: None,
             orphan_sounds: Vec::new(),
             patch_meta: vec![ProjectSoundEntityMeta {
                 id: 5,

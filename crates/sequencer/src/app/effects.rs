@@ -905,6 +905,10 @@ impl App {
         self.state.pattern.midi_fx_slots[track][slot_idx].apply_descriptor(&desc, 0);
 
         self.state.save_current_track_midi_fx_snapshot(track);
+        // The track sound's chain layout must follow the append (track-sound
+        // spec §2.3), or the carrier drifts from the live chain.
+        self.state
+            .insert_midi_fx_slot_in_track_sound(track, slot_idx, desc.name.clone(), &desc);
         self.device_registry
             .insert_midi_effect_identity(track_id, slot_idx, old_len)?;
 
@@ -4270,7 +4274,8 @@ mod tests {
             )
             .expect("cached instrument should be found")
             .expect("cached swap should succeed");
-        assert_eq!(cached_summary.patterns_reset, 1);
+        // Scene pattern + track-sound carrier.
+        assert_eq!(cached_summary.patterns_reset, 2);
         assert_eq!(app.graph.track_engine_ids, vec![Some(cached_engine_id)]);
         assert_eq!(app.tracks, vec!["cached"]);
         assert!(app.graph.engine_node_ids[0].is_none());
@@ -4289,7 +4294,7 @@ mod tests {
                 },
             )
             .expect("compiled swap should succeed");
-        assert_eq!(compiled_summary.patterns_reset, 1);
+        assert_eq!(compiled_summary.patterns_reset, 2);
         assert_eq!(app.graph.track_engine_ids, vec![Some(2)]);
         assert!(app.graph.engine_node_ids[cached_engine_id].is_none());
         assert_eq!(app.tracks, vec!["compiled"]);

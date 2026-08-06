@@ -161,6 +161,9 @@ impl SequencerState {
                 scenes.track_pools[track].sounds.mixes.remove(&refs.mix);
             }
         }
+        // The new track gets its track sound (track-sound spec §2.1), seeded
+        // from the scene-0 cell just materialized (§2.6).
+        scenes.ensure_track_sounds();
         debug_assert!(
             scenes.validate_sound_refs().is_ok(),
             "sound refs invalid after track add: {:?}",

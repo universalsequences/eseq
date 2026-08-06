@@ -519,8 +519,11 @@ impl SequencerState {
 
     /// The pool pattern whose device state the live mirror currently shows
     /// for `track`: the bound source's pattern while a sound binding holds
-    /// the lane (takes spec 16.2), else the effective scene pattern. Device
-    /// edits use this to decide whether the live surface IS the target.
+    /// the lane (takes spec 16.2), the effective scene pattern otherwise —
+    /// and on a bare lane (no cell, no override) the TRACK SOUND's carrier
+    /// pattern (track-sound spec §2.3: the live mirror on a bare lane *is*
+    /// the track sound). Device edits use this to decide whether the live
+    /// surface IS the target.
     pub(crate) fn mirror_device_pattern_id(
         &self,
         track: usize,
@@ -531,7 +534,9 @@ impl SequencerState {
                 return Some(*pattern);
             }
         }
-        scenes.effective_pattern_id(track)
+        scenes
+            .effective_pattern_id(track)
+            .or_else(|| scenes.track_sound_pattern(track))
     }
 
     /// Put every borrowed lane's effective scene pattern back behind the

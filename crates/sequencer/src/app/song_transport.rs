@@ -515,6 +515,20 @@ impl App {
                     None
                 };
                 self.state.stop_playback();
+                // Persist the live grid like the SongPlayback arm does
+                // (track-sound spec §2.3): the save is masked, so latched
+                // lanes with pins self-write, other stale lanes are skipped,
+                // and bare lanes flow their device tweaks into the TRACK
+                // SOUND — device edits made while recording must survive the
+                // stop. Runs BEFORE the latch clears so the masking still
+                // sees latched lanes as stale.
+                let _ = self.state.save_current_pattern_snapshot(
+                    self.tracks.len(),
+                    &self.graph.track_buffer_ids,
+                    &self.graph.track_sample_rates,
+                    &self.tracks,
+                    &self.graph.track_instrument_types,
+                );
                 // Unlock the song editing primitives before committing: the
                 // commit itself goes through `song_replace`.
                 self.set_song_transport_mode(SongTransportMode::Stopped);

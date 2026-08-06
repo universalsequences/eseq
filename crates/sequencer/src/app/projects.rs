@@ -2020,15 +2020,22 @@ impl App {
                 carried_patches.insert(refs.patch);
                 carried_mixes.insert(refs.mix);
             }
-            // Any cell naming an uncarried entity gets a content carrier for
-            // its pair (one per distinct pair — bare cells left behind by a
-            // pattern delete can share). A pair whose carried half is
-            // duplicated into the carrier is harmless: the loader seeds only
-            // ids that content-carrying referents didn't already claim.
+            // The track sound (track-sound spec §2.1) serializes its refs
+            // like a cell does; content rides a carrier below when nothing
+            // else carries the pair.
+            let track_refs = scenes_for_takes
+                .track_sound_refs(track)
+                .map(to_refs);
+            // Any cell (or the track sound) naming an uncarried entity gets
+            // a content carrier for its pair (one per distinct pair — bare
+            // cells left behind by a pattern delete can share). A pair whose
+            // carried half is duplicated into the carrier is harmless: the
+            // loader seeds only ids that content-carrying referents didn't
+            // already claim.
             let mut orphan_sounds = Vec::new();
             let mut emitted: std::collections::HashSet<(u64, u64)> =
                 std::collections::HashSet::new();
-            for refs in &cells {
+            for refs in cells.iter().chain(track_refs.iter()) {
                 if refs.patch == u64::MAX || refs.mix == u64::MAX {
                     continue;
                 }
@@ -2088,7 +2095,7 @@ impl App {
             // pruned entities are never named, so their meta drops with them.
             let mut named_patches: std::collections::HashSet<u64> = carried_patches;
             let mut named_mixes: std::collections::HashSet<u64> = carried_mixes;
-            for refs in &cells {
+            for refs in cells.iter().chain(track_refs.iter()) {
                 if refs.patch != u64::MAX {
                     named_patches.insert(refs.patch);
                 }
@@ -2131,6 +2138,7 @@ impl App {
                 cells,
                 patterns,
                 takes,
+                track: track_refs,
                 orphan_sounds,
                 patch_meta,
                 mix_meta,
@@ -3309,6 +3317,7 @@ impl App {
                     .into_iter()
                     .map(|meta| (meta.id, meta.name, meta.color))
                     .collect::<Vec<_>>(),
+                sounds.track.map(|refs| (refs.patch, refs.mix)),
             ));
         }
         self.state.apply_project_sound_model(&sound_model);

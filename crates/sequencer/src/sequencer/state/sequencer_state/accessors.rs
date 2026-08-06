@@ -726,6 +726,51 @@ impl SequencerState {
                 take_pool.next_take_id = take_pool.next_take_id.max(next_take_id);
             }
         }
+        // Re-seed every track sound now that bare cells are re-applied
+        // (track-sound spec §2.6): the constructor seeded against the dense
+        // bank before absence was known, so a track whose first cells are
+        // bare would otherwise carry a default-lane sound instead of its
+        // first RESOLVING cell's. Files that serialize the track sound
+        // re-link it afterwards in `apply_project_sound_model`; the reseeded
+        // private entities become orphans and are pruned.
+        for track in 0..scenes.track_pools.len() {
+            if let Some(id) = scenes.track_sounds.get(track).copied().flatten() {
+                if let Some(pool) = scenes.track_pools.get_mut(track) {
+                    pool.remove(id);
+                }
+            }
+            if track < scenes.track_sounds.len() {
+                scenes.track_sounds[track] = None;
+            }
+        }
+        scenes.ensure_track_sounds();
+    }
+
+    /// The track-sound carrier pattern id (track-sound spec §2.1).
+    pub fn track_sound_pattern_id(&self, track: usize) -> Option<PatternId> {
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .track_sound_pattern(track)
+    }
+
+    /// Load the track sound's device state into the live mirror. Only
+    /// meaningful on a bare lane (track-sound spec §2.2: the mirror there IS
+    /// the track sound) — a repoint of the track sound has no cell restore
+    /// to make it audible, so the caller re-loads it explicitly.
+    pub fn restore_track_sound_to_mirror(&self, track: usize) -> bool {
+        let data = {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            let Some(id) = scenes.track_sound_pattern(track) else {
+                return false;
+            };
+            scenes.track_pools.get(track).and_then(|pool| pool.get(id))
+        };
+        match data {
+            Some(data) => data.restore_device_state_to(self, track),
+            None => false,
+        }
     }
 
     /// Apply a project file's serialized sound ref STRUCTURE (takes spec
@@ -747,6 +792,7 @@ impl SequencerState {
     /// meaning name-only (§17.11). Every pool finishes with `ensure_meta`,
     /// so files predating display metadata load with mint-style
     /// auto-assignments.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn apply_project_sound_model(
         &self,
         track_sounds: &[(
@@ -756,10 +802,11 @@ impl SequencerState {
             Vec<(u64, u64, TrackPatternData)>,
             Vec<(u64, String, i32)>,
             Vec<(u64, String, i32)>,
+            Option<(u64, u64)>,
         )],
     ) {
         let mut scenes = self.pattern.scenes.lock().unwrap();
-        for (track, (cells, patterns, takes, carriers, patch_meta, mix_meta)) in
+        for (track, (cells, patterns, takes, carriers, patch_meta, mix_meta, track_refs)) in
             track_sounds.iter().enumerate()
         {
             if track >= scenes.track_pools.len() {
@@ -884,6 +931,41 @@ impl SequencerState {
                         patch: canonical_patch,
                         mix: canonical_mix,
                     };
+                }
+            }
+            // The track sound (track-sound spec §2.6): re-link the carrier
+            // pattern to the file's entities — shared ids canonicalize onto
+            // a referent that carried content (a cell pattern, a take, or an
+            // orphan carrier); unknown ids keep the load-time reseed.
+            if let Some((file_patch, file_mix)) = track_refs {
+                if *file_patch != u64::MAX && *file_mix != u64::MAX {
+                    if let Some(live) = scenes
+                        .track_sounds
+                        .get(track)
+                        .copied()
+                        .flatten()
+                        .and_then(|id| scenes.track_pools.get(track)?.refs(id))
+                    {
+                        let canonical_patch =
+                            *patch_map.entry(*file_patch).or_insert(live.patch);
+                        let canonical_mix = *mix_map.entry(*file_mix).or_insert(live.mix);
+                        let canonical = SoundRefs {
+                            patch: canonical_patch,
+                            mix: canonical_mix,
+                        };
+                        if canonical != live {
+                            if let (Some(id), Some(pool)) = (
+                                scenes.track_sounds.get(track).copied().flatten(),
+                                scenes.track_pools.get_mut(track),
+                            ) {
+                                if let Some(stored) =
+                                    pool.patterns.get_mut(&id).map(Arc::make_mut)
+                                {
+                                    stored.sound = canonical;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             // §17.11 display metadata, translated through the file-id →
@@ -1371,6 +1453,12 @@ impl SequencerState {
     /// `track`'s pool and assign it to the CURRENT scene's empty cell.
     /// Returns `None` when the track is out of range or the cell already
     /// holds a pattern (callers re-resolve instead of overwriting).
+    ///
+    /// Seeding (track-sound spec §2.5): the new pattern's sound CLONES the
+    /// track sound — the "set the sound, then record" workflow. `data` is
+    /// captured from the live mirror, which on a bare lane is the track
+    /// sound; its device half is first absorbed into the track sound (so
+    /// un-saved mixer moves are not lost), then forked for the new cell.
     pub(crate) fn materialize_current_scene_pattern(
         &self,
         track: usize,
@@ -1389,7 +1477,22 @@ impl SequencerState {
         {
             return None;
         }
-        let id = scenes.track_pools.get_mut(track)?.insert(data);
+        let track_sound = scenes.track_sound_refs(track);
+        let id = match track_sound {
+            Some(refs) => {
+                let pool = scenes.track_pools.get_mut(track)?;
+                // Absorb the mirror's device half into the track sound
+                // (mixer moves persist only at save-backs), then fork it
+                // for the new cell. `insert_with_refs` keeps only the
+                // sequence half of `data` — the fork is the sound.
+                let (_seq, patch, mix) = data.clone().split();
+                pool.sounds.patches.insert(refs.patch, Arc::new(patch));
+                pool.sounds.mixes.insert(refs.mix, Arc::new(mix));
+                let sound = pool.sounds.fork(refs);
+                pool.insert_with_refs(data, sound)
+            }
+            None => scenes.track_pools.get_mut(track)?.insert(data),
+        };
         let refs = scenes.track_pools.get(track)?.refs(id)?;
         {
             let scene = scenes.scenes.get_mut(current)?;
@@ -1540,7 +1643,7 @@ impl SequencerState {
             .scenes
             .lock()
             .unwrap()
-            .save_scene_snapshot_masked(current_pattern, snapshot, self.stale_live_lane_mask())
+            .save_scene_snapshot_masked(current_pattern, snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask())
     }
 
     /// Write one lane out of a scene-derived snapshot into the pattern that

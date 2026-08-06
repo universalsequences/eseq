@@ -87,6 +87,38 @@ impl SequencerState {
         Ok(())
     }
 
+    /// Keep the TRACK SOUND's chain layout in step with a live-lane
+    /// structural append (track-sound spec §2.3): `add_midi_fx_to_track_sync`
+    /// self-writes only the effective lane, so without this the carrier's
+    /// MIDI-FX chain drifts from the track's and later slot edits / history
+    /// replays fail descriptor validation. Skipped when the carrier shares
+    /// the effective pattern's Patch — the self-write already reached it.
+    pub fn insert_midi_fx_slot_in_track_sound(
+        &self,
+        track: usize,
+        slot_idx: usize,
+        name: String,
+        descriptor: &EffectDescriptor,
+    ) {
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(id) = scenes.track_sound_pattern(track) else {
+            return;
+        };
+        let effective_patch = scenes
+            .effective_pattern_id(track)
+            .and_then(|effective| scenes.track_pools.get(track)?.refs(effective))
+            .map(|refs| refs.patch);
+        let Some(pool) = scenes.track_pools.get_mut(track) else {
+            return;
+        };
+        if pool.refs(id).map(|refs| refs.patch) == effective_patch && effective_patch.is_some() {
+            return;
+        }
+        pool.edit(id, |data| {
+            data.insert_midi_fx_slot(slot_idx, name.clone(), descriptor);
+        });
+    }
+
     pub fn move_midi_fx_slot_in_other_track_patterns(
         &self,
         track: usize,

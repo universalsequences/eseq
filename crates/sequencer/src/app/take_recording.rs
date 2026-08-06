@@ -228,6 +228,83 @@ mod tests {
             .expect("press instant")
     }
 
+    /// Empty every scene cell on track 0 (the takes-only workflow): cells
+    /// cleared, grid patterns deleted, only the track-sound carrier remains.
+    fn empty_track_lane(app: &mut App) {
+        app.state.with_scenes_mut(|scenes| {
+            let scene_count = scenes.scenes.len();
+            for scene_idx in 0..scene_count {
+                if let Some(id) = scenes.clear_cell(scene_idx, 0) {
+                    scenes.delete_track_pattern(0, id);
+                }
+            }
+        });
+        assert!(app.state.effective_track_pattern_id(0).is_none());
+    }
+
+    /// Track-sound spec §2.4 (symptom 4): punch-in on a bare lane stamps the
+    /// TRACK SOUND — exactly what the lane monitors — so the committed take
+    /// plays back with the sound the performer heard, not the cursor row's
+    /// scene cell.
+    #[test]
+    fn recorded_take_binds_to_the_monitored_track_sound_on_a_bare_lane() {
+        let (mut app, anchor) = capture_app();
+        empty_track_lane(&mut app);
+        let track_sound = app
+            .state
+            .with_project_scenes(|scenes| scenes.track_sound_refs(0))
+            .expect("track sound resolves");
+
+        assert!(app.take_record_note(0, press_at_beats(anchor, 4.0), 60.0, 1.0));
+        let session = app.take_recording.as_ref().expect("session active");
+        let lane = session.lanes[0].as_ref().expect("lane punched in");
+        assert_eq!(
+            lane.sound,
+            Some(track_sound),
+            "punch-in stamps the monitored track sound (rule 3b)"
+        );
+
+        // Registration shares those refs: the take IS the monitored sound.
+        let pending = vec![(0usize, lane.clone())];
+        let committed = app
+            .register_pending_takes(pending)
+            .expect("takes register");
+        let take = app
+            .state
+            .track_take(0, committed[0].take_id)
+            .expect("registered take");
+        assert_eq!(
+            take.sound, track_sound,
+            "the registered take plays back bound to the track sound"
+        );
+    }
+
+    /// Track-sound spec §2.3 (symptom 5, the missing capture save-back):
+    /// device/mixer tweaks made on a bare lane WHILE capture-recording
+    /// persist into the track sound when the transport stops.
+    #[test]
+    fn device_tweaks_during_capture_recording_persist_after_stop() {
+        let (mut app, _anchor) = capture_app();
+        empty_track_lane(&mut app);
+        // A live mixer move mid-capture: only the stop save-back persists it.
+        app.state.pattern.track_params[0].set_volume(0.66);
+
+        app.song_transport_stop().expect("capture stop succeeds");
+
+        app.state.with_project_scenes(|scenes| {
+            let refs = scenes.track_sound_refs(0).expect("track sound resolves");
+            let mix = &scenes.track_pools[0].sounds.mixes[&refs.mix];
+            assert_eq!(
+                mix.volume.to_bits(),
+                0.66f32.to_bits(),
+                "the mid-capture tweak survived the stop"
+            );
+            for scene in &scenes.scenes {
+                assert_eq!(scene.cells[0], None, "the lane stays bare");
+            }
+        });
+    }
+
     #[test]
     fn take_notes_land_at_latency_compensated_clip_positions() {
         let (mut app, anchor) = capture_app();

@@ -1380,7 +1380,9 @@
                 CustomInstrumentRunMode::Instrument,
             )
             .expect("first track should swap to the new engine");
-        assert_eq!(summary.patterns_reset, 1);
+        // The scene pattern + the track-sound carrier (track-sound spec
+        // §2.1) both reset with the track.
+        assert_eq!(summary.patterns_reset, 2);
         assert_eq!(app.graph.track_engine_ids, vec![Some(1), Some(0)]);
         assert_eq!(app.graph.track_node_ids[0].voice_sum_id, track_zero_sum);
         assert_eq!(
@@ -1477,7 +1479,8 @@
             )
             .expect("sampler track should convert to a custom instrument");
 
-        assert_eq!(summary.patterns_reset, 1);
+        // Scene pattern + track-sound carrier.
+        assert_eq!(summary.patterns_reset, 2);
         assert_eq!(app.tracks, vec!["new".to_string()]);
         assert_eq!(
             app.graph.track_instrument_types,
@@ -3332,7 +3335,8 @@
             .convert_custom_track_to_sampler(0, buffer_id, 48_000, "snare")
             .expect("custom track should convert to a sampler");
 
-        assert_eq!(summary.patterns_reset, 1);
+        // Scene pattern + track-sound carrier.
+        assert_eq!(summary.patterns_reset, 2);
         assert_eq!(app.tracks, vec!["snare".to_string()]);
         assert_eq!(
             app.graph.track_instrument_types,

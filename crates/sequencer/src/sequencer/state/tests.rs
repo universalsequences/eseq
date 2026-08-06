@@ -444,7 +444,9 @@
             "scene cells must retain their stable pattern ids"
         );
         assert_eq!(scenes.track_overrides[0], Some(override_pattern_id));
-        assert_eq!(scenes.track_pools[0].patterns.len(), 3);
+        // 2 scene cells + 1 override fork + the track-sound carrier
+        // (track-sound spec §2.1).
+        assert_eq!(scenes.track_pools[0].patterns.len(), 4);
 
         let expected = [
             (scene_pattern_ids_before[0].unwrap(), 0.11, 0.21),
@@ -555,8 +557,9 @@
             )
             .expect("valid custom track should reset");
 
-        assert_eq!(summary.patterns_reset, 3);
-        assert_eq!(summary.patterns_with_cleared_locks, 3);
+        // 3 patterns + the track-sound carrier (it swaps with the track).
+        assert_eq!(summary.patterns_reset, 4);
+        assert_eq!(summary.patterns_with_cleared_locks, 4);
         assert_eq!(summary.neural_overrides_dropped, 3);
         assert_eq!(
             f32::from_bits(state.pattern.instrument_base_note_offsets[0].load(Ordering::Relaxed)),
@@ -685,7 +688,8 @@
             )
             .expect("valid track should convert to sampler");
 
-        assert_eq!(summary.patterns_reset, 3);
+        // 3 patterns + the track-sound carrier (it converts with the track).
+        assert_eq!(summary.patterns_reset, 4);
         assert_eq!(
             state.runtime.instrument_type_flags[0].load(Ordering::Acquire),
             InstrumentType::Sampler.runtime_flag()
@@ -732,7 +736,8 @@
         let seeded =
             state.seed_unset_pattern_sample_ids(0, (42, "eight-oh-eight".to_string(), 48_000));
 
-        assert_eq!(seeded, 2);
+        // 2 unset scene patterns + the track-sound carrier (unset sample).
+        assert_eq!(seeded, 3);
         let exported = state.export_pattern_repository();
         assert_eq!(
             exported[0].sample_ids[0],
@@ -1108,7 +1113,7 @@
         let mut second_slot = EffectSlotSnapshot::new_default(&descriptor, 901);
         second_slot.defaults[0] = 0.79;
         let empty = EffectSlotSnapshot::new_empty().authoring_values();
-        let pattern_values = [(first, first_slot.authoring_values()), (second, second_slot.authoring_values())]
+        let mut pattern_values = [(first, first_slot.authoring_values()), (second, second_slot.authoring_values())]
             .into_iter()
             .map(|(pattern, first_value)| {
                 let mut values = vec![empty.clone(); crate::lisp_host::MAX_CUSTOM_FX];
@@ -1116,6 +1121,13 @@
                 (pattern, values)
             })
             .collect::<Vec<_>>();
+        // The track-sound carrier (track-sound spec §2.1) is a pool pattern
+        // too: chain history spans it like any other.
+        pattern_values.push((state.track_sound_pattern_id(0).expect("track sound"), {
+            let mut values = vec![empty.clone(); crate::lisp_host::MAX_CUSTOM_FX];
+            values[0] = first_slot.authoring_values();
+            values
+        }));
         let mut descriptors = vec![descriptor; 1];
         descriptors.resize_with(
             crate::lisp_host::MAX_CUSTOM_FX,
@@ -1166,7 +1178,7 @@
         let mut second_slot = EffectSlotSnapshot::new_default(&descriptor, 0);
         second_slot.defaults[0] = 0.83;
         let empty = EffectSlotSnapshot::new_empty().authoring_values();
-        let pattern_values = [(first, first_slot.authoring_values()), (second, second_slot.authoring_values())]
+        let mut pattern_values = [(first, first_slot.authoring_values()), (second, second_slot.authoring_values())]
             .into_iter()
             .map(|(pattern, first_value)| {
                 let mut values = vec![empty.clone(); crate::lisp_host::MAX_MIDI_FX_SLOTS];
@@ -1174,6 +1186,13 @@
                 (pattern, values)
             })
             .collect::<Vec<_>>();
+        // The track-sound carrier (track-sound spec §2.1) is a pool pattern
+        // too: chain history spans it like any other.
+        pattern_values.push((state.track_sound_pattern_id(0).expect("track sound"), {
+            let mut values = vec![empty.clone(); crate::lisp_host::MAX_MIDI_FX_SLOTS];
+            values[0] = first_slot.authoring_values();
+            values
+        }));
 
         state
             .restore_track_midi_fx_chain_values(
@@ -1445,21 +1464,22 @@
         live_rack.slots[0].instrument_base_note_offset = 24.0;
         state.pattern.rack_tracks.lock().unwrap()[0] = Some(live_rack);
 
+        // 2 other scene patterns + the track-sound carrier.
         assert_eq!(
             state.copy_current_effect_values_to_all_track_patterns(0, 0),
-            2
+            3
         );
         assert_eq!(
             state.copy_current_midi_fx_values_to_all_track_patterns(0, 0),
-            2
+            3
         );
         assert_eq!(
             state.copy_current_instrument_values_to_all_track_patterns(0),
-            2
+            3
         );
         assert_eq!(
             state.copy_current_rack_slot_instrument_values_to_all_track_patterns(0, 0),
-            2
+            3
         );
 
         let patterns = state.export_pattern_repository();
@@ -2022,8 +2042,9 @@
 
         assert_eq!(scenes.current_scene, 1);
         assert_eq!(scenes.track_pools.len(), 2);
-        assert_eq!(scenes.track_pools[0].patterns.len(), 2);
-        assert_eq!(scenes.track_pools[1].patterns.len(), 2);
+        // 2 scene cells + the track-sound carrier (track-sound spec §2.1).
+        assert_eq!(scenes.track_pools[0].patterns.len(), 3);
+        assert_eq!(scenes.track_pools[1].patterns.len(), 3);
         assert_eq!(scenes.scenes.len(), 2);
         assert_eq!(scenes.track_overrides, vec![None, None]);
 
@@ -2101,8 +2122,9 @@
         assert_eq!(new_scene, 1);
         assert_eq!(scenes.current_scene, 1);
         assert_eq!(scenes.track_overrides, vec![None, None]);
-        assert_eq!(scenes.track_pools[0].patterns.len(), 2);
-        assert_eq!(scenes.track_pools[1].patterns.len(), 3);
+        // Counts include each track's track-sound carrier.
+        assert_eq!(scenes.track_pools[0].patterns.len(), 3);
+        assert_eq!(scenes.track_pools[1].patterns.len(), 4);
         assert_eq!(scenes.scenes[1].mod_connections, vec![route]);
 
         let track_zero_new = scenes.scenes[1].cells[0].unwrap();
@@ -3962,7 +3984,9 @@
 
         assert_eq!(cleared, Some(assigned));
         assert!(state.is_scene_silenced(0));
-        assert!(state.pattern.patterns[0].is_active(2));
+        // Clearing the last cell blanks the live lane (track-sound spec
+        // §2.3): leftover steps would otherwise survive as ghosts.
+        assert!(!state.pattern.patterns[0].is_active(2));
         assert!(state.track_pattern_cells(0).iter().any(|cell| {
             cell.pattern_id == assigned
                 && !cell.assigned_to_current_scene
@@ -5476,7 +5500,9 @@
             })
             .collect::<Vec<_>>();
         offsets.sort_by(f32::total_cmp);
-        assert_eq!(offsets, vec![11.0, 22.0, 33.0]);
+        // The 0.0 is the track-sound carrier, untouched by the snapshot
+        // restore (it is not part of the captured pattern set).
+        assert_eq!(offsets, vec![0.0, 11.0, 22.0, 33.0]);
         let restored = &scenes.scenes[0].neural_networks[0].neurons[0]
             .output_overrides
             .instrument[0];
@@ -5953,8 +5979,8 @@
         state.with_project_scenes(|scenes| {
             assert_eq!(
                 scenes.track_pools[2].patterns.len(),
-                2,
-                "one private pattern per scene"
+                3,
+                "one private pattern per scene plus the track-sound carrier"
             );
             let scene0 = scenes.scenes[0].cells[2].expect("scene 0 cell");
             let scene1 = scenes.scenes[1].cells[2].expect("scene 1 cell");
@@ -5983,42 +6009,69 @@
         });
     }
 
+    /// Sticky bare lanes (track-sound spec §2.3): the lazy bare-track mint
+    /// is GONE — leftover live-grid content never resurrects a cell (the
+    /// ghost-step bug, spec §1.2). The lane's device/mixer deltas persist
+    /// into the TRACK SOUND instead, and a latched lane's do not.
     #[test]
-    fn lazy_materialization_covers_fully_bare_tracks_only() {
-        // A track with an EMPTY pool (fully bare) materializes a pattern on
-        // the first saved content; a track whose pool has patterns but whose
-        // cell was cleared stays cleared.
+    fn bare_lane_save_back_never_mints_and_flows_to_the_track_sound() {
         let state = SequencerState::new(2, vec![vec![], vec![]]);
         state.with_scenes_mut(|scenes| {
             let snapshots = vec![PatternSnapshot::new_default(2, &[])];
             *scenes = ProjectScenes::from_pattern_snapshots(&snapshots, 0);
-            // Track 1: fully bare (simulated) — empty pool, None cell.
-            scenes.scenes[0].cells[1] = None;
-            scenes.track_pools[1] = TrackPatternPool::default();
+            // Track 1: fully bare — no cell; only the track-sound carrier
+            // remains in the pool.
+            let cell = scenes.scenes[0].cells[1].expect("cell");
+            assert!(scenes.delete_track_pattern(1, cell));
         });
-        // Empty pool + NO content: a routine snapshot save (every scene/row
-        // transition runs one) must leave the bare lane alone instead of
-        // minting an empty pattern for it.
-        state.with_scenes_mut(|scenes| {
-            assert!(scenes.save_scene_snapshot(0, PatternSnapshot::new_default(2, &[])));
-            assert!(
-                scenes.track_pools[1].patterns.is_empty(),
-                "an all-empty snapshot never materializes a bare track"
-            );
-            assert_eq!(
-                scenes.scenes[0].cells[1], None,
-                "the untouched bare cell stays bare"
-            );
-        });
+        let grid_patterns = |scenes: &ProjectScenes, track: usize| {
+            scenes.track_pools[track]
+                .patterns
+                .keys()
+                .filter(|id| Some(**id) != scenes.track_sounds[track])
+                .count()
+        };
+        // A snapshot with ACTIVE STEPS on the bare lane (ghost steps from a
+        // deleted clip) must NOT mint a cell — and its device deltas land in
+        // the track sound.
         state.with_scenes_mut(|scenes| {
             let mut snapshot = PatternSnapshot::new_default(2, &[]);
             snapshot.track_bits[1][0] |= 1;
+            snapshot.track_params[1].volume = 0.31;
             assert!(scenes.save_scene_snapshot(0, snapshot));
-            assert_eq!(scenes.track_pools[1].patterns.len(), 1);
-            assert!(scenes.scenes[0].cells[1].is_some(), "bare track materializes");
+            assert_eq!(
+                grid_patterns(scenes, 1),
+                0,
+                "live content never materializes a bare track (§2.3)"
+            );
+            assert_eq!(
+                scenes.scenes[0].cells[1], None,
+                "the bare cell stays bare"
+            );
+            let refs = scenes.track_sound_refs(1).expect("track sound resolves");
+            let mix = scenes.track_pools[1].sounds.mixes[&refs.mix].clone();
+            assert_eq!(
+                mix.volume.to_bits(),
+                0.31f32.to_bits(),
+                "the lane's mixer delta persists into the track sound"
+            );
+        });
+        // A LATCHED bare lane's mirror is the performer's, not the track's
+        // own sound: its device deltas must not leak into the track sound.
+        state.with_scenes_mut(|scenes| {
+            let mut snapshot = PatternSnapshot::new_default(2, &[]);
+            snapshot.track_params[1].volume = 0.99;
+            assert!(scenes.save_scene_snapshot_masked(0, snapshot, 1 << 1, 1 << 1));
+            let refs = scenes.track_sound_refs(1).expect("track sound resolves");
+            let mix = scenes.track_pools[1].sounds.mixes[&refs.mix].clone();
+            assert_eq!(
+                mix.volume.to_bits(),
+                0.31f32.to_bits(),
+                "a latched lane's deltas stay out of the track sound"
+            );
         });
         // Cleared cell with a non-empty pool: content in the live snapshot
-        // must NOT resurrect the cell.
+        // must NOT resurrect the cell either.
         state.with_scenes_mut(|scenes| {
             scenes.scenes[0].cells[0] = None;
             let mut snapshot = PatternSnapshot::new_default(2, &[]);
@@ -6026,13 +6079,9 @@
             assert!(scenes.save_scene_snapshot(0, snapshot));
             assert_eq!(scenes.scenes[0].cells[0], None, "cleared cells stay cleared");
         });
-        // A pool holding ONLY claimed take chunks is still bare: chunks are
-        // hidden from the grid, so real content must still mint a grid
-        // pattern (and never adopt the chunk as the scene cell).
+        // A pool holding ONLY claimed take chunks (plus the carrier) is
+        // still bare and still never mints.
         state.with_scenes_mut(|scenes| {
-            scenes.scenes[0].cells[1] = None;
-            scenes.track_pools[1] = TrackPatternPool::default();
-            scenes.take_pools[1] = TrackTakePool::default();
             let chunk_data = PatternSnapshot::new_default(2, &[])
                 .track_pattern_data(1)
                 .expect("chunk data");
@@ -6043,13 +6092,15 @@
             let mut snapshot = PatternSnapshot::new_default(2, &[]);
             snapshot.track_bits[1][0] |= 1;
             assert!(scenes.save_scene_snapshot(0, snapshot));
-            assert_eq!(
-                scenes.track_pools[1].patterns.len(),
-                2,
-                "a claimed-chunk-only pool still counts as bare"
+            assert_eq!(scenes.scenes[0].cells[1], None, "no cell is minted");
+            assert!(
+                !scenes
+                    .track_pools[1]
+                    .patterns
+                    .keys()
+                    .any(|id| Some(*id) != scenes.track_sounds[1] && *id != chunk),
+                "no grid pattern is minted for a claimed-chunk-only pool"
             );
-            let cell = scenes.scenes[0].cells[1].expect("content materializes a grid pattern");
-            assert_ne!(cell, chunk, "the take chunk is never adopted as the cell");
         });
     }
 

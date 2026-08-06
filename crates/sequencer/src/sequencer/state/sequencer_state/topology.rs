@@ -446,6 +446,7 @@ impl SequencerState {
             pool,
             scene_cells,
             cell_sounds,
+            track_sound: scenes.track_sound_pattern(track_idx),
             track_override,
             scene_references,
             sidechains,
@@ -461,6 +462,11 @@ impl SequencerState {
             .ok_or_else(|| "Cannot restore a track lane into an empty project".to_string())?;
         scenes.track_pools[track] = snapshot.pool.clone();
         scenes.track_overrides[track] = snapshot.track_override;
+        while scenes.track_sounds.len() <= track {
+            scenes.track_sounds.push(None);
+        }
+        scenes.track_sounds[track] = snapshot.track_sound;
+        scenes.ensure_track_sounds();
         if scenes.scenes.len() != snapshot.scene_cells.len() {
             return Err("Track history scene topology no longer matches the project".to_string());
         }
@@ -502,6 +508,10 @@ impl SequencerState {
         scenes.track_pools.insert(target, pool);
         let track_override = scenes.track_overrides.remove(last);
         scenes.track_overrides.insert(target, track_override);
+        if last < scenes.track_sounds.len() {
+            let track_sound = scenes.track_sounds.remove(last);
+            scenes.track_sounds.insert(target, track_sound);
+        }
         for ((scene, references), expected_cell) in scenes.scenes.iter_mut()
             .zip(&snapshot.scene_references)
             .zip(&snapshot.scene_cells)
@@ -589,7 +599,7 @@ impl SequencerState {
         self.release_bound_device_state();
         {
             let mut scenes = self.pattern.scenes.lock().unwrap();
-            scenes.save_scene_snapshot_masked(current_pattern, current_snapshot.clone(), self.stale_live_lane_mask());
+            scenes.save_scene_snapshot_masked(current_pattern, current_snapshot.clone(), self.stale_live_lane_mask(), self.song_manual_latch_mask());
             for owner_track in 0..old_count {
                 if owner_track == track_idx {
                     continue;

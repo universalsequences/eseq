@@ -197,8 +197,24 @@ impl App {
                         current: refs,
                     });
                 }
-                // Bare cell (§17.2 "no steps ≠ no sound"): the cell's own
-                // refs are the target.
+                // Bare lane (track-sound spec §2.2 rule 3b): the TRACK
+                // SOUND is the target — it is what the lane monitors,
+                // edits, and records with, and unlike the cell's refs it
+                // does not flap when arrangement playback moves
+                // `current_scene`. The carrier pattern rides the ordinary
+                // pattern re-link path.
+                if let (Some(id), Some(refs)) = (
+                    scenes.track_sound_pattern(track),
+                    scenes.track_sound_refs(track),
+                ) {
+                    return Ok(ResolvedPaletteTarget {
+                        patterns: vec![id],
+                        takes: Vec::new(),
+                        cells: Vec::new(),
+                        current: refs,
+                    });
+                }
+                // Fallback for out-of-invariant states: the cell's own refs.
                 let scene = scenes.current_scene;
                 let refs = scenes
                     .scenes

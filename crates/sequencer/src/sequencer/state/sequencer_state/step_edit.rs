@@ -1324,7 +1324,9 @@ impl SequencerState {
                     .get_mut(slot_idx)
                     .ok_or_else(|| "stored MIDI-FX slot is missing".to_string())?;
                 slot.sync_to_descriptor(&descriptor, 0);
-                slot.apply_authoring_values(&values[slot_idx])?;
+                slot.apply_authoring_values(&values[slot_idx]).map_err(|error| {
+                    format!("{error} (pattern {}, MIDI-FX slot {slot_idx})", pattern.0)
+                })?;
             }
         }
         let live_values = patterns
