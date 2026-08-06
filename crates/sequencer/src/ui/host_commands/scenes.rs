@@ -30,7 +30,7 @@ pub(super) fn handle(
     let selected_neural_neurons = ctx.shared.selected_neural_neurons.clone();
     let piano_roll_selection = ctx.shared.piano_roll_selection.clone();
     let ui_epoch = ctx.shared.ui_epoch.clone();
-    let fx_epoch = ctx.shared.fx_epoch.clone();
+    let fx_value_epoch = ctx.shared.fx_value_epoch.clone();
     let expanded_step_projection = ctx.shared.expanded_step_projection.clone();
     let active_delete_target = ctx.shared.active_delete_target.clone();
     let active_delete_target_version = ctx.shared.active_delete_target_version.clone();
@@ -376,13 +376,15 @@ pub(super) fn handle(
             // Assigning into the current scene live-restores the pattern's
             // params + sample; the generic pattern-epoch sync covers
             // steps/params/mixer but not the fx and instrument-panel
-            // values, so bump fx_epoch and let the SAME tick cycle carry
-            // them. (This used to resync inline with its own reactive
-            // cycle + side-effects pass when *fx* was visible — a whole
-            // extra ~35ms cycle at 20-clip pool scale for surfaces the
-            // tick's fx-epoch branch republishes anyway.)
+            // values, so bump fx_value_epoch and let the SAME tick cycle
+            // carry them via the in-place value patch. (This used to resync
+            // inline with its own reactive cycle + side-effects pass when
+            // *fx* was visible — a whole extra ~35ms cycle at 20-clip pool
+            // scale for surfaces the tick's fx branch republishes anyway.
+            // Launches restore VALUES only, never panel structure, so the
+            // patch path is safe here; structural edits use fx_epoch.)
             if scene == app.state.current_scene_index() {
-                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                fx_value_epoch.fetch_add(1, Ordering::Relaxed);
             }
             if profile {
                 eprintln!(
@@ -576,7 +578,7 @@ pub(super) fn handle(
                 );
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
             } else {
-                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                fx_value_epoch.fetch_add(1, Ordering::Relaxed);
             }
             sync_track_params_with_neural_selection(
                 rt,
@@ -773,7 +775,7 @@ pub(super) fn handle(
                                 build_accumulator_names(&app);
                             sync_accumulators_elapsed = sub_started.elapsed();
                         } else {
-                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                            fx_value_epoch.fetch_add(1, Ordering::Relaxed);
                         }
                         sync_fx_lists_elapsed = started.elapsed();
                         let started = Instant::now();

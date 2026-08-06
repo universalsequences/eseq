@@ -314,7 +314,12 @@ pub(crate) fn reactive_tick_and_render(
             sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
             sync_modulator_phase_fields(rt, &ctx.meters.cached_modulator_phases);
             sync_modulator_level_fields(rt, &ctx.meters.cached_modulator_levels);
-            rt.set_reactive_value_patch(
+            // Full set_reactive, NOT set_reactive_value_patch: ui_epoch bumps
+            // come from edits (e.g. Boolean/Enum fx params) whose values drive
+            // conditional panel STRUCTURE, so the *fx* root must re-eval. A
+            // silent in-place patch here also poisons the fx-epoch branch
+            // below (equalized tree -> is_unchanged fast path -> no re-eval).
+            rt.set_reactive(
                 "SEQ",
                 "effects",
                 build_effects_value(
@@ -324,12 +329,12 @@ pub(crate) fn reactive_tick_and_render(
                     &ctx.shared.selected_steps,
                 ),
             );
-            rt.set_reactive_value_patch(
+            rt.set_reactive(
                 "SEQ",
                 "midi-effects",
                 build_midi_effects_value(&ctx.shared.state, ct, &ctx.shared.selected_steps),
             );
-            rt.set_reactive_value_patch(
+            rt.set_reactive(
                 "SEQ",
                 "instrument-panel",
                 build_instrument_panel_value(&app, ct, &ctx.shared.selected_steps),
@@ -1213,10 +1218,26 @@ pub(crate) fn reactive_tick_and_render(
             needs_reactive_cycle = true;
         }
         let fx_ep = ctx.shared.fx_epoch.load(Ordering::Relaxed);
-        if fx_visible && fx_ep != ctx.frame.prev_fx_epoch {
+        let fx_value_ep = ctx.shared.fx_value_epoch.load(Ordering::Relaxed);
+        if fx_visible
+            && (fx_ep != ctx.frame.prev_fx_epoch
+                || fx_value_ep != ctx.frame.prev_fx_value_epoch)
+        {
+            // fx_epoch = STRUCTURAL invalidation (Boolean/Enum param edits,
+            // add/remove effect): full set_reactive so the *fx* root re-evals
+            // conditional layout. fx_value_epoch alone = value-only scene/clip
+            // launch: in-place patch, field bindings carry the visuals.
+            let structural = fx_ep != ctx.frame.prev_fx_epoch;
             let rt = editor.runtime_mut();
-            rt.set_reactive_value_patch(
-                "SEQ",
+            let publish = |rt: &mut Runtime, field: &str, value: Value| {
+                if structural {
+                    rt.set_reactive("SEQ", field, value);
+                } else {
+                    rt.set_reactive_value_patch("SEQ", field, value);
+                }
+            };
+            publish(
+                rt,
                 "effects",
                 if app.tracks.is_empty() {
                     Value::List(vec![])
@@ -1229,8 +1250,8 @@ pub(crate) fn reactive_tick_and_render(
                     )
                 },
             );
-            rt.set_reactive_value_patch(
-                "SEQ",
+            publish(
+                rt,
                 "midi-effects",
                 if app.tracks.is_empty() {
                     Value::List(vec![])
@@ -1238,8 +1259,8 @@ pub(crate) fn reactive_tick_and_render(
                     build_midi_effects_value(&ctx.shared.state, ct, &ctx.shared.selected_steps)
                 },
             );
-            rt.set_reactive_value_patch(
-                "SEQ",
+            publish(
+                rt,
                 "instrument-panel",
                 if app.tracks.is_empty() {
                     Value::List(vec![])
@@ -1256,12 +1277,13 @@ pub(crate) fn reactive_tick_and_render(
                     build_step_has_plocks(&ctx.shared.state, ct, &app.graph.effect_descriptors)
                 },
             );
-            rt.set_reactive_value_patch(
-                "SEQ",
+            publish(
+                rt,
                 "bus-effects",
                 build_bus_effects_value_for_selection(&app, Some(&ctx.shared.selected_steps)),
             );
             ctx.frame.prev_fx_epoch = fx_ep;
+            ctx.frame.prev_fx_value_epoch = fx_value_ep;
             needs_reactive_cycle = true;
         }
         if transport_visible && transport_playhead != ctx.frame.prev_transport_playhead {

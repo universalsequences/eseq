@@ -92,6 +92,7 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_current_track_playhead_visible: bool,
     pub(crate) prev_ui_epoch: usize,
     pub(crate) prev_fx_epoch: usize,
+    pub(crate) prev_fx_value_epoch: usize,
     pub(crate) prev_sound_binding_epoch: usize,
     /// Arming/clearing a delete target republishes only the delete-target
     /// read surfaces (version reactive + mixer/rack binding fields) off this
@@ -148,7 +149,17 @@ pub(crate) struct SharedHandles {
     pub(crate) step_clipboard:
         Arc<Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>>,
     pub(crate) ui_epoch: Arc<AtomicUsize>,
+    /// Structural fx invalidation: the tick's fx branch fully republishes the
+    /// effects/instrument-panel reactives (dirty marks, *fx* re-eval). Bump
+    /// this for edits that change panel STRUCTURE (Boolean/Enum params drive
+    /// conditional layout, add/remove effect, ...).
     pub(crate) fx_epoch: Arc<AtomicUsize>,
+    /// Value-only fx invalidation: the tick's fx branch republishes via
+    /// `set_reactive_value_patch` (in-place Number/Bool cell writes, NO dirty
+    /// marks — field bindings carry the visible updates). Only scene/clip
+    /// launch paths may bump this; anything that can change panel structure
+    /// must use `fx_epoch` instead.
+    pub(crate) fx_value_epoch: Arc<AtomicUsize>,
     pub(crate) ui_invalidations: Arc<UiInvalidationQueue>,
     pub(crate) expanded_step_projection: Arc<ExpandedStepProjectionRegistry>,
     pub(crate) active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,

@@ -2304,6 +2304,7 @@
         let piano_roll_move_state = Arc::new(Mutex::new(None));
         let ui_epoch = Arc::new(AtomicUsize::new(0));
         let fx_epoch = Arc::new(AtomicUsize::new(0));
+        let fx_value_epoch = Arc::new(AtomicUsize::new(0));
         let ui_invalidations = Arc::new(UiInvalidationQueue::new());
         let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
         let recording = Arc::new(AtomicBool::new(false));
@@ -4660,6 +4661,7 @@
                 step_clipboard: Arc::new(Mutex::new(None)),
                 ui_epoch: ui_epoch.clone(),
                 fx_epoch: fx_epoch.clone(),
+                fx_value_epoch: fx_value_epoch.clone(),
                 ui_invalidations: ui_invalidations.clone(),
                 expanded_step_projection: expanded_step_projection.clone(),
                 active_delete_target: active_delete_target.clone(),
@@ -5696,6 +5698,7 @@
                 step_clipboard: Arc::new(Mutex::new(None)),
                 ui_epoch: ui_epoch.clone(),
                 fx_epoch: fx_epoch.clone(),
+                fx_value_epoch: fx_value_epoch.clone(),
                 ui_invalidations: ui_invalidations.clone(),
                 expanded_step_projection: expanded_step_projection.clone(),
                 active_delete_target: active_delete_target.clone(),
@@ -5747,6 +5750,7 @@
             frame_diff.prev_song_row_mirror_epoch = app.song_row_mirror_epoch;
             frame_diff.prev_ui_epoch = ui_epoch.load(Ordering::Relaxed);
             frame_diff.prev_fx_epoch = fx_epoch.load(Ordering::Relaxed);
+            frame_diff.prev_fx_value_epoch = fx_value_epoch.load(Ordering::Relaxed);
             frame_diff.prev_sound_binding_epoch = app.sound_binding_epoch;
             frame_diff.prev_delete_target_version =
                 active_delete_target_version.load(Ordering::Relaxed);
@@ -6058,8 +6062,14 @@
                 // --- reactive_tick.rs ui_epoch / fx_epoch branches ---------
                 let ui_ep = ui_epoch.load(Ordering::Relaxed);
                 let fx_ep = fx_epoch.load(Ordering::Relaxed);
+                let fx_value_ep = fx_value_epoch.load(Ordering::Relaxed);
                 let ui_epoch_fired = ui_ep != frame.prev_ui_epoch;
-                let fx_epoch_fired = fx_visible && fx_ep != frame.prev_fx_epoch;
+                let fx_epoch_fired = fx_visible
+                    && (fx_ep != frame.prev_fx_epoch
+                        || fx_value_ep != frame.prev_fx_value_epoch);
+                // Mirrors the tick's structural-vs-value split: launches bump
+                // fx_value_epoch (in-place patch), edits bump fx_epoch (full).
+                let fx_structural = fx_ep != frame.prev_fx_epoch;
                 if ui_epoch_fired {
                     let revision = build_revision(&state, app);
                     sync_shared_track_collapsed(&track_collapsed, app);
@@ -6143,8 +6153,15 @@
                 }
                 if fx_epoch_fired {
                     let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
+                    let publish = |rt: &mut Runtime, field: &str, value: Value| {
+                        if fx_structural {
+                            rt.set_reactive("SEQ", field, value);
+                        } else {
+                            rt.set_reactive_value_patch("SEQ", field, value);
+                        }
+                    };
+                    publish(
+                        rt,
                         "effects",
                         build_effects_value(
                             &state,
@@ -6153,13 +6170,13 @@
                             &selected_steps,
                         ),
                     );
-                    rt.set_reactive(
-                        "SEQ",
+                    publish(
+                        rt,
                         "midi-effects",
                         build_midi_effects_value(&state, ct, &selected_steps),
                     );
-                    rt.set_reactive(
-                        "SEQ",
+                    publish(
+                        rt,
                         "instrument-panel",
                         build_instrument_panel_value(app, ct, &selected_steps),
                     );
@@ -6168,12 +6185,13 @@
                         "step-has-plocks",
                         build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
                     );
-                    rt.set_reactive(
-                        "SEQ",
+                    publish(
+                        rt,
                         "bus-effects",
                         build_bus_effects_value_for_selection(app, Some(&selected_steps)),
                     );
                     frame.prev_fx_epoch = fx_ep;
+                    frame.prev_fx_value_epoch = fx_value_ep;
                 }
                 let epoch_sync_done = Instant::now();
 

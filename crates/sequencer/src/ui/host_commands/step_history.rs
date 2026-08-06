@@ -1660,6 +1660,7 @@ mod tests {
                 step_clipboard: Arc::new(Mutex::new(None)),
                 ui_epoch: ui_epoch.clone(),
                 fx_epoch: Arc::new(AtomicUsize::new(0)),
+                fx_value_epoch: Arc::new(AtomicUsize::new(0)),
                 ui_invalidations: ui_invalidations.clone(),
                 expanded_step_projection: expanded_step_projection.clone(),
                 active_delete_target: active_delete_target.clone(),

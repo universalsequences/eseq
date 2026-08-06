@@ -69,6 +69,33 @@ Switch publishing of `SEQ.effects`, `SEQ.midi-effects`, `SEQ.instrument-panel`,
 Authoring/load/event_loop sites keep plain `set_reactive` — they are genuine
 structural moments and not hot.
 
+## Epoch split (regression fix, 2026-08-05)
+
+Wiring the patch into the tick's shared ui-epoch/fx-epoch branches broke
+Boolean fx-param toggles (Space Echo / str8-delay "Sync"): a toggle's 0/1
+value drives conditional panel STRUCTURE (`if (fx-param-on-for? ...)` picks
+between the sync grid and the free knob, and paints the button), so a silent
+in-place patch never re-evals the `*fx*` root and the click appears dead.
+Enum buttons only survived via the `text-value` String fallback.
+`param_change_needs_fx_rebuild` = `Boolean | Enum` — an edit-driven
+`fx_epoch` bump *means* "structure changed".
+
+Resolution: two epochs on `SharedHandles`.
+
+- `fx_epoch` — structural invalidation. All edit handlers keep bumping this;
+  the tick's fx branch (and the ui-epoch full-resync branch) publish with
+  plain `set_reactive` so the `*fx*` root re-evals. (A patch in the ui-epoch
+  branch also poisons a later full set: the equalized tree hits the
+  `is_unchanged` fast path and nothing dirties.)
+- `fx_value_epoch` — value-only invalidation. Bumped ONLY by the scene/clip
+  launch paths in `host_commands/scenes.rs`; when it moves alone, the tick's
+  fx branch uses `set_reactive_value_patch`. Launches restore values, never
+  panel structure, so the patch precondition holds there by construction.
+
+Anything new that bumps an epoch for a change that can alter panel layout
+must use `fx_epoch`; `fx_value_epoch` is reserved for launch-style
+value restores.
+
 ## Caveats / consequences
 
 - **Reader aliasing (spec rev 5 caveat)**: Lisp closures captured value cells

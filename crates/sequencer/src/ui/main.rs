@@ -155,6 +155,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // FX/instrument panel refresh counter for changes that affect *fx* but
     // should not force *fx* to rerun on unrelated step-grid edits.
     let fx_epoch = Arc::new(AtomicUsize::new(0));
+    // Value-only fx refresh counter for scene/clip launches: rides the tick's
+    // in-place value-patch path instead of a full *fx* re-eval.
+    let fx_value_epoch = Arc::new(AtomicUsize::new(0));
     let ui_invalidations = Arc::new(UiInvalidationQueue::new());
     let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
     let active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>> = Arc::new(Mutex::new(None));
@@ -227,6 +230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         step_clipboard: step_clipboard.clone(),
         ui_epoch: ui_epoch.clone(),
         fx_epoch: fx_epoch.clone(),
+        fx_value_epoch: fx_value_epoch.clone(),
         ui_invalidations: ui_invalidations.clone(),
         expanded_step_projection: expanded_step_projection.clone(),
         active_delete_target: active_delete_target.clone(),

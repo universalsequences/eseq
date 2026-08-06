@@ -620,7 +620,7 @@
         (sdf/fill (sdf/circle (* radius (if (= selected 1) 0.64 0.69)))
           (material
             :lighting (lighting :edge-min -0.15 :edge-max 1.0
-              :light (vec3 0.3 -1.0 2.5) :shininess 92.0)
+              :light (vec3 0.3 -2.0 2.8) :shininess 92.0)
             :color (* (if (= muted 1) 0.3 1) (aqua-color offcol offcol))))
         (sdf/fill
           (sdf/translate 0 0.82

@@ -18,6 +18,7 @@ pub static RESPONSE_CURVE_EDITOR_WIDGET: ResponseCurveEditorWidget = ResponseCur
 
 const PAD_X: f32 = 0.0;
 const PAD_Y: f32 = 0.0;
+const HANDLE_OUTER_RADIUS: f32 = 0.070;
 
 #[derive(Clone, Copy, Debug)]
 struct LiveBandState {
@@ -159,12 +160,25 @@ fn band_type_code(band_type: &str) -> f32 {
     match band_type {
         "lowpass" | "lowcut" => 0.0,
         "highpass" | "highcut" => 1.0,
-        "bandpass" | "notch" => 2.0,
+        "bandpass" => 2.0,
         "passband" => 6.0,
+        "notch" => 7.0,
         "lowshelf" => 3.0,
         "highshelf" => 4.0,
         _ => 5.0,
     }
+}
+
+fn band_octave_span(band: &ResponseBand) -> f32 {
+    (band.freq_max / band.freq_min).log2().max(0.001)
+}
+
+fn handle_insets(pixel_aspect: f32) -> (f32, f32) {
+    let aspect = pixel_aspect.max(0.0001);
+    (
+        (HANDLE_OUTER_RADIUS / aspect).min(0.49),
+        HANDLE_OUTER_RADIUS.min(0.49),
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -555,6 +569,7 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
             viewport,
             super::get_f32_prop(&node.props, "corner-radius", 0.0),
         );
+        let (handle_inset_x, handle_inset_y) = handle_insets(pixel_aspect);
         let total = bands.len().max(1) as f32;
         let mut primitives = Vec::new();
 
@@ -577,8 +592,8 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
                         q_to_t(band.q, band.q_min, band.q_max),
                     ],
                     uniform_b: [idx as f32, total, band.gain, filter_mode],
-                    uniform_c: [0.0; 4],
-                    uniform_d: [0.0; 4],
+                    uniform_c: [band.q, band_octave_span(band), 0.0, 0.0],
+                    uniform_d: [handle_inset_x, handle_inset_y, 0.0, 0.0],
                     color_a: curve_color.to_rgba(),
                     color_b: bg_color.to_rgba(),
                     color_c: grid_color.to_rgba(),
@@ -601,8 +616,8 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
                     itime: viewport.time_seconds,
                     uniform_a: [5.0, 0.5, 0.5, 0.0],
                     uniform_b: [0.0, 1.0, 0.0, filter_mode],
-                    uniform_c: [0.0; 4],
-                    uniform_d: [0.0; 4],
+                    uniform_c: [1.0, 9.97, 0.0, 0.0],
+                    uniform_d: [handle_inset_x, handle_inset_y, 0.0, 0.0],
                     color_a: curve_color.to_rgba(),
                     color_b: bg_color.to_rgba(),
                     color_c: grid_color.to_rgba(),
@@ -634,47 +649,56 @@ float2 rce_plot(float2 data) {
         pad.y + (1.0 - data.y) * (1.0 - pad.y * 2.0));
 }
 
-float rce_curveY(float bandType, float x, float freqT, float yT, float qT, float isFilter) {
+float rce_filterResponseY(float bandType, float x, float freqT, float q, float octaveSpan) {
+    // The production filter is a topology-preserving state-variable filter.
+    // Its analog prototype gives a stable, physically meaningful display
+    // response without making the rolloff collapse at either plot boundary.
+    float ratio = exp2(clamp((x - freqT) * octaveSpan, -24.0, 24.0));
+    float ratio2 = ratio * ratio;
+    float damping = 1.0 / max(q, 0.001);
+    float denominator = sqrt(
+        (1.0 - ratio2) * (1.0 - ratio2)
+        + damping * damping * ratio2);
+    float magnitude = 1.0 / max(denominator, 0.000001);
+    if (bandType > 0.5 && bandType < 1.5) {
+        magnitude = ratio2 / max(denominator, 0.000001);
+    } else if (bandType > 1.5 && bandType < 2.5) {
+        magnitude = ratio / max(denominator, 0.000001);
+    } else if (bandType > 6.5 && bandType < 7.5) {
+        magnitude = abs(1.0 - ratio2) / max(denominator, 0.000001);
+    }
+    float decibels = 20.0 * log10(max(magnitude, 0.000001));
+    return 0.5 + decibels / 48.0;
+}
+
+float rce_curveY(
+    float bandType,
+    float x,
+    float freqT,
+    float yT,
+    float qT,
+    float isFilter,
+    float filterQ,
+    float octaveSpan
+) {
     float dist = x - freqT;
     float q = mix(0.22, 0.045, qT);
     if (isFilter > 0.5) {
-        float resonance = qT * 0.92;
         if (bandType > 5.5 && bandType < 6.5) {
-            float octaveSpan = 9.97;
+            float passbandOctaveSpan = 9.97;
             float widthOctaves = mix(0.25, 6.0, qT);
-            float halfWidth = (widthOctaves * 0.5) / octaveSpan;
+            float halfWidth = (widthOctaves * 0.5) / passbandOctaveSpan;
             float lowEdge = freqT - halfWidth;
             float highEdge = freqT + halfWidth;
-            float hpOctaves = (x - lowEdge) * octaveSpan;
-            float lpOctaves = (highEdge - x) * octaveSpan;
+            float hpOctaves = (x - lowEdge) * passbandOctaveSpan;
+            float lpOctaves = (highEdge - x) * passbandOctaveSpan;
             float hp = 1.0 / sqrt(1.0 + pow(2.0, -hpOctaves * 3.6));
             float lp = 1.0 / sqrt(1.0 + pow(2.0, -lpOctaves * 3.6));
             float pass = clamp(hp * lp * 1.14, 0.0, 1.0);
             float eased = smoothstep(0.0, 1.0, pass);
             return -0.95 + eased * 1.45;
         }
-        if (bandType < 0.5) {
-            float slopeStart = freqT - q * mix(1.10, 0.0, qT);
-            float slopeEnd = freqT + q * mix(2.85, 1.42, qT);
-            float slope = smoothstep(slopeStart, slopeEnd, x);
-            float peakCenter = freqT;
-            float peakDist = x - peakCenter;
-            float peakWidth = max(q * q * mix(0.65, 0.16, qT), 0.00004);
-            float bump = resonance * exp(-peakDist * peakDist / peakWidth);
-            return 0.50 + bump - slope * 1.45;
-        }
-        if (bandType < 1.5) {
-            float slopeStart = freqT - q * mix(2.85, 1.42, qT);
-            float slopeEnd = freqT + q * mix(1.10, 0.0, qT);
-            float slope = smoothstep(slopeStart, slopeEnd, x);
-            float peakCenter = freqT;
-            float peakDist = x - peakCenter;
-            float peakWidth = max(q * q * mix(0.65, 0.16, qT), 0.00004);
-            float bump = resonance * exp(-peakDist * peakDist / peakWidth);
-            return -0.95 + slope * 1.45 + bump;
-        }
-        float peak = exp(-dist * dist / max(q * q, 0.0001));
-        return -0.42 + peak * (0.86 + qT * 0.52);
+        return rce_filterResponseY(bandType, x, freqT, filterQ, octaveSpan);
     }
 
     if (bandType > 2.5 && bandType < 3.5) {
@@ -699,6 +723,8 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float qT = clamp(in.uniform_a.w, 0.0, 1.0);
     float bandIndex = in.uniform_b.x;
     float isFilter = in.uniform_b.w;
+    float filterQ = max(in.uniform_c.x, 0.001);
+    float octaveSpan = max(in.uniform_c.y, 0.001);
 
     float4 col = float4(0.0);
     float clipMask = 1.0;
@@ -710,7 +736,6 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         float d = length(max(qr, 0.0)) + min(max(qr.x, qr.y), 0.0) - r;
         float edge = max(fwidth(d) * 1.2, 0.001);
         clipMask = smoothstep(edge, -edge, d);
-        if (clipMask < 0.002) { discard_fragment(); }
     }
 
     if (bandIndex < 0.5) {
@@ -732,10 +757,12 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float lineMask = 0.0;
     const int steps = 96;
     float prevX = 0.0;
-    float prevY = rce_curveY(bandType, 0.0, freqT, yT, qT, isFilter);
+    float prevY = rce_curveY(
+        bandType, 0.0, freqT, yT, qT, isFilter, filterQ, octaveSpan);
     for (int i = 1; i <= steps; i++) {
         float x = float(i) / float(steps);
-        float y = rce_curveY(bandType, x, freqT, yT, qT, isFilter);
+        float y = rce_curveY(
+            bandType, x, freqT, yT, qT, isFilter, filterQ, octaveSpan);
         float2 a = rce_plot(float2(prevX, prevY));
         float2 b = rce_plot(float2(x, y));
         float d = rce_sdSegment(float2(uv.x * aspect, uv.y), float2(a.x * aspect, a.y), float2(b.x * aspect, b.y));
@@ -746,6 +773,8 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     }
 
     float2 handle = rce_plot(float2(freqT, yT));
+    float2 handleInset = clamp(in.uniform_d.xy, float2(0.0), float2(0.49));
+    handle = clamp(handle, handleInset, float2(1.0) - handleInset);
     float hd = length(float2((uv.x - handle.x) * aspect, uv.y - handle.y));
     float selected = in.value_t;
     float handleOuter = smoothstep(0.068, 0.052, hd);
@@ -757,8 +786,10 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     if (selected < 0.5) {
         col.rgb = mix(col.rgb, in.color_b.rgb, handleInner);
     }
-    col.a = max(col.a, handleOuter);
-    col.a *= clipMask;
+    // The handle is constrained to the primitive bounds above, so preserve it
+    // over the rounded background mask. Otherwise a corner handle would still
+    // lose its diagonal edge even though its center was correctly inset.
+    col.a = max(col.a * clipMask, handleOuter);
     return col;
 }
 "#;
@@ -850,6 +881,25 @@ mod tests {
     #[test]
     fn passband_has_dedicated_shader_code() {
         assert_eq!(band_type_code("passband"), 6.0);
+    }
+
+    #[test]
+    fn notch_has_dedicated_shader_code() {
+        assert_eq!(band_type_code("notch"), 7.0);
+    }
+
+    #[test]
+    fn edge_handle_insets_keep_full_radius_inside_wide_plot() {
+        let (x, y) = handle_insets(4.0);
+        assert!((x - 0.0175).abs() < 0.0001);
+        assert!((y - 0.07).abs() < 0.0001);
+    }
+
+    #[test]
+    fn filter_band_octave_span_matches_log_frequency_axis() {
+        let node = test_node("filter");
+        let band = &prop_bands(&node.props)[0];
+        assert!((band_octave_span(band) - 9.965_784).abs() < 0.0001);
     }
 
     #[test]
