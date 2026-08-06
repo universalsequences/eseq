@@ -1,2 +1,3 @@
-(load "crates/sequencer/scripts/process-project-performance-lanes-demo.lisp")
-(load "crates/sequencer/scripts/band-coupling-matrix-demo.lisp")
+(load "crates/sequencer/scripts/sequencers/graph-neural-8x8-reset-demo.lisp")
+
+(load "crates/sequencer/scripts/sequencers/graph-neural-16-demo.lisp")

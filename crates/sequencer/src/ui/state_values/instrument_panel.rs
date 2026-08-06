@@ -1,5 +1,20 @@
 use super::*;
 
+/// The panel header's sound-binding label (takes spec 16.6): the bound
+/// sound's identity only — the patch name, or the binding label
+/// (`Take 2 · bars 0–2` / `Pattern 2 (scene)`) when no palette entry
+/// resolves. Deliberately *not* `App::sound_binding_badge`, which appends
+/// the reverse referent index ("— used by Scene 1, Take 2, …"): that list
+/// grows without bound and carries nothing the header needs.
+fn sound_binding_label(app: &app::App, track: usize) -> Option<String> {
+    let target = app.palette_target_or_binding(track, None);
+    app.sound_palette_entries(track, target)
+        .into_iter()
+        .find(|entry| entry.is_current)
+        .map(|entry| entry.name)
+        .or_else(|| app.track_binding_label(track))
+}
+
 pub(crate) fn build_sampler_panel_value(
     app: &app::App,
     track: usize,
@@ -550,19 +565,14 @@ pub(crate) fn build_sampler_panel_value(
         "duration".to_string(),
         Rc::new(RefCell::new(Value::Number(sample_duration))),
     );
-    // Sound-binding badge (takes spec 16.6, §17.5 S3 form) — sampler tracks
-    // are the common take-recording case, so they carry the badge too.
+    // Sound-binding badge (takes spec 16.6) — sampler tracks are the common
+    // take-recording case, so they carry the badge too.
     panel_map.insert(
         "sound-binding".to_string(),
-        Rc::new(RefCell::new(
-            match app
-                .sound_binding_badge(track)
-                .or_else(|| app.track_binding_label(track))
-            {
-                Some(label) => Value::String(label),
-                None => Value::Nil,
-            },
-        )),
+        Rc::new(RefCell::new(match sound_binding_label(app, track) {
+            Some(label) => Value::String(label),
+            None => Value::Nil,
+        })),
     );
 
     Value::List(vec![Rc::new(RefCell::new(Value::Map(panel_map)))])
@@ -1220,22 +1230,16 @@ pub(crate) fn build_instrument_panel_value(
             &instrument_name,
         )))),
     );
-    // Sound-binding badge (takes spec 16.6, §17.5 S3 form): the bound
-    // Patch's identity plus its referent index — "Patch A — used by
-    // Scene 1, Take 2". Rides the panel map rather than a per-track
-    // reactive list because the FX strip is driven entirely by `inst` —
-    // a panel-scope SEQ.* read breaks the *fx* buffer's evaluation.
+    // Sound-binding badge (takes spec 16.6): the bound Patch's identity —
+    // "Patch A". Rides the panel map rather than a per-track reactive list
+    // because the FX strip is driven entirely by `inst` — a panel-scope
+    // SEQ.* read breaks the *fx* buffer's evaluation.
     panel_map.insert(
         "sound-binding".to_string(),
-        Rc::new(RefCell::new(
-            match app
-                .sound_binding_badge(track)
-                .or_else(|| app.track_binding_label(track))
-            {
-                Some(label) => Value::String(label),
-                None => Value::Nil,
-            },
-        )),
+        Rc::new(RefCell::new(match sound_binding_label(app, track) {
+            Some(label) => Value::String(label),
+            None => Value::Nil,
+        })),
     );
     panel_map.insert(
         "synth".to_string(),
