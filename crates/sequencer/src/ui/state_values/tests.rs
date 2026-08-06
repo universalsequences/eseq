@@ -18392,6 +18392,52 @@
     }
 
     #[test]
+    fn metal_seq_cursor_highlight_clears_even_after_pattern_length_change() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 2, 16);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-num-steps", test_number_list(&[16.0, 16.0]));
+
+        editor
+            .runtime_mut()
+            .eval_str("(set-track-cursor-step 12)")
+            .expect("place cursor at step 12");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(reactive-get \"SEQV\" \"seqv-track-cursor-0-12\")")
+                .unwrap(),
+            Some(Value::Bool(true))
+        );
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-num-steps", test_number_list(&[8.0, 16.0]));
+        editor
+            .runtime_mut()
+            .eval_str("(set-track-cursor-step 3)")
+            .expect("move cursor after the pattern shrank");
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(reactive-get \"SEQV\" \"seqv-track-cursor-0-3\")")
+                .unwrap(),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(reactive-get \"SEQV\" \"seqv-track-cursor-0-12\")")
+                .unwrap(),
+            Some(Value::Bool(false)),
+            "the old highlight cell must be cleared even though the projection changed, \
+             otherwise a ghost cursor stays lit at step 12"
+        );
+    }
+
+    #[test]
     fn metal_seq_samples_sidebar_toggle_hides_and_restores_samples_tile() {
         let mut editor = full_grid_editor_for_scroll_tests();
 

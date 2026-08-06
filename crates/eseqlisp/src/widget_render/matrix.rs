@@ -401,6 +401,28 @@ fn negative_fill_color(props: &HashMap<String, Value>, default: Color) -> Color 
     )
 }
 
+/// Color of the disc drawn for every cell before the value fill goes on top.
+/// Falls back to `border-color` (the legacy name for this layer) and then to a
+/// slight lightening of the background.
+fn empty_fill_color(props: &HashMap<String, Value>, bg: Color) -> Color {
+    resolve_matrix_color(
+        props,
+        &[
+            "empty-fill",
+            "empty-fill-color",
+            "empty-color",
+            "border-color",
+        ],
+        default_cell_color(bg),
+    )
+}
+
+fn stroke_color(props: &HashMap<String, Value>) -> Option<Color> {
+    ["stroke-color", "stroke"]
+        .iter()
+        .find_map(|key| props.get(*key).and_then(theme::parse_color_value))
+}
+
 fn background_color(props: &HashMap<String, Value>) -> Color {
     resolve_matrix_color(
         props,
@@ -493,12 +515,29 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         ) / outAlpha;
         return float4(outColor, outAlpha);
     } else if (control < 0.5) {
-        float ringDist = d - radius;
-        ringMask = smoothstep(pix, 0.0, ringDist) * inCell;
-
+        float discMask = smoothstep(pix, 0.0, d - radius) * inCell;
         float innerRadius = radius * value;
-        float innerDist = innerRadius - d;
-        innerMask = smoothstep(-pix, 0.0, innerDist) * inCell;
+        float fillMask = smoothstep(-pix, 0.0, innerRadius - d) * inCell;
+        float strokeMask = 0.0;
+        float strokeHalf = in.uniform_b.x * 0.5;
+        if (in.uniform_b.y > 0.5 && strokeHalf > 0.0) {
+            float strokeDist = abs(d - radius) - strokeHalf;
+            strokeMask = smoothstep(pix, 0.0, strokeDist) * inCell;
+        }
+
+        // Composite bg -> empty disc -> value fill -> stroke ring so each
+        // layer's own alpha survives a transparent background.
+        float4 acc = in.color_b;
+        float discA = discMask * in.color_c.a;
+        acc.rgb = mix(acc.rgb, in.color_c.rgb, discA);
+        acc.a = discA + acc.a * (1.0 - discA);
+        float fillA = fillMask * in.color_a.a;
+        acc.rgb = mix(acc.rgb, in.color_a.rgb, fillA);
+        acc.a = fillA + acc.a * (1.0 - fillA);
+        float strokeA = strokeMask * in.color_d.a;
+        acc.rgb = mix(acc.rgb, in.color_d.rgb, strokeA);
+        acc.a = strokeA + acc.a * (1.0 - strokeA);
+        return float4(acc.rgb, acc.a * inCell);
     } else {
         float squareHalfSize = radius;
         float squareDist = sdf_rounded_rect(p, float2(squareHalfSize), squareHalfSize * 0.15);
@@ -713,14 +752,24 @@ impl WidgetDefinition for MatrixWidget {
         let color = fill_color(&node.props);
         let negative_color = negative_fill_color(&node.props, color);
         let bg = background_color(&node.props);
-        let border = resolve_named_color(&node.props, "border-color", default_cell_color(bg));
+        let border = empty_fill_color(&node.props, bg);
         let hover_border = resolve_named_color(
             &node.props,
             "hover-border-color",
             default_hover_cell_color(bg),
         );
+        let stroke = stroke_color(&node.props);
+        let stroke_active_only = get_bool_prop(&node.props, "stroke-active-only", false);
         let cell_w = node.rect.width / cols as f32;
         let cell_h = node.rect.height / rows as f32;
+        // Stroke width arrives in pixels; the shader works in a per-cell space
+        // whose vertical extent is 2.0, so convert via the cell's pixel height.
+        let cell_px_h = cell_h * viewport.cell_h;
+        let stroke_width_p = if cell_px_h > 0.0 {
+            get_f32_prop(&node.props, "stroke-width", 1.5) * 2.0 / cell_px_h
+        } else {
+            0.0
+        };
         let mut prims = Vec::with_capacity(rows * cols);
 
         for (row, row_values) in matrix.iter().enumerate() {
@@ -769,13 +818,21 @@ impl WidgetDefinition for MatrixWidget {
                             state.release_time,
                             0.0,
                         ],
-                        uniform_b: [0.0; 4],
+                        uniform_b: [
+                            stroke_width_p,
+                            match stroke {
+                                Some(_) if !stroke_active_only || t > 0.0 => 1.0,
+                                _ => 0.0,
+                            },
+                            0.0,
+                            0.0,
+                        ],
                         uniform_c: [0.0; 4],
                         uniform_d: [0.0; 4],
                         color_a: cell_color.to_rgba(),
                         color_b: bg.to_rgba(),
                         color_c: cell_border.to_rgba(),
-                        color_d: [0.0; 4],
+                        color_d: stroke.unwrap_or(Color::rgba(0.0, 0.0, 0.0, 0.0)).to_rgba(),
                         corner_radius: 0.0,
                         pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
                     },
@@ -1227,6 +1284,111 @@ mod tests {
                 MetalPrimitive::WidgetInstance { widget_type, .. } if widget_type == "matrix"
             )
         }));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn test_viewport() -> WidgetViewport {
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 640.0,
+            vp_h: 360.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 18.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn empty_fill_color_overrides_the_disc_layer() {
+        let mut props = HashMap::new();
+        props.insert("rows".to_string(), Value::Number(1.0));
+        props.insert("cols".to_string(), Value::Number(1.0));
+        props.insert(
+            "empty-fill-color".to_string(),
+            Value::String("#112233".to_string()),
+        );
+        props.insert(
+            "value".to_string(),
+            list(vec![list(vec![Value::Number(0.0)])]),
+        );
+        let node = matrix_node(props);
+
+        let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, test_viewport());
+        let [MetalPrimitive::WidgetInstance { instance, .. }] = prims.as_slice() else {
+            panic!("expected one widget instance");
+        };
+        assert_eq!(
+            instance.color_c,
+            [
+                0x11 as f32 / 255.0,
+                0x22 as f32 / 255.0,
+                0x33 as f32 / 255.0,
+                1.0
+            ]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stroke_props_feed_uniforms_and_active_only_gates_empty_cells() {
+        let mut props = HashMap::new();
+        props.insert("rows".to_string(), Value::Number(1.0));
+        props.insert("cols".to_string(), Value::Number(2.0));
+        props.insert(
+            "stroke-color".to_string(),
+            Value::String("#00ff00".to_string()),
+        );
+        props.insert("stroke-width".to_string(), Value::Number(2.0));
+        props.insert("stroke-active-only".to_string(), Value::Bool(true));
+        props.insert(
+            "value".to_string(),
+            list(vec![list(vec![Value::Number(0.0), Value::Number(0.5)])]),
+        );
+        let node = matrix_node(props);
+
+        let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, test_viewport());
+        let instances: Vec<_> = prims
+            .iter()
+            .map(|prim| match prim {
+                MetalPrimitive::WidgetInstance { instance, .. } => instance,
+                _ => panic!("expected widget instance"),
+            })
+            .collect();
+        assert_eq!(instances.len(), 2);
+        // One row over an 8-unit-tall rect at 20px per unit = 160px cell height.
+        let expected_width = 2.0 * 2.0 / (8.0 * 20.0);
+        for instance in &instances {
+            assert!((instance.uniform_b[0] - expected_width).abs() < 1e-6);
+            assert_eq!(instance.color_d, [0.0, 1.0, 0.0, 1.0]);
+        }
+        assert_eq!(instances[0].uniform_b[1], 0.0, "zero cell draws no stroke");
+        assert_eq!(instances[1].uniform_b[1], 1.0, "non-zero cell draws stroke");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stroke_defaults_off_without_a_stroke_color() {
+        let mut props = HashMap::new();
+        props.insert("rows".to_string(), Value::Number(1.0));
+        props.insert("cols".to_string(), Value::Number(1.0));
+        props.insert(
+            "value".to_string(),
+            list(vec![list(vec![Value::Number(1.0)])]),
+        );
+        let node = matrix_node(props);
+
+        let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, test_viewport());
+        let [MetalPrimitive::WidgetInstance { instance, .. }] = prims.as_slice() else {
+            panic!("expected one widget instance");
+        };
+        assert_eq!(instance.uniform_b[1], 0.0);
+        assert_eq!(instance.color_d, [0.0, 0.0, 0.0, 0.0]);
     }
 
     #[cfg(target_os = "macos")]

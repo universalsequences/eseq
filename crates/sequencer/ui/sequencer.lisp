@@ -232,17 +232,22 @@
 (def seqv-cursor-highlight-binding (track step)
   (bind "SEQV" (seqv-cursor-highlight-field track step)))
 
+;; Clearing must target the exact field set last time. Recomputing it from the
+;; stored step goes stale when num-steps or the id->index mapping changed in
+;; between, leaving ghost cursor highlights behind.
 (def seqv-set-cursor-step (track-id step)
   (let ((track (seqv-track-index-for-id track-id)))
     (if (>= track 0)
-      (let ((previous-step (seqv-cursor-step track-id))
+      (let ((previous-field (reactive-get "SEQV" (str "cursor-field-" track-id)))
+          (next-field (seqv-cursor-highlight-field track (seqv-project-cursor-step track step)))
           (projected-step (seqv-project-cursor-step track step)))
         (do
           (reactive-set "SEQV" (str "cursor-step-" track-id) projected-step)
-          (if (= previous-step projected-step)
+          (if (or (= previous-field nil) (= previous-field next-field))
             nil
-            (reactive-set "SEQV" (seqv-cursor-highlight-field track previous-step) false))
-          (reactive-set "SEQV" (seqv-cursor-highlight-field track projected-step) true)
+            (reactive-set "SEQV" previous-field false))
+          (reactive-set "SEQV" next-field true)
+          (reactive-set "SEQV" (str "cursor-field-" track-id) next-field)
           (if (seqv-track-expanded? track-id)
             (seqv-sync-expanded-step-slots-for track track-id)
             nil)))
@@ -581,7 +586,7 @@
               :offset (vec2 0 0))))))))
 
 (defwidget seqv-step-shell
-  :width 1.5 :height 1.5
+  :width 1.5 :height 2.5
   :paint-margin 1
   :state (active plock-kind selected duration muted hide track-r track-g track-b variant-r variant-g variant-b off-fill-r off-fill-g off-fill-b)
   :bindable (active plock-kind selected duration muted hide track-r track-g track-b variant-r variant-g variant-b)
@@ -596,7 +601,7 @@
       (sdf/layer
         (sdf/fill
           (sdf/translate 0 0.0
-            (sdf/rounded-rect (* 8.0 width) (* 1.00 height) 0.1))
+            (sdf/rounded-rect (* 4.0 width) (* 1.00 height) 0))
           (material
             :lighting (lighting :edge-min -0.3 :edge-max 0.393
               :light (vec3 0.8 -1.8 4.5) :shininess 92.0)
@@ -607,15 +612,15 @@
                   (mix border (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 0.5) (if (= selected 1) 0.8 1))
                   (if (= selected 1) border (rgba track-r track-g track-b 1))))
               (rgba 0 0 0 0))))
-        (sdf/fill (sdf/circle (* radius 0.85))
+        (sdf/fill (sdf/circle (* radius 0.88))
           (material
-            :lighting (lighting :edge-min -0.3 :edge-max 1.0
-              :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
+            :lighting (lighting :edge-min -0.12 :edge-max 0.9
+              :light (vec3 -0.1 1.0 1.8) :shininess 92.0)
             :color (* (if (= selected 1) 1 (if (= muted 1) 0.6 1)) (aqua-color border border))))
         (sdf/fill (sdf/circle (* radius (if (= selected 1) 0.64 0.69)))
           (material
-            :lighting (lighting :edge-min -0.1 :edge-max 1.0
-              :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
+            :lighting (lighting :edge-min -0.15 :edge-max 1.0
+              :light (vec3 0.3 -1.0 2.5) :shininess 92.0)
             :color (* (if (= muted 1) 0.3 1) (aqua-color offcol offcol))))
         (sdf/fill
           (sdf/translate 0 0.82
@@ -1907,25 +1912,14 @@
                 (seqv-drum-track-grid i))
               (h-stack :padding 0.1 :width :fill :gap 0.6 :align :start
                 (v-stack (box :height 0.1)
-                (seqv-track-header i))
+                  (seqv-track-header i))
                 (seqv-track-grid i)
                 (box :flex 1 :width 0 :height 0.1 :bg :transparent)
                 (seqv-track-actions i)))))))
-    (box :key "sequencer-new-track-drop-zone"
-      :width :fill :height 2.4 :flex 1
-      :background-color :transparent
-      :drop-hover-background-color :mixer-control-bg
-      :border-width 1
-      :border-color :transparent
-      :drop-hover-border-color :mixer-strip-selected-border
-      :corner-radius 10
-      :drop-types (list "sample" "instrument" "sound")
-      :drop-meta (dict :kind "new-sample-track")
-      :on-drop (lambda (event) (seqv-drop-new-track event))
-      (label ""
-        :font-size 1
-        :color :transparent
-        :bg :transparent))))
+   
+    )
+  )
+
 
 (set-buffer-mode-for "*sequencer*" "seq-grid-mode")
 
