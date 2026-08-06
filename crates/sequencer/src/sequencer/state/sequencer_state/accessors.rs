@@ -297,6 +297,9 @@ impl SequencerState {
             song_manual_latch: AtomicU64::new(0),
             song_scene_latch: AtomicBool::new(false),
             song_take_lane_mask: AtomicU64::new(0),
+            // Matches `App::arrangement_view_visible`'s initial value; the
+            // App re-asserts it on every view switch and on project load.
+            arrangement_context: AtomicBool::new(false),
             sound_binding_borrowed: AtomicU64::new(0),
             sound_binding_patterns: Mutex::new(HashMap::new()),
         };
@@ -771,6 +774,48 @@ impl SequencerState {
             Some(data) => data.restore_device_state_to(self, track),
             None => false,
         }
+    }
+
+    /// Entering-arrangement-view half of the view-switch seam (track-sound
+    /// spec §2.9 step 2): install the TRACK SOUND into the mirror on every
+    /// lane rules 1/2 do not claim. Only the device half moves — note content
+    /// on a playing lane is never touched.
+    ///
+    /// Call AFTER the context flag flips, so `track_owned_lane_mask` names
+    /// the lanes the arrangement view now owns.
+    pub fn install_track_sounds_into_mirror(&self) {
+        self.restore_track_sounds_to_mirror_masked(u64::MAX);
+    }
+
+    /// Claim-end half of the §2.8 invariant: reinstall the TRACK SOUND's
+    /// device half for the lanes in `mask` that the track owns NOW. Every
+    /// path that ends a rule-1/2 claim in arrangement context must put the
+    /// owner back into the mirror — the borrow release already does
+    /// (`release_borrowed_lanes` falls back to the carrier); this is the
+    /// LATCH-release counterpart. Callers pass the latch mask captured
+    /// before the clear; the intersection with `track_owned_lane_mask`
+    /// drops lanes something still claims (re-borrowed selections) and makes
+    /// the whole call a no-op in Seq context, where the cells own the lanes.
+    pub fn restore_track_sounds_to_mirror_masked(&self, mask: u64) {
+        let mask = mask & self.track_owned_lane_mask();
+        if mask == 0 {
+            return;
+        }
+        let restore: Vec<(usize, TrackPatternData)> = {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            (0..self.pattern.track_params.len().min(64))
+                .filter(|track| mask >> track & 1 == 1)
+                .filter_map(|track| {
+                    let id = scenes.track_sound_pattern(track)?;
+                    Some((track, scenes.track_pools.get(track)?.get(id)?))
+                })
+                .collect()
+        };
+        for (track, data) in restore {
+            data.restore_device_state_to(self, track);
+        }
+        self.schedule_mod_resync();
+        self.publish_scheduler_snapshot();
     }
 
     /// Apply a project file's serialized sound ref STRUCTURE (takes spec
@@ -1613,6 +1658,17 @@ impl SequencerState {
                     self.set_scene_silenced(track, false);
                 } else {
                     self.set_scene_silenced(track, true);
+                    // §2.8 load seam (symptom 7): a bare lane's mirror must
+                    // come up holding the TRACK SOUND — with fresh-track
+                    // defaults left there, the next stop save-back would
+                    // overwrite the user's sound (and every take sharing its
+                    // refs) with stock.
+                    if let Some(data) = scenes
+                        .track_sound_pattern(track)
+                        .and_then(|id| scenes.track_pools.get(track)?.get(id))
+                    {
+                        data.restore_device_state_to(self, track);
+                    }
                 }
             }
             scenes
@@ -1643,7 +1699,7 @@ impl SequencerState {
             .scenes
             .lock()
             .unwrap()
-            .save_scene_snapshot_masked(current_pattern, snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask())
+            .save_scene_snapshot_masked(current_pattern, snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask(), self.track_owned_lane_mask())
     }
 
     /// Write one lane out of a scene-derived snapshot into the pattern that

@@ -5217,6 +5217,21 @@ fn ensure_effective_track_pattern(
     app.state.materialize_current_scene_pattern(track, data)
 }
 
+/// Rule 3's write target, view-keyed (track-sound spec §2.2.2): in
+/// ARRANGEMENT context the track owns the sound, so the edit lands on the
+/// track-sound carrier — never a cell, never a materialization, wherever the
+/// cursor sits and whatever cells exist (symptom 8's stopped-time preset). In
+/// SEQ context it is the classic effective cell, with the carrier only as the
+/// bare-lane fallback that keeps device edits from minting a cell.
+fn rule_three_device_target(app: &App, track: usize) -> Option<crate::sequencer::PatternId> {
+    if app.arrangement_view_visible {
+        return app.state.track_sound_pattern_id(track);
+    }
+    app.state
+        .effective_track_pattern_id(track)
+        .or_else(|| app.state.track_sound_pattern_id(track))
+}
+
 fn resolve_device_value_target(
     app: &mut App,
     cmd: &AppCommand,
@@ -5228,17 +5243,13 @@ fn resolve_device_value_target(
         .ok_or(EditError::TrackOutOfRange { track })?;
     // Device edits follow the track's sound binding (takes spec 16.4): a
     // bound take or track clip owns them, and only rule 3 falls back to the
-    // effective scene pattern. On a bare lane rule 3b (track-sound spec
-    // §2.2) writes to the TRACK SOUND's carrier instead — a device edit
+    // view's owner (track-sound spec §2.2.2) — the TRACK SOUND's carrier in
+    // arrangement context, the effective cell in Seq context. A device edit
     // never materializes a scene cell. No dual-write — a bound edit never
     // touches the scene pattern.
     let pattern = match app.bound_read_pattern(track) {
         Some(pattern) if !app.track_sound_binding(track).is_scene() => pattern,
-        _ => app
-            .state
-            .effective_track_pattern_id(track)
-            .or_else(|| app.state.track_sound_pattern_id(track))
-            .ok_or(EditError::MissingTrackPattern)?,
+        _ => rule_three_device_target(app, track).ok_or(EditError::MissingTrackPattern)?,
     };
     let (id, slot_idx) = match cmd {
         AppCommand::SetEffectParam { slot_idx, .. }
@@ -5709,16 +5720,12 @@ pub fn apply_recorded_instrument_values_mutation(
         .id_at(track)
         .ok_or(EditError::TrackOutOfRange { track })?;
     // Preset loads follow the sound binding like any other device edit
-    // (takes spec 16.4); on a bare lane they land on the track sound
-    // (track-sound spec §2.2) — same resolution as
-    // `resolve_device_value_target`, never materializing a scene cell.
+    // (takes spec 16.4); rule 3 is view-keyed (track-sound spec §2.2.2) —
+    // same resolution as `resolve_device_value_target`, never materializing
+    // a scene cell.
     let pattern = match app.bound_read_pattern(track) {
         Some(pattern) if !app.track_sound_binding(track).is_scene() => pattern,
-        _ => app
-            .state
-            .effective_track_pattern_id(track)
-            .or_else(|| app.state.track_sound_pattern_id(track))
-            .ok_or(EditError::MissingTrackPattern)?,
+        _ => rule_three_device_target(app, track).ok_or(EditError::MissingTrackPattern)?,
     };
     let target = ResolvedDeviceTarget {
         id: DeviceId::TrackInstrument(track_id),
@@ -6265,9 +6272,16 @@ fn apply_recorded_track_params_command(
             _ => None,
         }
     };
+    // Track-param write-through (track-sound spec §2.9): the edit persists
+    // into the OWNING entity at edit time, exactly like a device value —
+    // never parked in the mirror awaiting a stop save-back that a
+    // borrow/release/row-apply may preempt (the `polyphonic` reset, symptom
+    // 8). Rule 3's owner is view-keyed, so a bare lane in Seq context and
+    // every unclaimed lane in arrangement context reach the track-sound
+    // carrier instead of erroring out with no target.
     let pattern_id = match bound_pattern {
         Some(pattern) => pattern,
-        None => effective_id.ok_or(EditError::MissingTrackPattern)?,
+        None => rule_three_device_target(app, track).ok_or(EditError::MissingTrackPattern)?,
     };
     let target = TrackPatternId { track: track_id, pattern: pattern_id };
     let merge_key = merge_key.map(|_| {
@@ -6290,10 +6304,18 @@ fn apply_recorded_track_params_command(
     // binding-aware rule its base-note twin already follows), or the
     // whole-snapshot write below would stamp the loaned sound onto the scene
     // pattern with no way back.
+    // "The mirror holds the target" is the live surface BY DEFINITION, and
+    // since rev 4 the target can be the track-sound carrier — which
+    // `capture_pattern_track_params` would read out of the pool (it only
+    // shortcuts to live for the EFFECTIVE pattern), turning every
+    // write-through into a no-op against an unmoved pool snapshot.
     let mirror_holds_target = mirror_pattern == Some(pattern_id);
-    let current_before = if mirror_holds_target {
-        app.state.capture_pattern_track_params(track, pattern_id)
+    let current_before = if mirror_holds_target && bound_pattern.is_none() {
+        app.state.capture_live_track_params(track)
     } else {
+        // A BOUND target's structural fields live only in the pool (the
+        // borrow never loads them), so it reads the pool even though the
+        // mirror shows its device half.
         capture_pool_track_params(app, track, pattern_id)
     }
     .map_err(EditError::ReplayFailed)?;
@@ -6340,7 +6362,7 @@ fn apply_recorded_track_params_command(
             )),
         }
     } else if mirror_holds_target {
-        match app.state.capture_pattern_track_params(track, pattern_id) {
+        match app.state.capture_live_track_params(track) {
             Ok(after) => after,
             Err(error) => return Err(rollback_track_params_edit(
                 app,
@@ -6579,10 +6601,11 @@ pub fn apply_recorded_track_params_batch(
             .track_registry
             .id_at(track)
             .ok_or(EditError::TrackOutOfRange { track })?;
-        let pattern_id = app
-            .state
-            .effective_track_pattern_id(track)
-            .ok_or(EditError::MissingTrackPattern)?;
+        // Same view-keyed owner as the single-command path (§2.9
+        // write-through); batches are solo/mute-style mixer gestures, which
+        // are never bound-source edits.
+        let pattern_id =
+            rule_three_device_target(app, track).ok_or(EditError::MissingTrackPattern)?;
         let target = TrackPatternId { track: track_id, pattern: pattern_id };
         let before = app
             .state

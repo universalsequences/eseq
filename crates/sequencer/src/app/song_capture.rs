@@ -299,6 +299,11 @@ impl App {
                     })
                     .collect(),
             },
+            // An override launch names its pattern directly — no cell
+            // resolution (the cell was deliberately left untouched).
+            PatternLaunchTarget::TrackPattern { track, pattern } => CaptureLaunchKind::Tracks {
+                overrides: vec![(*track, PatternId(*pattern))],
+            },
         };
         let Some(take) = self.song_capture_take.as_mut() else {
             return;

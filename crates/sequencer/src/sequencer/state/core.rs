@@ -298,6 +298,13 @@ pub struct SequencerState {
     /// "playing" while the lane is actually playing a take. Transient
     /// transport state; never serialized. Bit `t` = track `t`.
     pub(super) song_take_lane_mask: AtomicU64,
+    /// True while the user is standing in the ARRANGEMENT view (track-sound
+    /// spec §2.2.2). Ownership of a lane's sound is view-keyed, and the
+    /// state-side consumers (save-back masks, the stop resync,
+    /// `mirror_device_pattern_id`) cannot see the `App` — so the App mirrors
+    /// its `arrangement_view_visible` here on every view switch. Control-side
+    /// intent, not transport state; never serialized.
+    pub(super) arrangement_context: AtomicBool,
     /// Tracks whose live device state is on loan to a sound binding (takes
     /// spec 16.2): the mirror shows a take's or a track clip's frozen
     /// devices instead of the effective scene pattern's. Any session

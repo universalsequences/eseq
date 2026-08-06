@@ -3502,6 +3502,11 @@ impl App {
             self.effective_sidebar_mode()
         };
 
+        // Track-sound spec §5.3.1: the state's ownership context is a mirror
+        // of the App's view flag. A load can hand us a fresh `SequencerState`
+        // (default `false`), so re-assert before anything reads the masks.
+        self.state
+            .set_arrangement_context(self.arrangement_view_visible);
         let current_sample_ids = self
             .state
             .restore_current_pattern_from_repository()

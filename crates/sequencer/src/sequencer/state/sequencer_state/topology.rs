@@ -594,12 +594,15 @@ impl SequencerState {
             names,
             instrument_types,
         );
+        // Read BEFORE the release below: the snapshot substituted borrowed
+        // lanes' device halves with their cells' (see `masked_save_masks`).
+        let save_masks = self.masked_save_masks();
         // Track indices are about to shift; the index-keyed device loans
         // must not survive the shift (the App re-binds on its next sync).
         self.release_bound_device_state();
         {
             let mut scenes = self.pattern.scenes.lock().unwrap();
-            scenes.save_scene_snapshot_masked(current_pattern, current_snapshot.clone(), self.stale_live_lane_mask(), self.song_manual_latch_mask());
+            scenes.save_scene_snapshot_masked(current_pattern, current_snapshot.clone(), save_masks.0, save_masks.1, save_masks.2);
             for owner_track in 0..old_count {
                 if owner_track == track_idx {
                     continue;

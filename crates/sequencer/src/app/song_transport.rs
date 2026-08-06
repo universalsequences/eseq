@@ -187,6 +187,7 @@ impl App {
         }
         // Pending quantized manual launches must not fire after the return.
         let _ = self.state.quantized_launches().cancel_all();
+        let released_latch = self.state.song_manual_latch_mask();
         self.state.clear_song_manual_latch();
         if !self.song_playback_authority_active() {
             // The latch survives transport stop (Ableton's Back to
@@ -194,6 +195,12 @@ impl App {
             // lanes' live grid back to the scene so the next Play is fully
             // arrangement-governed.
             self.state.resync_live_grid_to_current_scene();
+            // Claim-end reinstall (track-sound spec §2.8): the resync holds
+            // track-owned lanes, but a just-released lane's mirror is still
+            // the performer's launch — reinstall the owner before the next
+            // save-back can persist it into the shared track-sound entities.
+            self.state
+                .restore_track_sounds_to_mirror_masked(released_latch);
             self.sync_track_sound_bindings();
             return Ok("Back to arrangement: manual overrides cleared".to_string());
         }
@@ -212,6 +219,13 @@ impl App {
                 // row's scene-cell devices; re-resolve the bindings in the same
                 // step so no lane keeps a stale loaded snapshot for a tick.
                 self.sync_track_sound_bindings();
+                // Claim-end reinstall (track-sound spec §2.8): a released
+                // lane the row resolves nothing for is track-owned again
+                // (the binding sync above re-borrowed the audible ones, so
+                // the mask spares those) — reinstall the owner so its mirror
+                // stops holding the performer's launch.
+                self.state
+                    .restore_track_sounds_to_mirror_masked(released_latch);
             }
         }
         Ok("Back to song: manual overrides cleared".to_string())
@@ -245,6 +259,10 @@ impl App {
                 // Same as `back_to_song`: the row apply dropped the loan and
                 // pushed the row's devices, so re-resolve the bindings now.
                 self.sync_track_sound_bindings();
+                // Claim-end reinstall (§2.8), scoped to the one released
+                // lane; a no-op when the binding sync re-borrowed it.
+                self.state
+                    .restore_track_sounds_to_mirror_masked(1u64 << track.min(63));
             }
         }
         Ok(format!("Track {}: back to song", track + 1))
@@ -538,12 +556,25 @@ impl App {
                 // (their live grid holds the performer's launch, not the
                 // current scene's pattern) or it writes that content over
                 // the scene cell's real pattern.
+                let released_latch = self.state.song_manual_latch_mask();
                 self.state.clear_song_manual_latch();
                 // Capture ran on top of song playback, so the same row-owned
                 // lane state has to be handed back to the scene.
                 if playback_teardown.is_some() {
                     self.state.resync_live_grid_to_current_scene();
                 }
+                // Claim-end reinstall (track-sound spec §2.8): a lane the
+                // latch just released keeps the performer's LAUNCH in its
+                // mirror — the resync above deliberately holds track-owned
+                // lanes (it assumes their mirror is already the track sound).
+                // In arrangement context the track owns them again, so put
+                // the track sound's device half back NOW; otherwise the next
+                // save-back persists the launch's stock state into the
+                // shared track-sound entities, retuning every take sharing
+                // them. Also makes the audible state honest: the launch is
+                // over, the user hears the track sound again.
+                self.state
+                    .restore_track_sounds_to_mirror_masked(released_latch);
                 if let Some(Err(error)) = playback_teardown {
                     return Err(format!("Song playback teardown failed: {error}"));
                 }
@@ -577,9 +608,16 @@ impl App {
             self.song_mirrored_row = None;
             let _ = self.state.stop_song_playback();
         }
+        let released_latch = self.state.song_manual_latch_mask();
         self.state.clear_song_manual_latch();
         self.state.stop_playback();
         self.set_song_transport_mode(SongTransportMode::Stopped);
+        // Claim-end reinstall (track-sound spec §2.8): the cancel discards
+        // the take but the released lanes' mirrors still hold the
+        // performer's launches — reinstall the owner so the next save-back
+        // cannot persist them into the shared track-sound entities.
+        self.state
+            .restore_track_sounds_to_mirror_masked(released_latch);
         Ok("Arrangement capture cancelled; take discarded, committed song preserved".to_string())
     }
 
@@ -777,13 +815,18 @@ mod tests {
         app
     }
 
-    /// A song row that resolves nothing for a lane silences it. That is the
-    /// song's state, not the scene's: stopping must hand the lane back, or
-    /// session mode shows the scene's pattern sitting there unlaunched until
-    /// the performer switches scenes and back.
+    /// A song row that resolves nothing for a lane silences it, and stopping
+    /// in the ARRANGEMENT view HOLDS that lane (track-sound spec §2.2.2/§2.3,
+    /// rev 4): the track owns the lane there, so re-launching its cell at Stop
+    /// would retune the track to a sound the performer never heard. The clip
+    /// stays unlaunched (dot off) until an explicit launch re-installs it.
+    /// In Seq view the rev-1 behavior returns — see
+    /// `stopping_in_seq_view_resyncs_cells_classically`.
     #[test]
-    fn stopping_song_playback_unsilences_lanes_the_last_row_left_empty() {
+    fn stopping_song_playback_holds_lanes_the_last_row_left_empty() {
         let mut app = app_with_song();
+        app.arrangement_view_visible = true;
+        app.state.set_arrangement_context(true);
         app.song_transport_play(false).expect("song playback starts");
         app.apply_song_row_control(Some(0), &[(0, None)], false)
             .expect("sparse row applies");
@@ -795,8 +838,93 @@ mod tests {
         app.song_transport_stop().expect("stop succeeds");
 
         assert!(
+            app.state.is_scene_silenced(0),
+            "the held lane's cell stays unlaunched after the stop"
+        );
+
+        // The scene workflow is preserved: an explicit launch re-installs the
+        // cell and clears the hold.
+        let cell = app
+            .state
+            .scene_track_pattern_id(app.state.current_scene_index(), 0)
+            .expect("the scene still owns a cell on track 0");
+        assert!(
+            app.state.launch_track_pattern(
+                0,
+                cell,
+                1,
+                &[-1],
+                &[44_100],
+                &["Track 1".to_string()],
+                &[crate::sequencer::InstrumentType::Sampler],
+            ),
+            "explicit launch"
+        );
+        assert!(!app.state.is_scene_silenced(0), "launching re-engages the cell");
+    }
+
+    /// Track-sound spec §5.3 (rev 4, the other half of the view rule): in SEQ
+    /// context the stop resync is classic — the scene's cells reinstall over
+    /// the mirror and the lane un-silences, exactly as before rev 2. Nothing
+    /// about the transport changed; only the view the user stands in.
+    #[test]
+    fn stopping_in_seq_view_resyncs_cells_classically() {
+        let mut app = app_with_song();
+        assert!(!app.arrangement_view_visible, "the Seq tab");
+        app.song_transport_play(false).expect("song playback starts");
+        app.apply_song_row_control(Some(0), &[(0, None)], false)
+            .expect("sparse row applies");
+        assert!(app.state.is_scene_silenced(0));
+
+        app.song_transport_stop().expect("stop succeeds");
+
+        assert!(
             !app.state.is_scene_silenced(0),
             "the scene resolves a pattern for track 0, so its clip is launched again"
+        );
+    }
+
+    /// Track-sound spec §2.3 (symptom 6/8): the stop resync must not
+    /// `restore_to` a track-owned lane whose session cells survive — that is
+    /// the audible snap, pushing a sound the performer never heard over the
+    /// one they did. The mirror is held and the cell stays unlaunched.
+    #[test]
+    fn stopping_does_not_retune_a_track_owned_lane_whose_cells_survive() {
+        use std::sync::Arc;
+        let mut app = app_with_song();
+        app.arrangement_view_visible = true;
+        app.state.set_arrangement_context(true);
+        app.song_transport_play(false).expect("song playback starts");
+        app.apply_song_row_control(Some(0), &[(0, None)], false)
+            .expect("explicit-empty row applies");
+        assert!(app.state.is_scene_silenced(0));
+        let cell = app
+            .state
+            .effective_track_pattern_id(0)
+            .expect("the session cell survives the empty row");
+        // Give the cell a stored sound that differs from what the performer
+        // is hearing, so a `restore_to` is observable.
+        app.state.with_scenes_mut(|scenes| {
+            let refs = scenes.track_pools[0].refs(cell).expect("cell refs");
+            let mut mix = (*scenes.track_pools[0].sounds.mixes[&refs.mix]).clone();
+            mix.volume = 0.11;
+            scenes.track_pools[0]
+                .sounds
+                .mixes
+                .insert(refs.mix, Arc::new(mix));
+        });
+        app.state.pattern.track_params[0].set_volume(0.77);
+
+        app.song_transport_stop().expect("stop succeeds");
+
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume().to_bits(),
+            0.77f32.to_bits(),
+            "the held lane keeps the mirror the performer was hearing"
+        );
+        assert!(
+            app.state.is_scene_silenced(0),
+            "a held cell stays unlaunched after the stop"
         );
     }
 

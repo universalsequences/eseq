@@ -55,6 +55,11 @@ impl SequencerState {
         // semantics: the latch survives transport stop) — their live grid
         // must not be re-launched from the scene until the latch clears.
         let latched = self.song_manual_latch_mask();
+        // Read the ownership mask BEFORE `launch_scene` so a lane's held-ness
+        // is decided by the state Play left it in, not by anything the launch
+        // path mutates on the way through. Empty in Seq context — there the
+        // rev-1 behavior returns and every lane resyncs from its cell.
+        let track_owned = self.track_owned_lane_mask();
         let mut scenes = self.pattern.scenes.lock().unwrap();
         // The latch survives the stop, and so must its override pin:
         // `launch_scene` clears every override, but a latched lane that
@@ -80,6 +85,19 @@ impl SequencerState {
         }
         for (track, data) in launched.into_iter().enumerate() {
             if latched >> track.min(63) & 1 == 1 {
+                continue;
+            }
+            // Held like a latched lane (track-sound spec §2.2.2/§2.3, rev 4):
+            // in ARRANGEMENT context the lane's owner is the track sound, so
+            // `restore_to` would push a cell's sound the user never heard over
+            // the one they did (the audible snap at Stop). Restore the owner
+            // instead and leave the cell unlaunched (dot off), so the binding
+            // keeps resolving the track sound until an explicit launch or a
+            // switch to Seq view re-installs the cell. Holding IS restoring
+            // the owner here: §2.8's invariant says the mirror already holds
+            // the track sound on a track-owned lane, so touching it would
+            // only risk clobbering a live edit the next save-back owes to it.
+            if track_owned >> track.min(63) & 1 == 1 {
                 continue;
             }
             match data {
@@ -191,6 +209,9 @@ impl SequencerState {
         // 3: it captures the scene-effective device state for borrowed lanes
         // instead); this path overwrites the mirror below, so drop the loans
         // here — the App re-binds on its next sync.
+        // Read BEFORE the release below: the snapshot substituted borrowed
+        // lanes' device halves with their cells' (see `masked_save_masks`).
+        let save_masks = self.masked_save_masks();
         self.release_bound_device_state();
         profile.capture_current_snapshot = started.elapsed();
 
@@ -205,7 +226,7 @@ impl SequencerState {
             }
 
             let started = Instant::now();
-            scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask());
+            scenes.save_scene_snapshot_masked(current_scene, current_snapshot, save_masks.0, save_masks.1, save_masks.2);
             profile.save_current_snapshot = started.elapsed();
 
             let started = Instant::now();
@@ -316,11 +337,14 @@ impl SequencerState {
         // 3: it captures the scene-effective device state for borrowed lanes
         // instead); this path overwrites the mirror below, so drop the loans
         // here — the App re-binds on its next sync.
+        // Read BEFORE the release below: the snapshot substituted borrowed
+        // lanes' device halves with their cells' (see `masked_save_masks`).
+        let save_masks = self.masked_save_masks();
         self.release_bound_device_state();
         let launched = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
-            if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask()) {
+            if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, save_masks.0, save_masks.1, save_masks.2) {
                 return false;
             }
             scenes.launch_track_pattern(track, pattern_id)
@@ -409,6 +433,9 @@ impl SequencerState {
         // 3: it captures the scene-effective device state for borrowed lanes
         // instead); this path overwrites the mirror below, so drop the loans
         // here — the App re-binds on its next sync.
+        // Read BEFORE the release below: the snapshot substituted borrowed
+        // lanes' device halves with their cells' (see `masked_save_masks`).
+        let save_masks = self.masked_save_masks();
         self.release_bound_device_state();
         let launched = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
@@ -430,7 +457,7 @@ impl SequencerState {
                 return false;
             }
             let current_scene = self.current_scene_index();
-            if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask()) {
+            if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, save_masks.0, save_masks.1, save_masks.2) {
                 return false;
             }
             scenes.launch_scene_tracks(scene, tracks)
@@ -472,6 +499,10 @@ impl SequencerState {
         let (scene_idx, mask) = match target {
             PatternLaunchTarget::Scene { scene } => (*scene, None),
             PatternLaunchTarget::SceneTracks { scene, tracks } => (*scene, Some(tracks)),
+            // Override launches are only scheduled during song playback,
+            // where the scheduler's boundary machinery is inactive — the
+            // legacy control-side apply handles them at the boundary.
+            PatternLaunchTarget::TrackPattern { .. } => return None,
         };
         let staged = {
             let scenes = self.pattern.scenes.lock().unwrap();
@@ -632,6 +663,9 @@ impl SequencerState {
         // scene-effective device state for borrowed lanes instead, takes
         // spec 18.1 step 3); the per-lane restores below overwrite the
         // mirror, so the loans must still be dropped here.
+        // Read BEFORE the release below: the snapshot substituted borrowed
+        // lanes' device halves with their cells' (see `masked_save_masks`).
+        let save_masks = self.masked_save_masks();
         self.release_bound_device_state();
         let launched = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
@@ -700,7 +734,7 @@ impl SequencerState {
             }
             if let Some(current_snapshot) = current_snapshot {
                 let current_scene = self.current_scene_index();
-                if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask()) {
+                if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, save_masks.0, save_masks.1, save_masks.2) {
                     return Err("Could not save the outgoing session state".to_string());
                 }
                 scenes.current_scene = scene;
@@ -818,11 +852,14 @@ impl SequencerState {
         // 3: it captures the scene-effective device state for borrowed lanes
         // instead); this path overwrites the mirror below, so drop the loans
         // here — the App re-binds on its next sync.
+        // Read BEFORE the release below: the snapshot substituted borrowed
+        // lanes' device halves with their cells' (see `masked_save_masks`).
+        let save_masks = self.masked_save_masks();
         self.release_bound_device_state();
         let id = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
-            scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask());
+            scenes.save_scene_snapshot_masked(current_scene, current_snapshot, save_masks.0, save_masks.1, save_masks.2);
             scenes.fork_track_pattern(track)?
         };
         self.set_scene_silenced(track, false);
@@ -854,11 +891,14 @@ impl SequencerState {
         // 3: it captures the scene-effective device state for borrowed lanes
         // instead); this path overwrites the mirror below, so drop the loans
         // here — the App re-binds on its next sync.
+        // Read BEFORE the release below: the snapshot substituted borrowed
+        // lanes' device halves with their cells' (see `masked_save_masks`).
+        let save_masks = self.masked_save_masks();
         self.release_bound_device_state();
         let (id, data) = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
-            scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask());
+            scenes.save_scene_snapshot_masked(current_scene, current_snapshot, save_masks.0, save_masks.1, save_masks.2);
             let id = scenes.clone_track_pattern_into_current_scene(track)?;
             let data = scenes.effective_track_pattern(track)?;
             (id, data)
@@ -894,11 +934,14 @@ impl SequencerState {
         // 3: it captures the scene-effective device state for borrowed lanes
         // instead); this path overwrites the mirror below, so drop the loans
         // here — the App re-binds on its next sync.
+        // Read BEFORE the release below: the snapshot substituted borrowed
+        // lanes' device halves with their cells' (see `masked_save_masks`).
+        let save_masks = self.masked_save_masks();
         self.release_bound_device_state();
         let (id, data) = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
-            scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask());
+            scenes.save_scene_snapshot_masked(current_scene, current_snapshot, save_masks.0, save_masks.1, save_masks.2);
             let id = scenes.clone_track_pattern_id_into_current_scene(track, source_id)?;
             let data = scenes.effective_track_pattern(track)?;
             (id, data)
@@ -948,11 +991,14 @@ impl SequencerState {
         // 3: it captures the scene-effective device state for borrowed lanes
         // instead); this path overwrites the mirror below, so drop the loans
         // here — the App re-binds on its next sync.
+        // Read BEFORE the release below: the snapshot substituted borrowed
+        // lanes' device halves with their cells' (see `masked_save_masks`).
+        let save_masks = self.masked_save_masks();
         self.release_bound_device_state();
         let (was_effective, replacement) = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
-            scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask());
+            scenes.save_scene_snapshot_masked(current_scene, current_snapshot, save_masks.0, save_masks.1, save_masks.2);
             let was_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
             if !scenes.delete_track_pattern(track, pattern_id) {
                 return Err(format!(
@@ -1071,11 +1117,14 @@ impl SequencerState {
         // 3: it captures the scene-effective device state for borrowed lanes
         // instead); this path overwrites the mirror below, so drop the loans
         // here — the App re-binds on its next sync.
+        // Read BEFORE the release below: the snapshot substituted borrowed
+        // lanes' device halves with their cells' (see `masked_save_masks`).
+        let save_masks = self.masked_save_masks();
         self.release_bound_device_state();
         let restore_current_track = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
-            if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask()) {
+            if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, save_masks.0, save_masks.1, save_masks.2) {
                 return false;
             }
             // The lane's audible identity before the cell moves — the
@@ -1139,11 +1188,14 @@ impl SequencerState {
         // 3: it captures the scene-effective device state for borrowed lanes
         // instead); this path overwrites the mirror below, so drop the loans
         // here — the App re-binds on its next sync.
+        // Read BEFORE the release below: the snapshot substituted borrowed
+        // lanes' device halves with their cells' (see `masked_save_masks`).
+        let save_masks = self.masked_save_masks();
         self.release_bound_device_state();
         let (cleared, should_silence) = {
             let mut scenes = self.pattern.scenes.lock().unwrap();
             let current_scene = self.current_scene_index();
-            if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask()) {
+            if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, save_masks.0, save_masks.1, save_masks.2) {
                 return None;
             }
             let cleared = scenes.clear_cell(scene, track)?;
@@ -1230,7 +1282,7 @@ impl SequencerState {
                 current_metadata.1,
                 current_metadata.2,
             );
-            scenes.save_scene_snapshot_masked(cur, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask());
+            scenes.save_scene_snapshot_masked(cur, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask(), self.track_owned_lane_mask());
             let new_idx = scenes.new_scene();
             self.pattern
                 .current_pattern
@@ -1318,7 +1370,7 @@ impl SequencerState {
                 current_metadata.1,
                 current_metadata.2,
             );
-            scenes.save_scene_snapshot_masked(cur, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask());
+            scenes.save_scene_snapshot_masked(cur, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask(), self.track_owned_lane_mask());
             let new_idx = scenes
                 .delete_scene(cur)
                 .ok_or_else(|| "The last scene cannot be deleted".to_string())?;
@@ -1389,7 +1441,7 @@ impl SequencerState {
             current_metadata.1,
             current_metadata.2,
         );
-        scenes.save_scene_snapshot_masked(cur, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask());
+        scenes.save_scene_snapshot_masked(cur, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask(), self.track_owned_lane_mask());
         let Some(source) = scenes.scene_snapshot(cur) else {
             return false;
         };

@@ -443,19 +443,76 @@ impl SequencerState {
 
     /// Bitmask of lanes whose live-grid content does not belong to the
     /// current scene: song-latched lanes (the performer's launch is live
-    /// there) and scene-silenced lanes (an explicit-empty row override left
-    /// stale content in the live grid on purpose — see the mirror comment in
-    /// `apply_song_row_latched`). Pass this to `save_scene_snapshot_masked`
+    /// there), scene-silenced lanes (an explicit-empty row override left
+    /// stale STEP content in the live grid on purpose — see the mirror
+    /// comment in `apply_song_row_latched`), and — in arrangement context —
+    /// track-owned lanes, whose mirror is the TRACK SOUND by construction
+    /// (track-sound spec §2.2.2). Pass this to `save_scene_snapshot_masked`
     /// so a live-grid save-back never clones foreign content over a scene
     /// cell's real pattern.
     pub fn stale_live_lane_mask(&self) -> u64 {
-        let mut mask = self.song_manual_latch_mask();
+        self.song_manual_latch_mask() | self.scene_silenced_mask() | self.track_owned_lane_mask()
+    }
+
+    /// The `(stale, latched, track_owned)` masks `save_scene_snapshot_masked`
+    /// consumes, captured together. Every capture → release-device-loans →
+    /// masked-save path MUST read this BEFORE the release: the snapshot
+    /// substituted each borrowed lane's device half with its CELL's entity
+    /// state (`capture_current_pattern_snapshot`), so a lane whose borrow is
+    /// released in between must still count as claimed at save time.
+    /// Recomputing the masks after the release promotes the lane into
+    /// `track_owned_lane_mask`, and the save then writes the cell's stock
+    /// device state into the shared track-sound entities — retuning the
+    /// track sound and every take sharing it (track-sound spec §2.8 litmus:
+    /// the user never heard or dialed that in).
+    pub(crate) fn masked_save_masks(&self) -> (u64, u64, u64) {
+        (
+            self.stale_live_lane_mask(),
+            self.song_manual_latch_mask(),
+            self.track_owned_lane_mask(),
+        )
+    }
+
+    /// Scene-silenced lanes as a bitmask. Playback DISPLAY state only since
+    /// rev 4 (the silenced flag no longer gates ownership, §2.2.1's
+    /// supersession note) — kept for the surfaces that render "this lane is
+    /// not sounding its cell".
+    pub fn scene_silenced_mask(&self) -> u64 {
+        let mut mask = 0u64;
         for track in 0..self.pattern.scene_silenced.len().min(64) {
             if self.is_scene_silenced(track) {
                 mask |= 1 << track;
             }
         }
         mask
+    }
+
+    /// True while the user is standing in the arrangement view — the rev-4
+    /// ownership discriminator (track-sound spec §2.2.2). Written by the App
+    /// on every view switch.
+    pub fn arrangement_context(&self) -> bool {
+        self.arrangement_context.load(Ordering::Acquire)
+    }
+
+    pub fn set_arrangement_context(&self, arrangement: bool) {
+        self.arrangement_context.store(arrangement, Ordering::Release);
+    }
+
+    /// Lanes whose sound the TRACK owns right now (track-sound spec §2.2.2):
+    /// in arrangement context every lane rules 1/2 do not claim; in Seq
+    /// context none — the classic scene+pattern world, where the track sound
+    /// is dormant.
+    ///
+    /// Rule 1/2 claims are read here in their machine-readable state-side
+    /// form: a LATCHED lane (the performer's own launch — it keeps its
+    /// self-write carve-out through its override pin) and a BORROWED lane
+    /// (the sound binding installed a selected clip's or an audible take's
+    /// devices into the mirror, so the mirror is not the track's sound).
+    pub fn track_owned_lane_mask(&self) -> u64 {
+        if !self.arrangement_context() {
+            return 0;
+        }
+        !(self.song_manual_latch_mask() | self.sound_binding_borrowed_mask())
     }
 
     /// Pin `track`'s session override to the pattern the lane currently
@@ -534,9 +591,16 @@ impl SequencerState {
                 return Some(*pattern);
             }
         }
-        scenes
-            .effective_pattern_id(track)
-            .or_else(|| scenes.track_sound_pattern(track))
+        // §2.2.2 (rev 4): in arrangement context the mirror is the TRACK
+        // SOUND on every unborrowed lane — a resolving cell is inert-but-
+        // visible there and must not name what the live surface is showing.
+        // Seq context is the classic scene+pattern world.
+        if !self.arrangement_context() {
+            if let Some(id) = scenes.effective_pattern_id(track) {
+                return Some(id);
+            }
+        }
+        scenes.track_sound_pattern(track)
     }
 
     /// Put every borrowed lane's effective scene pattern back behind the
@@ -568,7 +632,22 @@ impl SequencerState {
             (0..64)
                 .filter(|track| mask >> track & 1 == 1)
                 .filter_map(|track| {
-                    Some((track, scenes.effective_track_pattern(track)?))
+                    // §2.8 borrow-release seam, re-keyed to the owner (§2.9):
+                    // the released lane is repainted by whoever owns it —
+                    // the cell in Seq context, the TRACK SOUND in arrangement
+                    // context. Restoring nothing would leave the borrow's
+                    // device state behind for the next save-back to write
+                    // into the track sound.
+                    let installed = !self.arrangement_context();
+                    let data = installed
+                        .then(|| scenes.effective_track_pattern(track))
+                        .flatten()
+                        .or_else(|| {
+                            scenes
+                                .track_sound_pattern(track)
+                                .and_then(|id| scenes.track_pools.get(track)?.get(id))
+                        })?;
+                    Some((track, data))
                 })
                 .collect()
         };

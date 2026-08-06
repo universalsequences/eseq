@@ -519,7 +519,7 @@ impl ProjectScenes {
     }
 
     pub fn save_scene_snapshot(&mut self, scene_idx: usize, snapshot: PatternSnapshot) -> bool {
-        self.save_scene_snapshot_masked(scene_idx, snapshot, 0, 0)
+        self.save_scene_snapshot_masked(scene_idx, snapshot, 0, 0, 0)
     }
 
     /// Save a live-grid snapshot into a scene, skipping lanes whose live
@@ -536,12 +536,22 @@ impl ProjectScenes {
     /// the track sound and is persisted there (track-sound spec §2.3), but a
     /// latched lane's mirror is the performer's clip — its device deltas
     /// must not leak into the track sound.
+    ///
+    /// `track_owned_mask` (the other subset of `stale_mask`) marks lanes whose
+    /// sound the TRACK owns (track-sound spec §2.2.2, rev 4): arrangement
+    /// context, rules 1/2 unclaimed. Their mirror IS the track sound — a
+    /// resolving cell there is inert-but-visible — so the device half persists
+    /// into the TRACK SOUND and the cell's own entities stay untouched. In Seq
+    /// context the mask is empty and every lane saves to its cell, exactly as
+    /// rev 1. The view flag lives on `SequencerState`, which is why it arrives
+    /// as a mask.
     pub fn save_scene_snapshot_masked(
         &mut self,
         scene_idx: usize,
         snapshot: PatternSnapshot,
         stale_mask: u64,
         latched_mask: u64,
+        track_owned_mask: u64,
     ) -> bool {
         while self.track_pools.len() < snapshot.track_bits.len() {
             self.track_pools.push(TrackPatternPool::default());
@@ -592,48 +602,51 @@ impl ProjectScenes {
                 .flatten()
                 .or_else(|| scene.cells.get(track).copied().flatten())
                 .filter(|id| self.track_pools[track].contains(*id));
-            // A stale lane holds foreign content: skip it so the save-back
-            // never clones it over the pattern the cell really points at. A
-            // track override pins the lane's own pattern id, so that write is
-            // a self-write and stays allowed. A lane that resolves to nothing
-            // has no pattern to clobber, so it still falls through to the
-            // lazy bare-track materialization below.
-            if track < 64
-                && stale_mask >> track & 1 == 1
-                && self.track_overrides.get(track).copied().flatten().is_none()
-                && resolved.is_some()
-            {
-                continue;
-            }
-            let Some(id) = resolved else {
-                // Sticky bare lane (track-sound spec §2.3): a lane the user
-                // emptied stays empty — never mint a cell from leftover live
-                // content (the ghost-step resurrection, spec §1.2). The live
-                // mirror's device/mixer state on a bare lane belongs to the
-                // TRACK SOUND, so persist it there instead of dropping the
-                // user's edits. A latched lane's mirror is the performer's
-                // clip, not the track's own sound — skip it. A cell holding
-                // a dangling pattern id is ambiguous, not bare — skip it too.
-                let latched = track < 64 && latched_mask >> track & 1 == 1;
-                let cell_dangling = scene.cells.get(track).copied().flatten().is_some();
-                if latched || cell_dangling {
+            let latched = track < 64 && latched_mask >> track & 1 == 1;
+            let track_owned = track < 64 && track_owned_mask >> track & 1 == 1;
+            let pinned = self.track_overrides.get(track).copied().flatten().is_some();
+            // A track-owned lane never reaches a cell (§2.2.2): its mirror is
+            // the track sound, whatever cells happen to exist. Otherwise:
+            // a stale lane holds foreign content — its cell is not what the
+            // live grid is showing, so the save-back must never clone the
+            // mirror over the pattern the cell really points at. A track
+            // override pins the lane's own pattern id, so that write is a
+            // self-write and stays allowed. A lane that resolves to nothing
+            // has no pattern to clobber.
+            let installed =
+                !(track < 64 && stale_mask >> track & 1 == 1 && !pinned && resolved.is_some());
+            if !track_owned {
+                if let Some(id) = resolved.filter(|_| installed) {
+                    self.track_pools[track].store(id, data);
                     continue;
                 }
-                if let Some(refs) = self
-                    .track_sounds
-                    .get(track)
-                    .copied()
-                    .flatten()
-                    .and_then(|id| self.track_pools[track].refs(id))
-                {
-                    let (_seq, patch, mix) = data.split();
-                    let sounds = &mut self.track_pools[track].sounds;
-                    sounds.patches.insert(refs.patch, Arc::new(patch));
-                    sounds.mixes.insert(refs.mix, Arc::new(mix));
-                }
+            }
+            // Sticky bare lane (track-sound spec §2.3) and — rev 4, §2.2.2 —
+            // the track-owned lane whose cell still resolves: never mint a
+            // cell from leftover live content (the ghost-step resurrection,
+            // spec §1.2), and never write the uninstalled cell's entities.
+            // The live mirror's device/mixer state on such a lane belongs to
+            // the TRACK SOUND, so persist it there instead of dropping the
+            // user's edits. A latched lane's mirror is the performer's clip,
+            // not the track's own sound — skip it. A cell holding a dangling
+            // pattern id is ambiguous, not bare — skip it too.
+            let cell_dangling =
+                resolved.is_none() && scene.cells.get(track).copied().flatten().is_some();
+            if latched || cell_dangling || (!track_owned && resolved.is_some()) {
                 continue;
-            };
-            self.track_pools[track].store(id, data);
+            }
+            if let Some(refs) = self
+                .track_sounds
+                .get(track)
+                .copied()
+                .flatten()
+                .and_then(|id| self.track_pools[track].refs(id))
+            {
+                let (_seq, patch, mix) = data.split();
+                let sounds = &mut self.track_pools[track].sounds;
+                sounds.patches.insert(refs.patch, Arc::new(patch));
+                sounds.mixes.insert(refs.mix, Arc::new(mix));
+            }
         }
         true
     }

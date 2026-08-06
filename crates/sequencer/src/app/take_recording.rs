@@ -242,6 +242,111 @@ mod tests {
         assert!(app.state.effective_track_pattern_id(0).is_none());
     }
 
+    /// Symptom 6/8's lane, re-keyed for rev 4: the SESSION CELLS are intact
+    /// and nothing was ever silenced — the user is simply standing in the
+    /// arrangement view, which is the whole ownership signal (§2.2.2). No
+    /// explicit-empty row, no playback history.
+    fn stand_in_the_arrangement_view(app: &mut App) {
+        app.arrangement_view_visible = true;
+        app.state.set_arrangement_context(true);
+        assert!(
+            !app.state.is_scene_silenced(0),
+            "rev 4 owns this lane without any transport-derived flag"
+        );
+        assert!(
+            app.state.effective_track_pattern_id(0).is_some(),
+            "the session cell resolves — it is inert-but-visible, not absent"
+        );
+    }
+
+    /// Track-sound spec §2.2.2 (symptom 8): in arrangement context the cell
+    /// owns nothing, so punch-in stamps the TRACK SOUND even though rule 3a's
+    /// cell resolves and the lane was never silenced. Under rev 2/3 this lane
+    /// took the cursor row's cell sound while the ear followed the mirror.
+    #[test]
+    fn punch_in_in_arrangement_context_stamps_the_track_sound_not_the_cell() {
+        let (mut app, anchor) = capture_app();
+        stand_in_the_arrangement_view(&mut app);
+        let track_sound = app
+            .state
+            .with_project_scenes(|scenes| scenes.track_sound_refs(0))
+            .expect("track sound resolves");
+        let cell_sound = app
+            .state
+            .with_project_scenes(|scenes| {
+                let id = scenes.effective_pattern_id(0)?;
+                scenes.track_pools[0].refs(id)
+            })
+            .expect("the cell has its own sound");
+        assert_ne!(track_sound, cell_sound, "a leak must be observable");
+        assert!(
+            !app.state.is_playing(),
+            "the 8-bar scenario: nothing ever played over this lane"
+        );
+
+        assert!(app.take_record_note(0, press_at_beats(anchor, 4.0), 60.0, 1.0));
+        let session = app.take_recording.as_ref().expect("session active");
+        let lane = session.lanes[0].as_ref().expect("lane punched in");
+        assert_eq!(
+            lane.sound,
+            Some(track_sound),
+            "an inert cell owns nothing: punch-in stamps the monitor"
+        );
+        // §2.4/§2.8: the frozen per-chunk snapshot clones the OWNER's device
+        // state too, so selecting the take later cannot revert the lane.
+        let carrier_volume = app.state.with_project_scenes(|scenes| {
+            let id = scenes.track_sound_pattern(0).expect("carrier");
+            scenes.track_pools[0].get(id).expect("carrier data").track_params.volume
+        });
+        assert_eq!(
+            lane.template.track_params.volume.to_bits(),
+            carrier_volume.to_bits(),
+            "the chunk template clones the track sound, not the cell"
+        );
+    }
+
+    /// Track-sound spec §2.3/§2.2.2 (symptom 8): mid-record device tweaks on
+    /// a track-owned lane persist into the TRACK SOUND, and the inert cell's
+    /// entities stay untouched. Under rev 1 the masked save-back skipped the
+    /// lane entirely (stale, but not cell-less) and the edits were dropped.
+    #[test]
+    fn device_tweaks_in_arrangement_context_persist_into_the_track_sound() {
+        let (mut app, _anchor) = capture_app();
+        stand_in_the_arrangement_view(&mut app);
+        let cell = app
+            .state
+            .effective_track_pattern_id(0)
+            .expect("the cell resolves");
+        let cell_volume = app.state.with_project_scenes(|scenes| {
+            let refs = scenes.track_pools[0].refs(cell).expect("cell refs");
+            scenes.track_pools[0].sounds.mixes[&refs.mix].volume
+        });
+        app.state.pattern.track_params[0].set_volume(0.66);
+
+        app.song_transport_stop().expect("capture stop succeeds");
+
+        app.state.with_project_scenes(|scenes| {
+            let refs = scenes.track_sound_refs(0).expect("track sound resolves");
+            assert_eq!(
+                scenes.track_pools[0].sounds.mixes[&refs.mix].volume.to_bits(),
+                0.66f32.to_bits(),
+                "the mirror's device half persists into the track sound"
+            );
+            let cell_refs = scenes.track_pools[0].refs(cell).expect("cell refs");
+            assert_eq!(
+                scenes.track_pools[0].sounds.mixes[&cell_refs.mix]
+                    .volume
+                    .to_bits(),
+                cell_volume.to_bits(),
+                "the inert cell's entities are never written"
+            );
+            assert!(
+                scenes.scenes[scenes.current_scene].cells[0].is_some(),
+                "the cell itself survives — holding is not deleting"
+            );
+        });
+    }
+
     /// Track-sound spec §2.4 (symptom 4): punch-in on a bare lane stamps the
     /// TRACK SOUND — exactly what the lane monitors — so the committed take
     /// plays back with the sound the performer heard, not the cursor row's
@@ -279,6 +384,181 @@ mod tests {
         );
     }
 
+    /// Track-sound spec §2.4.1 (rev 3, user-confirmed UX): takes SHARE the
+    /// track sound's refs. Editing the track sound after recording — here a
+    /// live mixer move followed by the stop save-back that persists it —
+    /// retunes every committed take bound to it, the same way clips sharing
+    /// a pool Patch retune together. Divergence is an explicit palette
+    /// clone, never automatic.
+    ///
+    /// This is safe only under the §2.8 mirror invariant: a seam that lets
+    /// the mirror diverge from the track sound WITHOUT a user edit turns
+    /// this same write path into symptom 7 (the reload flip-flop).
+    #[test]
+    fn editing_the_track_sound_retunes_the_takes_that_share_it() {
+        let (mut app, anchor) = capture_app();
+        empty_track_lane(&mut app);
+
+        // "Select a preset": panel = mirror = track-sound entity all agree
+        // (0.77 stands in for the preset's device state).
+        app.state.with_scenes_mut(|scenes| {
+            let refs = scenes.track_sound_refs(0).expect("track sound resolves");
+            let mut mix = (*scenes.track_pools[0].sounds.mixes[&refs.mix]).clone();
+            mix.volume = 0.77;
+            scenes.track_pools[0]
+                .sounds
+                .mixes
+                .insert(refs.mix, std::sync::Arc::new(mix));
+        });
+        app.state.pattern.track_params[0].set_volume(0.77);
+
+        // Record and commit a take: it is bound to the monitored sound.
+        assert!(app.take_record_note(0, press_at_beats(anchor, 4.0), 60.0, 1.0));
+        let lane = app.take_recording.as_ref().expect("session active").lanes[0]
+            .clone()
+            .expect("lane punched in");
+        let committed = app
+            .register_pending_takes(vec![(0usize, lane)])
+            .expect("takes register");
+        let take_sound = app
+            .state
+            .track_take(0, committed[0].take_id)
+            .expect("registered take")
+            .sound;
+        let volume_of = |app: &App| {
+            app.state.with_project_scenes(|scenes| {
+                scenes.track_pools[0].sounds.mixes[&take_sound.mix].volume
+            })
+        };
+        assert_eq!(
+            volume_of(&app).to_bits(),
+            0.77f32.to_bits(),
+            "right after recording, the take plays the chosen sound"
+        );
+
+        // "Edit the track sound" (no take selected): a live mixer move, then
+        // the stop save-back that persists it — the writer
+        // `song_transport_stop` invokes.
+        app.state.pattern.track_params[0].set_volume(0.25);
+        app.state.save_current_pattern_snapshot(
+            app.tracks.len(),
+            &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates,
+            &app.tracks,
+            &app.graph.track_instrument_types,
+        );
+
+        assert_eq!(
+            volume_of(&app).to_bits(),
+            0.25f32.to_bits(),
+            "the take shares the track sound, so the edit reaches it (§2.4.1)"
+        );
+    }
+
+    /// Give the track sound's Mix entity a recognizable volume ("the
+    /// preset"), leaving the live mirror alone.
+    fn set_track_sound_volume(app: &mut App, volume: f32) {
+        app.state.with_scenes_mut(|scenes| {
+            let refs = scenes.track_sound_refs(0).expect("track sound resolves");
+            let mut mix = (*scenes.track_pools[0].sounds.mixes[&refs.mix]).clone();
+            mix.volume = volume;
+            scenes.track_pools[0]
+                .sounds
+                .mixes
+                .insert(refs.mix, std::sync::Arc::new(mix));
+        });
+    }
+
+    /// Track-sound spec §2.8, load seam (symptom 7, the reload flip-flop):
+    /// `restore_current_pattern_from_repository` is the load path's mirror
+    /// install. On a bare lane it must restore the TRACK SOUND's device
+    /// state — leaving the fresh-track defaults there lets the next stop
+    /// save-back overwrite the user's sound (and every take sharing it)
+    /// with stock.
+    #[test]
+    fn repository_restore_installs_the_track_sound_on_a_bare_lane() {
+        let (mut app, _anchor) = capture_app();
+        empty_track_lane(&mut app);
+        set_track_sound_volume(&mut app, 0.77);
+        // The mirror holds fresh-track defaults, as after the load path's
+        // AddTrack/AddEffect phases.
+        app.state.pattern.track_params[0].set_volume(0.33);
+
+        app.state
+            .restore_current_pattern_from_repository()
+            .expect("the current scene restores");
+
+        assert!(app.state.is_scene_silenced(0), "the bare lane stays held");
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume().to_bits(),
+            0.77f32.to_bits(),
+            "a bare lane's mirror comes up holding the track sound (§2.8)"
+        );
+    }
+
+    /// Track-sound spec §2.8, borrow-release seam (the delete-clip revert):
+    /// releasing a bound take on a bare lane must restore the TRACK SOUND to
+    /// the mirror. Falling back to the effective cell (`None` here) leaves
+    /// the take's borrowed device state in the mirror, which the next stop
+    /// save-back then writes into the track sound.
+    #[test]
+    fn releasing_a_borrowed_take_restores_the_track_sound_on_a_bare_lane() {
+        let (mut app, anchor) = capture_app();
+        empty_track_lane(&mut app);
+        set_track_sound_volume(&mut app, 0.77);
+
+        assert!(app.take_record_note(0, press_at_beats(anchor, 4.0), 60.0, 1.0));
+        let lane = app.take_recording.as_ref().expect("session active").lanes[0]
+            .clone()
+            .expect("lane punched in");
+        let committed = app
+            .register_pending_takes(vec![(0usize, lane)])
+            .expect("takes register");
+        let chunk = app
+            .state
+            .track_take(0, committed[0].take_id)
+            .expect("registered take")
+            .chunks[0];
+
+        // Selecting the take borrows its chunk's device state into the
+        // mirror; a foreign volume makes the leftover observable.
+        let mut borrowed = app
+            .state
+            .with_project_scenes(|scenes| scenes.track_pools[0].get(chunk))
+            .expect("chunk pattern data");
+        borrowed.track_params.volume = 0.40;
+        assert!(app.state.borrow_track_device_state(0, chunk, &borrowed));
+
+        app.state.release_bound_track_device_state(0);
+
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume().to_bits(),
+            0.77f32.to_bits(),
+            "the release restores the track sound, not the borrow's leftovers (§2.8)"
+        );
+    }
+
+    /// Track-sound spec §2.4/§2.8, punch-in template seam: a take recorded
+    /// on a bare lane freezes the TRACK SOUND's device state into its
+    /// chunks. Falling to a default template freezes the stock patch, so
+    /// selecting the take later audibly reverts the lane.
+    #[test]
+    fn take_chunks_freeze_the_track_sounds_device_state_on_a_bare_lane() {
+        let (mut app, anchor) = capture_app();
+        empty_track_lane(&mut app);
+        set_track_sound_volume(&mut app, 0.77);
+
+        assert!(app.take_record_note(0, press_at_beats(anchor, 4.0), 60.0, 1.0));
+        let lane = app.take_recording.as_ref().expect("session active").lanes[0]
+            .as_ref()
+            .expect("lane punched in");
+        assert_eq!(
+            lane.template.track_params.volume.to_bits(),
+            0.77f32.to_bits(),
+            "the chunk template clones the track sound's device state (§2.4)"
+        );
+    }
+
     /// Track-sound spec §2.3 (symptom 5, the missing capture save-back):
     /// device/mixer tweaks made on a bare lane WHILE capture-recording
     /// persist into the track sound when the transport stops.
@@ -303,6 +583,215 @@ mod tests {
                 assert_eq!(scene.cells[0], None, "the lane stays bare");
             }
         });
+    }
+
+    /// User repro (2026-08-06, the launch-record poisoning): with the preset
+    /// on the track sound and a committed take sharing it, record a CLIP
+    /// LAUNCH into the timeline from arrangement capture. The launch latches
+    /// the lane (manual latch + override pin) and installs the launched
+    /// pattern's STOCK device state into the mirror — legitimate while it
+    /// plays (rule 2). The capture stop's own save runs before the latch
+    /// clears (masked, self-write into the launched pattern — fine), but the
+    /// latch-release itself must REINSTALL the owner: after the launch ends,
+    /// the lane is track-owned again (§2.2.2), and a mirror still holding
+    /// the launch's stock state gets persisted into the shared track-sound
+    /// entities by the very next save-back — retuning every take that shares
+    /// them (§2.8 litmus: the user never dialed stock into the track sound).
+    #[test]
+    fn recorded_clip_launch_stop_reinstalls_the_track_sound_before_the_next_save_back() {
+        let (mut app, anchor) = capture_app();
+        stand_in_the_arrangement_view(&mut app);
+        // "Choose a preset": carrier entity and live mirror agree on 0.77.
+        set_track_sound_volume(&mut app, 0.77);
+        app.state.pattern.track_params[0].set_volume(0.77);
+        let carrier_refs = app
+            .state
+            .with_project_scenes(|scenes| scenes.track_sound_refs(0))
+            .expect("track sound resolves");
+        let volume_of = |app: &App| {
+            app.state.with_project_scenes(|scenes| {
+                scenes.track_pools[0].sounds.mixes[&carrier_refs.mix].volume
+            })
+        };
+
+        // Record + commit a take: it shares the carrier's refs (§2.4.1).
+        assert!(app.take_record_note(0, press_at_beats(anchor, 4.0), 60.0, 1.0));
+        app.song_transport_stop().expect("capture stop commits");
+        let takes = app.state.track_takes(0);
+        assert_eq!(takes.len(), 1, "the take committed");
+        assert_eq!(takes[0].sound, carrier_refs, "the take shares the track sound");
+        // Deselect the take: the user moved on (the launch-record gesture
+        // does not keep a clip selection alive on this lane).
+        app.set_song_clip_selection(None);
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume().to_bits(),
+            0.77f32.to_bits(),
+            "after the release the mirror holds the track sound again"
+        );
+
+        // "Punch a step pattern into scene 2's cell": scene 1's session cell
+        // already exists with its own stock sound — the launch target.
+        let launch_pattern = app
+            .state
+            .with_project_scenes(|scenes| scenes.scenes[1].cells[0])
+            .expect("scene 2's cell resolves");
+        let stock_volume = app.state.with_project_scenes(|scenes| {
+            let refs = scenes.track_pools[0].refs(launch_pattern).expect("cell refs");
+            scenes.track_pools[0].sounds.mixes[&refs.mix].volume
+        });
+        assert_ne!(
+            stock_volume.to_bits(),
+            0.77f32.to_bits(),
+            "the launched pattern must carry a different sound for a leak to show"
+        );
+
+        // Record the clip launch from arrangement capture.
+        app.song_transport_play(true).expect("capture starts");
+        assert_eq!(app.song_transport_mode, SongTransportMode::ArrangementCapture);
+        app.apply_manual_pattern_launch(&crate::quantized_launch::PatternLaunchTarget::TrackPattern {
+            track: 0,
+            pattern: launch_pattern.0,
+        })
+        .expect("launch applies");
+        assert_eq!(
+            app.state.song_manual_latch_mask() & 1,
+            1,
+            "the launch latched the lane"
+        );
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume().to_bits(),
+            stock_volume.to_bits(),
+            "while the launch plays, the mirror legitimately holds its stock state"
+        );
+
+        // Stop-commit: the launch splices into the song rows; the latch ends.
+        app.song_transport_stop().expect("capture stop commits the launch");
+        assert_eq!(
+            volume_of(&app).to_bits(),
+            0.77f32.to_bits(),
+            "the stop's own save is masked — the shared sound survives the stop"
+        );
+        assert_eq!(app.state.song_manual_latch_mask(), 0, "the latch cleared");
+        assert_eq!(
+            app.state.sound_binding_borrowed_mask() & 1,
+            0,
+            "nothing borrows the lane after the stop"
+        );
+        assert_eq!(
+            app.state.track_owned_lane_mask() & 1,
+            1,
+            "the lane is track-owned again — the claim ended"
+        );
+        // The invariant under test: ending the claim reinstalled the OWNER.
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume().to_bits(),
+            0.77f32.to_bits(),
+            "ending the latch must reinstall the track sound into the mirror \
+             (§2.8) — a mirror still holding the launch's stock state is what \
+             the next save-back persists into the shared entities"
+        );
+
+        // Any later gesture's save-back must find nothing to poison.
+        app.state.save_current_pattern_snapshot(
+            app.tracks.len(),
+            &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates,
+            &app.tracks,
+            &app.graph.track_instrument_types,
+        );
+        assert_eq!(
+            volume_of(&app).to_bits(),
+            0.77f32.to_bits(),
+            "the subsequent save-back must not write the launch's stock device \
+             state into the shared track-sound entities (§2.8 litmus)"
+        );
+    }
+
+    /// User repro (2026-08-06, the "preset nowhere to be found" poisoning):
+    /// in ARRANGEMENT view, choose a sound for the track (the track sound
+    /// carries it), record a take (shares the carrier's refs, §2.4.1; the
+    /// commit auto-selects it, which BORROWS the lane), then simply hit Play
+    /// to listen back. The play path's row apply runs the
+    /// capture → release-borrows → masked-save trio: the capture substitutes
+    /// the borrowed lane's device half with the CELL's (takes spec 18.1 step
+    /// 3), the release then clears the borrowed bit, and the save — reading
+    /// the masks AFTER the release — counts the lane as track-owned and
+    /// writes the cell's stock device state into the shared track-sound
+    /// entities. The take and the track sound are both poisoned; the chosen
+    /// sound survives nowhere (§2.8 litmus violation).
+    #[test]
+    fn verification_playback_with_the_take_selected_does_not_poison_the_track_sound() {
+        let (mut app, anchor) = capture_app();
+        stand_in_the_arrangement_view(&mut app);
+        // "Choose a preset": the carrier entity and the live mirror agree.
+        set_track_sound_volume(&mut app, 0.77);
+        app.state.pattern.track_params[0].set_volume(0.77);
+        let carrier_refs = app
+            .state
+            .with_project_scenes(|scenes| scenes.track_sound_refs(0))
+            .expect("track sound resolves");
+        let cell_volume = app.state.with_project_scenes(|scenes| {
+            let id = scenes.effective_pattern_id(0).expect("session cell");
+            let refs = scenes.track_pools[0].refs(id).expect("cell refs");
+            scenes.track_pools[0].sounds.mixes[&refs.mix].volume
+        });
+        assert_ne!(
+            cell_volume.to_bits(),
+            0.77f32.to_bits(),
+            "the inert cell must hold a different sound for a leak to show"
+        );
+
+        // Record a take and stop: the commit paints the clip, registers the
+        // take sharing the track sound's refs, and auto-selects it.
+        assert!(app.take_record_note(0, press_at_beats(anchor, 4.0), 60.0, 1.0));
+        app.song_transport_stop().expect("capture stop commits");
+        let takes = app.state.track_takes(0);
+        assert_eq!(takes.len(), 1, "the take committed");
+        assert_eq!(
+            takes[0].sound, carrier_refs,
+            "the take shares the track sound's refs (§2.4.1)"
+        );
+        assert!(
+            app.song_clip_selection.is_some(),
+            "the commit auto-selected the take (16.6 cause 3)"
+        );
+        assert_eq!(
+            app.state.sound_binding_borrowed_mask() & 1,
+            1,
+            "the selection borrowed the lane's device mirror"
+        );
+        let volume_of = |app: &App| {
+            app.state.with_project_scenes(|scenes| {
+                scenes.track_pools[0].sounds.mixes[&carrier_refs.mix].volume
+            })
+        };
+        assert_eq!(
+            volume_of(&app).to_bits(),
+            0.77f32.to_bits(),
+            "right after the commit the shared sound is intact"
+        );
+
+        // The fatal gesture: plain verification playback in arrangement view.
+        app.song_transport_play(false).expect("playback starts");
+
+        assert_eq!(
+            app.state
+                .with_project_scenes(|scenes| scenes.track_sound_refs(0)),
+            Some(carrier_refs),
+            "the carrier was never re-pointed"
+        );
+        assert_eq!(
+            volume_of(&app).to_bits(),
+            0.77f32.to_bits(),
+            "Play must not write the inert cell's device state into the \
+             shared track-sound entities (§2.8 litmus)"
+        );
+        app.song_transport_stop().expect("stop succeeds");
+        assert_eq!(
+            volume_of(&app).to_bits(),
+            0.77f32.to_bits(),
+            "the stop save-back must not poison the shared sound either"
+        );
     }
 
     #[test]
@@ -797,14 +1286,27 @@ impl App {
         // SHARED via the bound refs (§17.3), not cloned.
         let bound = self.bound_read_pattern(track);
         let bound_sound = self.bound_sound_refs(track);
+        // §2.4/§2.8/§2.9: with no bound pattern the monitor is whoever OWNS
+        // the lane — the track sound in arrangement context (where recording
+        // happens), the effective cell in Seq context. The frozen chunk
+        // snapshots must clone that, not a stock default (selecting the take
+        // later would audibly revert the lane).
+        let arrangement = self.arrangement_view_visible;
         let template = || {
             let mut data = self
                 .state
                 .with_project_scenes(|scenes| {
                     let pool = scenes.track_pools.get(track)?;
-                    bound
-                        .and_then(|id| pool.get(id))
-                        .or_else(|| scenes.effective_track_pattern(track))
+                    let carrier =
+                        || scenes.track_sound_pattern(track).and_then(|id| pool.get(id));
+                    let cell = || scenes.effective_track_pattern(track);
+                    bound.and_then(|id| pool.get(id)).or_else(|| {
+                        if arrangement {
+                            carrier().or_else(cell)
+                        } else {
+                            cell().or_else(carrier)
+                        }
+                    })
                 })
                 .or_else(|| {
                     PatternSnapshot::new_default(1, &[]).track_pattern_data(0)

@@ -6061,7 +6061,7 @@
         state.with_scenes_mut(|scenes| {
             let mut snapshot = PatternSnapshot::new_default(2, &[]);
             snapshot.track_params[1].volume = 0.99;
-            assert!(scenes.save_scene_snapshot_masked(0, snapshot, 1 << 1, 1 << 1));
+            assert!(scenes.save_scene_snapshot_masked(0, snapshot, 1 << 1, 1 << 1, 0));
             let refs = scenes.track_sound_refs(1).expect("track sound resolves");
             let mix = scenes.track_pools[1].sounds.mixes[&refs.mix].clone();
             assert_eq!(

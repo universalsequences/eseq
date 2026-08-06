@@ -233,10 +233,21 @@ impl App {
     /// The track's bound source (16.3). Cheap enough for per-frame reads:
     /// one scenes lock, no pattern clones.
     pub fn track_sound_binding(&self, track: usize) -> TrackBinding {
+        // Rule 3 is VIEW-KEYED (track-sound spec §2.2.2): in arrangement
+        // context the TRACK owns the sound, so rule 3a sits out entirely —
+        // whatever cells exist are inert-but-visible. Dropping the candidate
+        // keeps the origin `Scene` with no source, and every consumer falls
+        // to the track sound (rule 3b) — what the lane is monitoring. Seq
+        // context is the classic scene+pattern world.
+        let effective = if self.arrangement_view_visible {
+            None
+        } else {
+            self.state.effective_track_pattern_id(track)
+        };
         resolve_binding(
             self.selected_bound_source(track),
             self.audible_or_held_lane_source(track),
-            self.state.effective_track_pattern_id(track),
+            effective,
         )
     }
 
@@ -280,6 +291,10 @@ impl App {
     /// `None` only for an out-of-range track.
     pub(crate) fn bound_sound_refs(&self, track: usize) -> Option<SoundRefs> {
         let source = self.track_sound_binding(track).source;
+        // §2.2.2 (rev 4): the cell-refs fallback is rule 3a by another name,
+        // so it obeys the same view rule — in arrangement context the
+        // `track_sound_refs` fallback below supplies the owner instead.
+        let arrangement = self.arrangement_view_visible;
         self.state.with_project_scenes(|scenes| {
             let from_source = match source {
                 Some(BoundSource::Take(id)) => scenes
@@ -295,6 +310,9 @@ impl App {
             };
             from_source
                 .or_else(|| {
+                    if arrangement {
+                        return None;
+                    }
                     scenes
                         .effective_pattern_id(track)
                         .and_then(|id| scenes.track_pools.get(track)?.refs(id))
@@ -356,11 +374,58 @@ impl App {
     /// Follow the arrangement view on/off screen (16.6 dormancy). Called
     /// from the reactive tick before the bindings resolve; re-resolves only
     /// on a real transition, where the panel and monitor must both move.
+    ///
+    /// Since rev 4 this is also the OWNERSHIP switch (track-sound spec
+    /// §2.2.2/§2.9): the one seam where ownership legitimately changes
+    /// wholesale, so it moves edits OUT to the old owners and the new owners
+    /// IN, in that order.
     pub fn set_arrangement_view_visible(&mut self, visible: bool) {
         if self.arrangement_view_visible == visible {
+            // The state-side mirror of the flag can still be stale (a fresh
+            // `SequencerState` after a project load starts at `false`), so
+            // re-assert it unconditionally — cheap, and the ownership masks
+            // are read from it.
+            self.state.set_arrangement_context(visible);
             return;
         }
+        // (a) Leaving a view: save back to THAT view's owners (§2.9.1). The
+        // masks are still derived from the old context flag, so track-owned
+        // lanes persist into their track sounds. Only the arrangement→Seq
+        // direction runs it: Seq-context edits already write through to the
+        // cell at edit time (device values and — since rev 4 — track params),
+        // so a blind mirror→cell save on the way OUT of Seq view would add no
+        // durability and could only clobber a cell from a mirror that some
+        // borrow or row apply desynced (the §2.8 litmus).
+        if self.arrangement_view_visible {
+            self.state.save_current_pattern_snapshot(
+                self.tracks.len(),
+                &self.graph.track_buffer_ids,
+                &self.graph.track_sample_rates,
+                &self.tracks,
+                &self.graph.track_instrument_types,
+            );
+        }
+        // (b) Flip the context. Both copies move together: the App's own
+        // reads (rule 3, device-edit targets) and the state's (save-back
+        // masks, resync, `mirror_device_pattern_id`).
         self.arrangement_view_visible = visible;
+        self.state.set_arrangement_context(visible);
+        // (c) Entering a view: install the new owners into the mirror. Skipped
+        // while song playback holds authority — the rows own the lanes there
+        // and a wholesale repaint would fight the scheduler; the next stop's
+        // resync installs the owners anyway.
+        if !self.song_playback_authority_active() {
+            if visible {
+                // Arrangement: the track sound on every lane rules 1/2 do not
+                // claim. Note content is untouched — only the device half.
+                self.state.install_track_sounds_into_mirror();
+            } else {
+                // Seq: an ordinary resync installs the current scene's cells,
+                // restoring rev-1 session behavior wholesale (including
+                // clearing any track-sound hold).
+                self.state.resync_live_grid_to_current_scene();
+            }
+        }
         self.sync_track_sound_bindings();
     }
 
@@ -954,6 +1019,20 @@ pub(crate) mod tests {
         let scene_pattern = state
             .effective_track_pattern_id(0)
             .expect("scene 0 has a pattern on track 0");
+        // §2.6 seeding, re-run once the cell actually carries the instrument:
+        // `ProjectScenes`' construction-time `ensure_track_sounds` fired
+        // before the descriptor existed, so the carrier would otherwise hold
+        // a device-less Patch and every rule-3b edit target would be empty.
+        // Write through the carrier's OWN entities rather than re-seeding or
+        // forking, both of which would leave orphans in the pool (the palette
+        // cleanup pin counts them).
+        state.with_scenes_mut(|scenes| {
+            let carrier = scenes.track_sounds[0].expect("the carrier exists");
+            let data = scenes.track_pools[0]
+                .get(scene_pattern)
+                .expect("the cell resolves");
+            assert!(scenes.track_pools[0].store(carrier, data));
+        });
 
         let chunk = || -> TrackPatternData {
             let mut data = state
@@ -1007,6 +1086,11 @@ pub(crate) mod tests {
         // These cases are all "the user is looking at the timeline": rule 1
         // is dormant while the arrangement view is off screen (16.6).
         app.arrangement_view_visible = true;
+        // Rev 4: ownership is view-keyed, and the state-side consumers read
+        // their own copy of the flag (§2.2.2). Set both directly — the
+        // public setter runs the view-switch seam (§2.9), which a fixture
+        // has no business firing.
+        app.state.set_arrangement_context(true);
         (app, take, scene_pattern, chunks)
     }
 
@@ -1076,16 +1160,23 @@ pub(crate) mod tests {
     }
 
     /// 16.6 cause 1: deselecting returns the binding — and the edit target —
-    /// to the effective scene pattern.
+    /// to rule 3, which under rev 4 is view-keyed (track-sound spec §2.2.2).
+    /// In the arrangement view that is the TRACK SOUND; the scene cell is
+    /// inert-but-visible and must not absorb the edit.
     #[test]
-    fn deselecting_returns_edits_to_the_scene_pattern() {
+    fn deselecting_returns_edits_to_the_view_owner() {
         let (mut app, _take, scene_pattern, chunks) = app_with_take();
         app.select_song_clip(0, ClipId(0))
             .expect("clip selects");
         app.set_song_clip_selection(None);
         assert!(app.track_sound_binding(0).is_scene());
+        let carrier = app
+            .state
+            .track_sound_pattern_id(0)
+            .expect("the track sound resolves");
 
         let chunk_before = instrument_default(&app, chunks[0]);
+        let scene_before = instrument_default(&app, scene_pattern);
         let target = chunk_before - 0.25;
         try_apply_command(
             &mut app,
@@ -1097,7 +1188,16 @@ pub(crate) mod tests {
         )
         .expect("device edit applies");
 
-        assert_eq!(instrument_default(&app, scene_pattern), target);
+        assert_eq!(
+            instrument_default(&app, carrier),
+            target,
+            "arrangement view: rule 3 is the track sound"
+        );
+        assert_eq!(
+            instrument_default(&app, scene_pattern),
+            scene_before,
+            "the cell is inert-but-visible in arrangement view"
+        );
         assert_eq!(
             instrument_default(&app, chunks[0]),
             chunk_before,
@@ -1669,6 +1769,184 @@ pub(crate) mod tests {
                 assert_eq!(scene.cells[0], None, "the lane stays bare");
             }
         });
+    }
+
+    /// Move the ownership context without firing the §2.9 view-switch seam:
+    /// resolution pins want the rule, not the seam's mirror traffic.
+    pub(crate) fn set_view_context(app: &mut App, arrangement: bool) {
+        app.arrangement_view_visible = arrangement;
+        app.state.set_arrangement_context(arrangement);
+    }
+
+    /// Track-sound spec §2.2.2 (symptom 8, the 8-bar scenario): ownership is
+    /// keyed to the VIEW, not to transport history. STOPPED, nothing ever
+    /// played, cells resolving — in arrangement view rule 3a sits out and the
+    /// TRACK SOUND owns the lane; in Seq view the classic cell owns it. No
+    /// silencing, no playback, no cursor involved.
+    #[test]
+    fn ownership_follows_the_view_not_the_transport() {
+        let (mut app, _take, scene_pattern, _chunks) = app_with_take();
+        let cell_refs = app
+            .state
+            .with_project_scenes(|scenes| scenes.track_pools[0].refs(scene_pattern))
+            .expect("the scene cell has a sound");
+        let track_sound = app
+            .state
+            .with_project_scenes(|scenes| scenes.track_sound_refs(0))
+            .expect("track sound resolves");
+        assert_ne!(cell_refs, track_sound, "a leak must be observable");
+        assert!(!app.state.is_playing(), "the whole point: stopped");
+        assert!(
+            !app.state.is_scene_silenced(0),
+            "and never silenced — rev 2/3's predicate would bind the cell here"
+        );
+        assert_eq!(
+            app.state.effective_track_pattern_id(0),
+            Some(scene_pattern),
+            "the cell resolves; it is inert-but-visible, not absent"
+        );
+
+        set_view_context(&mut app, true);
+        assert_eq!(
+            app.track_sound_binding(0).source,
+            None,
+            "arrangement view: rule 3a sits out"
+        );
+        assert_eq!(
+            app.bound_sound_refs(0),
+            Some(track_sound),
+            "arrangement view: the track owns the sound (rule 3b)"
+        );
+
+        set_view_context(&mut app, false);
+        assert_eq!(
+            app.track_sound_binding(0).source,
+            Some(BoundSource::Pattern(scene_pattern)),
+            "Seq view: the pure scene+pattern world returns"
+        );
+        assert_eq!(app.bound_sound_refs(0), Some(cell_refs));
+    }
+
+    /// Track-sound spec §5.3.6d: in SEQ context nothing about rev 4 is
+    /// visible — a device edit on a lane with a cell writes the CELL, and the
+    /// track sound stays dormant. The twin of
+    /// `deselecting_returns_edits_to_the_view_owner`.
+    #[test]
+    fn seq_context_device_edits_still_write_the_cell() {
+        let (mut app, _take, scene_pattern, _chunks) = app_with_take();
+        set_view_context(&mut app, false);
+        let carrier = app
+            .state
+            .track_sound_pattern_id(0)
+            .expect("the track sound resolves");
+        let carrier_before = instrument_default(&app, carrier);
+        let target = instrument_default(&app, scene_pattern) - 0.25;
+
+        try_apply_command(
+            &mut app,
+            AppCommand::SetInstrumentParam {
+                track: 0,
+                param_idx: 0,
+                value: target,
+            },
+        )
+        .expect("device edit applies");
+
+        assert_eq!(
+            instrument_default(&app, scene_pattern),
+            target,
+            "Seq view: the classic cell owns the edit"
+        );
+        assert_eq!(
+            instrument_default(&app, carrier),
+            carrier_before,
+            "the track sound is dormant in Seq view"
+        );
+    }
+
+    /// Track-sound spec §2.9/§5.3.6b: the view switch is a first-class mirror
+    /// seam. Leaving arrangement view persists the mirror into the TRACK
+    /// SOUND and entering Seq view installs the scene's cells; switching back
+    /// reinstalls the track sound with the edit still on it.
+    #[test]
+    fn a_view_switch_roundtrip_moves_edits_out_and_owners_in() {
+        let (mut app, _take, scene_pattern, _chunks) = app_with_take();
+        let carrier = app
+            .state
+            .track_sound_pattern_id(0)
+            .expect("the track sound resolves");
+        let pool_volume = |app: &App, id: PatternId| {
+            app.state.with_project_scenes(|scenes| {
+                scenes.track_pools[0]
+                    .get(id)
+                    .expect("pattern resolves")
+                    .track_params
+                    .volume
+            })
+        };
+        let cell_volume = pool_volume(&app, scene_pattern);
+        assert_ne!(cell_volume.to_bits(), 0.77f32.to_bits());
+        // A live mixer move in arrangement context: unsaved, mirror-only.
+        app.state.pattern.track_params[0].set_volume(0.77);
+
+        app.set_arrangement_view_visible(false);
+
+        assert_eq!(
+            pool_volume(&app, carrier).to_bits(),
+            0.77f32.to_bits(),
+            "leaving arrangement view saves back to the track sound (§2.9.1)"
+        );
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume().to_bits(),
+            cell_volume.to_bits(),
+            "entering Seq view installs the scene's cells (§2.9.2)"
+        );
+
+        app.set_arrangement_view_visible(true);
+
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume().to_bits(),
+            0.77f32.to_bits(),
+            "entering arrangement view reinstalls the track sound, edit intact"
+        );
+    }
+
+    /// Track-sound spec §2.9/§5.3.6c (symptom 8's second half): track params
+    /// write through to the owning entity AT EDIT TIME, so a mirror repaint
+    /// — here the borrow/release cycle a selection performs — cannot discard
+    /// them. Before rev 4 `polyphonic` lived only in the mirror until a stop
+    /// save-back that anything could preempt.
+    #[test]
+    fn track_params_write_through_to_the_owner_at_edit_time() {
+        let (mut app, _take, _scene_pattern, _chunks) = app_with_take();
+        let carrier = app
+            .state
+            .track_sound_pattern_id(0)
+            .expect("the track sound resolves");
+        let before = app.state.pattern.track_params[0].is_polyphonic();
+
+        try_apply_command(&mut app, AppCommand::ToggleTrackPolyphonic { track: 0 })
+            .expect("the toggle applies");
+
+        assert_eq!(
+            app.state.with_project_scenes(|scenes| scenes.track_pools[0]
+                .get(carrier)
+                .expect("carrier resolves")
+                .track_params
+                .polyphonic),
+            !before,
+            "the edit reached the owning entity immediately"
+        );
+
+        // A mirror repaint with no save-back in between.
+        app.state.release_bound_device_state();
+        app.state.install_track_sounds_into_mirror();
+
+        assert_eq!(
+            app.state.pattern.track_params[0].is_polyphonic(),
+            !before,
+            "the setting survives the repaint"
+        );
     }
 
     /// Regression (16.3 rule 2): a structural arrangement edit made DURING

@@ -1853,10 +1853,16 @@ mod tests {
             app.track_sound_binding(0).is_scene(),
             "the binding falls back off rule 1"
         );
+        // Rev 4 (track-sound spec §2.2.2): rule 3 is view-keyed, and this
+        // fixture stands in the arrangement view — so the fallback is the
+        // TRACK SOUND, not the (inert-but-visible) scene cell.
+        assert_eq!(app.track_sound_binding(0).source, None);
         assert_eq!(
-            app.track_sound_binding(0).source,
-            Some(BoundSource::Pattern(scene_pattern))
+            app.bound_sound_refs(0),
+            app.state
+                .with_project_scenes(|scenes| scenes.track_sound_refs(0))
         );
+        let _ = scene_pattern;
     }
 
     /// Clip -> region: selecting a clip REPLACES the region with that clip's
