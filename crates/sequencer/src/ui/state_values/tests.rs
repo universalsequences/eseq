@@ -44114,9 +44114,86 @@
                         .map(|value| value.borrow().clone()),
                     Some(Value::Number(4.0))
                 );
+                assert_eq!(
+                    payload.get("quantize").map(|value| value.borrow().clone()),
+                    Some(Value::String("off".to_string())),
+                    "clip clicks must carry the transport launch quantize (off default)"
+                );
             }
             other => panic!("expected set-scene-cell host command, got {other:?}"),
         }
+        // The clip click must forward the LIVE transport quantize selection.
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "scene-launch-quantize",
+            Value::String("1 bar".to_string()),
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(mixer-v2-launch-track-pattern 1 (nth (mixer-v2-track-pattern-cells 1) 1))")
+            .expect("launch track pattern with quantize set");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "set-scene-cell");
+                let Value::Map(payload) = payload else {
+                    panic!("set-scene-cell payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("quantize").map(|value| value.borrow().clone()),
+                    Some(Value::String("1 bar".to_string())),
+                    "clip clicks must forward the selected scene launch quantize"
+                );
+            }
+            other => panic!("expected set-scene-cell host command, got {other:?}"),
+        }
+        // A pending quantized clip launch swaps the cell background to the
+        // blinking queued widget (glyph untouched); clearing it swaps back.
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "queued-track-clips",
+            Value::List(vec![
+                Rc::new(RefCell::new(Value::Number(-1.0))),
+                Rc::new(RefCell::new(Value::Number(4.0))),
+            ]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .runtime_mut()
+            .current_layout
+            .clone()
+            .expect("layout after queued clip publish");
+        let queued_cell = find_node_by_stable_key(&layout, "mixer-v2-track-pattern-cell-1-4")
+            .expect("queued track pattern cell");
+        assert_eq!(
+            queued_cell.props.get("background"),
+            Some(&Value::String("track-pattern-cell-queued-bg".to_string())),
+            "a cell with a pending quantized launch must use the blinking background"
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "queued-track-clips",
+            Value::List(vec![
+                Rc::new(RefCell::new(Value::Number(-1.0))),
+                Rc::new(RefCell::new(Value::Number(-1.0))),
+            ]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .runtime_mut()
+            .current_layout
+            .clone()
+            .expect("layout after queued clip clear");
+        let settled_cell = find_node_by_stable_key(&layout, "mixer-v2-track-pattern-cell-1-4")
+            .expect("settled track pattern cell");
+        assert_eq!(
+            settled_cell.props.get("background"),
+            Some(&Value::String("track-pattern-cell-bg".to_string())),
+            "clearing the pending launch must restore the normal cell background"
+        );
         editor.runtime_mut().set_reactive(
             "SEQ",
             &track_pattern_cell_selected_field(1, 4),

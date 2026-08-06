@@ -3772,6 +3772,62 @@
     }
 
     #[test]
+    fn queued_scene_cell_defers_restore_and_pins_outgoing_override() {
+        let state = make_state_with_tracks(1);
+        let first = PatternSnapshot::new_default(1, &[]);
+        let second = snapshot_with_active_step(1, 0, 4);
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let outgoing = state.scene_track_pattern_id(0, 0).unwrap();
+        let shared = state.scene_track_pattern_id(1, 0).unwrap();
+        let (buffer_ids, sample_rates, names, instrument_types) = launch_test_args();
+
+        assert!(state.set_scene_cell_queued(
+            0,
+            0,
+            shared,
+            1,
+            &buffer_ids,
+            &sample_rates,
+            &names,
+            &instrument_types,
+        ));
+
+        // The edit landed (cell assigned) but nothing sounded yet: the live
+        // grid still plays the outgoing pattern via its pinned override.
+        assert_eq!(state.scene_track_pattern_id(0, 0), Some(shared));
+        assert!(!state.pattern.patterns[0].is_active(4));
+        let cells = state.track_pattern_cells(0);
+        let outgoing_cell = cells
+            .iter()
+            .find(|cell| cell.pattern_id == outgoing)
+            .unwrap();
+        assert!(outgoing_cell.active_effective);
+        assert!(outgoing_cell.overridden);
+        let assigned_cell = cells.iter().find(|cell| cell.pattern_id == shared).unwrap();
+        assert!(assigned_cell.assigned_to_current_scene);
+        assert!(!assigned_cell.active_effective);
+
+        // Boundary apply: the launch's own masked save-back must self-write
+        // the outgoing pattern, never clone the outgoing live content over
+        // the newly assigned one.
+        assert!(state.launch_scene_tracks(
+            0,
+            &[0],
+            1,
+            &buffer_ids,
+            &sample_rates,
+            &names,
+            &instrument_types,
+        ));
+        assert!(state.pattern.patterns[0].is_active(4));
+        assert!(state
+            .track_pattern_cells(0)
+            .into_iter()
+            .any(|cell| cell.pattern_id == shared && cell.active_effective));
+    }
+
+    #[test]
     fn clone_current_scene_track_pattern_commits_new_pattern_id() {
         let state = make_state_with_tracks(1);
         let first = snapshot_with_active_step(1, 0, 2);

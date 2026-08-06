@@ -406,7 +406,36 @@
         (material :color outer))
       (sdf/fill (sdf/rounded-rect (* width 0.94) (* height 0.94) 0.2)
         (material :color middle))
-      (sdf/fill (sdf/rounded-rect (* width (if (= active 1) 0.8 0.92)) 
+      (sdf/fill (sdf/rounded-rect (* width (if (= active 1) 0.8 0.92))
+          (* (if (= active 1) 0.8 0.92) height) (if (= active 1) 0.1 0.22))
+        (material :color inner)))))
+
+;; `track-pattern-cell-bg` for a cell whose quantized launch is pending:
+;; identical geometry (the sound glyph on top is untouched), but the ring
+;; blinks the track color toward white at the queued-scene-pill cadence
+;; until the boundary launch fires and the host swaps the background back.
+(defwidget track-pattern-cell-queued-bg
+  :width 0.88 :height 0.38
+  :paint-margin 0.04
+  :state (active assigned override selected track-r track-g track-b)
+  :bindable (active assigned override selected track-r track-g track-b)
+  :animates true
+  :shader
+  (let ((pulse (+ 0.5 (* 0.5 (cos (* itime 5.4)))))
+      (blink-r (+ track-r (* pulse (- 1.0 track-r))))
+      (blink-g (+ track-g (* pulse (- 1.0 track-g))))
+      (blink-b (+ track-b (* pulse (- 1.0 track-b))))
+      (outer (rgba blink-r blink-g blink-b 1.0))
+      (middle (rgba blink-r blink-g blink-b 1.0))
+      (inner (if (= active 0)
+          (rgba 0.02 0.025 0.03 0.7)
+          (rgba 0.1 0.1 0.1 0.3))))
+    (sdf/layer
+      (sdf/fill (sdf/rounded-rect width height 0.3)
+        (material :color outer))
+      (sdf/fill (sdf/rounded-rect (* width 0.94) (* height 0.94) 0.2)
+        (material :color middle))
+      (sdf/fill (sdf/rounded-rect (* width (if (= active 1) 0.8 0.92))
           (* (if (= active 1) 0.8 0.92) height) (if (= active 1) 0.1 0.22))
         (material :color inner)))))
 
@@ -417,15 +446,26 @@
     (nth SEQ.track-pattern-cells track)
     (list)))
 
+;; The pattern id this track has queued behind a quantized clip launch
+;; (-1 = none), from the host's pending-launch poll.
+(def mixer-v2-queued-clip (track)
+  (let ((queued (or SEQ.queued-track-clips (list))))
+    (if (< track (len queued))
+      (nth queued track)
+      -1)))
+
 (def mixer-v2-launch-track-pattern (track cell)
   (do
     (mixer-v2-activate-track-control track)
     (seq-set-track track)
+    ;; Clip launches follow the transport's scene launch quantize: the host
+    ;; assigns the cell now and defers the audible launch to the boundary.
     (host-command "set-scene-cell"
       (dict
         :scene (or SEQ.current-pattern 0)
         :track track
-        :pattern-id (get cell :id)))
+        :pattern-id (get cell :id)
+        :quantize (or SEQ.scene-launch-quantize "off")))
     (seq-set-delete-target :track-pattern (dict :track track :pattern-id (get cell :id)))))
 
 (def mixer-v2-track-pattern-grid (track)
@@ -439,7 +479,9 @@
               :width 1.90 :height 0.95
               :padding 0.35
               :bg :transparent
-              :background "track-pattern-cell-bg"
+              :background (if (= pattern-id (mixer-v2-queued-clip track))
+                "track-pattern-cell-queued-bg"
+                "track-pattern-cell-bg")
               :active (mixer-v2-track-pattern-cell-active-binding track pattern-id)
               :assigned (mixer-v2-track-pattern-cell-assigned-binding track pattern-id)
               :override (mixer-v2-track-pattern-cell-override-binding track pattern-id)

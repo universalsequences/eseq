@@ -993,6 +993,65 @@ impl SequencerState {
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> bool {
+        self.set_scene_cell_with_launch(
+            scene,
+            track,
+            pattern_id,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+            false,
+        )
+    }
+
+    /// `set_scene_cell` for a quantized clip launch into the current scene:
+    /// the cell assignment (the edit) lands now, but the audible restore is
+    /// deferred to the pending `SceneTracks` boundary launch. Until that
+    /// launch applies, the lane's override stays pinned to the pattern it is
+    /// actually playing — the cell already names the new pattern, so an
+    /// unpinned lane would let any masked save-back (the boundary launch's
+    /// own save included) clone the outgoing pattern's live content over the
+    /// newly assigned one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_scene_cell_queued(
+        &self,
+        scene: usize,
+        track: usize,
+        pattern_id: PatternId,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> bool {
+        self.set_scene_cell_with_launch(
+            scene,
+            track,
+            pattern_id,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn set_scene_cell_with_launch(
+        &self,
+        scene: usize,
+        track: usize,
+        pattern_id: PatternId,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+        defer_launch: bool,
+    ) -> bool {
         if track >= num_tracks {
             return false;
         }
@@ -1014,17 +1073,29 @@ impl SequencerState {
             if !scenes.save_scene_snapshot_masked(current_scene, current_snapshot, self.stale_live_lane_mask()) {
                 return false;
             }
+            // The lane's audible identity before the cell moves — the
+            // deferred-launch pin below must name the OUTGOING pattern.
+            let playing = scenes.effective_pattern_id(track);
             if !scenes.set_cell(scene, track, pattern_id) {
                 return false;
             }
             if scene == current_scene {
-                if let Some(override_slot) = scenes.track_overrides.get_mut(track) {
-                    *override_slot = None;
+                if defer_launch {
+                    if let Some(override_slot) = scenes.track_overrides.get_mut(track) {
+                        if override_slot.is_none() {
+                            *override_slot = playing;
+                        }
+                    }
+                    None
+                } else {
+                    if let Some(override_slot) = scenes.track_overrides.get_mut(track) {
+                        *override_slot = None;
+                    }
+                    scenes
+                        .track_pools
+                        .get(track)
+                        .and_then(|pool| pool.get(pattern_id))
                 }
-                scenes
-                    .track_pools
-                    .get(track)
-                    .and_then(|pool| pool.get(pattern_id))
             } else {
                 None
             }

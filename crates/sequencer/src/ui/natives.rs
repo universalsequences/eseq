@@ -2180,6 +2180,9 @@ pub(crate) fn init_runtime(
                 ("record-quantize", Value::String("1/16".to_string())),
                 ("metronome", Value::Bool(false)),
                 ("queued-scene", Value::Number(-1.0)),
+                // Per-track pattern id (-1 = none) with a pending quantized
+                // clip launch — drives the mixer grid's queued-cell blink.
+                ("queued-track-clips", Value::List(vec![])),
                 // Song mode observability (docs/song-mode-spec.md 12).
                 ("song-exists", Value::Bool(false)),
                 ("song-mode", Value::String("stopped".to_string())),

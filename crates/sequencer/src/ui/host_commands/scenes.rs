@@ -307,6 +307,82 @@ pub(super) fn handle(
                 handle("launch-track-pattern", payload, app, editor, ctx);
                 return;
             }
+            // Clip launches follow the same transport launch-quantize as
+            // scene launches (`switch-pattern`): assign the cell now (the
+            // edit), defer the audible restore to the quantized boundary via
+            // a SceneTracks launch — the scheduler applies it with the same
+            // chunk split scene launches use. Only a click into the CURRENT
+            // scene is a launch; other scenes stay a plain edit.
+            let quantize_label = extract_string_from_payload(&payload, "quantize")
+                .unwrap_or_else(|| "off".to_string());
+            let Some(quantize) =
+                sequencer::quantized_launch::LaunchQuantize::from_transport_label(
+                    &quantize_label,
+                )
+            else {
+                editor.handle_host_event(HostEvent::Error(format!(
+                    "Unknown scene launch quantization: {quantize_label}"
+                )));
+                return;
+            };
+            if scene == app.state.current_scene_index()
+                && quantize != sequencer::quantized_launch::LaunchQuantize::Off
+            {
+                let num_tracks = app.tracks.len();
+                let queued = app.apply_recorded_scene_structure_mutation(
+                    "Assign scene cell",
+                    |app| {
+                        if !app.state.set_scene_cell_queued(
+                            scene,
+                            track,
+                            PatternId(pattern_id),
+                            num_tracks,
+                            &app.graph.track_buffer_ids,
+                            &app.graph.track_sample_rates,
+                            &app.tracks,
+                            &app.graph.track_instrument_types,
+                        ) {
+                            return Err(format!(
+                                "Could not assign scene {} track {}",
+                                scene + 1,
+                                track + 1
+                            ));
+                        }
+                        Ok(())
+                    },
+                );
+                if queued.is_err() {
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "Scene cell share failed: scene {}, track {}, pattern {}",
+                        scene + 1,
+                        track + 1,
+                        pattern_id
+                    )));
+                    return;
+                }
+                match state.schedule_quantized_pattern_launch(
+                    sequencer::quantized_launch::PatternLaunchTarget::SceneTracks {
+                        scene,
+                        tracks: vec![track],
+                    },
+                    quantize,
+                    sequencer::quantized_launch::QuantizedLaunchOwner::TrackClip(
+                        track as u32,
+                    ),
+                ) {
+                    Ok(token) => editor.handle_host_event(HostEvent::Status(format!(
+                        "Queued track {} clip {} at {} (launch {})",
+                        track + 1,
+                        pattern_id,
+                        quantize.transport_label(),
+                        token
+                    ))),
+                    Err(error) => editor.handle_host_event(HostEvent::Error(format!(
+                        "Could not queue clip launch: {error:?}"
+                    ))),
+                }
+                return;
+            }
             let profile = pattern_switch_profile_enabled();
             let profile_started = Instant::now();
             let num_tracks = app.tracks.len();
@@ -1093,5 +1169,191 @@ pub(super) fn handle(
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::{BTreeSet, HashSet};
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    fn scene_cell_payload(scene: f64, track: f64, pattern_id: f64, quantize: &str) -> Value {
+        Value::Map(
+            [
+                ("scene".to_string(), Value::Number(scene)),
+                ("track".to_string(), Value::Number(track)),
+                ("pattern-id".to_string(), Value::Number(pattern_id)),
+                ("quantize".to_string(), Value::String(quantize.to_string())),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key, Rc::new(RefCell::new(value))))
+            .collect(),
+        )
+    }
+
+    /// Drives the REAL `dispatch_custom_host_command` -> `scenes::handle`
+    /// seam for a mixer clip click (`set-scene-cell` into the current scene)
+    /// with the transport launch quantize set: the cell assignment must land
+    /// as an edit, the audible restore must NOT happen, and a `SceneTracks`
+    /// launch must be pending under the per-track `TrackClip` owner. With
+    /// quantize off the legacy immediate restore must be untouched.
+    #[test]
+    fn quantized_clip_click_defers_the_audible_launch_and_queues_scene_tracks() {
+        const TRACK: usize = 0;
+
+        let state = Arc::new(sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        // Scene 0: empty pattern (current). Scene 1: pattern with step 4 set.
+        let first = sequencer::sequencer::PatternSnapshot::new_default(1, &[]);
+        let mut second = sequencer::sequencer::PatternSnapshot::new_default(1, &[]);
+        second.track_bits[TRACK][0] |= 1u64 << 4;
+        state.replace_pattern_repository(vec![first, second], 0);
+        state.restore_current_pattern_from_repository().unwrap();
+        let target_id = state.scene_track_pattern_id(1, TRACK).unwrap();
+        assert!(!state.pattern.patterns[TRACK].is_active(4));
+
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = app::App::new(
+            state.clone(),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_gate_runtime: Arc::new(Mutex::new(Arc::new(Vec::new()))),
+                bus_gate_playheads: Arc::new(Mutex::new(Vec::new())),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx.clone(),
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", Vec::new(), true);
+        let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
+
+        let current_track = Arc::new(AtomicUsize::new(TRACK));
+        let sample_db = Rc::new(
+            sequencer::sample_db::SampleDb::open_in_memory().expect("open in-memory sample db"),
+        );
+        let shared = SharedHandles {
+            state: state.clone(),
+            lg_raw: std::ptr::null_mut(),
+            current_track: current_track.clone(),
+            selected_tracks: Arc::new(Mutex::new(HashSet::new())),
+            selected_steps: Arc::new(Mutex::new(HashSet::new())),
+            selected_neural_neurons: Arc::new(Mutex::new(BTreeSet::new())),
+            piano_roll_selection: Arc::new(Mutex::new(HashSet::new())),
+            piano_roll_move_state: Arc::new(Mutex::new(None)),
+            piano_roll_focus: super::super::super::new_shared_piano_roll_focus(),
+            step_clipboard: Arc::new(Mutex::new(None)),
+            ui_epoch: Arc::new(AtomicUsize::new(0)),
+            fx_epoch: Arc::new(AtomicUsize::new(0)),
+            fx_value_epoch: Arc::new(AtomicUsize::new(0)),
+            ui_invalidations: Arc::new(UiInvalidationQueue::new()),
+            expanded_step_projection: Arc::new(ExpandedStepProjectionRegistry::new()),
+            active_delete_target: Arc::new(Mutex::new(None)),
+            active_delete_target_version: Arc::new(AtomicUsize::new(0)),
+            auto_follow_override_until: Arc::new(Mutex::new(None)),
+            track_pan_ids: Arc::new(Mutex::new(Vec::new())),
+            track_collapsed: Arc::new(Mutex::new(app.track_collapsed.clone())),
+            bus_state: Arc::new(Mutex::new(app.buses.clone())),
+            bus_node_ids: Arc::new(Mutex::new(app.graph.bus_node_ids.clone())),
+            track_groups: Arc::new(Mutex::new(app.groups.clone())),
+            record_armed: Arc::new(Mutex::new(vec![false])),
+            recording: Arc::new(AtomicBool::new(false)),
+            master_recording: Arc::new(AtomicBool::new(false)),
+            held_notes: Arc::new(Mutex::new(Vec::new())),
+            keyboard_octave: Arc::new(AtomicI32::new(0)),
+            sample_browser: Rc::new(RefCell::new(DebouncedSampleBrowser::new(
+                sample_db,
+                Duration::from_millis(100),
+            ))),
+            keyboard_tx,
+            accumulator_names: Arc::new(Mutex::new(Vec::new())),
+            piano_roll_clipboard: super::super::super::new_piano_roll_clipboard(),
+            arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
+            selected_drum_lane_steps: Arc::new(Mutex::new(HashSet::new())),
+        };
+        let mut sessions = EditSessionState::default();
+        let mut frame = FrameDiffState::default();
+        let mut gesture = GestureState::default();
+        let mut meters = MeterCache {
+            cached_peak_l_level: 0.0,
+            cached_peak_r_level: 0.0,
+            cached_track_peak_levels: vec![0.0],
+            cached_rack_slot_peak_levels: Vec::new(),
+            cached_bus_peak_levels: Vec::new(),
+            cached_modulator_phases: Vec::new(),
+            cached_modulator_levels: Vec::new(),
+            cached_cpu_load_bits: 0.0f32.to_bits(),
+            last_meter_poll_at: Instant::now(),
+            last_cpu_ui_poll_at: Instant::now(),
+            last_neural_visualization_poll_at: Instant::now(),
+            visualization_liveness: VisualizationLiveness::default(),
+            last_voice_count_log_at: Instant::now(),
+        };
+        let mut track_names = vec!["Track 1".to_string()];
+        let mut ctx = LoopCtx {
+            sessions: &mut sessions,
+            meters: &mut meters,
+            frame: &mut frame,
+            gesture: &mut gesture,
+            track_names: &mut track_names,
+            shared: &shared,
+        };
+
+        dispatch_custom_host_command(
+            "set-scene-cell",
+            scene_cell_payload(0.0, TRACK as f64, target_id.0 as f64, "1 bar"),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+
+        // The edit landed but nothing sounded: cell assigned, live grid
+        // still empty, and the launch is pending under the TrackClip owner.
+        assert_eq!(state.scene_track_pattern_id(0, TRACK), Some(target_id));
+        assert!(
+            !state.pattern.patterns[TRACK].is_active(4),
+            "a quantized clip click must not restore the pattern immediately"
+        );
+        assert_eq!(
+            state.quantized_launches().pending_target(
+                sequencer::quantized_launch::QuantizedLaunchOwner::TrackClip(TRACK as u32)
+            ),
+            Some(
+                sequencer::quantized_launch::PatternLaunchTarget::SceneTracks {
+                    scene: 0,
+                    tracks: vec![TRACK],
+                }
+            ),
+            "the clip click must queue a SceneTracks launch under its track's owner"
+        );
+
+        // Quantize off: the legacy immediate restore.
+        dispatch_custom_host_command(
+            "set-scene-cell",
+            scene_cell_payload(0.0, TRACK as f64, target_id.0 as f64, "off"),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        assert!(
+            state.pattern.patterns[TRACK].is_active(4),
+            "an unquantized clip click must restore the pattern immediately"
+        );
     }
 }

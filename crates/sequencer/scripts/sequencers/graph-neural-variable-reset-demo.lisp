@@ -171,6 +171,7 @@
 (defstate gvr-threshold 0.55)
 (defstate gvr-global-transpose 0)
 (defstate gvr-dur-factor 1)
+(defstate gvr-piano-press-depth 0.6)
 (defstate gvr-delay-factor-index 2)
 (defstate gvr-timebase-factor-index 2)
 
@@ -523,7 +524,7 @@
     (label "res"    :width gvr-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
     (label "quant"  :width gvr-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)))
 
-(def gvr-panel (current-pattern graph-visualizations track-colors)
+(def gvr-panel (current-pattern graph-visualizations track-colors track-active-notes)
   (do
     ;; Re-derive the matrix snapshot from the resolved current-pattern graph. The
     ;; per-node knobs need no sync — `bind-graph` re-seeds their slots as the rows
@@ -708,9 +709,24 @@
                   (do
                     (set! gvr-weights (gvr-set-cell gvr-weights r c v))
                     (graph-edge gvr-name :from r :to c :weight v))))))
-          
-          
+          (box
+            :debug-name "graph-variable-reset-piano-panel"
+            :padding 1
+            :background-color :mixer-strip-bg
+            :border-color :mixer-strip-border
+            :corner-radius 12
+            (piano-keyboard
+              :key "graph-variable-reset-piano"
+              :notes-by-track track-active-notes
+              :track-colors track-colors
+              :tracks (range 0 active-count)
+              :overlap-mode :loudest
+              :press-depth gvr-piano-press-depth
+              :start-note 12
+              :key-count 80
+              :width 84
+              :height 3.5))
           )))))
 
-(effect-buffer "*variable-reset*" (gvr-panel SEQ.current-pattern SEQ.graph-visualizations SEQ.track-colors))
+(effect-buffer "*variable-reset*" (gvr-panel SEQ.current-pattern SEQ.graph-visualizations SEQ.track-colors SEQ.track-active-notes))
 (seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

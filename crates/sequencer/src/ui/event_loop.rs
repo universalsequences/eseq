@@ -104,6 +104,7 @@ pub(crate) fn run_event_loop(
         prev_sampler_analysis_key: None,
         prev_auto_follow: true,
         prev_queued_transport_scene: None,
+        prev_queued_track_clips: Vec::new(),
         song: SongFrameState::default(),
         sound_palette: SoundPaletteFrameState::default(),
         watched_sampler_voice_track: None,
@@ -207,6 +208,54 @@ pub(crate) fn run_event_loop(
             }
             editor.mark_needs_redraw();
             frame.prev_queued_transport_scene = queued_transport_scene;
+        }
+        // Pending quantized clip launches, as the pattern id each track has
+        // queued (-1 = none). The queued clip is the just-assigned scene
+        // cell (the click assigns the cell up front and defers the audible
+        // restore), so resolve the pending SceneTracks target's cell. Drives
+        // the mixer grid's blinking queued-cell background.
+        let queued_track_clips: Vec<i64> = (0..app.tracks.len())
+            .map(|track| {
+                shared
+                    .state
+                    .quantized_launches()
+                    .pending_target(
+                        sequencer::quantized_launch::QuantizedLaunchOwner::TrackClip(
+                            track as u32,
+                        ),
+                    )
+                    .and_then(|target| match target {
+                        sequencer::quantized_launch::PatternLaunchTarget::SceneTracks {
+                            scene,
+                            ..
+                        } => shared
+                            .state
+                            .scene_track_pattern_id(scene, track)
+                            .map(|id| id.0 as i64),
+                        sequencer::quantized_launch::PatternLaunchTarget::Scene { .. } => None,
+                    })
+                    .unwrap_or(-1)
+            })
+            .collect();
+        if queued_track_clips != frame.prev_queued_track_clips {
+            let rt = editor.runtime_mut();
+            rt.set_reactive(
+                "SEQ",
+                "queued-track-clips",
+                Value::List(
+                    queued_track_clips
+                        .iter()
+                        .map(|id| Rc::new(RefCell::new(Value::Number(*id as f64))))
+                        .collect(),
+                ),
+            );
+            rt.run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            if editor_has_visible_buffer(&editor, "*mixer*") {
+                editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+            }
+            editor.mark_needs_redraw();
+            frame.prev_queued_track_clips = queued_track_clips;
         }
         let sample_browser_ready = { shared.sample_browser.borrow_mut().poll_ready() };
         match sample_browser_ready {

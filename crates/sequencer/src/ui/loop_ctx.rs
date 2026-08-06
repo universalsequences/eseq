@@ -115,6 +115,9 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_sampler_analysis_key: Option<(usize, i32, u32, u32, usize)>,
     pub(crate) prev_auto_follow: bool,
     pub(crate) prev_queued_transport_scene: Option<usize>,
+    /// Per-track pattern id (-1 = none) with a pending quantized clip
+    /// launch, for the mixer grid's queued-cell blink.
+    pub(crate) prev_queued_track_clips: Vec<i64>,
     /// Song-mode reactive diff state (docs/song-mode-spec.md 12).
     pub(crate) song: SongFrameState,
     /// Sound-palette reactive diff state (takes spec §17.6/§18.3).

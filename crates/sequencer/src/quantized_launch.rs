@@ -66,6 +66,10 @@ pub enum PatternLaunchTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum QuantizedLaunchOwner {
     SceneMacro(u32),
+    /// A mixer clip-grid launch, keyed per track: clip launches on different
+    /// tracks coexist at one boundary, while re-clicking a clip on the same
+    /// track replaces that track's pending launch.
+    TrackClip(u32),
     Transport,
 }
 
