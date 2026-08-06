@@ -202,6 +202,8 @@
 (def g8-num (key value lo hi stp dec on-change)
   (number-picker
     :key key
+    :border-color :dim
+    :background-color :mixer-strip-bg
     :value value :min lo :max hi :step stp :decimals dec
     :width g8-control-width :height g8-row-height :font-size 9
     :on-change on-change))
@@ -210,6 +212,9 @@
   (dropdown
     :key key
     :value-index value-index :options options
+    :badge-color :transparent
+    :bg-color :mixer-strip-bg
+    :border-color :mixer-strip-selected-bg
     :width g8-control-width :height g8-row-height :font-size 7
     :on-change on-change))
 
@@ -298,7 +303,7 @@
                 :height 6
                 
                 :control :grid
-                :background (rgba 0.1 0.1 0.1 0.4)
+                :background-color :bg
                 :fill :primary
                 :min 0
                 :max 1
@@ -312,7 +317,7 @@
                 :renderer :isometric
                 :x :transpose
                 :x-min -24
-                :background (rgba 0.1 0.1 0.1 0.5)
+                :background :bg
                 :x-max 24
                 :y :node
                 :y-min 0
@@ -350,7 +355,7 @@
                 :color-count 16
                 :x-bins 64
                 :y-bins 120
-                :background (rgba 0.1 0.1 0.1 0.5)
+                :background :bg
                 :width 42
                 :height 6)
               )
@@ -396,7 +401,12 @@
                 :width 22
                 :height 9.5
                 :min 0
-                :color :blue
+                :background :mixer-strip-bg
+                :color (rgba 0.14 0.3 0.9 1)
+                :empty-fill-color (rgba 0.04 0.04 0.05 1)
+                :stroke-color (rgba 0.36 0.62 0.57 1)
+                :stroke-width 1.5
+                :stroke-active-only true
                 :max 1
                 :value g8-weights
                 :on-cell-change (lambda (r c v)

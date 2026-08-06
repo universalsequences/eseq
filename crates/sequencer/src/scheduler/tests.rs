@@ -6725,6 +6725,63 @@
         });
     }
 
+    /// A track added while the song plays is invisible to the preflighted
+    /// row snapshots (frozen at Play). The lookahead merge must append the
+    /// live lane so the clock steps it: without that, the new track neither
+    /// triggers nor publishes a playhead until the next transport start.
+    #[test]
+    fn track_added_after_preflight_schedules_and_publishes_its_playhead() {
+        run_with_scheduler_stack(|| {
+            let (state, _) = song_mode_fixture();
+            song_mode_commit(
+                &state,
+                vec![song_mode_row(0, 0.0, 1, Vec::new())],
+                4.0,
+                false,
+            );
+            let runtime = state.preflight_runtime_song().expect("preflight");
+
+            // Mid-play add: the live state grows to 3 tracks AFTER preflight
+            // froze 2-track rows; the add path latches the new lane
+            // (`latch_track_created_during_song_playback`).
+            let mut live = state.with_scenes_mut(|scenes| {
+                scenes.track_pools[0]
+                    .get(crate::sequencer::PatternId(1))
+                    .expect("pool pattern")
+                    .clone()
+            });
+            song_mode_configure_pattern(&mut live, 9.0);
+            let mut live_snapshot = crate::sequencer::PatternSnapshot::new_default(3, &[]);
+            live_snapshot.set_track_pattern_data(2, live);
+            assert!(live_snapshot.restore_track(&state, 2));
+            state.transport.num_tracks.store(3, Ordering::Release);
+            state.latch_song_manual_override([2]);
+            state.transport.track_playheads[2].store(u32::MAX, Ordering::Relaxed);
+
+            let (events, _) =
+                drive_song_lookahead(&state, Arc::clone(&runtime), 16_000, 48_000);
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event.track == 2 && event.transpose == 9.0),
+                "the added track schedules from its live lane: {events:?}"
+            );
+            for event in &events {
+                if event.track < 2 {
+                    assert_eq!(
+                        event.transpose, 2.0,
+                        "row-governed lanes keep the song's content: {event:?}"
+                    );
+                }
+            }
+            assert_ne!(
+                state.transport.track_playheads[2].load(Ordering::Relaxed),
+                u32::MAX,
+                "the added track's playhead is published"
+            );
+        });
+    }
+
     #[test]
     fn song_unquantized_row_boundary_keeps_sample_offset() {
         run_with_scheduler_stack(|| {

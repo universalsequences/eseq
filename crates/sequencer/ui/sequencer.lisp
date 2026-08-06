@@ -598,30 +598,33 @@
         (radius (if (= active 1) 1 0.7))
         (border input-color)
         (offcol (rgba off-fill-r off-fill-g off-fill-b 1)))
+      ;; duration visualization
       (sdf/layer
         (sdf/fill
-          (sdf/translate 0 0.0
-            (sdf/rounded-rect (* 4.0 width) (* 1.00 height) 0))
+          (sdf/translate 0.0 0.0
+            (sdf/rounded-rect (* 3.0 width) (* 1.0 height) 0))
           (material
-            :lighting (lighting :edge-min -0.3 :edge-max 0.393
-              :light (vec3 0.8 -1.8 4.5) :shininess 92.0)
-            :color (if (= duration 1)
+            :lighting (lighting :edge-min -0.32 :edge-max 1.293
+              :light (vec3 0.8 -0.8 3.5) :shininess 92.0)
+            :color (* 0.9 (if (= duration 1)
               (if (= muted 1)
                 (rgba 0 0 0 0)
                 (aqua-color
-                  (mix border (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 0.5) (if (= selected 1) 0.8 1))
-                  (if (= selected 1) border (rgba track-r track-g track-b 1))))
-              (rgba 0 0 0 0))))
-        (sdf/fill (sdf/circle (* radius 0.88))
+                  (mix border (rgba (* track-r 0.85) (* track-g 0.85) (* track-b 0.85) 0.5) (if (= selected 1) 0.8 0.6))
+                  (if (= selected 1) border (rgba track-r track-g track-b 0.6))))
+              (rgba 0 0 0 0)))))
+        ;; border
+        (sdf/fill (sdf/circle (* radius 0.8))
           (material
             :lighting (lighting :edge-min -0.12 :edge-max 0.9
-              :light (vec3 -0.1 1.0 1.8) :shininess 92.0)
+              :light (vec3 -0.3 1.0 0.8) :shininess 92.0)
             :color (* (if (= selected 1) 1 (if (= muted 1) 0.6 1)) (aqua-color border border))))
         (sdf/fill (sdf/circle (* radius (if (= selected 1) 0.64 0.69)))
           (material
             :lighting (lighting :edge-min -0.15 :edge-max 1.0
               :light (vec3 0.3 -2.0 2.8) :shininess 92.0)
             :color (* (if (= muted 1) 0.3 1) (aqua-color offcol offcol))))
+        ;; p-lock indicator
         (sdf/fill
           (sdf/translate 0 0.82
             (sdf/rounded-rect 0.52 0.10 0.05))
@@ -649,10 +652,11 @@
                   (if (= plock-kind 2) 0.12 0.0))
                 0.0)
               :offset (vec2 0 0))))
+        ;; toggled fill
         (sdf/fill (sdf/circle (if (= selected 1) 0.35 0.5))
           (material
-            :lighting (lighting :edge-min -0.25 :edge-max 1.95
-              :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
+            :lighting (lighting :edge-min -0.25 :edge-max 0.95
+              :light (vec3 0.1 -1.4 0.3) :shininess 32.0)
             :color (if (= active 1)
               (if (= muted 1)
                 (* 0.7 (aqua-color offcol border))
@@ -1917,8 +1921,21 @@
                 (box :flex 1 :width 0 :height 0.1 :bg :transparent)
                 (seqv-track-actions i)))))))
    
-    )
-  )
+     (box :key "sequencer-new-track-drop-zone"
+      :width :fill :height 2.4 :flex 1
+      :background-color :transparent
+      :drop-hover-background-color :mixer-control-bg
+      :border-width 1
+      :border-color :transparent
+      :drop-hover-border-color :mixer-strip-selected-border
+      :corner-radius 10
+      :drop-types (list "sample" "instrument" "sound")
+      :drop-meta (dict :kind "new-sample-track")
+      :on-drop (lambda (event) (seqv-drop-new-track event))
+      (label ""
+        :font-size 1
+        :color :transparent
+        :bg :transparent))))
 
 
 (set-buffer-mode-for "*sequencer*" "seq-grid-mode")

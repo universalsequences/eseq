@@ -368,7 +368,12 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     // cleared), and row boundaries neither swap their
                     // content nor reset their accumulators.
                     let latch = state.song_manual_latch_mask();
-                    if latch != 0 {
+                    let row_track_count = song_row_snapshot
+                        .as_deref()
+                        .map(|snapshot| snapshot.tracks.len())
+                        .expect("row snapshot set above");
+                    let live_track_count = base_snapshot.tracks.len().min(MAX_TRACKS);
+                    if latch != 0 || live_track_count > row_track_count {
                         let mut merged =
                             (*song_row_snapshot.take().expect("row snapshot set above")).clone();
                         let track_count = merged
@@ -386,6 +391,23 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                 }
                             }
                         }
+                        // Tracks created after the song preflight are unknown
+                        // to every prebuilt row snapshot, and the clock only
+                        // steps `0..num_tracks` of the chunk snapshot — without
+                        // this they neither trigger nor publish a playhead
+                        // until the next Play. They are latched at creation
+                        // (`latch_track_created_during_song_playback`), so
+                        // schedule them from the live session lanes,
+                        // free-running like any latched lane.
+                        for track in merged.tracks.len()..live_track_count {
+                            merged.tracks.push(Arc::clone(&base_snapshot.tracks[track]));
+                            clock.clear_track_anchor(track);
+                            if !wrapped {
+                                pending_accum_reset[track] = false;
+                            }
+                        }
+                        merged.transport.num_tracks =
+                            merged.transport.num_tracks.max(merged.tracks.len());
                         song_row_snapshot = Some(Arc::new(merged));
                     }
                 }

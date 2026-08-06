@@ -281,6 +281,8 @@
 (def g8r-num (key value lo hi stp dec on-change)
   (number-picker
     :key key
+    :border-color :dim
+    :background-color :mixer-strip-bg
     :value value :min lo :max hi :step stp :decimals dec
     :width g8r-control-width :height g8r-row-height :font-size 9
     :on-change on-change))
@@ -289,6 +291,9 @@
   (dropdown
     :key key
     :value-index value-index :options options
+    :badge-color :transparent
+    :bg-color :mixer-strip-bg
+    :border-color :mixer-strip-selected-bg
     :width g8r-control-width :height g8r-row-height :font-size 6
     :on-change on-change))
 
@@ -302,8 +307,8 @@
     (toggle
       :key key
       :value value
-      :color "#4f7dff"
-      :off-color "#5f687a"
+      :color :blue
+      :off-color :mixer-strip-bg
       :knob-color "#e8ecf4"
       :off-knob-color "#d8dde8"
       :on-change on-change)))
@@ -421,7 +426,7 @@
                 :height 5
                 
                 :control :grid
-                :background (rgba 0.1 0.1 0.1 0.6)
+                :background-color :bg
                 :fill :primary
                 :min 0
                 :max 1
@@ -446,7 +451,7 @@
                 :auto-rotate true
                 :window-beats 16
                 :brightness :velocity
-                :background (rgba 0.1 0.1 0.1 0.7)
+                :background :bg
                 :width 20
                 :height 8)              
 	(spectrogram
@@ -461,7 +466,7 @@
                   :smoothing 0.68
                   :width 20
                   :height 8.0
-                  :background-color (rgba 0.13 0.13 0.13 1.00)
+                  :background-color :bg
                   :min-color (rgba 0.05 0.05 0.11 1)
                   :mid-color (rgba 0.16 0.66 0.88 1)
                   :max-color (rgba 1.0 0.72 0.28 1)
@@ -514,7 +519,12 @@
                 :width 26
                 :height 9.5
                 :min 0
-                :color :blue
+                :background :mixer-strip-bg
+                :color (rgba 0.14 0.3 0.9 1)
+                :empty-fill-color (rgba 0.04 0.04 0.05 1)
+                :stroke-color (rgba 0.36 0.62 0.57 1)
+                :stroke-width 1.5
+                :stroke-active-only true
                 :max 1
                 :value g8r-weights
                 :on-cell-change (lambda (r c v)

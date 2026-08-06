@@ -161,6 +161,22 @@ impl App {
         true
     }
 
+    /// A track created while the song is the playback authority is invisible
+    /// to the preflighted row snapshots (frozen at Play): no row can resolve
+    /// content for it, so it would stay silent with a dead playhead until the
+    /// next transport start. Latch it like a manual launch (takes spec 10) so
+    /// it free-runs the live grid immediately — the lookahead merge appends
+    /// lanes the row snapshot doesn't know about — and pin the override so
+    /// masked save-backs persist the performer's edits (spec 5.1).
+    pub fn latch_track_created_during_song_playback(&mut self, track: usize) {
+        if !self.song_playback_authority_active() {
+            return;
+        }
+        self.state.latch_song_manual_override(std::iter::once(track));
+        self.state.pin_track_override_to_effective(track);
+        self.song_row_mirror_epoch += 1;
+    }
+
     /// Back to Song (takes spec 10): clear the manual-override latch so the
     /// affected lanes snap back to whatever the song resolves at the
     /// current beat with anchored phase. Audible on the next scheduled
@@ -875,6 +891,25 @@ mod tests {
         app.back_to_song().expect("back to arrangement while stopped");
         assert_eq!(app.state.song_manual_latch_mask(), 0);
         assert!(!app.state.song_scene_latch(), "the scene latch clears too");
+    }
+
+    #[test]
+    fn track_created_during_song_playback_latches_its_lane() {
+        // A track added mid-play is unknown to the preflighted row
+        // snapshots: creation latches it like a manual launch so it
+        // free-runs the live grid instead of staying silent until the
+        // next transport start.
+        let mut app = app_with_song();
+        app.song_transport_play(false).expect("song playback");
+        assert_eq!(app.state.song_manual_latch_mask(), 0);
+        app.latch_track_created_during_song_playback(1);
+        assert_eq!(app.state.song_manual_latch_mask(), 1 << 1);
+        app.song_transport_stop().expect("stop succeeds");
+        app.back_to_song().expect("clear the latch");
+
+        // While stopped, track creation must not latch anything.
+        app.latch_track_created_during_song_playback(1);
+        assert_eq!(app.state.song_manual_latch_mask(), 0);
     }
 
     #[test]

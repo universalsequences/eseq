@@ -124,7 +124,7 @@
       :sequencer-step-border          '(0.22 0.22 0.23)
       :sequencer-step-selected-border '(0.90 0.92 0.96)
       :sequencer-step-off-fill        '(0.055 0.058 0.065)
-      :sequencer-step-off-fill-alt    '(0.15 0.155 0.16)
+      :sequencer-step-off-fill-alt    '(0.25 0.255 0.26)
       :patcher-bg           '(0.08 0.08 0.08)
       :patcher-grid-minor   '(0.22 0.23 0.25 0.34)
       :patcher-grid-major   '(0.32 0.33 0.36 0.46)

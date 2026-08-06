@@ -376,6 +376,7 @@ impl GraphController<'_> {
             .fetch_add(1, Ordering::Relaxed);
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
+        self.app.latch_track_created_during_song_playback(idx);
         self.app.state.publish_scheduler_snapshot();
         Ok(())
     }
