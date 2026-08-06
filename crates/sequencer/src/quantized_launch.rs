@@ -61,6 +61,12 @@ impl LaunchQuantize {
 pub enum PatternLaunchTarget {
     Scene { scene: usize },
     SceneTracks { scene: usize, tracks: Vec<usize> },
+    /// A specific pool pattern launched as one track's session override
+    /// (the mixer clip click during song playback authority — the scene
+    /// cell is deliberately untouched). Never scheduler-applied: it is only
+    /// scheduled during song playback, where boundary launches degrade to
+    /// the control-side apply at the boundary anyway.
+    TrackPattern { track: usize, pattern: u64 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -457,6 +463,11 @@ impl PendingQuantizedLaunches {
                 PatternLaunchTarget::SceneTracks { tracks, .. } => {
                     (Some(tracks.clone()), None)
                 }
+                // Never carries a snapshot (no preflight), so it never
+                // becomes a boundary launch; handled for completeness.
+                PatternLaunchTarget::TrackPattern { track, .. } => {
+                    (Some(vec![*track]), None)
+                }
             };
             install = match (&install, &tracks) {
                 (SessionLaunchInstall::AllTracks, _) | (_, None) => {
@@ -786,16 +797,28 @@ fn canonicalize_target(
     scene_count: usize,
     track_count: usize,
 ) -> Result<PatternLaunchTarget, QuantizedLaunchSubmitError> {
+    if let PatternLaunchTarget::TrackPattern { track, .. } = &target {
+        if *track >= track_count {
+            return Err(QuantizedLaunchSubmitError::TrackOutOfRange {
+                track: *track,
+                track_count,
+            });
+        }
+        // Pool membership cannot be validated here (the mailbox has no view
+        // into the pattern pools); the control-side apply surfaces it.
+        return Ok(target);
+    }
     let scene = match &target {
         PatternLaunchTarget::Scene { scene } | PatternLaunchTarget::SceneTracks { scene, .. } => {
             *scene
         }
+        PatternLaunchTarget::TrackPattern { .. } => unreachable!("handled above"),
     };
     if scene >= scene_count {
         return Err(QuantizedLaunchSubmitError::SceneOutOfRange { scene, scene_count });
     }
     match target {
-        PatternLaunchTarget::Scene { .. } => Ok(target),
+        PatternLaunchTarget::Scene { .. } | PatternLaunchTarget::TrackPattern { .. } => Ok(target),
         PatternLaunchTarget::SceneTracks { scene, mut tracks } => {
             tracks.sort_unstable();
             tracks.dedup();

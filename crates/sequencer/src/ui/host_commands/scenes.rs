@@ -570,6 +570,48 @@ pub(super) fn handle(
                 )));
                 return;
             }
+            // Override launches (the clip-click path during song playback
+            // authority — `set-scene-cell` delegates here with the click's
+            // quantize label) follow the transport launch quantize too. The
+            // deferred apply runs through the central launch seam
+            // (`apply_pattern_launch_at` via the due drain), which latches
+            // the lane and records the capture event at the boundary beat.
+            let quantize_label = extract_string_from_payload(&payload, "quantize")
+                .unwrap_or_else(|| "off".to_string());
+            let Some(quantize) =
+                sequencer::quantized_launch::LaunchQuantize::from_transport_label(
+                    &quantize_label,
+                )
+            else {
+                editor.handle_host_event(HostEvent::Error(format!(
+                    "Unknown scene launch quantization: {quantize_label}"
+                )));
+                return;
+            };
+            if quantize != sequencer::quantized_launch::LaunchQuantize::Off {
+                match state.schedule_quantized_pattern_launch(
+                    sequencer::quantized_launch::PatternLaunchTarget::TrackPattern {
+                        track,
+                        pattern: pattern_id,
+                    },
+                    quantize,
+                    sequencer::quantized_launch::QuantizedLaunchOwner::TrackClip(
+                        track as u32,
+                    ),
+                ) {
+                    Ok(token) => editor.handle_host_event(HostEvent::Status(format!(
+                        "Queued track {} clip {} at {} (launch {})",
+                        track + 1,
+                        pattern_id,
+                        quantize.transport_label(),
+                        token
+                    ))),
+                    Err(error) => editor.handle_host_event(HostEvent::Error(format!(
+                        "Could not queue clip launch: {error:?}"
+                    ))),
+                }
+                return;
+            }
             let launched = app.state.launch_track_pattern(
                 track,
                 PatternId(pattern_id),
@@ -1354,6 +1396,54 @@ mod tests {
         assert!(
             state.pattern.patterns[TRACK].is_active(4),
             "an unquantized clip click must restore the pattern immediately"
+        );
+
+        // The override-launch path (`launch-track-pattern` — where
+        // `set-scene-cell` delegates during song playback authority) must
+        // quantize through the same seam: with quantize set the pool
+        // pattern is NOT launched immediately and a TrackPattern launch is
+        // pending; with quantize off it launches immediately.
+        let original_id = {
+            let cells = state.track_pattern_cells(TRACK);
+            cells
+                .iter()
+                .map(|cell| cell.pattern_id)
+                .find(|id| *id != target_id)
+                .expect("the original scene-0 pattern stays in the pool")
+        };
+        dispatch_custom_host_command(
+            "launch-track-pattern",
+            scene_cell_payload(0.0, TRACK as f64, original_id.0 as f64, "1 bar"),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        assert!(
+            state.pattern.patterns[TRACK].is_active(4),
+            "a quantized override launch must not swap the live pattern immediately"
+        );
+        assert_eq!(
+            state.quantized_launches().pending_target(
+                sequencer::quantized_launch::QuantizedLaunchOwner::TrackClip(TRACK as u32)
+            ),
+            Some(
+                sequencer::quantized_launch::PatternLaunchTarget::TrackPattern {
+                    track: TRACK,
+                    pattern: original_id.0,
+                }
+            ),
+            "the override launch must queue a TrackPattern target under its track's owner"
+        );
+        dispatch_custom_host_command(
+            "launch-track-pattern",
+            scene_cell_payload(0.0, TRACK as f64, original_id.0 as f64, "off"),
+            &mut app,
+            &mut editor,
+            &mut ctx,
+        );
+        assert!(
+            !state.pattern.patterns[TRACK].is_active(4),
+            "an unquantized override launch must swap the live pattern immediately"
         );
     }
 }

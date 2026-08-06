@@ -1577,10 +1577,15 @@ impl App {
         let num_tracks = self.tracks.len();
         let scene = match target {
             PatternLaunchTarget::Scene { scene }
-            | PatternLaunchTarget::SceneTracks { scene, .. } => *scene,
+            | PatternLaunchTarget::SceneTracks { scene, .. } => Some(*scene),
+            // Override launches carry no scene: they launch a pool pattern
+            // into the lane without touching the cell assignments.
+            PatternLaunchTarget::TrackPattern { .. } => None,
         };
-        if scene >= self.state.scene_count() {
-            return Err(PatternLaunchError::SceneOutOfRange { scene });
+        if let Some(scene) = scene {
+            if scene >= self.state.scene_count() {
+                return Err(PatternLaunchError::SceneOutOfRange { scene });
+            }
         }
 
         let sample_ids = match target {
@@ -1655,6 +1660,29 @@ impl App {
                 }
                 self.state.effective_pattern_sample_ids(num_tracks)
             }
+            PatternLaunchTarget::TrackPattern { track, pattern } => {
+                if *track >= num_tracks {
+                    return Err(PatternLaunchError::TrackOutOfRange { track: *track });
+                }
+                // Same override launch the immediate `launch-track-pattern`
+                // path performs (epoch bump included) — never mirror-applied,
+                // because this target is never scheduler-applied.
+                if !self.state.launch_track_pattern(
+                    *track,
+                    crate::sequencer::PatternId(*pattern),
+                    num_tracks,
+                    &self.graph.track_buffer_ids,
+                    &self.graph.track_sample_rates,
+                    &self.tracks,
+                    &self.graph.track_instrument_types,
+                ) {
+                    return Err(PatternLaunchError::MissingSceneCell {
+                        scene: self.state.current_scene_index(),
+                        track: *track,
+                    });
+                }
+                self.state.effective_pattern_sample_ids(num_tracks)
+            }
         };
 
         self.graph_controller().apply_sample_ids(&sample_ids);
@@ -1717,6 +1745,11 @@ impl App {
                     // `launch_scene_tracks` already pinned these lanes'
                     // overrides to the launched pattern ids.
                     self.state.latch_song_manual_override(tracks.iter().copied());
+                }
+                PatternLaunchTarget::TrackPattern { track, .. } => {
+                    // `launch_track_pattern` already pinned the lane's
+                    // override to the launched pattern id.
+                    self.state.latch_song_manual_override([*track]);
                 }
             }
         }

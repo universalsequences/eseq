@@ -184,11 +184,12 @@ pub(crate) fn run_event_loop(
         let queued_transport_scene = shared.state
             .quantized_launches()
             .pending_target(sequencer::quantized_launch::QuantizedLaunchOwner::Transport)
-            .map(|target| match target {
+            .and_then(|target| match target {
                 sequencer::quantized_launch::PatternLaunchTarget::Scene { scene }
                 | sequencer::quantized_launch::PatternLaunchTarget::SceneTracks { scene, .. } => {
-                    scene
+                    Some(scene)
                 }
+                sequencer::quantized_launch::PatternLaunchTarget::TrackPattern { .. } => None,
             });
         if queued_transport_scene != frame.prev_queued_transport_scene {
             let rt = editor.runtime_mut();
@@ -232,6 +233,12 @@ pub(crate) fn run_event_loop(
                             .state
                             .scene_track_pattern_id(scene, track)
                             .map(|id| id.0 as i64),
+                        // Song-authority override launches name the pattern
+                        // directly.
+                        sequencer::quantized_launch::PatternLaunchTarget::TrackPattern {
+                            pattern,
+                            ..
+                        } => Some(pattern as i64),
                         sequencer::quantized_launch::PatternLaunchTarget::Scene { .. } => None,
                     })
                     .unwrap_or(-1)
