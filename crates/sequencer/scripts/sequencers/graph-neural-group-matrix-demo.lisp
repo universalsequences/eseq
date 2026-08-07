@@ -635,8 +635,22 @@
                       (do
                         (set! ggm-dur-factor v)
                         (ggm-edit-global-param :dur-factor v)))))
-                
+
                 )
+              ;; Time-constant of the whole H coupling layer: the per-beat decay of the
+              ;; group activity traces. ~0.5 = beat-scale sidechain-style coupling;
+              ;; 0.85+ = bar-scale swells (the back-off cycle time for excite +
+              ;; self-limit diagonal patches).
+              (knob-number
+                :key "graph-group-matrix-trace-decay"
+                :debug-name "graph-group-matrix-trace-decay"
+                :label "trace decay"
+                :value (bind-graph-config ggm-name :group-trace-decay)
+                :min 0 :max 1 :decimals 2
+                :width 7.0 :height 3.0 :knob-size 2.2
+                :font-size 9.0 :label-font-size 9.0
+                :label-color :dim
+                :on-change (lambda (v) (ggm-edit-config :group-trace-decay v)))
               (matrix
                 :key "graph-group-matrix-dampening-matrix"
                 :rows active-count
@@ -760,8 +774,8 @@
                 :key "graph-group-matrix-group-gain-matrix"
                 :rows ggm-group-count
                 :cols ggm-group-count
-                :width 8
-                :height (ggm-matrix-data-height ggm-group-count)
+                :width 16
+                :height (* 2 (ggm-matrix-data-height ggm-group-count))
                 :min 0
                 :max 2
                 :background :mixer-strip-bg
@@ -786,8 +800,8 @@
                 :key "graph-group-matrix-group-coupling-matrix"
                 :rows ggm-group-count
                 :cols ggm-group-count
-                :width 8
-                :height (ggm-matrix-data-height ggm-group-count)
+                :width 16
+                :height (* 2 (ggm-matrix-data-height ggm-group-count))
                 :min -2
                 :max 2
                 :control :pie
