@@ -2640,6 +2640,145 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn graph_group_matrix_demo_loads_and_edits_group_matrix_cells() {
+        fn find_by_stable_key<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            key: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.stable_key.as_deref() == Some(key) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_by_stable_key(child, key))
+        }
+
+        let state = Arc::new(SequencerState::new(
+            16,
+            (0..16).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("current-pattern", Value::Number(0.0)),
+                ("graph-visualizations", Value::List(Vec::new())),
+            ],
+            true,
+        );
+        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+        runtime
+            .eval_str(
+                "(def seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)",
+            )
+            .expect("install script sequencer tab registration test stub");
+
+        let source = std::fs::read_to_string(format!(
+            "{}/scripts/sequencers/graph-neural-group-matrix-demo.lisp",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("read graph group matrix demo script");
+        runtime
+            .eval_str(&source)
+            .expect("evaluate graph group matrix demo");
+        assert!(
+            state.current_graph_overrides().is_empty(),
+            "loading the group matrix demo must not write pattern overrides"
+        );
+        let manifest = state
+            .published_sequencers()
+            .into_iter()
+            .find_map(|published| published.graph)
+            .expect("published group matrix graph manifest");
+        assert_eq!(manifest.name, "neural-group-matrix-demo");
+
+        // The matrix reader sees the engine's inert defaults: G all-ones, H all-zeros.
+        assert_eq!(
+            runtime
+                .eval_str("(nth (nth (ggm-read-group-matrix \"group-gain\") 0) 1)")
+                .expect("read G cell default"),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(nth (nth (ggm-read-group-matrix \"group-coupling\") 0) 1)")
+                .expect("read H cell default"),
+            Some(Value::Number(0.0))
+        );
+
+        // The two group matrices render with the fixed 4×4 shape and cell-edit hooks.
+        let tree = runtime
+            .take_pending_buffer_widget_trees()
+            .into_iter()
+            .rev()
+            .find_map(|pending| match pending {
+                eseqlisp::vm::PendingUiUpdate::FullTree(update) => Some(update.tree),
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => Some(tree),
+            })
+            .expect("script should publish widget tree");
+        let layout = runtime
+            .layout_snapshot_for_tree_with_viewport(&tree, Some((80.0, 64.0)))
+            .expect("group matrix widget tree should lay out");
+        for key in [
+            "graph-group-matrix-weight-matrix",
+            "graph-group-matrix-group-gain-matrix",
+            "graph-group-matrix-group-coupling-matrix",
+        ] {
+            assert!(
+                find_by_stable_key(&layout, key).is_some(),
+                "missing {key}"
+            );
+        }
+        let gain_change = find_by_stable_key(&layout, "graph-group-matrix-group-gain-matrix")
+            .and_then(|node| node.props.get("on-cell-change"))
+            .cloned()
+            .expect("G matrix cell-change callback");
+        runtime
+            .invoke(
+                gain_change,
+                vec![Value::Number(0.0), Value::Number(1.0), Value::Number(0.25)],
+            )
+            .expect("edit G[A][B]");
+        let coupling_change =
+            find_by_stable_key(&layout, "graph-group-matrix-group-coupling-matrix")
+                .and_then(|node| node.props.get("on-cell-change"))
+                .cloned()
+                .expect("H matrix cell-change callback");
+        runtime
+            .invoke(
+                coupling_change,
+                vec![Value::Number(1.0), Value::Number(0.0), Value::Number(-1.5)],
+            )
+            .expect("edit H[B][A]");
+
+        // One drag = one persisted cell, resolved back through graph-config-value.
+        let overrides = state.current_graph_overrides();
+        let graph = overrides
+            .iter()
+            .find(|graph| graph.sequencer_name == "neural-group-matrix-demo")
+            .expect("group matrix overrides");
+        let k = crate::graph::NEURAL_GROUP_MAX as usize;
+        assert_eq!(graph.group_gain.as_ref().expect("gain written")[1], 0.25);
+        assert_eq!(
+            graph.group_coupling.as_ref().expect("coupling written")[k],
+            -1.5
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-config-value ggm-name :group-gain-0-1)")
+                .expect("read back G cell"),
+            Some(Value::Number(0.25))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-config-value ggm-name :group-coupling-1-0)")
+                .expect("read back H cell"),
+            Some(Value::Number(-1.5))
+        );
+    }
+
+    #[test]
     fn graph_markov_8x8_demo_loads_weight_matrix_and_node_delays() {
         fn collect_widgets<'a>(
             node: &'a eseqlisp::layout::LayoutNode,
@@ -3336,6 +3475,9 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             max_poly: None,
             max_poly_selection: None,
             node_count: None,
+            group_gain: None,
+            group_coupling: None,
+            group_trace_decay: None,
         };
         state
             .edit_current_graph_overrides(|overrides| {
@@ -3858,6 +4000,64 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(config.reset_interval_beats, 8.0);
         assert_eq!(config.max_poly, 1);
         assert_eq!(config.max_poly_selection, NeuralMaxPolySelection::Random);
+
+        // Group matrices (neural-groups spec §3.2): unset cells read their inert
+        // defaults, one graph-config write persists one cell, and values clamp to the
+        // declared cell ranges.
+        assert_eq!(
+            runtime
+                .eval_str("(graph-config-value \"neural\" :group-gain-0-1)")
+                .expect("group-gain default"),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-config-value \"neural\" :group-coupling-0-1)")
+                .expect("group-coupling default"),
+            Some(Value::Number(0.0))
+        );
+        assert_eq!(
+            runtime
+                .eval_str("(graph-config-value \"neural\" :group-trace-decay)")
+                .expect("group-trace-decay default"),
+            Some(Value::Number(crate::graph::GROUP_TRACE_DECAY_DEFAULT))
+        );
+        runtime
+            .eval_str("(graph-config \"neural\" :group-gain-0-1 0.25)")
+            .expect("set group-gain cell");
+        runtime
+            .eval_str("(graph-config \"neural\" :group-coupling-1-0 9)")
+            .expect("set group-coupling cell (clamps)");
+        runtime
+            .eval_str("(graph-config \"neural\" :group-trace-decay 0.8)")
+            .expect("set group-trace-decay");
+        let overrides = state.current_graph_overrides();
+        let k = crate::graph::NEURAL_GROUP_MAX as usize;
+        let gain = overrides[0].group_gain.as_ref().expect("gain persisted");
+        assert_eq!(gain[1], 0.25); // cell 0-1
+        assert_eq!(gain[k], 1.0); // untouched cell 1-0 keeps its default
+        let coupling = overrides[0]
+            .group_coupling
+            .as_ref()
+            .expect("coupling persisted");
+        assert_eq!(coupling[k], crate::graph::GROUP_COUPLING_MAX);
+        assert_eq!(overrides[0].group_trace_decay, Some(0.8));
+        assert_eq!(
+            runtime
+                .eval_str("(reactive-value (bind-graph-config \"neural\" :group-gain-0-1))")
+                .expect("bound group-gain cell"),
+            Some(Value::Number(0.25))
+        );
+        let config = manifest.runtime_config_with_overrides(Some(&overrides[0]));
+        assert_eq!(config.group_gain[1], 0.25);
+        assert_eq!(config.group_coupling[k], crate::graph::GROUP_COUPLING_MAX);
+        assert_eq!(config.group_trace_decay, 0.8);
+        // An out-of-range cell coordinate is rejected: nothing is written.
+        let _ = runtime.eval_str("(graph-config \"neural\" :group-gain-9-0 1)");
+        let overrides = state.current_graph_overrides();
+        let gain = overrides[0].group_gain.as_ref().expect("gain persisted");
+        assert_eq!(gain.len(), crate::graph::NEURAL_GROUP_CELLS);
+        assert_eq!(gain[1], 0.25);
     }
 
     #[test]

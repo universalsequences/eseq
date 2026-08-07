@@ -383,6 +383,9 @@
             max_poly: None,
             max_poly_selection: None,
             node_count: None,
+            group_gain: None,
+            group_coupling: None,
+            group_trace_decay: None,
         }
     }
 
@@ -3630,6 +3633,9 @@
                     max_poly: None,
                     max_poly_selection: None,
                     node_count: None,
+                    group_gain: None,
+                    group_coupling: None,
+                    group_trace_decay: None,
                 });
                 Ok(())
             })
