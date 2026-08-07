@@ -2592,7 +2592,12 @@ impl GraphRuntime {
                 .filter(|&edge_idx| {
                     self.edges
                         .get(edge_idx)
-                        .map(|edge| edge.distribution == distribution && edge.gather() > 0.0)
+                        .map(|edge| {
+                            // `G` gates candidacy too (spec §4.3): a zero-gain edge must
+                            // not win a weighted-choice slot only to deposit nothing.
+                            edge.distribution == distribution
+                                && edge.gather() * self.group_gain_between(edge.from, edge.to) > 0.0
+                        })
                         .unwrap_or(false)
                 })
                 .collect::<Vec<_>>();
@@ -2624,24 +2629,25 @@ impl GraphRuntime {
     }
 
     fn choose_weighted_edge(&mut self, edge_indices: &[usize]) -> Option<usize> {
-        let mut total = 0.0;
-        for &edge_idx in edge_indices {
-            total += self
-                .edges
-                .get(edge_idx)
-                .map(|edge| edge.gather())
-                .unwrap_or(0.0);
-        }
+        // Weight by the *effective* contribution — gather scaled by `G` — so a
+        // down-gained cross-group edge sheds selection probability to its siblings
+        // instead of winning the slot and depositing a scaled-down amount. All-ones
+        // `G` leaves every amount (and the RNG stream) bit-identical.
+        let amounts: Vec<f64> = edge_indices
+            .iter()
+            .map(|&edge_idx| {
+                self.edges
+                    .get(edge_idx)
+                    .map(|edge| edge.gather() * self.group_gain_between(edge.from, edge.to))
+                    .unwrap_or(0.0)
+            })
+            .collect();
+        let total: f64 = amounts.iter().sum();
         if total <= 0.0 || !total.is_finite() {
             return None;
         }
         let mut cursor = self.next_random_unit() * total;
-        for &edge_idx in edge_indices {
-            let amount = self
-                .edges
-                .get(edge_idx)
-                .map(|edge| edge.gather())
-                .unwrap_or(0.0);
+        for (&edge_idx, &amount) in edge_indices.iter().zip(&amounts) {
             if amount <= 0.0 {
                 continue;
             }
@@ -3976,6 +3982,33 @@ mod tests {
         assert_eq!(unplugged.edges[0].weight, 1.0);
         // The blocked group-B node kept zero energy: nothing deposited, nothing fired.
         assert_eq!(unplugged.energy(1), 0.0);
+    }
+
+    #[test]
+    fn group_gain_zero_redistributes_weighted_choice_to_live_edges() {
+        // Under :weighted-choice, a zero-gain cross-group edge must shed its selection
+        // probability instead of winning the single slot and depositing nothing: with
+        // G[A][B] = 0 the choice must land on the group-A edge every time, for every
+        // RNG stream.
+        for seed in 0..8 {
+            let mut n1 = node(Timebase::Quarter);
+            n1.neural_group = 1;
+            let nodes = vec![node(Timebase::Quarter), n1, node(Timebase::Quarter)];
+            let mut edges = vec![GraphEdge::new(0, 1, 0.9), GraphEdge::new(0, 2, 0.1)];
+            for edge in &mut edges {
+                edge.distribution = EdgeDistribution::WeightedChoice;
+            }
+            let mut config = runtime_config(14, nodes, edges);
+            config.group_gain[group_cell(0, 1)] = 0.0;
+            let mut runtime = GraphRuntime::new_from_config(config);
+            runtime.random_state = seed;
+            runtime.push_propagation(0, 0.0, GraphPayload::default());
+            let fired: Vec<usize> = run(&mut runtime, 3.0, 0, vec![9.0, 0.05, 0.05])
+                .iter()
+                .map(|e| e.node_index)
+                .collect();
+            assert_eq!(fired, vec![2], "seed {seed}: choice must skip the G=0 edge");
+        }
     }
 
     #[test]
