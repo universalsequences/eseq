@@ -393,7 +393,7 @@ pub fn register_graph_authoring_natives(
     runtime.register_native_with_docs(
         "graph-config-value",
         "(graph-config-value sequencer :reset-bars)",
-        "Resolved sequencer-level config (:reset-bars, :max-poly, :max-poly-selection, or :node-count), override-or-manifest.",
+        "Resolved sequencer-level config, override-or-manifest. Fields: :reset-bars, :max-poly, :max-poly-selection, :node-count, :group-trace-decay, and the neural-group matrix cells :group-gain-<row>-<col> (default 1) / :group-coupling-<row>-<col> (default 0), row = source group, col = target group.",
         move |args, _ctx| {
             if args.len() != 2 {
                 return Err("graph-config-value expects graph and field".to_string());
@@ -409,7 +409,7 @@ pub fn register_graph_authoring_natives(
     runtime.register_native_with_docs(
         "graph-config",
         "(graph-config sequencer :reset-bars 4)",
-        "Set a sequencer-level config override (:reset-bars in bars, :max-poly, :max-poly-selection, or :node-count).",
+        "Set a sequencer-level config override: :reset-bars (in bars), :max-poly, :max-poly-selection, :node-count, :group-trace-decay (0-1 per-beat activity-trace decay), :group-gain-<row>-<col> (0-2, propagation gain from group row to group col), :group-coupling-<row>-<col> (-2 to 2, activity in group row offsets group col's threshold; positive suppresses, negative excites). Values clamp to their range; one call writes one matrix cell.",
         move |args, ctx| {
             if args.len() != 3 {
                 return Err("graph-config expects graph, field, value".to_string());
@@ -448,7 +448,7 @@ pub fn register_graph_authoring_natives(
     runtime.register_native_with_docs(
         "bind-graph-config",
         "(bind-graph-config sequencer :reset-bars [options])",
-        "Reactive handle to a sequencer-level config field, seeded with the resolved value. Pass an options list to bind enum fields as dropdown indices.",
+        "Reactive handle to a sequencer-level config field (see graph-config for the field list, including the :group-gain-<row>-<col> / :group-coupling-<row>-<col> matrix cells), seeded with the resolved value. Pass an options list to bind enum fields as dropdown indices.",
         move |args, _ctx| {
             if args.len() < 2 {
                 return Err("bind-graph-config expects graph and field".to_string());
@@ -702,6 +702,29 @@ fn graph_config_reactive_field(manifest_id: u64, field: &str) -> String {
     format!("{manifest_id}|cfg|{field}")
 }
 
+/// Parse a `<prefix>-<row>-<col>` group-matrix cell field (e.g. `group-gain-1-2`)
+/// into a flat row-major cell index. One cell per field keeps the config lockstep
+/// scalar-shaped: a matrix drag writes exactly one override cell.
+fn parse_group_cell_index(field: &str, prefix: &str) -> Option<usize> {
+    let suffix = field.strip_prefix(prefix)?;
+    let (row, col) = suffix.split_once('-')?;
+    let row: usize = row.parse().ok()?;
+    let col: usize = col.parse().ok()?;
+    let k = crate::graph::NEURAL_GROUP_MAX as usize;
+    if row >= k || col >= k {
+        return None;
+    }
+    Some(row * k + col)
+}
+
+fn group_matrix_cell(cells: Option<&Vec<f64>>, index: usize, default: f64) -> f64 {
+    cells
+        .and_then(|cells| cells.get(index))
+        .copied()
+        .filter(|value| value.is_finite())
+        .unwrap_or(default)
+}
+
 /// Resolve a sequencer-level config field (override-or-manifest) to a UI value.
 /// `:reset-bars` reports bars (engine stores beats); `:max-poly` reports the cap;
 /// `:max-poly-selection` reports the engine enum name; `:node-count` reports the
@@ -742,7 +765,30 @@ fn resolved_graph_config_value(
                 manifest.shape.resolved_node_count(overrides.as_ref()) as f64,
             ))
         }
-        other => Err(format!("graph config unknown field :{other}")),
+        "group-trace-decay" => {
+            let value = overrides
+                .as_ref()
+                .and_then(|o| o.group_trace_decay)
+                .unwrap_or(crate::graph::GROUP_TRACE_DECAY_DEFAULT);
+            Ok(EValue::Number(value))
+        }
+        other => {
+            if let Some(index) = parse_group_cell_index(other, "group-gain-") {
+                return Ok(EValue::Number(group_matrix_cell(
+                    overrides.as_ref().and_then(|o| o.group_gain.as_ref()),
+                    index,
+                    crate::graph::GROUP_GAIN_DEFAULT,
+                )));
+            }
+            if let Some(index) = parse_group_cell_index(other, "group-coupling-") {
+                return Ok(EValue::Number(group_matrix_cell(
+                    overrides.as_ref().and_then(|o| o.group_coupling.as_ref()),
+                    index,
+                    crate::graph::GROUP_COUPLING_DEFAULT,
+                )));
+            }
+            Err(format!("graph config unknown field :{other}"))
+        }
     }
 }
 
@@ -794,6 +840,9 @@ fn set_graph_config_value(
         MaxPoly(u32),
         MaxPolySelection(NeuralMaxPolySelection),
         NodeCount(u32),
+        GroupGainCell(usize, f64),
+        GroupCouplingCell(usize, f64),
+        GroupTraceDecay(f64),
     }
 
     let edit = match field {
@@ -815,7 +864,41 @@ fn set_graph_config_value(
                 .ok_or_else(|| "graph config :node-count expects a numeric value".to_string())?;
             ConfigEdit::NodeCount(clamp_graph_node_count(manifest, value)?)
         }
-        other => return Err(format!("graph config unknown field :{other}")),
+        "group-trace-decay" => {
+            let value = graph_number(value).ok_or_else(|| {
+                "graph config :group-trace-decay expects a numeric value".to_string()
+            })?;
+            if !value.is_finite() {
+                return Err("graph config :group-trace-decay expects a finite value".to_string());
+            }
+            ConfigEdit::GroupTraceDecay(value.clamp(0.0, 1.0))
+        }
+        other => {
+            if let Some(index) = parse_group_cell_index(other, "group-gain-") {
+                let value = graph_number(value)
+                    .filter(|value| value.is_finite())
+                    .ok_or_else(|| "graph config group-gain cell expects a number".to_string())?;
+                ConfigEdit::GroupGainCell(
+                    index,
+                    value.clamp(crate::graph::GROUP_GAIN_MIN, crate::graph::GROUP_GAIN_MAX),
+                )
+            } else if let Some(index) = parse_group_cell_index(other, "group-coupling-") {
+                let value = graph_number(value)
+                    .filter(|value| value.is_finite())
+                    .ok_or_else(|| {
+                        "graph config group-coupling cell expects a number".to_string()
+                    })?;
+                ConfigEdit::GroupCouplingCell(
+                    index,
+                    value.clamp(
+                        crate::graph::GROUP_COUPLING_MIN,
+                        crate::graph::GROUP_COUPLING_MAX,
+                    ),
+                )
+            } else {
+                return Err(format!("graph config unknown field :{other}"));
+            }
+        }
     };
 
     state.edit_current_graph_overrides(|graphs| {
@@ -825,6 +908,26 @@ fn set_graph_config_value(
             ConfigEdit::MaxPoly(value) => graph.max_poly = Some(value),
             ConfigEdit::MaxPolySelection(value) => graph.max_poly_selection = Some(value),
             ConfigEdit::NodeCount(value) => graph.node_count = Some(value),
+            ConfigEdit::GroupGainCell(index, value) => {
+                let cells = graph
+                    .group_gain
+                    .get_or_insert_with(|| {
+                        vec![crate::graph::GROUP_GAIN_DEFAULT; crate::graph::NEURAL_GROUP_CELLS]
+                    });
+                cells.resize(crate::graph::NEURAL_GROUP_CELLS, crate::graph::GROUP_GAIN_DEFAULT);
+                cells[index] = value;
+            }
+            ConfigEdit::GroupCouplingCell(index, value) => {
+                let cells = graph.group_coupling.get_or_insert_with(|| {
+                    vec![crate::graph::GROUP_COUPLING_DEFAULT; crate::graph::NEURAL_GROUP_CELLS]
+                });
+                cells.resize(
+                    crate::graph::NEURAL_GROUP_CELLS,
+                    crate::graph::GROUP_COUPLING_DEFAULT,
+                );
+                cells[index] = value;
+            }
+            ConfigEdit::GroupTraceDecay(value) => graph.group_trace_decay = Some(value),
         }
         Ok(())
     })

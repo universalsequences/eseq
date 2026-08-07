@@ -260,6 +260,11 @@ pub struct GraphVisualizationSnapshot {
     pub edges: Vec<GraphVisualizationEdge>,
     pub deltas: Vec<GraphDeltaEntry>,
     pub delta_leak_per_beat: f32,
+    /// Per-group leaky activity traces (spec §4.4), `NEURAL_GROUP_MAX` entries.
+    pub group_activity: Vec<f64>,
+    /// Per-group signed threshold offset `Σ_c H[c][g] * activity[c]` (spec §4.5):
+    /// positive = suppression, negative = excitation. `NEURAL_GROUP_MAX` entries.
+    pub group_suppression: Vec<f64>,
 }
 
 const GRAPH_EVENT_HISTORY_CAP: usize = 1024;
@@ -530,6 +535,42 @@ impl From<&ProjectGraphSeedFrom> for SeedFrom {
 
 /// Max neural groups in v1 (A–D), neural-groups spec §3.1.
 pub const NEURAL_GROUP_MAX: u8 = 4;
+/// Cell count of the k×k group matrices (`G` gain / `H` coupling), stored row-major
+/// as flat vecs indexed `[from_group * NEURAL_GROUP_MAX + to_group]`.
+pub const NEURAL_GROUP_CELLS: usize = (NEURAL_GROUP_MAX as usize) * (NEURAL_GROUP_MAX as usize);
+/// `G` propagation-gain cell range (neural-groups spec §3.2). All-ones is inert.
+pub const GROUP_GAIN_DEFAULT: f64 = 1.0;
+pub const GROUP_GAIN_MIN: f64 = 0.0;
+pub const GROUP_GAIN_MAX: f64 = 2.0;
+/// `H` activity→threshold coupling cell range (spec §3.2). All-zeros is inert.
+pub const GROUP_COUPLING_DEFAULT: f64 = 0.0;
+pub const GROUP_COUPLING_MIN: f64 = -2.0;
+pub const GROUP_COUPLING_MAX: f64 = 2.0;
+/// Per-beat decay of the per-group activity trace (spec §4.4).
+pub const GROUP_TRACE_DECAY_DEFAULT: f64 = 0.5;
+/// Activity trace clamp ceiling (spec §4.4).
+const GROUP_ACTIVITY_MAX: f64 = 4.0;
+
+/// Force a group matrix to the dense `NEURAL_GROUP_CELLS` shape on ingest into the
+/// runtime. Paired with `node_group_index`'s clamp, this makes every group-matrix
+/// read provably in range without a per-read bounds check.
+fn dense_group_matrix(mut cells: Vec<f64>, default: f64) -> Vec<f64> {
+    cells.resize(NEURAL_GROUP_CELLS, default);
+    cells
+}
+
+/// Clamp an optional flat k×k override into a dense `NEURAL_GROUP_CELLS` vec.
+fn normalized_group_matrix(cells: Option<&Vec<f64>>, default: f64, min: f64, max: f64) -> Vec<f64> {
+    let mut normalized = vec![default; NEURAL_GROUP_CELLS];
+    if let Some(cells) = cells {
+        for (idx, value) in cells.iter().take(NEURAL_GROUP_CELLS).enumerate() {
+            if value.is_finite() {
+                normalized[idx] = value.clamp(min, max);
+            }
+        }
+    }
+    normalized
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectGraphNodeIntrinsicOverride {
@@ -600,6 +641,17 @@ pub struct ProjectGraphOverrides {
     pub max_poly_selection: Option<NeuralMaxPolySelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_count: Option<u32>,
+    /// `G` — flat k×k propagation-gain matrix over neural groups (spec §4.3),
+    /// row-major `[from_group * NEURAL_GROUP_MAX + to_group]`. None = all-ones (inert).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_gain: Option<Vec<f64>>,
+    /// `H` — flat k×k activity→threshold coupling matrix (spec §4.5),
+    /// row-major `[active_group * NEURAL_GROUP_MAX + target_group]`. None = all-zeros (inert).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_coupling: Option<Vec<f64>>,
+    /// Per-beat decay of the per-group activity trace (spec §4.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_trace_decay: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -814,6 +866,12 @@ pub struct GraphRuntimeConfig {
     pub node_params: Vec<HashMap<String, f64>>,
     pub node_param_ranges: HashMap<String, GraphDeltaRange>,
     pub edge_param_ranges: HashMap<String, GraphDeltaRange>,
+    /// `G` gain matrix, dense `NEURAL_GROUP_CELLS` (spec §4.3). All-ones = inert.
+    pub group_gain: Vec<f64>,
+    /// `H` coupling matrix, dense `NEURAL_GROUP_CELLS` (spec §4.5). All-zeros = inert.
+    pub group_coupling: Vec<f64>,
+    /// Per-beat activity trace decay (spec §4.4).
+    pub group_trace_decay: f64,
 }
 
 impl GraphRuntimeConfig {
@@ -859,6 +917,9 @@ impl GraphRuntimeConfig {
             node_params: normalized_node_params(num_nodes, node_params),
             node_param_ranges: HashMap::new(),
             edge_param_ranges: HashMap::new(),
+            group_gain: vec![GROUP_GAIN_DEFAULT; NEURAL_GROUP_CELLS],
+            group_coupling: vec![GROUP_COUPLING_DEFAULT; NEURAL_GROUP_CELLS],
+            group_trace_decay: GROUP_TRACE_DECAY_DEFAULT,
         }
     }
 
@@ -894,6 +955,12 @@ pub struct GraphRuntime {
     default_duration: GraphDurationSpec,
     default_swing: GraphSwingSpec,
     random_state: u64,
+    /// `G` gain matrix over neural groups, dense row-major (spec §4.3).
+    group_gain: Vec<f64>,
+    /// `H` activity→threshold coupling matrix, dense row-major (spec §4.5).
+    group_coupling: Vec<f64>,
+    /// Per-beat decay factor of `group_activity` (spec §4.4).
+    group_trace_decay: f64,
 
     // ── ephemeral process regulation ──
     authored_nodes: Vec<GraphNode>,
@@ -929,6 +996,12 @@ pub struct GraphRuntime {
     /// Edge indices that contributed positive current to each target since that target
     /// last evaluated. Cleared when the target's update/recovery path commits.
     incoming_triggers: Vec<Vec<usize>>,
+    /// Per-group leaky firing-rate trace (spec §4.4), member-count normalized. Runtime
+    /// state on the same lifecycle as `energy` — never persisted, cleared on reset.
+    group_activity: Vec<f64>,
+    /// Per-boundary snapshot of `Σ_c H[c][g] * activity[c]` (spec §4.5), refreshed
+    /// before fire decisions so arbitration and `θ_eff` read the same values.
+    group_suppression: Vec<f64>,
 
     // ── clock bookkeeping ──
     last_eval_indices: Vec<u64>,
@@ -1022,6 +1095,9 @@ impl GraphRuntime {
             default_duration: config.default_duration,
             default_swing: config.default_swing,
             random_state: config.id,
+            group_gain: dense_group_matrix(config.group_gain, GROUP_GAIN_DEFAULT),
+            group_coupling: dense_group_matrix(config.group_coupling, GROUP_COUPLING_DEFAULT),
+            group_trace_decay: config.group_trace_decay,
             authored_nodes,
             authored_edges,
             authored_node_params,
@@ -1044,6 +1120,8 @@ impl GraphRuntime {
             cycle_pos: vec![0; num_nodes],
             pending: vec![Vec::new(); num_nodes],
             incoming_triggers: vec![Vec::new(); num_nodes],
+            group_activity: vec![0.0; NEURAL_GROUP_MAX as usize],
+            group_suppression: vec![0.0; NEURAL_GROUP_MAX as usize],
             last_eval_indices: vec![0; num_nodes],
             last_decay_index: 0,
             next_reset_beat: 0.0,
@@ -1094,6 +1172,8 @@ impl GraphRuntime {
                 .collect(),
             deltas: self.delta_entries(),
             delta_leak_per_beat: self.delta_leak_per_beat,
+            group_activity: self.group_activity.clone(),
+            group_suppression: self.group_suppression.clone(),
         }
     }
 
@@ -1146,6 +1226,12 @@ impl GraphRuntime {
         self.max_poly_selection = config.max_poly_selection;
         self.default_duration = config.default_duration;
         self.default_swing = config.default_swing;
+        self.group_gain = dense_group_matrix(config.group_gain, GROUP_GAIN_DEFAULT);
+        self.group_coupling = dense_group_matrix(config.group_coupling, GROUP_COUPLING_DEFAULT);
+        self.group_trace_decay = config.group_trace_decay;
+        // A live `H` edit changes what the held activity traces imply — refresh so the
+        // next boundary doesn't read a suppression snapshot built from the old matrix.
+        self.refresh_group_suppression();
         self.node_params = self.authored_node_params.clone();
 
         for (idx, next_edge) in config.edges.into_iter().enumerate() {
@@ -1329,6 +1415,10 @@ impl GraphRuntime {
         for (edge, default_dampening) in self.edges.iter_mut().zip(&self.edge_default_dampening) {
             edge.dampening = *default_dampening;
         }
+        // Group traces ride the same lifecycle as energy (spec §5): reset hard-resyncs
+        // the group dynamics to the bar grid.
+        self.group_activity.fill(0.0);
+        self.group_suppression.fill(0.0);
         self.last_decay_index = self.finest_decay_index(total_beats);
         self.next_reset_beat = next_reset_beat_after(total_beats, self.reset_interval_beats);
         self.pending_reset_seed_emit_beat =
@@ -1441,6 +1531,11 @@ impl GraphRuntime {
                 }
             }
 
+            // ── Group modulation snapshot (spec §4.8 step 2): suppression for this
+            // boundary from the previous boundary's activity traces. Read-only until
+            // step 6, so no node's decision depends on another's within the boundary.
+            self.refresh_group_suppression();
+
             // ── Phase 2: fire. Integrate gather into energy, run the rule, collect
             // candidates (read-only — energy reset is deferred to commit so max_poly
             // can reject without consuming the node).
@@ -1467,7 +1562,7 @@ impl GraphRuntime {
                     resolution: self.nodes[idx].resolution,
                     delay_steps: self.nodes[idx].delay_steps,
                     input_event: self.source_event[idx],
-                    params: self.node_params[idx].clone(),
+                    params: self.node_params_with_group_threshold(idx),
                 };
                 self.tick_count[idx] = self.tick_count[idx].saturating_add(1);
                 let decision = update_fn(&eval);
@@ -1584,6 +1679,14 @@ impl GraphRuntime {
                         self.clear_incoming_triggers(idx);
                     }
                 }
+                // ── Group state update (spec §4.8 step 6): accepted fires feed the
+                // activity traces after all commit/drop decisions. A node-authored
+                // graph reset deliberately cleared the traces above, so it skips this.
+                for (cand_idx, candidate) in candidates.iter().enumerate() {
+                    if accepted[cand_idx] {
+                        self.bump_group_activity(candidate.node_index);
+                    }
+                }
             }
 
             self.apply_energy_decay(boundary_beats);
@@ -1692,6 +1795,7 @@ impl GraphRuntime {
                 self.energy[idx] *= self.energy_decay;
             }
             self.leak_deltas(self.finest_step_beats());
+            self.decay_group_activity(self.finest_step_beats());
             self.last_decay_index += 1;
         }
     }
@@ -1876,7 +1980,10 @@ impl GraphRuntime {
             if edge.from != node_index {
                 continue;
             }
-            let amount = edge.gather();
+            // `G` scales the *gathered* contribution (spec §4.3), so authored weights
+            // and the delta overlay stay meaningful; a zero cell blocks at deposit,
+            // which also gates propagations already in flight when the cell was edited.
+            let amount = edge.gather() * self.group_gain_between(edge.from, edge.to);
             if amount <= 0.0 {
                 continue;
             }
@@ -1990,6 +2097,9 @@ impl GraphRuntime {
     ) where
         F: FnMut(&NodeEval) -> NodeFire,
     {
+        // A reset just cleared the activity traces; refresh so arbitration and the
+        // rule both read the post-reset (zero) suppression.
+        self.refresh_group_suppression();
         let mut candidates = Vec::new();
         for idx in 0..self.num_nodes {
             if !self.nodes[idx].trigger_on_reset || self.nodes[idx].seed_on_reset <= 0.0 {
@@ -2004,7 +2114,7 @@ impl GraphRuntime {
                 resolution: self.nodes[idx].resolution,
                 delay_steps: self.nodes[idx].delay_steps,
                 input_event: None,
-                params: self.node_params[idx].clone(),
+                params: self.node_params_with_group_threshold(idx),
             };
             self.tick_count[idx] = self.tick_count[idx].saturating_add(1);
             let decision = update_fn(&eval);
@@ -2038,6 +2148,7 @@ impl GraphRuntime {
             if accepted[cand_idx] {
                 self.commit_reset_seed_emission(candidate, out);
                 self.advance_cycle(candidate.node_index, reset_beats);
+                self.bump_group_activity(candidate.node_index);
             }
         }
     }
@@ -2335,15 +2446,114 @@ impl GraphRuntime {
         }
     }
 
+    /// A node's neural group as a group-matrix index. Every authoring path already
+    /// clamps to `NEURAL_GROUP_MAX - 1` (manifest resolution, `graph-node :group`),
+    /// so this is insurance for a runtime built straight from a hand-made node
+    /// field: the group matrices are a fixed `NEURAL_GROUP_MAX` wide and an
+    /// out-of-range group must never index past them.
+    fn node_group_index(&self, node_index: usize) -> usize {
+        (self.nodes[node_index].neural_group as usize).min(NEURAL_GROUP_MAX as usize - 1)
+    }
+
+    /// `G[group(from)][group(to)]` — the gain every cross-group contribution is
+    /// scaled by at deposit time (spec §4.3). All-ones is exactly inert (`x * 1.0`
+    /// is bit-identical), so the default reproduces pre-groups behavior.
+    fn group_gain_between(&self, from_node: usize, to_node: usize) -> f64 {
+        let from_group = self.node_group_index(from_node);
+        let to_group = self.node_group_index(to_node);
+        self.group_gain[from_group * NEURAL_GROUP_MAX as usize + to_group]
+    }
+
+    /// A node's threshold with the group suppression offset applied (spec §4.5's
+    /// `θ_eff`). Read-time and engine-owned: the authored param map, the cached
+    /// `nodes[idx].threshold` mirror, and the delta store are never mutated, so
+    /// nothing transient can be committed into the user's patch. Returns the
+    /// authored value untouched when suppression is zero (bit-identical inert path).
+    fn effective_threshold(&self, node_index: usize) -> f64 {
+        let authored = self.nodes[node_index].threshold;
+        let suppression = self.group_suppression[self.node_group_index(node_index)];
+        if suppression == 0.0 {
+            return authored;
+        }
+        let theta_max = self
+            .node_param_ranges
+            .get("threshold")
+            .map(|range| range.max as f64)
+            .unwrap_or(f64::INFINITY);
+        (authored + suppression).clamp(0.0, theta_max)
+    }
+
+    /// The params map a node rule sees this boundary: the resolved map, with the
+    /// group-derived `θ_eff` swapped in for `threshold` (spec §4.5) so no node rule
+    /// changes. When suppression is zero the map is cloned untouched — byte-identical
+    /// to pre-groups behavior.
+    fn node_params_with_group_threshold(&self, node_index: usize) -> HashMap<String, f64> {
+        let mut params = self.node_params[node_index].clone();
+        let suppression = self.group_suppression[self.node_group_index(node_index)];
+        if suppression != 0.0 {
+            params.insert("threshold".to_string(), self.effective_threshold(node_index));
+        }
+        params
+    }
+
+    /// Refresh the per-boundary suppression snapshot `Σ_c H[c][g] * activity[c]`
+    /// (spec §4.8 step 2). Called once per boundary before fire decisions; traces
+    /// only mutate after commit (step 6), so every read within a boundary agrees.
+    fn refresh_group_suppression(&mut self) {
+        let k = NEURAL_GROUP_MAX as usize;
+        for g in 0..k {
+            let mut suppression = 0.0;
+            for c in 0..k {
+                suppression += self.group_coupling[c * k + g] * self.group_activity[c];
+            }
+            self.group_suppression[g] = suppression;
+        }
+    }
+
+    /// Record an accepted fire into its group's activity trace, normalized by member
+    /// count so `H` entries stay comparable across differently-sized groups (§4.4).
+    fn bump_group_activity(&mut self, node_index: usize) {
+        let group = self.node_group_index(node_index);
+        let members = (0..self.nodes.len())
+            .filter(|&idx| self.node_group_index(idx) == group)
+            .count()
+            .max(1);
+        let slot = &mut self.group_activity[group];
+        *slot = (*slot + 1.0 / members as f64).min(GROUP_ACTIVITY_MAX);
+    }
+
+    /// One finest-grid decay tick of the activity traces, `factor.powf(step_beats)`
+    /// per-beat conversion like delta leak (§4.4).
+    fn decay_group_activity(&mut self, step_beats: f64) {
+        if self.group_activity.iter().all(|activity| *activity == 0.0) {
+            return;
+        }
+        let factor = self.group_trace_decay.clamp(0.0, 1.0).powf(step_beats);
+        for activity in &mut self.group_activity {
+            *activity *= factor;
+        }
+    }
+
+    /// Read a group's activity trace (telemetry / tests).
+    pub fn group_activity(&self, group: u8) -> f64 {
+        self.group_activity
+            .get(group as usize)
+            .copied()
+            .unwrap_or(0.0)
+    }
+
     fn propagation_selection_score(&self, source: usize) -> f64 {
         let mut score = 0.0;
         for &edge_idx in &self.out_edges[source] {
             let edge = self.edges[edge_idx];
-            let amount = edge.gather();
-            if amount <= 0.0 || edge.to >= self.num_nodes {
+            if edge.to >= self.num_nodes {
                 continue;
             }
-            let threshold = self.nodes[edge.to].threshold.max(1e-6);
+            let amount = edge.gather() * self.group_gain_between(source, edge.to);
+            if amount <= 0.0 {
+                continue;
+            }
+            let threshold = self.effective_threshold(edge.to).max(1e-6);
             let projected = self.energy[edge.to] + amount;
             if projected >= threshold {
                 score += 1_000.0 + (projected - threshold);
@@ -2404,7 +2614,12 @@ impl GraphRuntime {
                 .filter(|&edge_idx| {
                     self.edges
                         .get(edge_idx)
-                        .map(|edge| edge.distribution == distribution && edge.gather() > 0.0)
+                        .map(|edge| {
+                            // `G` gates candidacy too (spec §4.3): a zero-gain edge must
+                            // not win a weighted-choice slot only to deposit nothing.
+                            edge.distribution == distribution
+                                && edge.gather() * self.group_gain_between(edge.from, edge.to) > 0.0
+                        })
                         .unwrap_or(false)
                 })
                 .collect::<Vec<_>>();
@@ -2436,24 +2651,25 @@ impl GraphRuntime {
     }
 
     fn choose_weighted_edge(&mut self, edge_indices: &[usize]) -> Option<usize> {
-        let mut total = 0.0;
-        for &edge_idx in edge_indices {
-            total += self
-                .edges
-                .get(edge_idx)
-                .map(|edge| edge.gather())
-                .unwrap_or(0.0);
-        }
+        // Weight by the *effective* contribution — gather scaled by `G` — so a
+        // down-gained cross-group edge sheds selection probability to its siblings
+        // instead of winning the slot and depositing a scaled-down amount. All-ones
+        // `G` leaves every amount (and the RNG stream) bit-identical.
+        let amounts: Vec<f64> = edge_indices
+            .iter()
+            .map(|&edge_idx| {
+                self.edges
+                    .get(edge_idx)
+                    .map(|edge| edge.gather() * self.group_gain_between(edge.from, edge.to))
+                    .unwrap_or(0.0)
+            })
+            .collect();
+        let total: f64 = amounts.iter().sum();
         if total <= 0.0 || !total.is_finite() {
             return None;
         }
         let mut cursor = self.next_random_unit() * total;
-        for &edge_idx in edge_indices {
-            let amount = self
-                .edges
-                .get(edge_idx)
-                .map(|edge| edge.gather())
-                .unwrap_or(0.0);
+        for (&edge_idx, &amount) in edge_indices.iter().zip(&amounts) {
             if amount <= 0.0 {
                 continue;
             }
@@ -2968,6 +3184,23 @@ impl GraphManifest {
             self.swing,
             node_params,
         );
+        config.group_gain = normalized_group_matrix(
+            overrides.and_then(|o| o.group_gain.as_ref()),
+            GROUP_GAIN_DEFAULT,
+            GROUP_GAIN_MIN,
+            GROUP_GAIN_MAX,
+        );
+        config.group_coupling = normalized_group_matrix(
+            overrides.and_then(|o| o.group_coupling.as_ref()),
+            GROUP_COUPLING_DEFAULT,
+            GROUP_COUPLING_MIN,
+            GROUP_COUPLING_MAX,
+        );
+        config.group_trace_decay = overrides
+            .and_then(|o| o.group_trace_decay)
+            .filter(|value| value.is_finite())
+            .map(|value| value.clamp(0.0, 1.0))
+            .unwrap_or(GROUP_TRACE_DECAY_DEFAULT);
         config.node_param_ranges = self
             .node
             .params
@@ -3714,6 +3947,331 @@ mod tests {
         let mut fired: Vec<usize> = out.iter().map(|e| e.node_index).collect();
         fired.sort_unstable();
         assert_eq!(fired, vec![0, 2]);
+    }
+
+    /// A rule that reads its threshold from the params map like the lisp `:update`
+    /// does — the seam `θ_eff` is injected through (spec §4.5).
+    fn param_threshold_update() -> impl FnMut(&NodeEval) -> NodeFire {
+        |eval: &NodeEval| NodeFire {
+            fired: eval.energy >= eval.params.get("threshold").copied().unwrap_or(1.0),
+            ..NodeFire::default()
+        }
+    }
+
+    fn run_on_params(runtime: &mut GraphRuntime, end_beats: f64) -> Vec<GraphEmission> {
+        let mut out = Vec::new();
+        let mut update = param_threshold_update();
+        runtime.process_block(0.0, end_beats, 0, 48_000.0, 0, &mut update, &mut out);
+        out
+    }
+
+    fn group_cell(from: u8, to: u8) -> usize {
+        from as usize * NEURAL_GROUP_MAX as usize + to as usize
+    }
+
+    #[test]
+    fn group_gain_zero_unplugs_cross_group_drive_without_touching_same_group() {
+        // Node 0 (group A) fires from a pushed propagation and drives node 1 (group B)
+        // and node 2 (group A) over identical weight-1 edges.
+        let mut n1 = node(Timebase::Quarter);
+        n1.neural_group = 1;
+        let nodes = vec![node(Timebase::Quarter), n1, node(Timebase::Quarter)];
+        let edges = vec![GraphEdge::new(0, 1, 1.0), GraphEdge::new(0, 2, 1.0)];
+        let build = |gain_a_to_b: f64| {
+            let mut config = runtime_config(11, nodes.clone(), edges.clone());
+            config.group_gain[group_cell(0, 1)] = gain_a_to_b;
+            GraphRuntime::new_from_config(config)
+        };
+
+        // Default gain 1.0: both targets receive the full contribution and fire.
+        let mut baseline = build(GROUP_GAIN_DEFAULT);
+        baseline.push_propagation(0, 0.0, GraphPayload::default());
+        let fired: Vec<usize> = run(&mut baseline, 3.0, 0, vec![9.0, 1.0, 1.0])
+            .iter()
+            .map(|e| e.node_index)
+            .collect();
+        assert_eq!(fired, vec![1, 2]);
+
+        // G[A][B] = 0 unplugs the cross-group edge at deposit time; the same-group
+        // edge (and the authored weights) are untouched.
+        let mut unplugged = build(0.0);
+        unplugged.push_propagation(0, 0.0, GraphPayload::default());
+        let fired: Vec<usize> = run(&mut unplugged, 3.0, 0, vec![9.0, 1.0, 1.0])
+            .iter()
+            .map(|e| e.node_index)
+            .collect();
+        assert_eq!(fired, vec![2]);
+        assert_eq!(unplugged.edges[0].weight, 1.0);
+        // The blocked group-B node kept zero energy: nothing deposited, nothing fired.
+        assert_eq!(unplugged.energy(1), 0.0);
+    }
+
+    #[test]
+    fn group_gain_zero_redistributes_weighted_choice_to_live_edges() {
+        // Under :weighted-choice, a zero-gain cross-group edge must shed its selection
+        // probability instead of winning the single slot and depositing nothing: with
+        // G[A][B] = 0 the choice must land on the group-A edge every time, for every
+        // RNG stream.
+        for seed in 0..8 {
+            let mut n1 = node(Timebase::Quarter);
+            n1.neural_group = 1;
+            let nodes = vec![node(Timebase::Quarter), n1, node(Timebase::Quarter)];
+            let mut edges = vec![GraphEdge::new(0, 1, 0.9), GraphEdge::new(0, 2, 0.1)];
+            for edge in &mut edges {
+                edge.distribution = EdgeDistribution::WeightedChoice;
+            }
+            let mut config = runtime_config(14, nodes, edges);
+            config.group_gain[group_cell(0, 1)] = 0.0;
+            let mut runtime = GraphRuntime::new_from_config(config);
+            runtime.random_state = seed;
+            runtime.push_propagation(0, 0.0, GraphPayload::default());
+            let fired: Vec<usize> = run(&mut runtime, 3.0, 0, vec![9.0, 0.05, 0.05])
+                .iter()
+                .map(|e| e.node_index)
+                .collect();
+            assert_eq!(fired, vec![2], "seed {seed}: choice must skip the G=0 edge");
+        }
+    }
+
+    #[test]
+    fn group_gain_scales_partial_contributions() {
+        // Weight 1.0 scaled by G = 0.4 deposits 0.4 — below threshold 0.5 — so the
+        // cross-group hit charges the target without firing it (spec §4.6 route 1).
+        let mut n1 = node(Timebase::Quarter);
+        n1.neural_group = 1;
+        let mut config = runtime_config(
+            12,
+            vec![node(Timebase::Quarter), n1],
+            vec![GraphEdge::new(0, 1, 1.0)],
+        );
+        config.group_gain[group_cell(0, 1)] = 0.4;
+        let mut runtime = GraphRuntime::new_from_config(config);
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+        let out = run(&mut runtime, 3.0, 0, vec![9.0, 0.5]);
+        assert!(out.is_empty());
+        assert!((runtime.energy(1) - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn group_coupling_suppression_raises_effective_threshold() {
+        // Node 0 (group A) fires every beat off its self-loop; node 1 (group B) gets a
+        // 0.3 cross-drive per hit that accumulates past its authored threshold of 0.5
+        // by the second arrival — after A's activity trace is nonzero. H[A][B] > 0
+        // turns that activity into a threshold raise on B that blocks the fire;
+        // H = 0 is inert.
+        let build = |coupling_a_to_b: f64| {
+            let mut n0 = node(Timebase::Quarter);
+            n0.threshold = 0.5;
+            let mut n1 = node(Timebase::Quarter);
+            n1.threshold = 0.5;
+            n1.neural_group = 1;
+            let mut config = runtime_config(
+                13,
+                vec![n0, n1],
+                vec![GraphEdge::new(0, 0, 1.0), GraphEdge::new(0, 1, 0.3)],
+            );
+            config.node_params = vec![
+                HashMap::from([("threshold".to_string(), 0.5)]),
+                HashMap::from([("threshold".to_string(), 0.5)]),
+            ];
+            config.group_coupling[group_cell(0, 1)] = coupling_a_to_b;
+            config.group_trace_decay = 1.0; // hold the trace steady for determinism
+            let mut runtime = GraphRuntime::new_from_config(config);
+            runtime.push_propagation(0, 0.0, GraphPayload::default());
+            runtime
+        };
+
+        let mut inert = build(0.0);
+        let fired: Vec<usize> = run_on_params(&mut inert, 4.0)
+            .iter()
+            .map(|e| e.node_index)
+            .collect();
+        assert!(fired.contains(&1), "H = 0 must not block group B: {fired:?}");
+
+        let mut suppressed = build(2.0);
+        let fired: Vec<usize> = run_on_params(&mut suppressed, 4.0)
+            .iter()
+            .map(|e| e.node_index)
+            .collect();
+        assert!(
+            fired.iter().all(|&idx| idx == 0),
+            "suppressed group B must not fire: {fired:?}"
+        );
+        // The suppressed node kept integrating its cross-drive sub-threshold
+        // (route-1 rebound charge), rather than being erased.
+        assert!(suppressed.energy(1) > 0.0);
+    }
+
+    #[test]
+    fn group_activity_trace_normalizes_by_member_count_and_decays() {
+        // Two group-B members firing once each in the same boundary add 0.5 apiece
+        // (member-count normalization, spec §4.4), driven through reset seeding.
+        let mut n0 = node(Timebase::Quarter);
+        n0.neural_group = 1;
+        n0.seed_on_reset = 2.0;
+        n0.trigger_on_reset = true;
+        let mut n1 = node(Timebase::Quarter);
+        n1.neural_group = 1;
+        n1.seed_on_reset = 2.0;
+        n1.trigger_on_reset = true;
+        let mut config = runtime_config(15, vec![n0, n1], Vec::new());
+        config.group_trace_decay = 0.5;
+        let mut runtime = GraphRuntime::new_from_config(config);
+        let out = run(&mut runtime, 1.0, 0, vec![1.0, 1.0]);
+        assert_eq!(out.len(), 2);
+        // Two accepted fires in a 2-member group: 2 × (1/2) = 1.0, then one decay
+        // tick per elapsed quarter-note beat at 0.5/beat.
+        assert!((runtime.group_activity(1) - 0.5).abs() < 1e-9);
+        assert_eq!(runtime.group_activity(0), 0.0);
+
+        // Reset clears the trace with the rest of the runtime state (spec §5).
+        runtime.reset(4.0);
+        assert_eq!(runtime.group_activity(1), 0.0);
+    }
+
+    #[test]
+    fn out_of_range_group_and_short_matrices_clamp_instead_of_panicking() {
+        // Every authoring path clamps `:group` to NEURAL_GROUP_MAX - 1, but a runtime
+        // built straight from a hand-made node field (or a config carrying a short
+        // matrix vec) must still index the fixed-width group matrices safely.
+        let mut n0 = node(Timebase::Quarter);
+        n0.neural_group = 200;
+        let mut n1 = node(Timebase::Quarter);
+        n1.neural_group = NEURAL_GROUP_MAX - 1;
+        let mut config = runtime_config(
+            18,
+            vec![n0, n1],
+            vec![GraphEdge::new(0, 1, 1.0), GraphEdge::new(1, 0, 1.0)],
+        );
+        // Truncated matrices (e.g. an older config shape) refill to the dense width.
+        config.group_gain.truncate(3);
+        config.group_coupling.clear();
+        let mut runtime = GraphRuntime::new_from_config(config);
+        assert_eq!(runtime.group_gain.len(), NEURAL_GROUP_CELLS);
+        assert_eq!(runtime.group_coupling.len(), NEURAL_GROUP_CELLS);
+
+        // The out-of-range group folds onto the last slot, so both nodes read the same
+        // group and the whole boundary path runs without an out-of-bounds index.
+        let last = NEURAL_GROUP_MAX - 1;
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+        let out = run(&mut runtime, 3.0, 0, vec![1.0, 1.0]);
+        assert!(!out.is_empty());
+        assert!(runtime.group_activity(last) > 0.0);
+        assert!(runtime.group_activity(last) <= GROUP_ACTIVITY_MAX);
+        // Nothing lands in group A: the out-of-range node folded onto `last` rather
+        // than wrapping to some other slot.
+        assert_eq!(runtime.group_activity(0), 0.0);
+    }
+
+    #[test]
+    fn visualization_snapshot_carries_group_activity_and_suppression() {
+        // A firing group-B pair with H[B][A] > 0 leaves nonzero activity and a
+        // nonzero suppression on group A; the viz snapshot must expose both.
+        let mut n0 = node(Timebase::Quarter);
+        n0.neural_group = 1;
+        n0.seed_on_reset = 2.0;
+        n0.trigger_on_reset = true;
+        let mut n1 = node(Timebase::Quarter);
+        n1.neural_group = 1;
+        n1.seed_on_reset = 2.0;
+        n1.trigger_on_reset = true;
+        let mut config = runtime_config(17, vec![n0, n1], Vec::new());
+        config.group_trace_decay = 1.0;
+        config.group_coupling[group_cell(1, 0)] = 0.8;
+        let mut runtime = GraphRuntime::new_from_config(config);
+        let out = run(&mut runtime, 2.0, 0, vec![1.0, 1.0]);
+        assert_eq!(out.len(), 2);
+
+        let snapshot = runtime.visualization_snapshot();
+        assert_eq!(snapshot.group_activity.len(), NEURAL_GROUP_MAX as usize);
+        assert_eq!(snapshot.group_suppression.len(), NEURAL_GROUP_MAX as usize);
+        assert!((snapshot.group_activity[1] - 1.0).abs() < 1e-9);
+        // Suppression snapshot refreshed at the boundary after the fires:
+        // H[B][A] * activity[B] = 0.8 * 1.0.
+        assert!((snapshot.group_suppression[0] - 0.8).abs() < 1e-9);
+        assert_eq!(snapshot.group_suppression[1], 0.0);
+    }
+
+    #[test]
+    fn group_matrix_overrides_resolve_clamp_and_serialize() {
+        let manifest = GraphManifest {
+            id: 22,
+            name: "matrices".into(),
+            shape: ShapeSpec::Line(2),
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 0,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: GraphDurationSpec::default(),
+            swing: GraphSwingSpec::default(),
+            node: NodeProto {
+                name: "nrn".into(),
+                ..NodeProto::default()
+            },
+            edge_sets: vec![],
+        };
+        let mut gain = vec![GROUP_GAIN_DEFAULT; NEURAL_GROUP_CELLS];
+        gain[group_cell(0, 1)] = 0.25;
+        gain[group_cell(1, 0)] = 99.0; // out of range: clamps to GROUP_GAIN_MAX
+        let mut coupling = vec![GROUP_COUPLING_DEFAULT; NEURAL_GROUP_CELLS];
+        coupling[group_cell(0, 1)] = 1.5;
+        coupling[group_cell(1, 1)] = -99.0; // clamps to GROUP_COUPLING_MIN
+        let overrides = ProjectGraphOverrides {
+            sequencer_id: manifest.id,
+            sequencer_name: manifest.name.clone(),
+            group_gain: Some(gain),
+            group_coupling: Some(coupling),
+            group_trace_decay: Some(0.75),
+            ..ProjectGraphOverrides::default()
+        };
+
+        // Serde round-trip: matrices survive, and legacy payloads (no fields) load inert.
+        let json = serde_json::to_string(&overrides).expect("serialize overrides");
+        let restored: ProjectGraphOverrides =
+            serde_json::from_str(&json).expect("deserialize overrides");
+        assert_eq!(restored, overrides);
+        let legacy: ProjectGraphOverrides =
+            serde_json::from_str(r#"{"sequencer_id":22,"sequencer_name":"matrices"}"#)
+                .expect("legacy payload");
+        assert_eq!(legacy.group_gain, None);
+        assert_eq!(legacy.group_coupling, None);
+        assert_eq!(legacy.group_trace_decay, None);
+
+        let config = manifest.runtime_config_with_overrides(Some(&overrides));
+        assert_eq!(config.group_gain[group_cell(0, 1)], 0.25);
+        assert_eq!(config.group_gain[group_cell(1, 0)], GROUP_GAIN_MAX);
+        assert_eq!(config.group_gain[group_cell(0, 0)], GROUP_GAIN_DEFAULT);
+        assert_eq!(config.group_coupling[group_cell(0, 1)], 1.5);
+        assert_eq!(config.group_coupling[group_cell(1, 1)], GROUP_COUPLING_MIN);
+        assert_eq!(config.group_trace_decay, 0.75);
+
+        // No-override resolution stays inert.
+        let inert = manifest.runtime_config_with_overrides(None);
+        assert!(inert.group_gain.iter().all(|&g| g == GROUP_GAIN_DEFAULT));
+        assert!(inert
+            .group_coupling
+            .iter()
+            .all(|&h| h == GROUP_COUPLING_DEFAULT));
+        assert_eq!(inert.group_trace_decay, GROUP_TRACE_DECAY_DEFAULT);
+    }
+
+    #[test]
+    fn group_matrices_apply_live_without_resetting_energy() {
+        // The matrices ride apply_config_preserving_state so a live matrix edit does
+        // not rebuild the runtime or drop energy (spec §5 live update).
+        let nodes = vec![node(Timebase::Quarter), node(Timebase::Quarter)];
+        let edges = vec![GraphEdge::new(0, 1, 1.0)];
+        let mut runtime =
+            GraphRuntime::new_from_config(runtime_config(16, nodes.clone(), edges.clone()));
+        runtime.energy[1] = 0.5;
+        let mut next = runtime_config(16, nodes, edges);
+        next.group_gain[group_cell(0, 1)] = 0.0;
+        next.group_coupling[group_cell(0, 1)] = 1.0;
+        assert!(runtime.apply_config_preserving_state(next, 0.0));
+        assert_eq!(runtime.energy(1), 0.5);
+        assert_eq!(runtime.group_gain[group_cell(0, 1)], 0.0);
+        assert_eq!(runtime.group_coupling[group_cell(0, 1)], 1.0);
     }
 
     #[test]
