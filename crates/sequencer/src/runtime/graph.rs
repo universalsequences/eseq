@@ -551,6 +551,14 @@ pub const GROUP_TRACE_DECAY_DEFAULT: f64 = 0.5;
 /// Activity trace clamp ceiling (spec §4.4).
 const GROUP_ACTIVITY_MAX: f64 = 4.0;
 
+/// Force a group matrix to the dense `NEURAL_GROUP_CELLS` shape on ingest into the
+/// runtime. Paired with `node_group_index`'s clamp, this makes every group-matrix
+/// read provably in range without a per-read bounds check.
+fn dense_group_matrix(mut cells: Vec<f64>, default: f64) -> Vec<f64> {
+    cells.resize(NEURAL_GROUP_CELLS, default);
+    cells
+}
+
 /// Clamp an optional flat k×k override into a dense `NEURAL_GROUP_CELLS` vec.
 fn normalized_group_matrix(cells: Option<&Vec<f64>>, default: f64, min: f64, max: f64) -> Vec<f64> {
     let mut normalized = vec![default; NEURAL_GROUP_CELLS];
@@ -1087,8 +1095,8 @@ impl GraphRuntime {
             default_duration: config.default_duration,
             default_swing: config.default_swing,
             random_state: config.id,
-            group_gain: config.group_gain,
-            group_coupling: config.group_coupling,
+            group_gain: dense_group_matrix(config.group_gain, GROUP_GAIN_DEFAULT),
+            group_coupling: dense_group_matrix(config.group_coupling, GROUP_COUPLING_DEFAULT),
             group_trace_decay: config.group_trace_decay,
             authored_nodes,
             authored_edges,
@@ -1218,8 +1226,8 @@ impl GraphRuntime {
         self.max_poly_selection = config.max_poly_selection;
         self.default_duration = config.default_duration;
         self.default_swing = config.default_swing;
-        self.group_gain = config.group_gain;
-        self.group_coupling = config.group_coupling;
+        self.group_gain = dense_group_matrix(config.group_gain, GROUP_GAIN_DEFAULT);
+        self.group_coupling = dense_group_matrix(config.group_coupling, GROUP_COUPLING_DEFAULT);
         self.group_trace_decay = config.group_trace_decay;
         // A live `H` edit changes what the held activity traces imply — refresh so the
         // next boundary doesn't read a suppression snapshot built from the old matrix.
@@ -2438,12 +2446,21 @@ impl GraphRuntime {
         }
     }
 
+    /// A node's neural group as a group-matrix index. Every authoring path already
+    /// clamps to `NEURAL_GROUP_MAX - 1` (manifest resolution, `graph-node :group`),
+    /// so this is insurance for a runtime built straight from a hand-made node
+    /// field: the group matrices are a fixed `NEURAL_GROUP_MAX` wide and an
+    /// out-of-range group must never index past them.
+    fn node_group_index(&self, node_index: usize) -> usize {
+        (self.nodes[node_index].neural_group as usize).min(NEURAL_GROUP_MAX as usize - 1)
+    }
+
     /// `G[group(from)][group(to)]` — the gain every cross-group contribution is
     /// scaled by at deposit time (spec §4.3). All-ones is exactly inert (`x * 1.0`
     /// is bit-identical), so the default reproduces pre-groups behavior.
     fn group_gain_between(&self, from_node: usize, to_node: usize) -> f64 {
-        let from_group = self.nodes[from_node].neural_group as usize;
-        let to_group = self.nodes[to_node].neural_group as usize;
+        let from_group = self.node_group_index(from_node);
+        let to_group = self.node_group_index(to_node);
         self.group_gain[from_group * NEURAL_GROUP_MAX as usize + to_group]
     }
 
@@ -2454,7 +2471,7 @@ impl GraphRuntime {
     /// authored value untouched when suppression is zero (bit-identical inert path).
     fn effective_threshold(&self, node_index: usize) -> f64 {
         let authored = self.nodes[node_index].threshold;
-        let suppression = self.group_suppression[self.nodes[node_index].neural_group as usize];
+        let suppression = self.group_suppression[self.node_group_index(node_index)];
         if suppression == 0.0 {
             return authored;
         }
@@ -2472,7 +2489,7 @@ impl GraphRuntime {
     /// to pre-groups behavior.
     fn node_params_with_group_threshold(&self, node_index: usize) -> HashMap<String, f64> {
         let mut params = self.node_params[node_index].clone();
-        let suppression = self.group_suppression[self.nodes[node_index].neural_group as usize];
+        let suppression = self.group_suppression[self.node_group_index(node_index)];
         if suppression != 0.0 {
             params.insert("threshold".to_string(), self.effective_threshold(node_index));
         }
@@ -2496,14 +2513,12 @@ impl GraphRuntime {
     /// Record an accepted fire into its group's activity trace, normalized by member
     /// count so `H` entries stay comparable across differently-sized groups (§4.4).
     fn bump_group_activity(&mut self, node_index: usize) {
-        let group = self.nodes[node_index].neural_group;
-        let members = self
-            .nodes
-            .iter()
-            .filter(|node| node.neural_group == group)
+        let group = self.node_group_index(node_index);
+        let members = (0..self.nodes.len())
+            .filter(|&idx| self.node_group_index(idx) == group)
             .count()
             .max(1);
-        let slot = &mut self.group_activity[group as usize];
+        let slot = &mut self.group_activity[group];
         *slot = (*slot + 1.0 / members as f64).min(GROUP_ACTIVITY_MAX);
     }
 
@@ -4112,6 +4127,40 @@ mod tests {
         // Reset clears the trace with the rest of the runtime state (spec §5).
         runtime.reset(4.0);
         assert_eq!(runtime.group_activity(1), 0.0);
+    }
+
+    #[test]
+    fn out_of_range_group_and_short_matrices_clamp_instead_of_panicking() {
+        // Every authoring path clamps `:group` to NEURAL_GROUP_MAX - 1, but a runtime
+        // built straight from a hand-made node field (or a config carrying a short
+        // matrix vec) must still index the fixed-width group matrices safely.
+        let mut n0 = node(Timebase::Quarter);
+        n0.neural_group = 200;
+        let mut n1 = node(Timebase::Quarter);
+        n1.neural_group = NEURAL_GROUP_MAX - 1;
+        let mut config = runtime_config(
+            18,
+            vec![n0, n1],
+            vec![GraphEdge::new(0, 1, 1.0), GraphEdge::new(1, 0, 1.0)],
+        );
+        // Truncated matrices (e.g. an older config shape) refill to the dense width.
+        config.group_gain.truncate(3);
+        config.group_coupling.clear();
+        let mut runtime = GraphRuntime::new_from_config(config);
+        assert_eq!(runtime.group_gain.len(), NEURAL_GROUP_CELLS);
+        assert_eq!(runtime.group_coupling.len(), NEURAL_GROUP_CELLS);
+
+        // The out-of-range group folds onto the last slot, so both nodes read the same
+        // group and the whole boundary path runs without an out-of-bounds index.
+        let last = NEURAL_GROUP_MAX - 1;
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+        let out = run(&mut runtime, 3.0, 0, vec![1.0, 1.0]);
+        assert!(!out.is_empty());
+        assert!(runtime.group_activity(last) > 0.0);
+        assert!(runtime.group_activity(last) <= GROUP_ACTIVITY_MAX);
+        // Nothing lands in group A: the out-of-range node folded onto `last` rather
+        // than wrapping to some other slot.
+        assert_eq!(runtime.group_activity(0), 0.0);
     }
 
     #[test]

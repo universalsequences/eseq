@@ -393,7 +393,7 @@ pub fn register_graph_authoring_natives(
     runtime.register_native_with_docs(
         "graph-config-value",
         "(graph-config-value sequencer :reset-bars)",
-        "Resolved sequencer-level config (:reset-bars, :max-poly, :max-poly-selection, or :node-count), override-or-manifest.",
+        "Resolved sequencer-level config, override-or-manifest. Fields: :reset-bars, :max-poly, :max-poly-selection, :node-count, :group-trace-decay, and the neural-group matrix cells :group-gain-<row>-<col> (default 1) / :group-coupling-<row>-<col> (default 0), row = source group, col = target group.",
         move |args, _ctx| {
             if args.len() != 2 {
                 return Err("graph-config-value expects graph and field".to_string());
@@ -409,7 +409,7 @@ pub fn register_graph_authoring_natives(
     runtime.register_native_with_docs(
         "graph-config",
         "(graph-config sequencer :reset-bars 4)",
-        "Set a sequencer-level config override (:reset-bars in bars, :max-poly, :max-poly-selection, or :node-count).",
+        "Set a sequencer-level config override: :reset-bars (in bars), :max-poly, :max-poly-selection, :node-count, :group-trace-decay (0-1 per-beat activity-trace decay), :group-gain-<row>-<col> (0-2, propagation gain from group row to group col), :group-coupling-<row>-<col> (-2 to 2, activity in group row offsets group col's threshold; positive suppresses, negative excites). Values clamp to their range; one call writes one matrix cell.",
         move |args, ctx| {
             if args.len() != 3 {
                 return Err("graph-config expects graph, field, value".to_string());
@@ -448,7 +448,7 @@ pub fn register_graph_authoring_natives(
     runtime.register_native_with_docs(
         "bind-graph-config",
         "(bind-graph-config sequencer :reset-bars [options])",
-        "Reactive handle to a sequencer-level config field, seeded with the resolved value. Pass an options list to bind enum fields as dropdown indices.",
+        "Reactive handle to a sequencer-level config field (see graph-config for the field list, including the :group-gain-<row>-<col> / :group-coupling-<row>-<col> matrix cells), seeded with the resolved value. Pass an options list to bind enum fields as dropdown indices.",
         move |args, _ctx| {
             if args.len() < 2 {
                 return Err("bind-graph-config expects graph and field".to_string());
