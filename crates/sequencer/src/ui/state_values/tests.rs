@@ -18878,7 +18878,7 @@
         let transport = tile("*transport*").rect;
         let patcher = tile("*instrument-patcher:test*").rect;
         let samples = tile("*samples*").rect;
-        let mixer = tile("*mixer*").rect;
+        let mixer = tile("*patch-mixer*").rect;
         let fx = tile("*fx*").rect;
 
         assert!(
@@ -18890,18 +18890,18 @@
             "patcher should dominate the viewport; patcher={patcher:?} bottom={samples:?}"
         );
         assert!(
-            (samples.height - 13.0).abs() < 0.75
-                && (mixer.height - 13.0).abs() < 0.75
-                && (fx.height - 13.0).abs() < 0.75,
-            "bottom bar should use the fixed mixer-panel height; samples={samples:?} mixer={mixer:?} fx={fx:?}"
+            (samples.height - 11.5).abs() < 0.75
+                && (mixer.height - 11.5).abs() < 0.75
+                && (fx.height - 11.5).abs() < 0.75,
+            "bottom bar panels should all use the regular fx-panel height; samples={samples:?} mixer={mixer:?} fx={fx:?}"
         );
         assert!(
             (samples.width - 28.0).abs() <= 1.0
-                && (mixer.width - 30.0).abs() <= 1.0
+                && (mixer.width - 15.0).abs() <= 1.0
                 && fx.width > mixer.width
                 && (samples.row - mixer.row).abs() <= 0.1
                 && (mixer.row - fx.row).abs() <= 0.1,
-            "samples and mixer should use their fixed widths while fx fills the remaining bottom bar; samples={samples:?} mixer={mixer:?} fx={fx:?}"
+            "samples and patch-mixer should use their fixed widths while fx fills the remaining bottom bar; samples={samples:?} mixer={mixer:?} fx={fx:?}"
         );
     }
 
@@ -18939,14 +18939,14 @@
                 .unwrap_or_else(|| panic!("expected tile for {name}"))
         };
 
-        let mixer = tile("*mixer*").rect;
+        let mixer = tile("*patch-mixer*").rect;
         let fx = tile("*fx*").rect;
         assert!(
             (mixer.row - fx.row).abs() <= 0.1
                 && (mixer.height - fx.height).abs() <= 0.75
                 && mixer.width > 0.0
                 && fx.width > 0.0,
-            "with samples hidden, mixer/fx should remain visible in the patcher bottom bar; mixer={mixer:?} fx={fx:?}"
+            "with samples hidden, patch-mixer/fx should remain visible in the patcher bottom bar; mixer={mixer:?} fx={fx:?}"
         );
     }
 

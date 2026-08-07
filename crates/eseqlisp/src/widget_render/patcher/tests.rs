@@ -18167,7 +18167,6 @@ fn mod_suffix_on_non_modulatable_param_is_flagged_not_desugared() {
     );
 }
 
-
 #[test]
 fn default_layout_never_overlaps_wide_params_and_named_inputs() {
     let patch = parse(
@@ -18214,14 +18213,27 @@ fn default_layout_never_overlaps_wide_params_and_named_inputs() {
         .collect::<Vec<_>>();
 
     // Every node must be sized from its label, not collapsed to the minimum
-    // width: the auto layout runs before any glyph advance is measured.
+    // width: the auto layout runs before any glyph advance is measured. The
+    // width it uses also has to cover what the node really renders as - a
+    // layout that packs by half the rendered width overlaps on screen while
+    // every layout-side assertion still agrees with itself.
     for (id, rect) in &rects {
         let node = patch.nodes.iter().find(|node| &node.id == id).unwrap();
-        let label_len = node_display_label(node).chars().count();
-        if label_len > 12 {
+        let label = node_display_label(node);
+        if label.chars().count() > 12 {
             assert!(
                 rect.width > NODE_MIN_WIDTH,
-                "node {id} with label {label_len} chars long should be wider than the minimum: {rect:?}"
+                "node {id} with label {label:?} should be wider than the minimum: {rect:?}"
+            );
+        }
+        #[cfg(target_os = "macos")]
+        for scale in [1.0_f64, 2.0] {
+            let rendered = rendered_label_width_cells(&label, node_font_size(node), scale);
+            assert!(
+                rect.width >= rendered * 0.9,
+                "node {id} is laid out at {:.2} cells but renders {rendered:.2} cells wide \
+                 at scale {scale}: label={label:?}",
+                rect.width
             );
         }
     }
@@ -18298,3 +18310,81 @@ fn default_layout_keeps_named_inputs_clear_of_the_param_stack() {
     );
 }
 
+/// True rendered width of `text` in layout cells, measured the way the macOS
+/// backend does: CoreText advances of the system font at `font_size * scale`
+/// device pixels, over a monospace cell of `MONO_CELL_POINTS * scale` device
+/// pixels. Both sides carry the scale factor, so the ratio cancels it - which
+/// is exactly what a cells-per-character estimate has to reproduce.
+#[cfg(target_os = "macos")]
+fn rendered_label_width_cells(text: &str, font_size: f32, scale: f64) -> f32 {
+    use crate::glyph_atlas::SizedFontCache;
+
+    // `MetalBackend` builds the layout atlas from JetBrains Mono at the app's
+    // monospace point size; its advance is a flat 0.6em.
+    const MONO_CELL_POINTS: f64 = 13.0;
+    const MONO_ADVANCE_EM: f64 = 0.6;
+    let cell_w = (MONO_CELL_POINTS * MONO_ADVANCE_EM * scale) as f32;
+    let mut fonts = SizedFontCache::new(14.0 * scale, scale).expect("system font");
+    fonts.measure_text(text, (font_size * 10.0).round() as u16) / cell_w
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn estimated_label_width_matches_the_rendered_width_at_every_display_scale() {
+    let labels = [
+        "param attack 0.01 0.001 2",
+        "in 3 @name velocity",
+        "adsr attack decay sustain release",
+        "param resonant-lowpass-cutoff 0.5 0.001 0.999 @unit hz @curve exp",
+    ];
+    // Retina (2.0) is the case that a pixel-based estimate gets wrong by the
+    // scale factor while still looking plausible at 1.0.
+    for scale in [1.0_f64, 2.0] {
+        for label in labels {
+            for font_size in [NODE_FONT_SIZE, CODE_NODE_FONT_SIZE] {
+                let estimated = estimated_label_width_cells(label, font_size);
+                let rendered = rendered_label_width_cells(label, font_size, scale);
+                let ratio = estimated / rendered;
+                assert!(
+                    (0.9..=1.35).contains(&ratio),
+                    "estimated width should track the rendered width at scale {scale} \
+                     (font {font_size}): estimated={estimated:.2} rendered={rendered:.2} \
+                     ratio={ratio:.2} label={label:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn estimated_label_width_calibrates_against_measured_advances() {
+    let measurer = FixedWidthTextMeasurer;
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        // A retina cell: two device pixels per logical point.
+        cell_w: 16.0,
+        cell_h: 32.0,
+        inherited_font_size: NODE_FONT_SIZE,
+    };
+    let sample = "param attack 0.01".to_string();
+    cache_text_widths(sample.clone(), NODE_FONT_SIZE, &measure_ctx);
+    let measured = measured_text_width(&sample, NODE_FONT_SIZE).expect("cached advance");
+    assert!(
+        (measured - measurer.measure_text_px(&sample, NODE_FONT_SIZE) / measure_ctx.cell_w).abs()
+            < 0.01,
+        "cached advances are stored in cells: {measured}"
+    );
+
+    // A label the cache has never seen has to be estimated from the advances
+    // the cache does hold, in the same (cell) unit.
+    let unmeasured = "in 3 @name velocity";
+    let estimated = estimated_label_width_cells(unmeasured, NODE_FONT_SIZE);
+    let expected = measurer.measure_text_px(unmeasured, NODE_FONT_SIZE) / measure_ctx.cell_w;
+    let ratio = estimated / expected;
+    assert!(
+        (0.9..=1.2).contains(&ratio),
+        "an unmeasured label should be estimated from the measured advances: \
+         estimated={estimated} expected={expected} ratio={ratio}"
+    );
+}

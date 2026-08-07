@@ -1391,9 +1391,14 @@ pub(super) fn dgenlisp_operator_documentation() -> &'static HashMap<String, Oper
                     .and_then(serde_json::Value::as_str)
                     .filter(|category| {
                         !category.is_empty()
-                            && !matches!(*category, "uncategorized" | "internal" | "preamble")
+                            && !matches!(*category, "uncategorized" | "internal")
                     })
-                    .map(|category| category.replace('_', " ")),
+                    .map(|category| match category {
+                        // Preamble ops are stdlib defmacros; label them like
+                        // user-defined ones rather than leaking "preamble".
+                        "preamble" => "macro".to_string(),
+                        other => other.replace('_', " "),
+                    }),
                 summary: operator
                     .get("summary")
                     .and_then(serde_json::Value::as_str)

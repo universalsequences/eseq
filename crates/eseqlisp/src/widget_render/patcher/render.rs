@@ -1159,8 +1159,8 @@ fn push_autocomplete_panel(
         else {
             continue;
         };
-        let name_width = approx_text_width_cells(&suggestion.name, name_font_size, viewport);
-        let category_width = approx_text_width_cells(&category, category_font_size, viewport);
+        let name_width = approx_text_width_cells(&suggestion.name, name_font_size);
+        let category_width = approx_text_width_cells(&category, category_font_size);
         // Right-align the category at the panel edge (Zed-style); skip it when
         // the name could plausibly collide with it. Widths are estimates, so
         // leave a generous gap rather than trusting them to the pixel.
@@ -1169,7 +1169,7 @@ fn push_autocomplete_panel(
         }
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
-                row: row + 0.32 * zoom,
+                row: row + 0.24 * zoom,
                 col: text_col,
                 align_width: text_right - text_col,
                 h_align: 1.0,
@@ -1194,11 +1194,9 @@ fn push_autocomplete_panel(
 /// when the glyph-advance cache has no entry: suggestion names and category
 /// labels are never measured during layout, so the cache is empty for them.
 #[cfg(target_os = "macos")]
-fn approx_text_width_cells(text: &str, font_size: f32, viewport: WidgetViewport) -> f32 {
-    measured_text_width(text, font_size).unwrap_or_else(|| {
-        let char_px = font_size * 0.55;
-        text.chars().count() as f32 * char_px / viewport.cell_w.max(1.0)
-    })
+fn approx_text_width_cells(text: &str, font_size: f32) -> f32 {
+    measured_text_width(text, font_size)
+        .unwrap_or_else(|| super::display::estimated_label_width_cells(text, font_size))
 }
 
 #[cfg(target_os = "macos")]

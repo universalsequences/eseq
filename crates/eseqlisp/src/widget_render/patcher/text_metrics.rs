@@ -49,6 +49,45 @@ pub(super) fn measured_text_width(text: &str, font_size: f32) -> Option<f32> {
     measured_cursor_offset(text, font_size, text.chars().count())
 }
 
+/// Sane bounds for an average glyph advance expressed in layout cells per point
+/// of font size. The patcher font renders around 0.06; anything outside this
+/// range means the sample was degenerate, not that the font changed.
+const MIN_ADVANCE_CELLS_PER_POINT: f32 = 0.03;
+const MAX_ADVANCE_CELLS_PER_POINT: f32 = 0.12;
+/// Minimum number of measured characters before the sample is trusted.
+const MIN_ADVANCE_SAMPLE_CHARS: usize = 8;
+
+/// Average glyph advance in layout cells per point of font size, derived from
+/// whatever the renderer has already measured on this thread.
+///
+/// Cached advances are already in cells, so this calibration carries no pixel
+/// units and is therefore immune to the display scale factor. Returns `None`
+/// until enough text has been measured to sample.
+pub(super) fn measured_average_advance_cells_per_point() -> Option<f32> {
+    GLYPH_ADVANCES.with(|cache| {
+        let cache = cache.borrow();
+        let mut cells_per_point = 0.0_f32;
+        let mut chars = 0usize;
+        for ((font_bits, _), widths) in cache.iter() {
+            let font_size = f32::from_bits(*font_bits);
+            if !font_size.is_finite() || font_size <= 0.0 {
+                continue;
+            }
+            let sum = widths.iter().sum::<f32>();
+            if !sum.is_finite() || sum <= 0.0 {
+                continue;
+            }
+            cells_per_point += sum / font_size;
+            chars += widths.len();
+        }
+        (chars >= MIN_ADVANCE_SAMPLE_CHARS)
+            .then(|| cells_per_point / chars as f32)
+            .filter(|advance| {
+                (MIN_ADVANCE_CELLS_PER_POINT..=MAX_ADVANCE_CELLS_PER_POINT).contains(advance)
+            })
+    })
+}
+
 pub(super) fn measured_closest_char_index(
     text: &str,
     font_size: f32,

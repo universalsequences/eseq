@@ -1251,6 +1251,42 @@
       :color :gray
       :bg :transparent)))
 
+;; ── Patch-editor mixer slot ──
+;; One compact channel strip for the current track: volume/meter,
+;; mute/solo/arm, and the name badge. No clip grid, output routing,
+;; sends, or mod ports — those stay in the full *mixer* buffer.
+(def patch-mixer-strip (i)
+  (box :width 10.0 :height 10.7
+    :selected (mixer-v2-track-selected-binding i)
+    :muted (bind-seq-nth "track-muted-effective" i)
+    :background-color :mixer-strip-bg
+    :selected-background-color :mixer-strip-selected-bg
+    :muted-background-color :mixer-strip-muted-bg
+    :border-width 2
+    :corner-radius 16
+    :border-color :mixer-strip-border
+    :selected-border-color :mixer-strip-selected-border
+    :muted-border-color :mixer-strip-border
+    :padding 0.45
+    (v-stack :gap 0.35 :align :right
+      (box :width :fill :height 3)
+      (h-stack
+        (box :width 3.5)
+        (mixer-v2-track-meter-control i)
+        )
+      (subtree :key (str "patch-mixer-strip-buttons-" i)
+        (h-stack
+          (mixer-v2-strip-buttons i)
+          )
+        )
+      (subtree :key (str "patch-mixer-strip-label-" i)
+        (mixer-v2-strip-label i)))))
+
+(effect-buffer "*patch-mixer*"
+  (box :padding 0.2
+    (subtree :key (str "patch-mixer-track-" SEQ.current-track)
+      (patch-mixer-strip SEQ.current-track))))
+
 (effect-buffer "*mixer*"
   (h-stack :padding 0.2 :gap 0.3
     (each (mixer-v2-render-order) |item|

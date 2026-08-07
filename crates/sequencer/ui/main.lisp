@@ -535,6 +535,13 @@
     (lambda () (seq-hide-mixer-panel))
     min-width max-width min-height max-height))
 
+;; Patch-editor bottom bar variant of the mixer panel: a single compact
+;; channel strip for the current track (see patch-mixer-strip in mixer.lisp).
+(def seq-patch-mixer-panel-layout-spec (min-width max-width min-height max-height)
+  (seq-collapsible-panel-layout-spec "*patch-mixer*"
+    (lambda () (seq-hide-mixer-panel))
+    min-width max-width min-height max-height))
+
 (def seq-fx-panel-layout-spec (min-width max-width min-height max-height)
   (seq-collapsible-panel-layout-spec "*fx*"
     (lambda () (seq-hide-fx-panel))
@@ -576,29 +583,34 @@
         0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
         0.95 main-layout))))
 
+;; Every patcher bottom-bar panel shares the regular fx-panel height so the
+;; instrument preview isn't padded out by a taller neighbor.
+(def seq-patcher-bottom-bar-panel-height lower-fx-layout-height)
+
 (def seq-patcher-bottom-bar-layout-spec ()
-  (if (and samples-sidebar-visible mixer-panel-visible lower-panel-visible)
-    (list :cols :gap 1
-      0.333 (seq-samples-panel-layout-spec 28 28 13 13)
-      0.334 (seq-mixer-panel-layout-spec 25 30 15 15)
-      0.333 (seq-fx-panel-layout-spec nil nil 13 13))
-    (if (and samples-sidebar-visible mixer-panel-visible)
+  (let ((h seq-patcher-bottom-bar-panel-height))
+    (if (and samples-sidebar-visible mixer-panel-visible lower-panel-visible)
       (list :cols :gap 1
-        0.5 (seq-samples-panel-layout-spec 28 28 13 13)
-        0.5 (seq-mixer-panel-layout-spec 25 30 14 14))
-    (if samples-sidebar-visible
-      (if lower-panel-visible
+        0.30 (seq-samples-panel-layout-spec 28 28 h h)
+        0.15 (seq-patch-mixer-panel-layout-spec 10 10 h h)
+        0.55 (seq-fx-panel-layout-spec nil nil h h))
+      (if (and samples-sidebar-visible mixer-panel-visible)
         (list :cols :gap 1
-          0.5 (seq-samples-panel-layout-spec 28 28 13 13)
-          0.5 (seq-fx-panel-layout-spec nil nil 13 13))
-        (seq-samples-panel-layout-spec 28 28 13 13))
-      (if mixer-panel-visible
+          0.6 (seq-samples-panel-layout-spec 28 28 h h)
+          0.4 (seq-patch-mixer-panel-layout-spec 10 10 h h))
+      (if samples-sidebar-visible
         (if lower-panel-visible
           (list :cols :gap 1
-            0.5 (seq-mixer-panel-layout-spec 25 30 14 14)
-            0.5 (seq-fx-panel-layout-spec nil nil 13 13))
-          (seq-mixer-panel-layout-spec 25 30 14 14))
-        (seq-fx-panel-layout-spec nil nil 13 13))))))
+            0.5 (seq-samples-panel-layout-spec 28 28 h h)
+            0.5 (seq-fx-panel-layout-spec nil nil h h))
+          (seq-samples-panel-layout-spec 28 28 h h))
+        (if mixer-panel-visible
+          (if lower-panel-visible
+            (list :cols :gap 1
+              0.4 (seq-patch-mixer-panel-layout-spec 10 10 h h)
+              0.6 (seq-fx-panel-layout-spec nil nil h h))
+            (seq-patch-mixer-panel-layout-spec 15 15 h h))
+          (seq-fx-panel-layout-spec nil nil h h)))))))
 
 (def seq-patcher-bottom-bar-visible? ()
   (or samples-sidebar-visible mixer-panel-visible lower-panel-visible))
