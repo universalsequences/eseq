@@ -217,6 +217,9 @@
 
 (def ggm-group-count 4)
 
+(def ggm-zero-group-column-matrix ()
+  (map (lambda (n) (list 0)) (range 0 ggm-group-count)))
+
 (def ggm-group-cell-field (prefix r c)
   (str prefix "-" r "-" c))
 
@@ -819,7 +822,41 @@
                 :on-cell-change (lambda (r c v)
                   (do
                     (set! ggm-group-coupling (ggm-set-cell ggm-group-coupling r c v))
-                    (ggm-edit-group-cell "group-coupling" r c v))))))
+                    (ggm-edit-group-cell "group-coupling" r c v)))))
+
+            ;; ── live group state (read-only, rows = groups A–D like the H matrix) ──
+            ;; act: each group's leaky activity trace. θΔ: the signed threshold offset
+            ;; H imposes on that group this boundary — orange wedge = suppressed,
+            ;; blue = excited, empty ring = untouched.
+            (v-stack :gap ggm-matrix-column-gap
+              (label "act" :width 2 :height (ggm-matrix-header-spacer-height) :font-size 8 :h-align :center :color :dim :bg :transparent)
+              (matrix
+                :key "graph-group-matrix-group-activity-matrix"
+                :rows ggm-group-count
+                :cols 1
+                :width 2
+                :height (* 2 (ggm-matrix-data-height ggm-group-count))
+                :min 0
+                :max 2
+                :color (rgba 0.16 0.66 0.44 1)
+                :value (ggm-viz-matrix viz :group-activity-matrix (ggm-zero-group-column-matrix) ggm-group-count 1)))
+
+            (v-stack :gap ggm-matrix-column-gap
+              (label "θΔ" :width 2.5 :height (ggm-matrix-header-spacer-height) :font-size 8 :h-align :center :color :dim :bg :transparent)
+              (matrix
+                :key "graph-group-matrix-group-suppression-matrix"
+                :rows ggm-group-count
+                :cols 1
+                :width 2.5
+                :height (* 2 (ggm-matrix-data-height ggm-group-count))
+                :min -2
+                :max 2
+                :control :pie
+                :background :mixer-strip-bg
+                :color (rgba 0.9 0.5 0.16 1)
+                :negative-color (rgba 0.3 0.55 0.95 1)
+                :empty-fill-color (rgba 0.42 0.44 0.5 1)
+                :value (ggm-viz-matrix viz :group-suppression-matrix (ggm-zero-group-column-matrix) ggm-group-count 1))))
           (box
             :debug-name "graph-group-matrix-piano-panel"
             :padding 1

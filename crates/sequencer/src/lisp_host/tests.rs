@@ -2724,6 +2724,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "graph-group-matrix-weight-matrix",
             "graph-group-matrix-group-gain-matrix",
             "graph-group-matrix-group-coupling-matrix",
+            "graph-group-matrix-group-activity-matrix",
+            "graph-group-matrix-group-suppression-matrix",
         ] {
             assert!(
                 find_by_stable_key(&layout, key).is_some(),

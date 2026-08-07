@@ -392,6 +392,18 @@ pub(super) fn graph_visualization_value(snapshot: &sequencer::graph::GraphVisual
         )),
     );
     map.insert(
+        "group-activity-matrix".to_string(),
+        value_cell(neural_column_matrix_value(
+            snapshot.group_activity.iter().copied(),
+        )),
+    );
+    map.insert(
+        "group-suppression-matrix".to_string(),
+        value_cell(neural_column_matrix_value(
+            snapshot.group_suppression.iter().copied(),
+        )),
+    );
+    map.insert(
         "weight-matrix".to_string(),
         value_cell(graph_dense_edge_matrix_value(snapshot, |edge| {
             graph_weight_display_value(edge.weight)

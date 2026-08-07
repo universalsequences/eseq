@@ -374,6 +374,8 @@
                 },
             ],
             delta_leak_per_beat: 0.9946,
+            group_activity: vec![0.75, 0.0, 0.0, 0.0],
+            group_suppression: vec![0.0, -0.375, 0.0, 0.0],
         }]);
 
         let Value::List(graphs) = build_graph_visualizations_value(&state) else {
@@ -444,6 +446,28 @@
             panic!("expected trigger matrix row");
         };
         assert_eq!(*trigger_row_1[0].borrow(), Value::Number(1.0));
+
+        let Value::List(activity_rows) =
+            &*graph.get("group-activity-matrix").unwrap().borrow()
+        else {
+            panic!("expected group activity matrix");
+        };
+        assert_eq!(activity_rows.len(), 4);
+        let Value::List(activity_row_0) = &*activity_rows[0].borrow() else {
+            panic!("expected group activity row");
+        };
+        assert_eq!(*activity_row_0[0].borrow(), Value::Number(0.75));
+
+        let Value::List(suppression_rows) =
+            &*graph.get("group-suppression-matrix").unwrap().borrow()
+        else {
+            panic!("expected group suppression matrix");
+        };
+        assert_eq!(suppression_rows.len(), 4);
+        let Value::List(suppression_row_1) = &*suppression_rows[1].borrow() else {
+            panic!("expected group suppression row");
+        };
+        assert_eq!(*suppression_row_1[0].borrow(), Value::Number(-0.375));
 
         let Value::List(node_events) = &*graph.get("node-events").unwrap().borrow() else {
             panic!("expected node events");

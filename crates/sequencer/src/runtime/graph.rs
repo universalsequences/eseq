@@ -260,6 +260,11 @@ pub struct GraphVisualizationSnapshot {
     pub edges: Vec<GraphVisualizationEdge>,
     pub deltas: Vec<GraphDeltaEntry>,
     pub delta_leak_per_beat: f32,
+    /// Per-group leaky activity traces (spec §4.4), `NEURAL_GROUP_MAX` entries.
+    pub group_activity: Vec<f64>,
+    /// Per-group signed threshold offset `Σ_c H[c][g] * activity[c]` (spec §4.5):
+    /// positive = suppression, negative = excitation. `NEURAL_GROUP_MAX` entries.
+    pub group_suppression: Vec<f64>,
 }
 
 const GRAPH_EVENT_HISTORY_CAP: usize = 1024;
@@ -1159,6 +1164,8 @@ impl GraphRuntime {
                 .collect(),
             deltas: self.delta_entries(),
             delta_leak_per_beat: self.delta_leak_per_beat,
+            group_activity: self.group_activity.clone(),
+            group_suppression: self.group_suppression.clone(),
         }
     }
 
@@ -4105,6 +4112,35 @@ mod tests {
         // Reset clears the trace with the rest of the runtime state (spec §5).
         runtime.reset(4.0);
         assert_eq!(runtime.group_activity(1), 0.0);
+    }
+
+    #[test]
+    fn visualization_snapshot_carries_group_activity_and_suppression() {
+        // A firing group-B pair with H[B][A] > 0 leaves nonzero activity and a
+        // nonzero suppression on group A; the viz snapshot must expose both.
+        let mut n0 = node(Timebase::Quarter);
+        n0.neural_group = 1;
+        n0.seed_on_reset = 2.0;
+        n0.trigger_on_reset = true;
+        let mut n1 = node(Timebase::Quarter);
+        n1.neural_group = 1;
+        n1.seed_on_reset = 2.0;
+        n1.trigger_on_reset = true;
+        let mut config = runtime_config(17, vec![n0, n1], Vec::new());
+        config.group_trace_decay = 1.0;
+        config.group_coupling[group_cell(1, 0)] = 0.8;
+        let mut runtime = GraphRuntime::new_from_config(config);
+        let out = run(&mut runtime, 2.0, 0, vec![1.0, 1.0]);
+        assert_eq!(out.len(), 2);
+
+        let snapshot = runtime.visualization_snapshot();
+        assert_eq!(snapshot.group_activity.len(), NEURAL_GROUP_MAX as usize);
+        assert_eq!(snapshot.group_suppression.len(), NEURAL_GROUP_MAX as usize);
+        assert!((snapshot.group_activity[1] - 1.0).abs() < 1e-9);
+        // Suppression snapshot refreshed at the boundary after the fires:
+        // H[B][A] * activity[B] = 0.8 * 1.0.
+        assert!((snapshot.group_suppression[0] - 0.8).abs() < 1e-9);
+        assert_eq!(snapshot.group_suppression[1], 0.0);
     }
 
     #[test]
