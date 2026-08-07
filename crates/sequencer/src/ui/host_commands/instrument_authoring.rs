@@ -10,6 +10,8 @@ pub(super) const COMMANDS: &[&str] = &[
     "preview-instrument-patch",
     "preview-effect-patch",
     "evaluate-editor-source",
+    "promote-editor-to-patch",
+    "eject-editor-to-code",
     "toggle-instrument-patcher-source",
     "enter-new-effect-editor",
     "save-new-effect",
@@ -1496,6 +1498,299 @@ pub(super) fn handle(
                 );
                 rt.run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
+            }
+        }
+
+        "promote-editor-to-patch" => {
+            // §3.3 "Open as patch": parse-check the CURRENT buffer text; on a
+            // clean projection, persist it, stamp the authored sidecar, and
+            // reopen the item in the patch editor.
+            if let Some(session) = ctx.sessions.instrument_edit_session.as_mut() {
+                if session.surface != EditorSurface::Code {
+                    return;
+                }
+                let Some(source) = editor.read_buffer_text(&session.buffer_name) else {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Code buffer '{}' is missing",
+                        session.buffer_name
+                    )));
+                    return;
+                };
+                if let Err(error) = std::fs::write(&session.path, &source) {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to save before promotion: {error}"
+                    )));
+                    return;
+                }
+                if let Err(error) =
+                    eseqlisp::widget_render::patcher::promote_source_to_patch(
+                        &session.path,
+                        &source,
+                        eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+                    )
+                {
+                    let rt = editor.runtime_mut();
+                    rt.set_reactive("SEQ", "editor-error", Value::String(error));
+                    rt.run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    return;
+                }
+                let old_buf = session.buffer_name.clone();
+                let buf_name = format!("*instrument-patcher:{}*", session.name);
+                editor.remove_buffer_by_name(&buf_name);
+                editor.create_scratch_buffer(&buf_name, "", BufferMode::ESeqLisp);
+                let patcher_source =
+                    instrument_patcher_buffer_source(&buf_name, &session.path);
+                if let Err(error) = editor.runtime_mut().eval_str(&patcher_source) {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to build patch editor: {error:?}"
+                    )));
+                    editor.remove_buffer_by_name(&buf_name);
+                    return;
+                }
+                reset_instrument_patcher_state(&session.path);
+                let layout_source = show_instrument_patcher_layout_source(&buf_name);
+                if let Err(error) = editor.runtime_mut().eval_str(&layout_source) {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to show patch editor: {error:?}"
+                    )));
+                    editor.remove_buffer_by_name(&buf_name);
+                    return;
+                }
+                editor.refresh_runtime_side_effects();
+                editor.remove_buffer_by_name(&old_buf);
+                session.buffer_name = buf_name.clone();
+                session.surface = EditorSurface::Patch;
+                session.last_valid_source = source;
+                session.visible_revision_valid = true;
+                ctx.sessions.editor_buffer_name = Some(buf_name.clone());
+                let rt = editor.runtime_mut();
+                rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
+                rt.set_reactive(
+                    "SEQ",
+                    "editor-surface",
+                    Value::String("patch".to_string()),
+                );
+                rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                rt.run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                editor.handle_host_event(HostEvent::Status(
+                    "Opened as patch".to_string(),
+                ));
+            } else if let Some(session) = ctx.sessions.effect_edit_session.as_mut() {
+                if session.surface != EditorSurface::Code {
+                    return;
+                }
+                let Some(source) = editor.read_buffer_text(&session.buffer_name) else {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Code buffer '{}' is missing",
+                        session.buffer_name
+                    )));
+                    return;
+                };
+                if let Err(error) = std::fs::write(&session.path, &source) {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to save before promotion: {error}"
+                    )));
+                    return;
+                }
+                if let Err(error) =
+                    eseqlisp::widget_render::patcher::promote_source_to_patch(
+                        &session.path,
+                        &source,
+                        eseqlisp::widget_render::patcher::PatcherIntent::Effect,
+                    )
+                {
+                    let rt = editor.runtime_mut();
+                    rt.set_reactive("SEQ", "editor-error", Value::String(error));
+                    rt.run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    return;
+                }
+                let old_buf = session.buffer_name.clone();
+                let buf_name = format!("*effect-patcher:{}*", session.name);
+                editor.remove_buffer_by_name(&buf_name);
+                editor.create_scratch_buffer(&buf_name, "", BufferMode::ESeqLisp);
+                let patcher_source =
+                    effect_patcher_buffer_source(&buf_name, &session.path);
+                if let Err(error) = editor.runtime_mut().eval_str(&patcher_source) {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to build patch editor: {error:?}"
+                    )));
+                    editor.remove_buffer_by_name(&buf_name);
+                    return;
+                }
+                reset_effect_patcher_state(&session.path);
+                let layout_source = show_instrument_patcher_layout_source(&buf_name);
+                if let Err(error) = editor.runtime_mut().eval_str(&layout_source) {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to show patch editor: {error:?}"
+                    )));
+                    editor.remove_buffer_by_name(&buf_name);
+                    return;
+                }
+                editor.refresh_runtime_side_effects();
+                editor.remove_buffer_by_name(&old_buf);
+                session.buffer_name = buf_name.clone();
+                session.surface = EditorSurface::Patch;
+                session.last_valid_source = source;
+                session.visible_revision_valid = true;
+                ctx.sessions.editor_buffer_name = Some(buf_name.clone());
+                let rt = editor.runtime_mut();
+                rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
+                rt.set_reactive(
+                    "SEQ",
+                    "editor-surface",
+                    Value::String("patch".to_string()),
+                );
+                rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                rt.run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                editor.handle_host_event(HostEvent::Status(
+                    "Opened as patch".to_string(),
+                ));
+            }
+        }
+
+        "eject-editor-to-code" => {
+            // §3.4 "Eject to code": persist the canonical generated source,
+            // flip the sidecar's authored flag (keeping layout data for
+            // re-promotion), and reopen in the code editor. Edit-existing
+            // sessions only — drafts must be finalized first.
+            if let Some(session) = ctx.sessions.instrument_edit_session.as_mut() {
+                if session.surface != EditorSurface::Patch {
+                    return;
+                }
+                if !matches!(session.mode, InstrumentEditMode::EditExisting { .. }) {
+                    editor.handle_host_event(HostEvent::Status(
+                        "Finalize the draft before ejecting to code".to_string(),
+                    ));
+                    return;
+                }
+                let source = session.last_valid_source.clone();
+                if let Err(error) = std::fs::write(&session.path, &source) {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to save before eject: {error}"
+                    )));
+                    return;
+                }
+                if let Some(layout) = session.last_valid_layout.as_deref() {
+                    if let Err(error) =
+                        write_patcher_layout_sidecar(&session.path, layout)
+                    {
+                        editor.handle_host_event(HostEvent::Error(format!(
+                            "Failed to save layout before eject: {error}"
+                        )));
+                        return;
+                    }
+                }
+                if let Err(error) =
+                    eseqlisp::widget_render::patcher::eject_patch_authored_sidecar(
+                        &session.path,
+                    )
+                {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to eject to code: {error}"
+                    )));
+                    return;
+                }
+                let old_buf = session.buffer_name.clone();
+                let buf_name = instrument_code_buffer_name(&session.name);
+                editor.remove_buffer_by_name(&buf_name);
+                editor.create_scratch_buffer(&buf_name, &source, BufferMode::DGenLisp);
+                let layout_source = show_instrument_patcher_layout_source(&buf_name);
+                if let Err(error) = editor.runtime_mut().eval_str(&layout_source) {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to show code editor: {error:?}"
+                    )));
+                    editor.remove_buffer_by_name(&buf_name);
+                    return;
+                }
+                editor.refresh_runtime_side_effects();
+                editor.remove_buffer_by_name(&old_buf);
+                session.buffer_name = buf_name.clone();
+                session.surface = EditorSurface::Code;
+                ctx.sessions.editor_buffer_name = Some(buf_name.clone());
+                let rt = editor.runtime_mut();
+                rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
+                rt.set_reactive(
+                    "SEQ",
+                    "editor-surface",
+                    Value::String("code".to_string()),
+                );
+                rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                rt.run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                editor.handle_host_event(HostEvent::Status(
+                    "Ejected to code".to_string(),
+                ));
+            } else if let Some(session) = ctx.sessions.effect_edit_session.as_mut() {
+                if session.surface != EditorSurface::Patch {
+                    return;
+                }
+                if !matches!(session.mode, EffectEditMode::EditExisting { .. }) {
+                    editor.handle_host_event(HostEvent::Status(
+                        "Finalize the draft before ejecting to code".to_string(),
+                    ));
+                    return;
+                }
+                let source = session.last_valid_source.clone();
+                if let Err(error) = std::fs::write(&session.path, &source) {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to save before eject: {error}"
+                    )));
+                    return;
+                }
+                if let Some(layout) = session.last_valid_layout.as_deref() {
+                    if let Err(error) =
+                        write_patcher_layout_sidecar(&session.path, layout)
+                    {
+                        editor.handle_host_event(HostEvent::Error(format!(
+                            "Failed to save layout before eject: {error}"
+                        )));
+                        return;
+                    }
+                }
+                if let Err(error) =
+                    eseqlisp::widget_render::patcher::eject_patch_authored_sidecar(
+                        &session.path,
+                    )
+                {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to eject to code: {error}"
+                    )));
+                    return;
+                }
+                let old_buf = session.buffer_name.clone();
+                let buf_name = effect_code_buffer_name(&session.name);
+                editor.remove_buffer_by_name(&buf_name);
+                editor.create_scratch_buffer(&buf_name, &source, BufferMode::DGenLisp);
+                let layout_source = show_instrument_patcher_layout_source(&buf_name);
+                if let Err(error) = editor.runtime_mut().eval_str(&layout_source) {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to show code editor: {error:?}"
+                    )));
+                    editor.remove_buffer_by_name(&buf_name);
+                    return;
+                }
+                editor.refresh_runtime_side_effects();
+                editor.remove_buffer_by_name(&old_buf);
+                session.buffer_name = buf_name.clone();
+                session.surface = EditorSurface::Code;
+                ctx.sessions.editor_buffer_name = Some(buf_name.clone());
+                let rt = editor.runtime_mut();
+                rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
+                rt.set_reactive(
+                    "SEQ",
+                    "editor-surface",
+                    Value::String("code".to_string()),
+                );
+                rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                rt.run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                editor.handle_host_event(HostEvent::Status(
+                    "Ejected to code".to_string(),
+                ));
             }
         }
 

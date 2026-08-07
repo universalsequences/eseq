@@ -1,0 +1,214 @@
+{
+  "version": 2,
+  "authored": true,
+  "root": {
+    "nodes": {
+      "attack": {
+        "x": -3.026813,
+        "y": -9.051019
+      },
+      "audio": {
+        "x": 4.0,
+        "y": 33.664997
+      },
+      "clock": {
+        "x": 204.48,
+        "y": 8.0
+      },
+      "created-0": {
+        "x": -20.798973,
+        "y": 25.402498
+      },
+      "created-1": {
+        "x": -20.798973,
+        "y": 19.035076
+      },
+      "created-10": {
+        "x": -16.027098,
+        "y": 32.932083
+      },
+      "created-11": {
+        "x": -40.83556,
+        "y": 15.16199
+      },
+      "created-12": {
+        "x": -56.905235,
+        "y": 17.049746
+      },
+      "created-13": {
+        "x": 2.3452702,
+        "y": 16.967793
+      },
+      "created-14": {
+        "x": -5.826813,
+        "y": 18.547792
+      },
+      "created-15": {
+        "x": -56.905235,
+        "y": 20.007973
+      },
+      "created-16": {
+        "x": -58.20524,
+        "y": 22.606863
+      },
+      "created-17": {
+        "x": 28.21,
+        "y": 29.430807
+      },
+      "created-18": {
+        "x": -51.528053,
+        "y": 33.359695
+      },
+      "created-2": {
+        "x": -20.053995,
+        "y": 28.434313
+      },
+      "created-20": {
+        "x": -33.881737,
+        "y": 23.836102
+      },
+      "created-21": {
+        "x": -60.172195,
+        "y": 30.058357
+      },
+      "created-4": {
+        "x": -47.203445,
+        "y": 12.793968
+      },
+      "created-5": {
+        "x": -46.706177,
+        "y": 21.833864
+      },
+      "created-6": {
+        "x": -48.25032,
+        "y": 25.402498
+      },
+      "created-7": {
+        "x": -45.345882,
+        "y": 27.970982
+      },
+      "created-8": {
+        "x": -42.77822,
+        "y": 33.867035
+      },
+      "created-9": {
+        "x": -28.375013,
+        "y": 36.097897
+      },
+      "decay": {
+        "x": -3.026813,
+        "y": -6.3710184
+      },
+      "env": {
+        "x": 28.21,
+        "y": 20.3
+      },
+      "gain": {
+        "x": -3.026813,
+        "y": 1.6689825
+      },
+      "gate": {
+        "x": 55.899998,
+        "y": 8.0
+      },
+      "mul-0": {
+        "x": 4.0,
+        "y": 26.982498
+      },
+      "phase": {
+        "x": -11.727098,
+        "y": 12.776785
+      },
+      "pitch": {
+        "x": -3.026813,
+        "y": -9.051019
+      },
+      "release": {
+        "x": -3.026813,
+        "y": -1.0110178
+      },
+      "sustain": {
+        "x": -3.026813,
+        "y": -3.691018
+      },
+      "trigger": {
+        "x": 78.95,
+        "y": 8.0
+      },
+      "velocity": {
+        "x": 28.21,
+        "y": 8.0
+      }
+    },
+    "cables": {
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 9.93
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "env:0->mul-0:1": {
+        "segmented": true,
+        "y": 24.431248
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 15.490001
+      },
+      "mul-0:0->audio:0": {
+        "segmented": true,
+        "y": 31.113747
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 19.830002
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 19.01
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 16.730001
+      },
+      "velocity:0->mul-0:2": {
+        "segmented": true,
+        "y": 18.170002
+      }
+    },
+    "inputPresentation": {
+      "created-0:0": "cable",
+      "created-10:0": "cable",
+      "created-11:0": "cable",
+      "created-12:0": "cable",
+      "created-13:0": "cable",
+      "created-14:0": "cable",
+      "created-14:1": "cable",
+      "created-15:0": "cable",
+      "created-16:0": "cable",
+      "created-17:0": "cable",
+      "created-18:0": "cable",
+      "created-1:0": "cable",
+      "created-1:1": "cable",
+      "created-20:0": "cable",
+      "created-21:0": "cable",
+      "created-2:0": "cable",
+      "created-4:0": "cable",
+      "created-4:1": "cable",
+      "created-5:0": "cable",
+      "created-6:0": "cable",
+      "created-7:0": "cable",
+      "created-7:1": "cable",
+      "created-8:0": "cable",
+      "created-8:1": "cable",
+      "created-8:2": "cable",
+      "created-9:0": "cable",
+      "created-9:1": "cable",
+      "mul-0:0": "cable",
+      "phase:0": "cable"
+    }
+  },
+  "macros": {}
+}

@@ -233,6 +233,28 @@ pub(super) fn load_apply_for_test(source_path: &Path, patch: &mut Patch) -> Resu
     apply_or_materialize(source_path, patch)
 }
 
+/// Promotion (§3.3): stamp the item as patch-authored by writing an
+/// `authored: true` v2 sidecar from the given patch (which should already
+/// carry any pre-existing layout via `apply_or_materialize`).
+pub(super) fn write_authored_layout(source_path: &Path, patch: &Patch) -> Result<(), String> {
+    save_patch_layout(source_path, patch, "promote-to-patch")
+}
+
+/// Eject (§3.4): flip the `authored` flag while keeping all layout data so
+/// the item can be re-promoted later without losing node positions.
+pub(super) fn set_sidecar_authored(source_path: &Path, authored: bool) -> Result<(), String> {
+    let (status, mut sidecar) = load_sidecar(source_path)?;
+    if status == SidecarStatus::Missing {
+        return Err(format!(
+            "no layout sidecar exists for '{}'",
+            source_path.display()
+        ));
+    }
+    sidecar.version = SIDECAR_VERSION;
+    sidecar.authored = authored;
+    write_sidecar(source_path, &sidecar)
+}
+
 fn load_sidecar(source_path: &Path) -> Result<(SidecarStatus, LayoutSidecar), String> {
     let path = sidecar_path_for_source(source_path);
     if !path.exists() {
@@ -490,7 +512,7 @@ fn scope_layout_from_patch(patch: &Patch) -> ScopeLayout {
     }
 }
 
-fn root_patch_with_interaction(
+pub(super) fn root_patch_with_interaction(
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
 ) -> Patch {

@@ -1,6 +1,7 @@
 mod alignment;
 mod display;
 mod emit;
+mod generate;
 mod geometry;
 mod interaction;
 mod layout;
@@ -35,7 +36,28 @@ pub use model::{
 
 pub fn emit_patch_writeback_source(source: &str, intent: PatcherIntent) -> Result<String, String> {
     let state = state::PatcherInteractionState::default();
-    writeback::emit_patch_writeback(source, intent, &state).map_err(|error| format!("{error:?}"))
+    generate_source_for_state(source, intent, &state).map(|generated| generated.source)
+}
+
+/// Parse `source`, overlay the interaction state, and regenerate the full
+/// canonical dsp.lisp from the resulting model (docs/patch-vs-code-editor-spec.md §4.2).
+fn generate_source_for_state(
+    source: &str,
+    intent: PatcherIntent,
+    state: &state::PatcherInteractionState,
+) -> Result<generate::GeneratedPatchSource, String> {
+    let root_patch = parse_source_with_default_library(source, intent)?;
+    let visible = sidecar::root_patch_with_interaction(&root_patch, state);
+    generate::generate_patch_source(&visible, intent)
+}
+
+/// §4.5 error surface: an agentic result that the projector cannot fully
+/// represent is refused with a pointer at the eject path.
+fn agentic_unprojectable_error(detail: impl AsRef<str>) -> String {
+    format!(
+        "agent result contains code the patch editor can't represent ({}); use \"Eject to code\" to accept it as text",
+        detail.as_ref()
+    )
 }
 
 pub fn emitted_source_buffer_name(path: &str) -> String {
@@ -72,6 +94,54 @@ pub fn source_opens_in_patch_editor(
         return false;
     };
     patch_is_fully_projectable(&patch)
+}
+
+/// Promotion ("Open as patch", spec §3.3): verify the source is fully
+/// projectable and stamp an `authored: true` v2 layout sidecar next to it,
+/// materializing default layout (or reusing any pre-existing sidecar layout).
+/// Returns the projector diagnostics when the source contains code islands.
+pub fn promote_source_to_patch(
+    source_path: &Path,
+    source: &str,
+    intent: PatcherIntent,
+) -> Result<(), String> {
+    let mut patch = parse_source_with_default_library(source, intent)?;
+    if !patch_is_fully_projectable(&patch) {
+        let mut diagnostics = patch.diagnostics.clone();
+        for macro_patch in &patch.macros {
+            diagnostics.extend(macro_patch.patch.diagnostics.iter().cloned());
+        }
+        if diagnostics.is_empty() {
+            diagnostics.push("source contains code the patch editor cannot represent".to_string());
+        }
+        return Err(format!(
+            "Cannot open as patch: {}",
+            diagnostics.join("; ")
+        ));
+    }
+    sidecar::apply_or_materialize(source_path, &mut patch)?;
+    sidecar::write_authored_layout(source_path, &patch)
+}
+
+/// Eject ("Eject to code", spec §3.4): flip the sidecar's `authored` flag to
+/// false while keeping layout data for later re-promotion. The canonical
+/// generated source is already on disk for patch-authored items, so no source
+/// rewrite is needed.
+pub fn eject_patch_authored_sidecar(source_path: &Path) -> Result<(), String> {
+    sidecar::set_sidecar_authored(source_path, false)
+}
+
+fn parse_source_with_default_library(
+    source: &str,
+    intent: PatcherIntent,
+) -> Result<Patch, String> {
+    match crate::defmacro_library::default_library_root() {
+        Some(root) => {
+            let (_, library) = cached_defmacro_library(&root);
+            parse_patch_source_with_library(source, intent, &library)
+        }
+        None => parse_patch_source(source, intent),
+    }
 }
 
 fn patch_is_fully_projectable(patch: &Patch) -> bool {
@@ -281,10 +351,12 @@ pub fn resolve_agentic_bubble(
             macro_source,
         );
         if !wrote {
-            let emitted =
-                writeback::emit_patch_writeback(&source, intent, &materialized.writeback_state)
-                    .map_err(|error| format!("{error:?}"))?;
-            std::fs::write(path, emitted)
+            // §4.5: the agent's code becomes the model and is regenerated
+            // canonically; it is only accepted if it projects cleanly.
+            let generated =
+                generate_source_for_state(&source, intent, &materialized.writeback_state)
+                    .map_err(agentic_unprojectable_error)?;
+            std::fs::write(path, generated.source)
                 .map_err(|error| format!("failed to write '{}': {error}", path.display()))?;
             wrote = true;
         }
@@ -321,9 +393,22 @@ pub fn resolve_agentic_bubble_macro_edit(
     }
     let source = std::fs::read_to_string(path)
         .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
-    let emitted = writeback::replace_macro_source(&source, macro_name, macro_source)
+    // §4.5: splice the agent's macro into a candidate source, accept it only
+    // if the whole file still projects with zero code islands, and write the
+    // canonical regeneration of the resulting model (never the raw splice).
+    let candidate = writeback::replace_macro_source(&source, macro_name, macro_source)
         .map_err(|error| format!("{error:?}"))?;
-    std::fs::write(path, emitted)
+    let candidate_patch = parse_source_with_default_library(&candidate, intent)?;
+    if !patch_is_fully_projectable(&candidate_patch) {
+        let mut diagnostics = candidate_patch.diagnostics.clone();
+        for macro_patch in &candidate_patch.macros {
+            diagnostics.extend(macro_patch.patch.diagnostics.iter().cloned());
+        }
+        return Err(agentic_unprojectable_error(diagnostics.join("; ")));
+    }
+    let generated = generate::generate_patch_source(&candidate_patch, intent)
+        .map_err(agentic_unprojectable_error)?;
+    std::fs::write(path, generated.source)
         .map_err(|error| format!("failed to write '{}': {error}", path.display()))?;
     rematerialize_edited_macro_layout(path, intent, macro_name)?;
     for key in keys {
@@ -513,7 +598,7 @@ pub fn emit_patch_writeback_with_inserted_node_before_first_output(
         },
     );
 
-    writeback::emit_patch_writeback(source, intent, &state).map_err(|error| format!("{error:?}"))
+    generate_source_for_state(source, intent, &state).map(|generated| generated.source)
 }
 
 #[cfg(any(test, feature = "patcher-test-support"))]
@@ -544,7 +629,7 @@ pub fn emit_patch_writeback_with_first_node_text_edit(
         .expect("source node edit should be present")
         .text = edited_text.to_string();
 
-    writeback::emit_patch_writeback(source, intent, &state).map_err(|error| format!("{error:?}"))
+    generate_source_for_state(source, intent, &state).map(|generated| generated.source)
 }
 
 #[cfg(any(test, feature = "patcher-test-support"))]
@@ -643,7 +728,7 @@ pub fn emit_patch_writeback_with_created_phasor_multiply_before_first_output(
         },
     );
 
-    writeback::emit_patch_writeback(source, intent, &state).map_err(|error| format!("{error:?}"))
+    generate_source_for_state(source, intent, &state).map(|generated| generated.source)
 }
 
 use display::{node_display_label, preview};
@@ -668,7 +753,6 @@ use text::{
     clamp_patcher_autocomplete_selection_with_macros, commit_patcher_text_edit,
     move_patcher_autocomplete_selection, patcher_autocomplete_is_open,
 };
-use writeback::emit_patch_writeback_result;
 
 use super::text_input::{TextEditOutcome, apply_text_entry_key, cache_char_widths};
 use super::{CellBuffer, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent};
@@ -2369,21 +2453,6 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
             ),
         ]);
     };
-    let path_buf = PathBuf::from(&path_str);
-    let source = match std::fs::read_to_string(&path_buf) {
-        Ok(source) => source,
-        Err(error) => {
-            return map_value(vec![
-                ("status", Value::Keyword("invalid".to_string())),
-                ("path", Value::String(path_str)),
-                (
-                    "diagnostic",
-                    Value::String(format!("failed to read '{}': {error}", path_buf.display())),
-                ),
-            ]);
-        }
-    };
-
     let root_patch = match load_patch_from_props(&node.props) {
         Ok((_, patch)) => patch,
         Err(error) => {
@@ -2410,107 +2479,123 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
     } else {
         state.clone()
     };
-    let writeback_result = if let Some(library) = library.as_ref() {
-        writeback::emit_patch_writeback_result_with_library(&source, intent, &root_state, library)
-    } else {
-        emit_patch_writeback_result(&source, intent, &root_state)
+    // Full deterministic regeneration from the in-memory model
+    // (docs/patch-vs-code-editor-spec.md §4): no surgical source rewriting,
+    // no source-position reasoning.
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &root_state);
+    let generated = match generate::generate_patch_source(&visible, intent) {
+        Ok(generated) => generated,
+        Err(error) => {
+            debug_log_edit_event("generate-payload-invalid-state", &state);
+            debug_log_writeback_event(
+                "payload-invalid",
+                format!("path={path_str}\nintent={intent:?}\nerror={error}"),
+            );
+            return map_value(vec![
+                ("status", Value::Keyword("invalid".to_string())),
+                ("path", Value::String(path_str)),
+                ("diagnostic", Value::String(error)),
+            ]);
+        }
     };
-
-    match writeback_result {
-        Ok(result) => {
-            let source = result.source;
-            let layout = match writeback_layout_for_source(
-                &source,
-                intent,
-                &node.props,
-                &root_patch,
-                &root_state,
-                &result.generated_node_ids,
-            ) {
-                Ok(layout) => layout,
+    let source = generated.source;
+    let mut emitted_patch = match parse_patch_source_for_props(&source, intent, &node.props) {
+        Ok(patch) => patch,
+        Err(error) => {
+            eprintln!(
+                "[patcher generate invalid]\npath={path_str}\nintent={intent:?}\nstage=parse-generated-source\nerror={error}\ngenerated-source:\n{source}\n[/patcher generate invalid]"
+            );
+            return map_value(vec![
+                ("status", Value::Keyword("invalid".to_string())),
+                ("path", Value::String(path_str)),
+                (
+                    "diagnostic",
+                    Value::String(format!("generated source failed to parse: {error}")),
+                ),
+            ]);
+        }
+    };
+    if !patch_is_fully_projectable(&emitted_patch) {
+        eprintln!(
+            "[patcher generate invalid]\npath={path_str}\nintent={intent:?}\nstage=projectability\ndiagnostics={:?}\ngenerated-source:\n{source}\n[/patcher generate invalid]",
+            emitted_patch.diagnostics
+        );
+        return map_value(vec![
+            ("status", Value::Keyword("invalid".to_string())),
+            ("path", Value::String(path_str)),
+            (
+                "diagnostic",
+                Value::String(format!(
+                    "generated source is not fully projectable: {}",
+                    emitted_patch.diagnostics.join("; ")
+                )),
+            ),
+        ]);
+    }
+    let layout = match sidecar::emitted_layout_json_with_node_map(
+        &mut emitted_patch,
+        &root_patch,
+        &root_state,
+        &generated.renamed_node_ids,
+    ) {
+        Ok(layout) => layout,
+        Err(error) => {
+            return map_value(vec![
+                ("status", Value::Keyword("invalid".to_string())),
+                ("path", Value::String(path_str)),
+                (
+                    "diagnostic",
+                    Value::String(format!("failed to build emitted patcher layout: {error}")),
+                ),
+            ]);
+        }
+    };
+    debug_log_writeback_event(
+        "payload-valid",
+        format!("path={path_str}\nintent={intent:?}\nsource:\n{source}"),
+    );
+    let compile_source = if let Some(library) = library.as_ref() {
+        let staged_library =
+            match library_with_staged_macro_edits(&root_patch, intent, &state, library) {
+                Ok(library) => library,
                 Err(error) => {
-                    eprintln!(
-                        "[patcher writeback invalid]\npath={path_str}\nintent={intent:?}\nstage=parse-emitted-layout-source\nerror={error}\nemitted-source:\n{}\n[/patcher writeback invalid]",
-                        source
-                    );
                     return map_value(vec![
                         ("status", Value::Keyword("invalid".to_string())),
                         ("path", Value::String(path_str)),
                         (
                             "diagnostic",
                             Value::String(format!(
-                                "failed to build emitted patcher layout: {error}"
+                                "failed to stage library macro edits: {error}"
                             )),
                         ),
                     ]);
                 }
             };
-            debug_log_writeback_event(
-                "payload-valid",
-                format!("path={path_str}\nintent={intent:?}\nsource:\n{}", source),
-            );
-            let compile_source = if let Some(library) = library.as_ref() {
-                let staged_library =
-                    match library_with_staged_macro_edits(&root_patch, intent, &state, library) {
-                        Ok(library) => library,
-                        Err(error) => {
-                            return map_value(vec![
-                                ("status", Value::Keyword("invalid".to_string())),
-                                ("path", Value::String(path_str)),
-                                (
-                                    "diagnostic",
-                                    Value::String(format!(
-                                        "failed to stage library macro edits: {error}"
-                                    )),
-                                ),
-                            ]);
-                        }
-                    };
-                match staged_library.materialize_source(&source) {
-                    Ok(materialized) => materialized.source,
-                    Err(error) => {
-                        return map_value(vec![
-                            ("status", Value::Keyword("invalid".to_string())),
-                            ("path", Value::String(path_str)),
-                            (
-                                "diagnostic",
-                                Value::String(format!(
-                                    "failed to materialize staged defmacro imports: {error}"
-                                )),
-                            ),
-                        ]);
-                    }
-                }
-            } else {
-                source.clone()
-            };
-            let entries = vec![
-                ("status", Value::Keyword("valid".to_string())),
-                ("path", Value::String(path_str)),
-                ("source", Value::String(source)),
-                ("compile-source", Value::String(compile_source)),
-                ("layout", Value::String(layout)),
-            ];
-            map_value(entries)
+        match staged_library.materialize_source(&source) {
+            Ok(materialized) => materialized.source,
+            Err(error) => {
+                return map_value(vec![
+                    ("status", Value::Keyword("invalid".to_string())),
+                    ("path", Value::String(path_str)),
+                    (
+                        "diagnostic",
+                        Value::String(format!(
+                            "failed to materialize staged defmacro imports: {error}"
+                        )),
+                    ),
+                ]);
+            }
         }
-        Err(error) => {
-            eprintln!(
-                "[patcher writeback invalid]\npath={path_str}\nintent={intent:?}\nstage=emit-writeback\nerror={error:?}\nno emitted source was produced; writeback failed before source generation completed\npre-edit-source:\n{source}\ninteraction-state:\n{state:#?}\n[/patcher writeback invalid]"
-            );
-            debug_log_edit_event("writeback-payload-invalid-state", &state);
-            debug_log_writeback_event(
-                "payload-invalid",
-                format!(
-                    "path={path_str}\nintent={intent:?}\nerror={error:?}\npre-edit-source:\n{source}"
-                ),
-            );
-            map_value(vec![
-                ("status", Value::Keyword("invalid".to_string())),
-                ("path", Value::String(path_str)),
-                ("diagnostic", Value::String(format!("{error:?}"))),
-            ])
-        }
-    }
+    } else {
+        source.clone()
+    };
+    map_value(vec![
+        ("status", Value::Keyword("valid".to_string())),
+        ("path", Value::String(path_str)),
+        ("source", Value::String(source)),
+        ("compile-source", Value::String(compile_source)),
+        ("layout", Value::String(layout)),
+    ])
 }
 
 fn patcher_intent_from_props(props: &HashMap<String, Value>) -> PatcherIntent {

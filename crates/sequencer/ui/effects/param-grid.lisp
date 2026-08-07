@@ -505,7 +505,7 @@
         (groups (fx-param-group-names visible))
         (ungrouped (filter |p| (not (get p :group)) visible)))
     (box :debug-name "fx-param-metadata-grid"
-         :width :fill :height :fill :padding 0.525
+         :width :fill :height 9.8 :padding 0.525
          :on-click (fx-param-grid-default-section-callback visible groups fx)
       (h-stack :width :fill :height :fill :gap 1.0 :align :stretch
         (fx-param-panel-columns visible groups ungrouped fx)

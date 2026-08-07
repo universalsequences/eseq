@@ -11578,7 +11578,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .expect("patcher writeback should insert created phasor multiply chain");
 
         assert!(
-            emitted.contains("5.0") && emitted.contains("(phasor ") && emitted.contains("(* "),
+            emitted.contains("(phasor created-") && emitted.contains("(* "),
             "emitted source should contain the inserted phasor multiply chain:\n{emitted}"
         );
         compile_instrument_with_asset_base(&emitted, 44_100, path.parent()).unwrap_or_else(

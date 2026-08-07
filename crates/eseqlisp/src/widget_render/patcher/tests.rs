@@ -1636,9 +1636,13 @@ fn move_all_persistence_nodes(
         }
         let position = persistence_position(seed, idx, scope_bias);
         set_node_edit_position(state, view_key, node, position, node_display_label(node));
-        expectations
-            .nodes
-            .push(expected_node(view_key, &node.id, position));
+        // Regeneration canonicalizes non-symbol ids (e.g. `*#0` -> `mul-0`)
+        // into binding names; expectations follow the emitted identity.
+        expectations.nodes.push(expected_node(
+            view_key,
+            &generate::sanitize_binding(&node.id),
+            position,
+        ));
     }
 }
 
@@ -1895,31 +1899,31 @@ fn build_persistence_case(
             connect_output_to_input(&mut state, "root", &phasor, "tri", 1);
             expectations
                 .nodes
-                .push(expected_node("root", "value1", literal_position));
+                .push(expected_node("root", &literal, literal_position));
             expectations
                 .nodes
-                .push(expected_node("root", "phasor1", phasor_position));
+                .push(expected_node("root", &phasor, phasor_position));
             expectations
                 .connections
-                .push(expected_connection("root", "value1", 0, "phasor1", 0));
+                .push(expected_connection("root", &literal, 0, &phasor, 0));
             expectations
                 .connections
-                .push(expected_connection("root", "trigger", 0, "phasor1", 1));
+                .push(expected_connection("root", "trigger", 0, &phasor, 1));
             expectations
                 .connections
-                .push(expected_connection("root", "phasor1", 0, "tri", 1));
+                .push(expected_connection("root", &phasor, 0, "tri", 1));
             expectations
                 .source_contains
-                .push("(def value1 0.5)".to_string());
+                .push(format!("(def {literal} 0.5)"));
             expectations
                 .source_contains
-                .push("(def phasor1 (phasor value1 trigger))".to_string());
+                .push(format!("(def {phasor} (phasor {literal} trigger))"));
             expectations
                 .source_contains
-                .push("(def tri (triangle phase phasor1))".to_string());
+                .push(format!("(def tri (triangle phase {phasor}))"));
             expectations
                 .source_not_contains
-                .push("(def phasor1 (phasor 0.5".to_string());
+                .push(format!("(def {phasor} (phasor 0.5"));
         }
         2 => {
             let mul_position = persistence_position(seed, 0, 20.0);
@@ -1938,28 +1942,28 @@ fn build_persistence_case(
             connect_output_to_input(&mut state, "root", &cosine, "tri", 0);
             expectations
                 .nodes
-                .push(expected_node("root", "mul1", mul_position));
+                .push(expected_node("root", &multiply, mul_position));
             expectations
                 .nodes
-                .push(expected_node("root", "cos1", cos_position));
+                .push(expected_node("root", &cosine, cos_position));
             expectations
                 .connections
-                .push(expected_connection("root", "phase", 0, "mul1", 0));
+                .push(expected_connection("root", "phase", 0, &multiply, 0));
             expectations
                 .connections
-                .push(expected_connection("root", "mul1", 0, "cos1", 0));
+                .push(expected_connection("root", &multiply, 0, &cosine, 0));
             expectations
                 .connections
-                .push(expected_connection("root", "cos1", 0, "tri", 0));
+                .push(expected_connection("root", &cosine, 0, "tri", 0));
             expectations
                 .source_contains
-                .push("(def mul1 (* phase 2.0))".to_string());
+                .push(format!("(def {multiply} (* phase 2))"));
             expectations
                 .source_contains
-                .push("(def cos1 (cos mul1))".to_string());
+                .push(format!("(def {cosine} (cos {multiply}))"));
             expectations
                 .source_contains
-                .push("(def tri (triangle cos1 0.1))".to_string());
+                .push(format!("(def tri (triangle {cosine} 0.1))"));
         }
         3 => {
             for (idx, connection) in visible_persistence_connections(&root_patch)
@@ -1979,9 +1983,9 @@ fn build_persistence_case(
                 );
                 expectations.segments.push(expected_segment(
                     "root",
-                    &connection.from_node,
+                    &generate::sanitize_binding(&connection.from_node),
                     connection.from_output,
-                    &connection.to_node,
+                    &generate::sanitize_binding(&connection.to_node),
                     connection.to_input,
                     row,
                 ));
@@ -2020,43 +2024,43 @@ fn build_persistence_case(
             connect_output_to_input(&mut state, "macro:fold", &phasor, "shaped", 2);
             expectations
                 .nodes
-                .push(expected_node("macro:fold", "value1", literal_position));
+                .push(expected_node("macro:fold", &literal, literal_position));
             expectations
                 .nodes
-                .push(expected_node("macro:fold", "phasor1", phasor_position));
+                .push(expected_node("macro:fold", &phasor, phasor_position));
             expectations.connections.push(expected_connection(
                 "macro:fold",
-                "value1",
+                &literal,
                 0,
-                "phasor1",
+                &phasor,
                 0,
             ));
             expectations.connections.push(expected_connection(
                 "macro:fold",
                 "amt",
                 0,
-                "phasor1",
+                &phasor,
                 1,
             ));
             expectations.connections.push(expected_connection(
                 "macro:fold",
-                "phasor1",
+                &phasor,
                 0,
                 "shaped",
                 2,
             ));
             expectations
                 .source_contains
-                .push("(def value1 0.125)".to_string());
+                .push(format!("(def {literal} 0.125)"));
             expectations
                 .source_contains
-                .push("(def phasor1 (phasor value1 amt))".to_string());
+                .push(format!("(def {phasor} (phasor {literal} amt))"));
             expectations
                 .source_contains
-                .push("(def shaped (mix sig amt phasor1))".to_string());
+                .push(format!("(def shaped (mix sig amt {phasor}))"));
             expectations
                 .source_not_contains
-                .push("(def phasor1 (phasor 0.125".to_string());
+                .push(format!("(def {phasor} (phasor 0.125"));
         }
         5 => {
             let value_position = persistence_position(seed, 0, 25.0);
@@ -2074,22 +2078,22 @@ fn build_persistence_case(
             connect_output_to_input(&mut state, "root", &shaper, "shaped", 0);
             expectations
                 .nodes
-                .push(expected_node("root", "value1", value_position));
+                .push(expected_node("root", &value, value_position));
             expectations
                 .nodes
-                .push(expected_node("root", "mix1", shaper_position));
+                .push(expected_node("root", &shaper, shaper_position));
             expectations
                 .connections
-                .push(expected_connection("root", "value1", 0, "mix1", 0));
+                .push(expected_connection("root", &value, 0, &shaper, 0));
             expectations
                 .connections
-                .push(expected_connection("root", "phase", 0, "mix1", 1));
+                .push(expected_connection("root", "phase", 0, &shaper, 1));
             expectations
                 .connections
-                .push(expected_connection("root", "mix1", 0, "shaped", 0));
+                .push(expected_connection("root", &shaper, 0, "shaped", 0));
             expectations
                 .source_contains
-                .push("(def mix1 (mix value1 phase 0.25))".to_string());
+                .push(format!("(def {shaper} (mix {value} phase 0.25))"));
         }
         6 => {
             let rate = root_patch
@@ -2154,9 +2158,9 @@ fn build_persistence_case(
             );
             expectations.segments.push(expected_segment(
                 "root",
-                &connection.from_node,
+                &generate::sanitize_binding(&connection.from_node),
                 connection.from_output,
-                &connection.to_node,
+                &generate::sanitize_binding(&connection.to_node),
                 connection.to_input,
                 row,
             ));
@@ -3223,8 +3227,8 @@ fn patcher_change_payload_does_not_install_emitted_layout_before_source_is_saved
         other => panic!("expected emitted layout string, got {other:?}"),
     };
     assert!(
-        !layout.contains(&created),
-        "emitted layout should be reconciled to emitted source ids"
+        layout.contains(&created),
+        "created node ids are stable emitted bindings and key the layout"
     );
 
     let installed: serde_json::Value =
@@ -3248,7 +3252,7 @@ fn patcher_change_payload_does_not_install_emitted_layout_before_source_is_saved
         reloaded
             .nodes
             .iter()
-            .any(|patch_node| patch_node.id == "mul1"),
+            .any(|patch_node| patch_node.id == created),
         "saved source and sidecar should reload with emitted ids"
     );
 }
@@ -3387,11 +3391,11 @@ fn finalized_create_instrument_flow_reopens_with_saved_created_node_layout() {
         other => panic!("expected emitted layout string, got {other:?}"),
     };
     assert!(
-        source.contains("(def mul1 (* phase 3.0))"),
+        source.contains(&format!("(def {multiply} (* phase 3))")),
         "created multiply should be materialized before final save:\n{source}"
     );
     let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
-    let mul_layout = &layout_json["root"]["nodes"]["mul1"];
+    let mul_layout = &layout_json["root"]["nodes"][&multiply];
     assert!(
         (mul_layout["x"].as_f64().unwrap() - placed_position.0 as f64).abs() < 0.0001
             && (mul_layout["y"].as_f64().unwrap() - placed_position.1 as f64).abs() < 0.0001,
@@ -3407,7 +3411,7 @@ fn finalized_create_instrument_flow_reopens_with_saved_created_node_layout() {
     let mul = reloaded
         .nodes
         .iter()
-        .find(|patch_node| patch_node.id == "mul1")
+        .find(|patch_node| patch_node.id == multiply)
         .expect("finalized patch should reload generated multiply node");
     assert_eq!(mul.position, placed_position);
 }
@@ -3572,25 +3576,27 @@ fn existing_instrument_edit_reopens_with_created_chain_layout_after_deleting_sou
         other => panic!("expected emitted layout string, got {other:?}"),
     };
     assert!(
-        source.contains("(def mul1 (* phase 1.0))")
-            && source.contains("(def cos1 (cos mul1)")
-            && source.contains("(* cos1 env velocity"),
+        source.contains(&format!("(def {multiply} (* phase 1))"))
+            && source.contains(&format!("(def {cosine} (cos {multiply})"))
+            && source.contains(&format!("(* {cosine} env velocity")),
         "created replacement chain should be materialized before save:\n{source}"
     );
     let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
     assert!(
-        (layout_json["root"]["nodes"]["mul1"]["x"].as_f64().unwrap() - mul_position.0 as f64).abs()
+        (layout_json["root"]["nodes"][&multiply]["x"].as_f64().unwrap() - mul_position.0 as f64)
+            .abs()
             < 0.0001
-            && (layout_json["root"]["nodes"]["mul1"]["y"].as_f64().unwrap()
+            && (layout_json["root"]["nodes"][&multiply]["y"].as_f64().unwrap()
                 - mul_position.1 as f64)
                 .abs()
                 < 0.0001,
         "emitted layout should keep created multiply position: {layout}"
     );
     assert!(
-        (layout_json["root"]["nodes"]["cos1"]["x"].as_f64().unwrap() - cos_position.0 as f64).abs()
+        (layout_json["root"]["nodes"][&cosine]["x"].as_f64().unwrap() - cos_position.0 as f64)
+            .abs()
             < 0.0001
-            && (layout_json["root"]["nodes"]["cos1"]["y"].as_f64().unwrap()
+            && (layout_json["root"]["nodes"][&cosine]["y"].as_f64().unwrap()
                 - cos_position.1 as f64)
                 .abs()
                 < 0.0001,
@@ -3605,7 +3611,7 @@ fn existing_instrument_edit_reopens_with_created_chain_layout_after_deleting_sou
         reloaded
             .nodes
             .iter()
-            .find(|patch_node| patch_node.id == "mul1")
+            .find(|patch_node| patch_node.id == multiply)
             .unwrap()
             .position,
         mul_position
@@ -3614,7 +3620,7 @@ fn existing_instrument_edit_reopens_with_created_chain_layout_after_deleting_sou
         reloaded
             .nodes
             .iter()
-            .find(|patch_node| patch_node.id == "cos1")
+            .find(|patch_node| patch_node.id == cosine)
             .unwrap()
             .position,
         cos_position
@@ -3670,7 +3676,8 @@ fn semantic_save_payload_maps_created_literal_layout_to_generated_constant_bindi
     };
 
     assert!(
-        source.contains("(def value1 0.3)") && source.contains("(def phasor1 (phasor value1))"),
+        source.contains(&format!("(def {literal} 0.3)"))
+            && source.contains(&format!("(def {phasor} (phasor {literal}))")),
         "created literal should materialize as a named constant feeding phasor:\n{source}"
     );
     let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
@@ -3679,19 +3686,19 @@ fn semantic_save_payload_maps_created_literal_layout_to_generated_constant_bindi
         "layout should not use literal text as the saved node id: {layout}"
     );
     assert!(
-        (layout_json["root"]["nodes"]["value1"]["x"]
+        (layout_json["root"]["nodes"][&literal]["x"]
             .as_f64()
             .unwrap()
             - literal_position.0 as f64)
             .abs()
             < 0.0001
-            && (layout_json["root"]["nodes"]["value1"]["y"]
+            && (layout_json["root"]["nodes"][&literal]["y"]
                 .as_f64()
                 .unwrap()
                 - literal_position.1 as f64)
                 .abs()
                 < 0.0001,
-        "layout should keep the visible constant position under value1: {layout}"
+        "layout should keep the visible constant position under the created id: {layout}"
     );
 }
 
@@ -13307,6 +13314,7 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
         connections: Vec::new(),
         macros: Vec::new(),
         diagnostics: Vec::new(),
+        host_modulators: Vec::new(),
     };
     let input_indices = patch_input_indices(&patch);
     assert_eq!(
@@ -13321,6 +13329,7 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
         connections: Vec::new(),
         macros: Vec::new(),
         diagnostics: Vec::new(),
+        host_modulators: Vec::new(),
     };
     let input_indices = patch_input_indices(&patch);
     assert_eq!(input_indices.get("mul").map(Vec::as_slice), Some(&[0][..]));
@@ -13352,6 +13361,7 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
         connections: Vec::new(),
         macros: Vec::new(),
         diagnostics: Vec::new(),
+        host_modulators: Vec::new(),
     };
     let input_indices = patch_input_indices(&patch);
     assert_eq!(input_indices.get("hist").map(Vec::as_slice), Some(&[0][..]));
@@ -16754,6 +16764,7 @@ fn metal_render_places_committed_node_tail_after_measured_space_width() {
         connections: Vec::new(),
         macros: Vec::new(),
         diagnostics: Vec::new(),
+        host_modulators: Vec::new(),
     };
     let mut prims = Vec::new();
     draw_patch(
@@ -16798,4 +16809,281 @@ fn metal_render_places_committed_node_tail_after_measured_space_width() {
         2.5 * DEFAULT_ZOOM,
         "tail should start after the measured width of `in `, not after a fixed visual gap"
     );
+}
+
+
+// ── Deterministic generation round-trip (docs/patch-vs-code-editor-spec.md §4.2) ──
+
+const GENERATION_STARTER_INSTRUMENT: &str = r#"(def gate (in 1 @name gate))
+(def pitch (in 2 @name pitch))
+(def velocity (in 3 @name velocity))
+(def trigger (in 4 @name trigger))
+(def clock (in 5 @name clock))
+(def mod1 (in 6 @name mod1 @modulator 1))
+(def mod2 (in 7 @name mod2 @modulator 2))
+(def mod3 (in 8 @name mod3 @modulator 3))
+(def mod4 (in 9 @name mod4 @modulator 4))
+
+(param attack @group amp @env amp-env @role attack @default 5 @min 0 @max 1000 @unit ms)
+(param decay @group amp @env amp-env @role decay @default 120 @min 1 @max 2000 @unit ms)
+(param sustain @group amp @env amp-env @role sustain @default 0.8 @min 0 @max 1)
+(param release @group amp @env amp-env @role release @default 180 @min 1 @max 5000 @unit ms)
+(param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+
+(def env (adsr gate trigger attack decay sustain release))
+(def phase (phasor pitch))
+(out (* phase env velocity (mod gain)) 1 @name audio)
+"#;
+
+fn generation_scope_signature(
+    lines: &mut Vec<String>,
+    scope_label: &str,
+    patch: &Patch,
+    mapped: &dyn Fn(&str, &str) -> String,
+) {
+    let mut nodes = patch
+        .nodes
+        .iter()
+        .map(|node| {
+            format!(
+                "{scope_label} node {} op={} kind={:?}",
+                mapped(scope_label, &node.id),
+                node.op,
+                node.kind
+            )
+        })
+        .collect::<Vec<_>>();
+    nodes.sort();
+    lines.append(&mut nodes);
+    let mut connections = patch
+        .connections
+        .iter()
+        .map(|connection| {
+            format!(
+                "{scope_label} cable {}:{}->{}:{} {:?}",
+                mapped(scope_label, &connection.from_node),
+                connection.from_output,
+                mapped(scope_label, &connection.to_node),
+                connection.to_input,
+                connection.kind
+            )
+        })
+        .collect::<Vec<_>>();
+    connections.sort();
+    lines.append(&mut connections);
+}
+
+fn generation_semantic_signature(patch: &Patch, mapped: &dyn Fn(&str, &str) -> String) -> String {
+    let mut lines = Vec::new();
+    generation_scope_signature(&mut lines, "root", patch, mapped);
+    let mut macros = patch
+        .macros
+        .iter()
+        .filter(|macro_patch| matches!(macro_patch.origin, MacroOrigin::Local))
+        .collect::<Vec<_>>();
+    macros.sort_by(|a, b| a.name.cmp(&b.name));
+    for macro_patch in macros {
+        lines.push(format!(
+            "macro {} params={:?} outputs={:?}",
+            macro_patch.name, macro_patch.params, macro_patch.outputs
+        ));
+        generation_scope_signature(
+            &mut lines,
+            &format!("macro:{}", macro_patch.name),
+            &macro_patch.patch,
+            mapped,
+        );
+    }
+    let mut host_modulators = patch
+        .host_modulators
+        .iter()
+        .map(|input| format!("host-mod {} ch={} slot={}", input.name, input.channel, input.slot))
+        .collect::<Vec<_>>();
+    host_modulators.sort();
+    lines.append(&mut host_modulators);
+    lines.join("\n")
+}
+
+fn assert_generation_roundtrip(
+    case_name: &str,
+    source: &str,
+    intent: PatcherIntent,
+    library: Option<&DefmacroLibrary>,
+) {
+    let parse = |text: &str| match library {
+        Some(library) => parse_patch_source_with_library(text, intent, library),
+        None => parse_patch_source(text, intent),
+    };
+    let p0 = parse(source).unwrap_or_else(|error| panic!("{case_name}: parse failed: {error}"));
+    assert!(
+        p0.diagnostics.is_empty(),
+        "{case_name}: fixture source should project cleanly: {:?}",
+        p0.diagnostics
+    );
+    let g1 = generate::generate_patch_source(&p0, intent)
+        .unwrap_or_else(|error| panic!("{case_name}: generation failed: {error}"));
+    assert!(
+        g1.source.starts_with(";; generated by the patch editor"),
+        "{case_name}: generated source must carry the provenance header:\n{}",
+        g1.source
+    );
+    let p1 = parse(&g1.source).unwrap_or_else(|error| {
+        panic!("{case_name}: generated source failed to parse: {error}\n{}", g1.source)
+    });
+    assert!(
+        p1.diagnostics.is_empty()
+            && !p1.nodes.iter().any(|node| node.kind == NodeKind::CodeIsland),
+        "{case_name}: generated source must project with zero code islands: {:?}\n{}",
+        p1.diagnostics,
+        g1.source
+    );
+
+    // parse(generate(patch)) == patch (modulo layout/positions): the model
+    // survives through the deterministic rename map.
+    let renames = g1.renamed_node_ids.clone();
+    let mapped = move |scope: &str, id: &str| {
+        renames
+            .get(&(scope.to_string(), id.to_string()))
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
+    };
+    let identity = |_: &str, id: &str| id.to_string();
+    assert_eq!(
+        generation_semantic_signature(&p0, &mapped),
+        generation_semantic_signature(&p1, &identity),
+        "{case_name}: reparsing the generated source must reproduce the model\n{}",
+        g1.source
+    );
+
+    // generate(parse(generate(patch))) == generate(patch): byte-identical fixpoint.
+    let g2 = generate::generate_patch_source(&p1, intent)
+        .unwrap_or_else(|error| panic!("{case_name}: regeneration failed: {error}"));
+    assert_eq!(
+        g1.source, g2.source,
+        "{case_name}: generator must reach a byte-identical fixpoint"
+    );
+    // And the canonical model's ids are stable across another round.
+    let p2 = parse(&g2.source).unwrap();
+    assert_eq!(
+        generation_semantic_signature(&p1, &identity),
+        generation_semantic_signature(&p2, &identity),
+        "{case_name}: canonical model ids must be stable across regeneration"
+    );
+}
+
+#[test]
+fn generation_roundtrip_starter_instrument() {
+    assert_generation_roundtrip(
+        "starter-instrument",
+        GENERATION_STARTER_INSTRUMENT,
+        PatcherIntent::Instrument,
+        None,
+    );
+}
+
+#[test]
+fn generation_roundtrip_lexilush_effect() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../sequencer/effects/lexilush/dsp.lisp");
+    let source = fs::read_to_string(&path).unwrap();
+    assert_generation_roundtrip("lexilush", &source, PatcherIntent::Effect, None);
+}
+
+#[test]
+fn generation_roundtrip_defmacro_library_patch() {
+    let library = temp_defmacro_library(
+        "generation-roundtrip",
+        &[("shape2", "(defmacro shape2 (x amt) (* (tanh (* x amt)) 0.5))")],
+    );
+    let source = "(use-defmacro shape2)\n\
+                  (def input (in 1 @name input))\n\
+                  (param drive @min 1 @max 10 @default 2)\n\
+                  (defmacro warm (sig) (def soft (tanh sig)) soft)\n\
+                  (def shaped (shape2 input drive))\n\
+                  (def warmed (warm shaped))\n\
+                  (out warmed 1 @name audio)\n";
+    assert_generation_roundtrip(
+        "library-patch",
+        source,
+        PatcherIntent::Effect,
+        Some(&library),
+    );
+    // the import must survive regeneration
+    let p0 = parse_patch_source_with_library(source, PatcherIntent::Effect, &library).unwrap();
+    let generated = generate::generate_patch_source(&p0, PatcherIntent::Effect).unwrap();
+    assert!(
+        generated.source.contains("(use-defmacro shape2)"),
+        "library imports must be regenerated:\n{}",
+        generated.source
+    );
+    assert!(
+        generated.source.contains("(defmacro warm"),
+        "local defmacros must be regenerated:\n{}",
+        generated.source
+    );
+}
+
+#[test]
+fn generation_roundtrip_history_feedback_effect() {
+    let source = "(def in-l (in 1 @name signal))\n\
+                  (param decay @min 0 @max 1 @default 0.5)\n\
+                  (make-history loop)\n\
+                  (def wet (+ in-l (* (read-history loop) decay)))\n\
+                  (def delayed (delay wet 4800))\n\
+                  (write-history loop delayed)\n\
+                  (out delayed 1 @name out-l)\n";
+    assert_generation_roundtrip("history-feedback", source, PatcherIntent::Effect, None);
+}
+
+// ── Promotion / eject sidecar flips (spec §3.3 / §3.4) ──
+
+#[test]
+fn promote_source_to_patch_stamps_authored_sidecar_for_clean_source() {
+    let path = temp_patcher_dsp_path("patcher-promote-clean");
+    let source = "(def input (in 1 @name input))\n(out input 1 @name audio)\n";
+    fs::write(&path, source).unwrap();
+    assert!(!sidecar::sidecar_is_authored(&path));
+    promote_source_to_patch(&path, source, PatcherIntent::Effect).unwrap();
+    assert!(sidecar::sidecar_is_authored(&path));
+    assert!(source_opens_in_patch_editor(&path, source, PatcherIntent::Effect));
+}
+
+#[test]
+fn promote_source_to_patch_refuses_code_islands_with_diagnostics() {
+    let path = temp_patcher_dsp_path("patcher-promote-islands");
+    let source = "(def input (in 1 @name input))\n(let ((x 1)) x)\n(out input 1 @name audio)\n";
+    fs::write(&path, source).unwrap();
+    let error = promote_source_to_patch(&path, source, PatcherIntent::Effect).unwrap_err();
+    assert!(
+        error.contains("Cannot open as patch"),
+        "promotion refusal should surface diagnostics: {error}"
+    );
+    assert!(!sidecar::sidecar_is_authored(&path));
+}
+
+#[test]
+fn eject_flips_authored_flag_but_keeps_layout_for_repromotion() {
+    let path = temp_patcher_dsp_path("patcher-eject-keeps-layout");
+    let source = "(def input (in 1 @name input))\n(out input 1 @name audio)\n";
+    fs::write(&path, source).unwrap();
+    promote_source_to_patch(&path, source, PatcherIntent::Effect).unwrap();
+    let sidecar_path = sidecar::sidecar_path_for_source(&path);
+    let before: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    eject_patch_authored_sidecar(&path).unwrap();
+    let after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    assert_eq!(after["authored"], serde_json::json!(false));
+    assert_eq!(after["version"], serde_json::json!(2));
+    assert_eq!(
+        after["root"]["nodes"], before["root"]["nodes"],
+        "eject must keep layout data for re-promotion"
+    );
+    assert!(!sidecar::sidecar_is_authored(&path));
+    // re-promotion restores patch routing with the same layout
+    promote_source_to_patch(&path, source, PatcherIntent::Effect).unwrap();
+    assert!(sidecar::sidecar_is_authored(&path));
+    let repromoted: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    assert_eq!(repromoted["root"]["nodes"], before["root"]["nodes"]);
 }

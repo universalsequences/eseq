@@ -280,12 +280,23 @@ pub struct MacroSignature {
     pub outputs: Vec<String>,
 }
 
+/// A host-modulator input def (`(def modN (in ch @name modN @modulator N))`)
+/// that the projector hides from the canvas. The generator re-emits these from
+/// the model so full regeneration does not drop them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostModulatorInput {
+    pub name: String,
+    pub channel: usize,
+    pub slot: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Patch {
     pub nodes: Vec<PatchNode>,
     pub connections: Vec<PatchConnection>,
     pub macros: Vec<MacroPatch>,
     pub diagnostics: Vec<String>,
+    pub host_modulators: Vec<HostModulatorInput>,
 }
 
 pub fn refresh_patch_inline_inputs(patch: &mut Patch) {

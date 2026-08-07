@@ -239,7 +239,8 @@ impl Projector {
 
         match &items[1] {
             Expression::Symbol(name) => {
-                if self.is_hidden_host_modulator_def(name, &items[2]) {
+                if let Some(host_modulator) = self.hidden_host_modulator_def(name, &items[2]) {
+                    self.patch.host_modulators.push(host_modulator);
                     return;
                 }
                 let binding = self.binding_id(name, BindingKind::Def);
@@ -427,13 +428,20 @@ impl Projector {
         );
     }
 
-    fn is_hidden_host_modulator_def(&self, name: &str, expr: &Expression) -> bool {
+    fn hidden_host_modulator_def(
+        &self,
+        name: &str,
+        expr: &Expression,
+    ) -> Option<super::model::HostModulatorInput> {
         if self.scope != SourceScopeId::Root {
-            return false;
+            return None;
         }
-        expected_host_modulator_slot(name).is_some_and(|slot| {
-            host_modulator_input_signature(expr)
-                .is_some_and(|(_, input_name, modulator)| input_name == name && modulator == slot)
+        let slot = expected_host_modulator_slot(name)?;
+        let (channel, input_name, modulator) = host_modulator_input_signature(expr)?;
+        (input_name == name && modulator == slot).then(|| super::model::HostModulatorInput {
+            name: name.to_string(),
+            channel,
+            slot,
         })
     }
 

@@ -1360,6 +1360,80 @@
     }
 
     #[test]
+    fn promotion_and_eject_flip_editor_surface_routing() {
+        let dir = std::env::temp_dir().join(format!(
+            "eseq-promote-eject-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dsp_path = dir.join("dsp.lisp");
+        let clean_source = "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)";
+        std::fs::write(&dsp_path, clean_source).unwrap();
+        let intent = eseqlisp::widget_render::patcher::PatcherIntent::Instrument;
+
+        assert_eq!(
+            editor_surface_for_existing(&dsp_path, clean_source, intent),
+            EditorSurface::Code,
+            "unpromoted item opens as code"
+        );
+
+        // §3.3 promotion: clean source stamps an authored sidecar → patch.
+        eseqlisp::widget_render::patcher::promote_source_to_patch(
+            &dsp_path,
+            clean_source,
+            intent,
+        )
+        .expect("clean source should promote");
+        assert_eq!(
+            editor_surface_for_existing(&dsp_path, clean_source, intent),
+            EditorSurface::Patch,
+            "promotion routes back into the patch editor"
+        );
+
+        // §3.4 eject: flips authored off but keeps layout for re-promotion.
+        let layout_path = dir.join("dsp.layout.json");
+        let before: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&layout_path).unwrap()).unwrap();
+        eseqlisp::widget_render::patcher::eject_patch_authored_sidecar(&dsp_path)
+            .expect("eject should flip the authored flag");
+        assert_eq!(
+            editor_surface_for_existing(&dsp_path, clean_source, intent),
+            EditorSurface::Code,
+            "ejected item opens as code"
+        );
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&layout_path).unwrap()).unwrap();
+        assert_eq!(after["authored"], serde_json::json!(false));
+        assert_eq!(
+            after["root"]["nodes"], before["root"]["nodes"],
+            "eject keeps layout data for re-promotion"
+        );
+
+        // §3.3 refusal: code islands block promotion with a diagnostic.
+        let island_source = format!("{clean_source}\n(let ((x 1)) x)\n");
+        let error = eseqlisp::widget_render::patcher::promote_source_to_patch(
+            &dsp_path,
+            &island_source,
+            intent,
+        )
+        .expect_err("code islands must refuse promotion");
+        assert!(
+            error.contains("Cannot open as patch"),
+            "promotion refusal should carry the diagnostic list: {error}"
+        );
+        assert_eq!(
+            editor_surface_for_existing(&dsp_path, &island_source, intent),
+            EditorSurface::Code
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn code_buffer_names_are_distinct_from_patcher_buffers() {
         assert_eq!(
             instrument_code_buffer_name("digitone"),

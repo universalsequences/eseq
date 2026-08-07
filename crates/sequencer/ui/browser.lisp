@@ -1320,6 +1320,30 @@
             (host-command "evaluate-editor-source" (dict))
           :color :white)
         (box))
+      ;; Open as patch (code editor, edit-existing): promote to the patch editor
+      (if (and (= SEQ.editor-surface "code")
+               (or (= SEQ.editor-mode "edit-instrument") (= SEQ.editor-mode "edit-effect")))
+        (button "Open as patch"
+          :variant :secondary
+          :width 13
+          :height 1.2
+          :font-size 10
+          :on-click |x y r|
+            (host-command "promote-editor-to-patch" (dict))
+          :color :white)
+        (box))
+      ;; Eject to code (patch editor, edit-existing only)
+      (if (and (= SEQ.editor-surface "patch")
+               (or (= SEQ.editor-mode "edit-instrument") (= SEQ.editor-mode "edit-effect")))
+        (button "Eject to code"
+          :variant :secondary
+          :width 13
+          :height 1.2
+          :font-size 10
+          :on-click |x y r|
+            (host-command "eject-editor-to-code" (dict))
+          :color :white)
+        (box))
       ;; Save button
       (if (sbrowser-editor-busy?)
         (box :height 1.2)
