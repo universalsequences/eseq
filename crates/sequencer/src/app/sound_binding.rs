@@ -777,10 +777,14 @@ impl App {
             self.loaded_sound_binding[track] = None;
         }
         self.state.release_bound_track_device_state(track);
-        // Bare lane (track-sound spec §2.2 rule 3b): the mirror is the track
-        // sound and no cell restore exists to re-load it after a repoint —
-        // do it here so a palette Apply/Fork on a bare lane is audible.
-        if self.state.effective_track_pattern_id(track).is_none() {
+        // Bare or track-owned lane (track-sound spec §2.2 rule 3b / §2.2.2):
+        // the mirror is the track sound and no cell restore exists to
+        // re-load it after a repoint — do it here so a palette Apply/Fork on
+        // such a lane is audible. In arrangement context this includes lanes
+        // whose cell resolves (inert-but-visible); read the mask AFTER the
+        // release above so a just-released borrow counts as track-owned.
+        let track_owned = track < 64 && self.state.track_owned_lane_mask() >> track & 1 == 1;
+        if track_owned || self.state.effective_track_pattern_id(track).is_none() {
             self.state.restore_track_sound_to_mirror(track);
         }
         self.sync_track_sound_bindings();

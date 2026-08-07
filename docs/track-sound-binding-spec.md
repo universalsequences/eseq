@@ -371,6 +371,15 @@ Litmus test for any future seam: after the seam runs, would an immediate
 stop-time save-back write anything into the track sound that the user never
 heard or dialed in? If yes, the seam is broken.
 
+**Borrow-claim rule (post-rev-4, fourth disease bug — the palette-clone
+note clobber): an arrangement-context borrow IS a rule-1/2 claim for the
+save masks.** A borrowed lane (selected take/clip) was in no mask at all —
+not latched, not track-owned (excluded *because* borrowed) — so a save-back
+stored the live grid's arrangement step content into the session cell's
+notes. `arrangement_borrowed_lane_mask()` now folds into
+`stale_live_lane_mask()` and `masked_save_masks()`, which is the single
+mask-derivation seam — never assemble the mask triple by hand.
+
 **Claim-end rule (post-rev-4, second poisoning fix): every path that ends a
 rule-1/2 claim in arrangement context reinstalls the track sound into the
 mirror.** A claimed lane's mirror legitimately holds foreign state (the

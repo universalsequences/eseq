@@ -20128,6 +20128,9 @@
                         ("referents", Value::String("Pattern 3, Take 2".to_string())),
                         ("base", Value::Bool(false)),
                         ("current", Value::Bool(true)),
+                        // This pair IS the track's own sound (track-sound
+                        // spec §2.1): the card renders the TRK chip.
+                        ("track-sound", Value::Bool(true)),
                         ("color", Value::Number(1.0)),
                         ("color-r", Value::Number(0.909_803_9)),
                         ("color-g", Value::Number(0.643_137_3)),
@@ -20189,6 +20192,18 @@
         assert_layout_inside(header, panel, "palette header");
         assert_layout_inside(base_row, panel, "gray base entry");
         assert_layout_inside(current_row, panel, "current entry");
+        // Track-sound marker (track-sound spec §2.1): the entry flagged
+        // :track-sound renders the TRK chip inside its card; unflagged
+        // entries render none. (Asserted before the source-label containment
+        // check below, which is a known pre-existing card-height overflow.)
+        let trk_chip = find_layout_node_by_stable_key(&layout, "sound-palette-trk-3")
+            .expect("the track-sound entry renders its TRK chip");
+        assert_finite_nonzero_rect(trk_chip, "TRK chip");
+        assert_layout_inside(trk_chip, current_row, "TRK chip");
+        assert!(
+            find_layout_node_by_stable_key(&layout, "sound-palette-trk-0").is_none(),
+            "an entry that is not the track sound renders no TRK chip"
+        );
         assert_layout_inside(source, current_row, "preset/sample source label");
         assert_layout_inside(diff_up, base_row, "diff badge");
 

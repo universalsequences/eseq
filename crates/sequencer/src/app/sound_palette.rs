@@ -47,6 +47,14 @@ pub struct PaletteEntry {
     pub referents_short: String,
     /// The scene-effective sound (§17.6): rendered as the gray base entry.
     pub is_base: bool,
+    /// This Patch IS the track's own sound (track-sound spec §2.1): its refs
+    /// match `track_sound_refs(track)`. The carrier PATTERN is hidden from
+    /// pattern listings, but its Patch/Mix entities are ordinary pool
+    /// entities that render as palette cards — this flag is what identifies
+    /// them (rendered as the card's "TRK" chip). Takes that share the track
+    /// sound (§2.4.1) reference the SAME pair, so a card can carry both take
+    /// referents and this flag at once.
+    pub is_track_sound: bool,
     /// The open target's current patch.
     pub is_current: bool,
     /// The instrument preset the patch was loaded from (a `*` suffix marks
@@ -179,26 +187,50 @@ impl App {
                 })
             }
             PaletteTarget::Cell => self.state.with_project_scenes(|scenes| {
-                // Effective resolution (§17.3 via the launch override):
-                // an active track-pattern launch wins, so the gesture hits
-                // the entity that is actually sounding.
-                if let Some(id) = scenes.effective_pattern_id(track) {
-                    let refs = scenes
-                        .track_pools
-                        .get(track)
-                        .and_then(|pool| pool.refs(id))
-                        .ok_or_else(|| {
-                            format!("The effective pattern on track {} has no sound", track + 1)
-                        })?;
-                    return Ok(ResolvedPaletteTarget {
-                        patterns: vec![id],
-                        takes: Vec::new(),
-                        cells: Vec::new(),
-                        current: refs,
-                    });
+                // View-keyed ownership (track-sound spec §2.2.2): on a
+                // track-owned lane — arrangement context, rules 1/2
+                // unclaimed — the TRACK SOUND is the effective sound. The
+                // current scene's cell is inert-but-visible there, so the
+                // gesture must never repoint it: the user hears (and edits)
+                // the track sound, and a fork/apply that silently moved the
+                // cell instead would diverge the palette from the monitor.
+                // An override pin is exempt: a track-pattern launch is a
+                // rule-2 claim and its pattern is what is actually sounding
+                // (§17.3's launch-override deviation below).
+                let pinned = scenes
+                    .track_overrides
+                    .get(track)
+                    .copied()
+                    .flatten()
+                    .is_some();
+                let track_owned = track < 64
+                    && self.state.track_owned_lane_mask() >> track & 1 == 1
+                    && !pinned;
+                if !track_owned {
+                    // Effective resolution (§17.3 via the launch override):
+                    // an active track-pattern launch wins, so the gesture
+                    // hits the entity that is actually sounding.
+                    if let Some(id) = scenes.effective_pattern_id(track) {
+                        let refs = scenes
+                            .track_pools
+                            .get(track)
+                            .and_then(|pool| pool.refs(id))
+                            .ok_or_else(|| {
+                                format!(
+                                    "The effective pattern on track {} has no sound",
+                                    track + 1
+                                )
+                            })?;
+                        return Ok(ResolvedPaletteTarget {
+                            patterns: vec![id],
+                            takes: Vec::new(),
+                            cells: Vec::new(),
+                            current: refs,
+                        });
+                    }
                 }
-                // Bare lane (track-sound spec §2.2 rule 3b): the TRACK
-                // SOUND is the target — it is what the lane monitors,
+                // Bare or track-owned lane (track-sound spec §2.2 rule 3b):
+                // the TRACK SOUND is the target — it is what the lane monitors,
                 // edits, and records with, and unlike the cell's refs it
                 // does not flap when arrangement playback moves
                 // `current_scene`. The carrier pattern rides the ordinary
@@ -401,6 +433,10 @@ impl App {
             let base_patch = scenes
                 .effective_sound_refs(track)
                 .map(|refs| refs.patch);
+            // The track's own sound (track-sound spec §2.1): the pair the
+            // carrier pattern references. Marks its Patch's card ("TRK").
+            let carrier = scenes.track_sound_pattern(track);
+            let track_sound_patch = scenes.track_sound_refs(track).map(|refs| refs.patch);
             // Reverse index: patch → referent names, in scene / pattern /
             // take display order; the first referent's mix is the entry's
             // Apply-with-mix pair.
@@ -427,10 +463,17 @@ impl App {
             pattern_ids.sort_by_key(|id| id.0);
             for id in pattern_ids {
                 if let Some(refs) = pool.refs(id) {
-                    let names = referents.entry(refs.patch).or_default();
-                    let label = format!("Pattern {}", id.0);
-                    if !names.contains(&label) {
-                        names.push(label);
+                    // The hidden carrier pattern (§2.1) is not a
+                    // user-visible pattern: it must not mint a "Pattern N"
+                    // referent chip — the entry's `is_track_sound` flag
+                    // marks its entities instead. Its pairing still anchors
+                    // Apply-with-mix.
+                    if Some(id) != carrier {
+                        let names = referents.entry(refs.patch).or_default();
+                        let label = format!("Pattern {}", id.0);
+                        if !names.contains(&label) {
+                            names.push(label);
+                        }
                     }
                     paired_mix.entry(refs.patch).or_insert(refs.mix);
                 }
@@ -454,6 +497,7 @@ impl App {
                 .map(|patch| {
                     let meta = pool.sounds.patch_meta.get(&patch);
                     let names = referents.remove(&patch).unwrap_or_default();
+                    let is_track_sound = Some(patch) == track_sound_patch;
                     let data = pool.sounds.patches.get(&patch);
                     let (params_up, params_down) = match (&current_defaults, data) {
                         (Some(current), Some(data))
@@ -472,12 +516,24 @@ impl App {
                             .unwrap_or_else(|| format!("Patch {}", patch.0 + 1)),
                         color: meta.and_then(|meta| meta.color),
                         referents: if names.is_empty() {
-                            "unused".to_string()
+                            // The track sound is never "unused": the carrier
+                            // references it even when nothing else does.
+                            if is_track_sound {
+                                "track sound".to_string()
+                            } else {
+                                "unused".to_string()
+                            }
                         } else {
                             names.join(", ")
                         },
                         referents_short: if names.is_empty() {
-                            "unused".to_string()
+                            // The card's TRK chip already says it; an empty
+                            // referent line avoids "TRK track" duplication.
+                            if is_track_sound {
+                                String::new()
+                            } else {
+                                "unused".to_string()
+                            }
                         } else {
                             names
                                 .iter()
@@ -486,6 +542,7 @@ impl App {
                                 .join(" ")
                         },
                         is_base: Some(patch) == base_patch,
+                        is_track_sound,
                         is_current: Some(patch) == current_patch,
                         preset: data
                             .and_then(|data| data.track_sound_state.loaded_preset.as_deref())
@@ -717,6 +774,10 @@ mod tests {
     #[test]
     fn apply_with_mix_relinks_a_new_scene_to_the_old_sound() {
         let (mut app, _take, scene_pattern, _chunks) = app_with_take();
+        // A scene workflow: in Seq view the Cell target is the scene's cell
+        // (§2.2.2 — in arrangement view it would be the track sound).
+        app.arrangement_view_visible = false;
+        app.state.set_arrangement_context(false);
         let old_refs = app
             .state
             .with_project_scenes(|scenes| scenes.track_pools[0].refs(scene_pattern))
@@ -930,6 +991,251 @@ mod tests {
             "the dot carries the clip's own patch color"
         );
         assert_ne!(lanes[0][0].2, lanes[0][1].2, "colors differ per patch");
+    }
+
+    /// Track-sound spec §2.2.2 ("the clone poisons the sequence",
+    /// 2026-08-06): in ARRANGEMENT view with nothing selected and nothing
+    /// latched, the lane is track-owned and the palette's Cell target IS the
+    /// track sound — the pair the user hears and edits. Pre-fix the target
+    /// resolved the current scene's inert-but-visible cell, so "+" silently
+    /// repointed the SESSION cell at a frozen clone while the audible track
+    /// sound stayed shared: the palette claimed divergence that never
+    /// happened, and the scene came back re-sounded.
+    #[test]
+    fn fork_on_a_track_owned_lane_forks_the_track_sound_not_the_inert_cell() {
+        let (mut app, take, scene_pattern, _chunks) = app_with_take();
+        assert_eq!(
+            app.state.track_owned_lane_mask() & 1,
+            1,
+            "rules 1/2 unclaimed in arrangement view: the track owns the lane"
+        );
+        let (carrier_before, cell_refs_before, cell_bits_before, take_sound_before) =
+            app.state.with_project_scenes(|scenes| {
+                (
+                    scenes.track_sound_refs(0).expect("track sound resolves"),
+                    scenes.track_pools[0]
+                        .refs(scene_pattern)
+                        .expect("cell refs"),
+                    scenes.track_pools[0]
+                        .get(scene_pattern)
+                        .expect("cell data")
+                        .track_bits,
+                    scenes.take_pools[0].get(take).expect("take").sound,
+                )
+            });
+
+        let target = app.palette_target_or_binding(0, None);
+        assert_eq!(target, PaletteTarget::Cell, "badge-open target is rule 3");
+        app.palette_fork(0, target).expect("fork succeeds");
+
+        app.state.with_project_scenes(|scenes| {
+            let carrier_after = scenes.track_sound_refs(0).expect("track sound resolves");
+            assert_ne!(
+                carrier_after, carrier_before,
+                "the TRACK SOUND forked — the target the user hears"
+            );
+            assert_eq!(
+                scenes.track_pools[0].refs(scene_pattern),
+                Some(cell_refs_before),
+                "the inert session cell keeps its own sound"
+            );
+            assert_eq!(
+                scenes.track_pools[0]
+                    .get(scene_pattern)
+                    .expect("cell data")
+                    .track_bits,
+                cell_bits_before,
+                "the cell's note content is untouched"
+            );
+            assert_eq!(
+                scenes.take_pools[0].get(take).expect("take").sound,
+                take_sound_before,
+                "un-cloned referents keep their refs"
+            );
+            // The fork is a value copy of what was sounding.
+            let forked = scenes.track_pools[0]
+                .compose_bare_sound(carrier_after)
+                .expect("fork resolves");
+            let source = scenes.track_pools[0]
+                .compose_bare_sound(carrier_before)
+                .expect("source resolves");
+            assert_eq!(
+                forked.instrument_slot.defaults,
+                source.instrument_slot.defaults,
+                "the clone sounds like what the user heard"
+            );
+        });
+    }
+
+    /// The Seq-view half of §2.2.2: the classic scene+pattern world is
+    /// untouched — a Cell fork targets the scene's effective pattern, the
+    /// track sound stays dormant, and the pattern's note content survives.
+    #[test]
+    fn fork_in_seq_view_targets_the_scene_cell_and_spares_the_track_sound() {
+        let (mut app, _take, scene_pattern, _chunks) = app_with_take();
+        app.arrangement_view_visible = false;
+        app.state.set_arrangement_context(false);
+        let (carrier_before, cell_refs_before, cell_bits_before) =
+            app.state.with_project_scenes(|scenes| {
+                (
+                    scenes.track_sound_refs(0).expect("track sound resolves"),
+                    scenes.track_pools[0]
+                        .refs(scene_pattern)
+                        .expect("cell refs"),
+                    scenes.track_pools[0]
+                        .get(scene_pattern)
+                        .expect("cell data")
+                        .track_bits,
+                )
+            });
+
+        app.palette_fork(0, PaletteTarget::Cell).expect("fork succeeds");
+
+        app.state.with_project_scenes(|scenes| {
+            let cell_refs_after = scenes.track_pools[0]
+                .refs(scene_pattern)
+                .expect("cell refs");
+            assert_ne!(cell_refs_after, cell_refs_before, "the cell forked");
+            assert_eq!(
+                scenes.scenes[scenes.current_scene].cell_sounds[0], cell_refs_after,
+                "the cell followed its pattern"
+            );
+            assert_eq!(
+                scenes.track_sound_refs(0),
+                Some(carrier_before),
+                "the track sound is dormant in Seq view"
+            );
+            assert_eq!(
+                scenes.track_pools[0]
+                    .get(scene_pattern)
+                    .expect("cell data")
+                    .track_bits,
+                cell_bits_before,
+                "the pattern's note content is untouched"
+            );
+        });
+    }
+
+    /// §2.2 rule 3b on a genuinely bare lane in arrangement view: "+" forks
+    /// the track sound, the carrier repoints at the clone, and the mirror
+    /// keeps sounding exactly what the user heard.
+    #[test]
+    fn fork_on_a_bare_lane_repoints_the_carrier_and_keeps_the_mirror() {
+        let (mut app, take, scene_pattern, _chunks) = app_with_take();
+        // Bare lane: drop the one scene cell (the take keeps its chunks).
+        app.state.with_scenes_mut(|scenes| {
+            assert!(scenes.clear_cell(0, 0).is_some());
+            assert!(scenes.delete_track_pattern(0, scene_pattern));
+        });
+        assert!(app.state.effective_track_pattern_id(0).is_none());
+        // "The preset": carrier entity and live mirror agree on 0.44.
+        let carrier_before = app.state.with_scenes_mut(|scenes| {
+            let refs = scenes.track_sound_refs(0).expect("track sound resolves");
+            let mut mix = (*scenes.track_pools[0].sounds.mixes[&refs.mix]).clone();
+            mix.volume = 0.44;
+            scenes.track_pools[0]
+                .sounds
+                .mixes
+                .insert(refs.mix, std::sync::Arc::new(mix));
+            refs
+        });
+        app.state.pattern.track_params[0].set_volume(0.44);
+        let take_sound_before = app
+            .state
+            .with_project_scenes(|scenes| scenes.take_pools[0].get(take).expect("take").sound);
+
+        app.palette_fork(0, PaletteTarget::Cell).expect("fork succeeds");
+
+        let carrier_after = app
+            .state
+            .with_project_scenes(|scenes| scenes.track_sound_refs(0))
+            .expect("track sound resolves");
+        assert_ne!(carrier_after, carrier_before, "the carrier repointed");
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume().to_bits(),
+            0.44f32.to_bits(),
+            "the mirror stays what the user heard"
+        );
+        app.state.with_project_scenes(|scenes| {
+            assert_eq!(
+                scenes.track_pools[0].sounds.mixes[&carrier_after.mix]
+                    .volume
+                    .to_bits(),
+                0.44f32.to_bits(),
+                "the clone carries the audible device state"
+            );
+            assert_eq!(
+                scenes.track_pools[0].sounds.mixes[&carrier_before.mix]
+                    .volume
+                    .to_bits(),
+                0.44f32.to_bits(),
+                "the source entities are unchanged"
+            );
+            assert_eq!(
+                scenes.take_pools[0].get(take).expect("take").sound,
+                take_sound_before,
+                "the take's binding is untouched by the track-sound fork"
+            );
+        });
+    }
+
+    /// The palette marks which card IS the track's own sound (task: "which
+    /// pool sound is the track sound?"): the entry whose refs match
+    /// `track_sound_refs` carries `is_track_sound`, the hidden carrier never
+    /// mints a bogus "Pattern N" referent chip, and a take that SHARES the
+    /// pair (§2.4.1) keeps the flag on the same card.
+    #[test]
+    fn palette_marks_the_track_sound_entry() {
+        let (mut app, take, _scene_pattern, _chunks) = app_with_take();
+        let carrier_refs = app
+            .state
+            .with_project_scenes(|scenes| scenes.track_sound_refs(0))
+            .expect("track sound resolves");
+        let entries = app.sound_palette_entries(0, PaletteTarget::Take(take));
+        let entry = entries
+            .iter()
+            .find(|entry| entry.patch == carrier_refs.patch)
+            .expect("the track sound's Patch renders as a card");
+        assert!(entry.is_track_sound, "the flag marks the pair");
+        assert!(
+            !entry.referents.contains("Pattern"),
+            "the hidden carrier is not a pattern referent: {}",
+            entry.referents
+        );
+        assert_eq!(
+            entry.referents, "track sound",
+            "a carrier-only pair is never 'unused'"
+        );
+        assert!(
+            entries
+                .iter()
+                .filter(|entry| entry.is_track_sound)
+                .count()
+                == 1,
+            "exactly one card is the track sound"
+        );
+
+        // Take-share nuance (§2.4.1): re-link the take to the track sound's
+        // pair — the SAME card now lists the take and keeps the flag.
+        app.palette_apply(
+            0,
+            PaletteTarget::Take(take),
+            carrier_refs.patch,
+            Some(carrier_refs.mix),
+        )
+        .expect("apply succeeds");
+        let entries = app.sound_palette_entries(0, PaletteTarget::Take(take));
+        let entry = entries
+            .iter()
+            .find(|entry| entry.patch == carrier_refs.patch)
+            .expect("the shared card renders");
+        assert!(entry.is_track_sound, "sharing does not clear the flag");
+        assert!(
+            entry.referents.contains("Take"),
+            "the take referent joined the card: {}",
+            entry.referents
+        );
+        assert!(entry.is_current, "the take target's current card is the pair");
     }
 
     /// The badge (§17.5): "Patch A — used by …" for the bound sound.

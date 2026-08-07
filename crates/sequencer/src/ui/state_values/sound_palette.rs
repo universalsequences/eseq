@@ -1346,6 +1346,10 @@ fn build_palette_value(
                 Rc::new(RefCell::new(Value::Bool(entry.is_base))),
             );
             row.insert(
+                "track-sound".to_string(),
+                Rc::new(RefCell::new(Value::Bool(entry.is_track_sound))),
+            );
+            row.insert(
                 "current".to_string(),
                 Rc::new(RefCell::new(Value::Bool(entry.is_current))),
             );

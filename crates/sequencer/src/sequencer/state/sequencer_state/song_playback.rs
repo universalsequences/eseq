@@ -451,7 +451,30 @@ impl SequencerState {
     /// so a live-grid save-back never clones foreign content over a scene
     /// cell's real pattern.
     pub fn stale_live_lane_mask(&self) -> u64 {
-        self.song_manual_latch_mask() | self.scene_silenced_mask() | self.track_owned_lane_mask()
+        self.song_manual_latch_mask()
+            | self.scene_silenced_mask()
+            | self.track_owned_lane_mask()
+            | self.arrangement_borrowed_lane_mask()
+    }
+
+    /// Borrowed lanes while the user stands in the ARRANGEMENT view. There
+    /// the live grid holds rule-1/2 content — the selection's or the audible
+    /// arrangement source's — and the current scene's cell is
+    /// inert-but-visible (track-sound spec §2.2.2), so a masked save-back
+    /// must treat the lane like a latched one: no cell write (the grid's
+    /// STEP content is the arrangement's, not the cell's — storing it
+    /// clobbers the session pattern's notes) and no track-sound write (the
+    /// mirror's device half is the borrow's, which the selection's own
+    /// edit-time write-through already persists). In Seq context a borrow
+    /// replaces only the device half and the capture substitutes it back
+    /// (`capture_current_pattern_snapshot`), so the cell save there stays a
+    /// self-write and the mask is empty.
+    pub(crate) fn arrangement_borrowed_lane_mask(&self) -> u64 {
+        if self.arrangement_context() {
+            self.sound_binding_borrowed_mask()
+        } else {
+            0
+        }
     }
 
     /// The `(stale, latched, track_owned)` masks `save_scene_snapshot_masked`
@@ -468,7 +491,10 @@ impl SequencerState {
     pub(crate) fn masked_save_masks(&self) -> (u64, u64, u64) {
         (
             self.stale_live_lane_mask(),
-            self.song_manual_latch_mask(),
+            // Arrangement-context borrows ride the latched mask: same
+            // treatment (skip the cell, skip the track sound), same reason
+            // (the mirror is the claim's, not the owner's).
+            self.song_manual_latch_mask() | self.arrangement_borrowed_lane_mask(),
             self.track_owned_lane_mask(),
         )
     }

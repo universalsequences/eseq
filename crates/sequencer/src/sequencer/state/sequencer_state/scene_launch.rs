@@ -1282,7 +1282,8 @@ impl SequencerState {
                 current_metadata.1,
                 current_metadata.2,
             );
-            scenes.save_scene_snapshot_masked(cur, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask(), self.track_owned_lane_mask());
+            let save_masks = self.masked_save_masks();
+            scenes.save_scene_snapshot_masked(cur, current_snapshot, save_masks.0, save_masks.1, save_masks.2);
             let new_idx = scenes.new_scene();
             self.pattern
                 .current_pattern
@@ -1370,7 +1371,8 @@ impl SequencerState {
                 current_metadata.1,
                 current_metadata.2,
             );
-            scenes.save_scene_snapshot_masked(cur, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask(), self.track_owned_lane_mask());
+            let save_masks = self.masked_save_masks();
+            scenes.save_scene_snapshot_masked(cur, current_snapshot, save_masks.0, save_masks.1, save_masks.2);
             let new_idx = scenes
                 .delete_scene(cur)
                 .ok_or_else(|| "The last scene cannot be deleted".to_string())?;
@@ -1441,7 +1443,8 @@ impl SequencerState {
             current_metadata.1,
             current_metadata.2,
         );
-        scenes.save_scene_snapshot_masked(cur, current_snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask(), self.track_owned_lane_mask());
+        let save_masks = self.masked_save_masks();
+        scenes.save_scene_snapshot_masked(cur, current_snapshot, save_masks.0, save_masks.1, save_masks.2);
         let Some(source) = scenes.scene_snapshot(cur) else {
             return false;
         };

@@ -794,6 +794,102 @@ mod tests {
         );
     }
 
+    /// User repro (2026-08-06, "the clone button poisons the sequence"): in
+    /// ARRANGEMENT view, record a take (the commit auto-selects it, which
+    /// BORROWS the lane), then press the palette's "+" to clone the take's
+    /// sound. The fork's history capture runs the full masked save-back —
+    /// and a BORROWED lane was in no mask, so the save wrote the live grid
+    /// into the current scene's cell pattern. The grid's STEP content on
+    /// that lane is the ARRANGEMENT's (whatever playback/recording left
+    /// there), not the cell's: the session pattern's notes get clobbered.
+    /// §2.2.2 re-keyed: an arrangement-context borrow is a rule-1/2 claim,
+    /// so the save-back must skip the lane entirely (the borrow's edits
+    /// already write through to pool entities at edit time).
+    #[test]
+    fn cloning_a_selected_take_leaves_the_cell_notes_and_track_sound_alone() {
+        let (mut app, anchor) = capture_app();
+        stand_in_the_arrangement_view(&mut app);
+        set_track_sound_volume(&mut app, 0.77);
+        app.state.pattern.track_params[0].set_volume(0.77);
+        let carrier_refs = app
+            .state
+            .with_project_scenes(|scenes| scenes.track_sound_refs(0))
+            .expect("track sound resolves");
+
+        // Record + commit: the take shares the carrier's refs (§2.4.1) and
+        // the commit auto-selects it, borrowing the lane.
+        assert!(app.take_record_note(0, press_at_beats(anchor, 4.0), 60.0, 1.0));
+        app.song_transport_stop().expect("capture stop commits");
+        let takes = app.state.track_takes(0);
+        assert_eq!(takes.len(), 1, "the take committed");
+        let take_id = takes[0].id;
+        assert_eq!(takes[0].sound, carrier_refs, "the take shares the track sound");
+        assert_eq!(
+            app.state.sound_binding_borrowed_mask() & 1,
+            1,
+            "the auto-selection borrowed the lane"
+        );
+
+        // The live grid on this lane holds ARRANGEMENT content, not the
+        // cell's — make that observable with a step the cell never had.
+        let cell = app
+            .state
+            .with_project_scenes(|scenes| scenes.scenes[scenes.current_scene].cells[0])
+            .expect("the session cell resolves");
+        let cell_bits_before = app.state.with_project_scenes(|scenes| {
+            scenes.track_pools[0].get(cell).expect("cell data").track_bits
+        });
+        app.state.pattern.patterns[0].set_step_active(3, true);
+
+        // The clone gesture ("+" on the palette, take target).
+        app.palette_fork(0, crate::app::sound_palette::PaletteTarget::Take(take_id))
+            .expect("fork succeeds");
+
+        app.state.with_project_scenes(|scenes| {
+            assert_eq!(
+                scenes.track_pools[0].get(cell).expect("cell data").track_bits,
+                cell_bits_before,
+                "the session cell's NOTE content is untouched by the clone"
+            );
+            assert_eq!(
+                scenes.track_sound_refs(0),
+                Some(carrier_refs),
+                "the track sound was never re-pointed"
+            );
+            assert_eq!(
+                scenes.track_pools[0].sounds.mixes[&carrier_refs.mix]
+                    .volume
+                    .to_bits(),
+                0.77f32.to_bits(),
+                "the un-cloned track-sound entities are unchanged"
+            );
+            let take = scenes.take_pools[0].get(take_id).expect("take");
+            assert_ne!(
+                take.sound, carrier_refs,
+                "the clone target's binding points at the new fork"
+            );
+            for chunk in &take.chunks {
+                assert_eq!(
+                    scenes.track_pools[0].refs(*chunk),
+                    Some(take.sound),
+                    "every chunk follows the fork"
+                );
+            }
+            assert_eq!(
+                scenes.track_pools[0].sounds.mixes[&take.sound.mix]
+                    .volume
+                    .to_bits(),
+                0.77f32.to_bits(),
+                "the fork is a value copy of what the user heard"
+            );
+        });
+        assert_eq!(
+            app.state.pattern.track_params[0].get_volume().to_bits(),
+            0.77f32.to_bits(),
+            "the mirror stays what the user heard"
+        );
+    }
+
     #[test]
     fn take_notes_land_at_latency_compensated_clip_positions() {
         let (mut app, anchor) = capture_app();

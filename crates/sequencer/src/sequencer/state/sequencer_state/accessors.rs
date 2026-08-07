@@ -1695,11 +1695,15 @@ impl SequencerState {
             names,
             instrument_types,
         );
+        // One derivation seam for the three masks (§2.8): `masked_save_masks`
+        // folds arrangement-context borrows into the stale + latched halves,
+        // so a selected clip's live grid never saves over the inert cell.
+        let save_masks = self.masked_save_masks();
         self.pattern
             .scenes
             .lock()
             .unwrap()
-            .save_scene_snapshot_masked(current_pattern, snapshot, self.stale_live_lane_mask(), self.song_manual_latch_mask(), self.track_owned_lane_mask())
+            .save_scene_snapshot_masked(current_pattern, snapshot, save_masks.0, save_masks.1, save_masks.2)
     }
 
     /// Write one lane out of a scene-derived snapshot into the pattern that

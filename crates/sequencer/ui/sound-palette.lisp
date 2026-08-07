@@ -165,6 +165,20 @@
                 :font-size 8.5 :color (if current :black :dim) :bg :transparent))
             )
           (sound-palette-diff-badges entry)
+          ;; TRK chip: this Patch/Mix pair IS the track's own sound
+          ;; (track-sound spec 2.1; takes may SHARE the pair, 2.4.1). The
+          ;; carrier pattern is hidden from pattern listings, so this chip
+          ;; is what identifies the track sound's card.
+          ;; Colored like the name label: on the CURRENT card the background
+          ;; is the entry color, so an entry-colored chip would vanish into
+          ;; it (cyan-on-cyan).
+          (if (get entry :track-sound)
+            (label "TRK"
+              :key (str "sound-palette-trk-" (get entry :patch-id))
+              :font-size 6.5
+              :color (if current :black (sound-palette-entry-color entry))
+              :bg :transparent)
+            (box :bg :transparent))
           (box :flex 1 :bg :transparent)
           )
         (let ((refs (get entry :referents-short)))
