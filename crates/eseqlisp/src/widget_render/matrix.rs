@@ -1601,6 +1601,59 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn pie_control_emits_every_cell_on_the_full_grid() {
+        // A 4x4 pie matrix must place all 16 cells on a 4x4 lattice — including
+        // zero cells, which still emit an instance (the neutral outline ring).
+        let mut props = HashMap::new();
+        props.insert("rows".to_string(), Value::Number(4.0));
+        props.insert("cols".to_string(), Value::Number(4.0));
+        props.insert("control".to_string(), Value::Keyword("pie".to_string()));
+        props.insert("min".to_string(), Value::Number(-2.0));
+        props.insert("max".to_string(), Value::Number(2.0));
+        props.insert(
+            "value".to_string(),
+            list(
+                (0..4)
+                    .map(|r| {
+                        list(
+                            (0..4)
+                                .map(|c| Value::Number(if (r + c) % 3 == 0 { 0.0 } else { 1.0 }))
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            ),
+        );
+        let node = matrix_node(props);
+
+        let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, test_viewport());
+        let instances: Vec<_> = prims
+            .iter()
+            .filter_map(|prim| match prim {
+                MetalPrimitive::WidgetInstance { instance, .. } => Some(instance),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(instances.len(), 16);
+
+        let mut xs: Vec<i64> = instances
+            .iter()
+            .map(|i| (i.ndc_min[0] * 1e6) as i64)
+            .collect();
+        xs.sort();
+        xs.dedup();
+        let mut ys: Vec<i64> = instances
+            .iter()
+            .map(|i| (i.ndc_min[1] * 1e6) as i64)
+            .collect();
+        ys.sort();
+        ys.dedup();
+        assert_eq!(xs.len(), 4, "expected 4 distinct columns");
+        assert_eq!(ys.len(), 4, "expected 4 distinct rows");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn non_pie_modes_leave_sign_uniform_neutral() {
         let mut props = HashMap::new();
         props.insert("rows".to_string(), Value::Number(1.0));

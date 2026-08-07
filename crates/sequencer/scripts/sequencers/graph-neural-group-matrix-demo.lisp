@@ -794,7 +794,10 @@
                 :background :mixer-strip-bg
                 :color (rgba 0.9 0.5 0.16 1)
                 :negative-color (rgba 0.3 0.55 0.95 1)
-                :empty-fill-color (rgba 0.16 0.17 0.2 1)
+                ;; Zero cells draw only this outline ring (at 0.6 alpha) — it must
+                ;; clearly beat the matrix background or the 4x4 grid reads as
+                ;; just-the-nonzero-cells.
+                :empty-fill-color (rgba 0.42 0.44 0.5 1)
                 :stroke-color (rgba 0.62 0.5 0.36 1)
                 :stroke-width 1.5
                 :stroke-active-only true
