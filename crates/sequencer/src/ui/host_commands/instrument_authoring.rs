@@ -9,6 +9,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "update-instrument",
     "preview-instrument-patch",
     "preview-effect-patch",
+    "evaluate-editor-source",
     "toggle-instrument-patcher-source",
     "enter-new-effect-editor",
     "save-new-effect",
@@ -164,6 +165,11 @@ pub(super) fn handle(
                 "SEQ",
                 "editor-instrument-run-mode",
                 Value::String("instrument".to_string()),
+            );
+            rt.set_reactive(
+                "SEQ",
+                "editor-surface",
+                Value::String("patch".to_string()),
             );
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -687,25 +693,49 @@ pub(super) fn handle(
                             &ui_epoch,
                             lg_raw,
                         );
-                        let buf_name = format!("*instrument-patcher:{inst_name}*");
-                        editor.remove_buffer_by_name(&buf_name);
-                        editor.create_scratch_buffer(
-                            &buf_name,
-                            "",
-                            BufferMode::ESeqLisp,
+                        let surface = editor_surface_for_existing(
+                            &file_path,
+                            &persisted_source,
+                            eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
                         );
-                        let patcher_source =
-                            instrument_patcher_buffer_source(&buf_name, &file_path);
-                        if let Err(error) =
-                            editor.runtime_mut().eval_str(&patcher_source)
-                        {
-                            editor.handle_host_event(HostEvent::Error(format!(
-                                "Failed to build patch editor: {error:?}"
-                            )));
-                            editor.remove_buffer_by_name(&buf_name);
-                            return;
-                        }
-                        reset_instrument_patcher_state(&file_path);
+                        let buf_name = match surface {
+                            EditorSurface::Patch => {
+                                let buf_name =
+                                    format!("*instrument-patcher:{inst_name}*");
+                                editor.remove_buffer_by_name(&buf_name);
+                                editor.create_scratch_buffer(
+                                    &buf_name,
+                                    "",
+                                    BufferMode::ESeqLisp,
+                                );
+                                let patcher_source = instrument_patcher_buffer_source(
+                                    &buf_name, &file_path,
+                                );
+                                if let Err(error) =
+                                    editor.runtime_mut().eval_str(&patcher_source)
+                                {
+                                    editor.handle_host_event(HostEvent::Error(
+                                        format!(
+                                            "Failed to build patch editor: {error:?}"
+                                        ),
+                                    ));
+                                    editor.remove_buffer_by_name(&buf_name);
+                                    return;
+                                }
+                                reset_instrument_patcher_state(&file_path);
+                                buf_name
+                            }
+                            EditorSurface::Code => {
+                                let buf_name = instrument_code_buffer_name(&inst_name);
+                                editor.remove_buffer_by_name(&buf_name);
+                                editor.create_scratch_buffer(
+                                    &buf_name,
+                                    &persisted_source,
+                                    BufferMode::DGenLisp,
+                                );
+                                buf_name
+                            }
+                        };
                         let layout_source =
                             show_instrument_patcher_layout_source(&buf_name);
                         if let Err(error) =
@@ -729,6 +759,7 @@ pub(super) fn handle(
                                 track,
                                 persisted_source,
                                 run_mode,
+                                surface,
                             ));
                         let rt = editor.runtime_mut();
                         rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
@@ -754,6 +785,13 @@ pub(super) fn handle(
                                 instrument_run_mode_label(run_mode).to_string(),
                             ),
                         );
+                        rt.set_reactive(
+                            "SEQ",
+                            "editor-surface",
+                            Value::String(
+                                editor_surface_label(surface).to_string(),
+                            ),
+                        );
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         refresh_visible_track_topology_layouts(&mut editor);
@@ -768,7 +806,9 @@ pub(super) fn handle(
                     if let Value::String(inst_name) = &*cell.borrow() {
                         let inst_name = inst_name.clone();
                         if let Some(session) = ctx.sessions.instrument_edit_session.as_ref() {
-                            if !session.visible_revision_valid {
+                            let code_surface =
+                                session.surface == EditorSurface::Code;
+                            if !code_surface && !session.visible_revision_valid {
                                 let rt = editor.runtime_mut();
                                 rt.set_reactive(
                                     "SEQ",
@@ -782,7 +822,9 @@ pub(super) fn handle(
                                 editor.refresh_runtime_side_effects();
                                 return;
                             }
-                            let flushed_macros =
+                            let flushed_macros = if code_surface {
+                                Vec::new()
+                            } else {
                                 match flush_staged_instrument_library_macro_edits(
                                     session,
                                 ) {
@@ -800,10 +842,33 @@ pub(super) fn handle(
                                         editor.refresh_runtime_side_effects();
                                         return;
                                     }
-                                };
+                                }
+                            };
+                            // Code sessions save the buffer text verbatim so
+                            // comments/formatting survive; patch sessions save
+                            // the last compiled emission.
+                            let source_to_save = if code_surface {
+                                match editor.read_buffer_text(&session.buffer_name)
+                                {
+                                    Some(text) => text,
+                                    None => {
+                                        editor.handle_host_event(HostEvent::Error(
+                                            format!(
+                                                "Code buffer '{}' is missing",
+                                                session.buffer_name
+                                            ),
+                                        ));
+                                        return;
+                                    }
+                                }
+                            } else {
+                                session.last_valid_source.clone()
+                            };
+                            let unevaluated_changes = code_surface
+                                && source_to_save != session.last_valid_source;
                             if let Err(e) = std::fs::write(
                                 &session.path,
-                                &session.last_valid_source,
+                                &source_to_save,
                             ) {
                                 let rt = editor.runtime_mut();
                                 rt.set_reactive(
@@ -887,9 +952,15 @@ pub(super) fn handle(
                             rt.run_reactive_cycle();
                             editor.refresh_runtime_side_effects();
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
-                            editor.handle_host_event(HostEvent::Status(format!(
-                                "Saved instrument '{inst_name}'"
-                            )));
+                            editor.handle_host_event(HostEvent::Status(
+                                if unevaluated_changes {
+                                    format!(
+                                        "Saved instrument '{inst_name}' with unevaluated changes (not hot-swapped)"
+                                    )
+                                } else {
+                                    format!("Saved instrument '{inst_name}'")
+                                },
+                            ));
                             return;
                         }
                         let buf_name = ctx.sessions.editor_buffer_name.clone().unwrap_or_default();
@@ -1331,15 +1402,118 @@ pub(super) fn handle(
             editor.refresh_runtime_side_effects();
         }
 
+        "evaluate-editor-source" => {
+            // Explicit compile + hot-swap of a code-editor buffer (C-c C-c /
+            // Eval button). Reuses the pending-preview pipeline; the compile
+            // path materializes defmacro-library imports itself.
+            if let Some(session) = ctx.sessions.instrument_edit_session.as_mut() {
+                if session.surface != EditorSurface::Code {
+                    return;
+                }
+                let Some(source) = editor.read_buffer_text(&session.buffer_name)
+                else {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Code buffer '{}' is missing",
+                        session.buffer_name
+                    )));
+                    return;
+                };
+                session.preview_generation =
+                    session.preview_generation.wrapping_add(1);
+                session.visible_revision_valid = false;
+                let generation = session.preview_generation;
+                let sample_rate = app.graph.sample_rate;
+                let asset_base =
+                    session.path.parent().map(|parent| parent.to_path_buf());
+                let compile_source = source.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let result =
+                        sequencer::lisp_host::compile_and_load_instrument_with_origin(
+                            &compile_source,
+                            sample_rate,
+                            asset_base.as_deref(),
+                            sequencer::lisp_host::DGenSourceOrigin::Draft,
+                        );
+                    let _ = tx.send(result);
+                });
+                ctx.sessions.pending_instrument_preview =
+                    Some(PendingInstrumentPreview {
+                        generation,
+                        source,
+                        layout: None,
+                        receiver: rx,
+                    });
+                let rt = editor.runtime_mut();
+                rt.set_reactive(
+                    "SEQ",
+                    "editor-error",
+                    Value::String("Preview compiling...".to_string()),
+                );
+                rt.run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+            } else if let Some(session) = ctx.sessions.effect_edit_session.as_mut() {
+                if session.surface != EditorSurface::Code {
+                    return;
+                }
+                let Some(source) = editor.read_buffer_text(&session.buffer_name)
+                else {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Code buffer '{}' is missing",
+                        session.buffer_name
+                    )));
+                    return;
+                };
+                session.preview_generation =
+                    session.preview_generation.wrapping_add(1);
+                session.visible_revision_valid = false;
+                let generation = session.preview_generation;
+                let sample_rate = app.graph.sample_rate;
+                let asset_base =
+                    session.path.parent().map(|parent| parent.to_path_buf());
+                let compile_source = source.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let result = sequencer::lisp_host::compile_and_load_with_origin(
+                        &compile_source,
+                        sample_rate,
+                        asset_base.as_deref(),
+                        sequencer::lisp_host::DGenSourceOrigin::Draft,
+                    );
+                    let _ = tx.send(result);
+                });
+                ctx.sessions.pending_effect_preview = Some(PendingEffectPreview {
+                    generation,
+                    source,
+                    layout: None,
+                    receiver: rx,
+                });
+                let rt = editor.runtime_mut();
+                rt.set_reactive(
+                    "SEQ",
+                    "editor-error",
+                    Value::String("Preview compiling...".to_string()),
+                );
+                rt.run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+            }
+        }
+
         "toggle-instrument-patcher-source" => {
             let (buffer_name, path, last_valid_source) =
                 if let Some(session) = ctx.sessions.instrument_edit_session.as_ref() {
+                    if session.surface == EditorSurface::Code {
+                        return;
+                    }
                     (
                         session.buffer_name.clone(),
                         session.path.clone(),
                         session.last_valid_source.clone(),
                     )
                 } else if let Some(session) = ctx.sessions.effect_edit_session.as_ref() {
+                    if session.surface == EditorSurface::Code {
+                        return;
+                    }
                     (
                         session.buffer_name.clone(),
                         session.path.clone(),
@@ -1507,6 +1681,11 @@ pub(super) fn handle(
                 "SEQ",
                 "editor-buffer-name",
                 Value::String(buf_name.clone()),
+            );
+            rt.set_reactive(
+                "SEQ",
+                "editor-surface",
+                Value::String("patch".to_string()),
             );
             rt.set_reactive(
                 "SEQ",
@@ -1865,25 +2044,49 @@ pub(super) fn handle(
                                 return;
                             }
                         };
-                        let buf_name = format!("*effect-patcher:{effect_name}*");
-                        editor.remove_buffer_by_name(&buf_name);
-                        editor.create_scratch_buffer(
-                            &buf_name,
-                            "",
-                            BufferMode::ESeqLisp,
+                        let surface = editor_surface_for_existing(
+                            &file_path,
+                            &persisted_source,
+                            eseqlisp::widget_render::patcher::PatcherIntent::Effect,
                         );
-                        let patcher_source =
-                            effect_patcher_buffer_source(&buf_name, &file_path);
-                        if let Err(error) =
-                            editor.runtime_mut().eval_str(&patcher_source)
-                        {
-                            editor.handle_host_event(HostEvent::Error(format!(
-                                "Failed to build patch editor: {error:?}"
-                            )));
-                            editor.remove_buffer_by_name(&buf_name);
-                            return;
-                        }
-                        reset_effect_patcher_state(&file_path);
+                        let buf_name = match surface {
+                            EditorSurface::Patch => {
+                                let buf_name =
+                                    format!("*effect-patcher:{effect_name}*");
+                                editor.remove_buffer_by_name(&buf_name);
+                                editor.create_scratch_buffer(
+                                    &buf_name,
+                                    "",
+                                    BufferMode::ESeqLisp,
+                                );
+                                let patcher_source = effect_patcher_buffer_source(
+                                    &buf_name, &file_path,
+                                );
+                                if let Err(error) =
+                                    editor.runtime_mut().eval_str(&patcher_source)
+                                {
+                                    editor.handle_host_event(HostEvent::Error(
+                                        format!(
+                                            "Failed to build patch editor: {error:?}"
+                                        ),
+                                    ));
+                                    editor.remove_buffer_by_name(&buf_name);
+                                    return;
+                                }
+                                reset_effect_patcher_state(&file_path);
+                                buf_name
+                            }
+                            EditorSurface::Code => {
+                                let buf_name = effect_code_buffer_name(&effect_name);
+                                editor.remove_buffer_by_name(&buf_name);
+                                editor.create_scratch_buffer(
+                                    &buf_name,
+                                    &persisted_source,
+                                    BufferMode::DGenLisp,
+                                );
+                                buf_name
+                            }
+                        };
                         let layout_source =
                             show_instrument_patcher_layout_source(&buf_name);
                         if let Err(error) =
@@ -1904,6 +2107,7 @@ pub(super) fn handle(
                                 buf_name.clone(),
                                 target,
                                 persisted_source,
+                                surface,
                             ));
                         let rt = editor.runtime_mut();
                         rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
@@ -1922,6 +2126,13 @@ pub(super) fn handle(
                             "editor-buffer-name",
                             Value::String(buf_name),
                         );
+                        rt.set_reactive(
+                            "SEQ",
+                            "editor-surface",
+                            Value::String(
+                                editor_surface_label(surface).to_string(),
+                            ),
+                        );
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                     }
@@ -1936,7 +2147,8 @@ pub(super) fn handle(
                 ));
                 return;
             };
-            if !session.visible_revision_valid {
+            let code_surface = session.surface == EditorSurface::Code;
+            if !code_surface && !session.visible_revision_valid {
                 let rt = editor.runtime_mut();
                 rt.set_reactive(
                     "SEQ",
@@ -1949,24 +2161,45 @@ pub(super) fn handle(
                 editor.refresh_runtime_side_effects();
                 return;
             }
-            let flushed_macros = match flush_staged_effect_library_macro_edits(session)
-            {
-                Ok(macros) => macros,
-                Err(error) => {
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive(
-                        "SEQ",
-                        "editor-error",
-                        Value::String(format!(
-                            "Failed to save library macro edits: {error}"
-                        )),
-                    );
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
-                    return;
+            let flushed_macros = if code_surface {
+                Vec::new()
+            } else {
+                match flush_staged_effect_library_macro_edits(session) {
+                    Ok(macros) => macros,
+                    Err(error) => {
+                        let rt = editor.runtime_mut();
+                        rt.set_reactive(
+                            "SEQ",
+                            "editor-error",
+                            Value::String(format!(
+                                "Failed to save library macro edits: {error}"
+                            )),
+                        );
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        return;
+                    }
                 }
             };
-            if let Err(e) = std::fs::write(&session.path, &session.last_valid_source) {
+            // Code sessions save the buffer text verbatim so comments and
+            // formatting survive; patch sessions save the compiled emission.
+            let source_to_save = if code_surface {
+                match editor.read_buffer_text(&session.buffer_name) {
+                    Some(text) => text,
+                    None => {
+                        editor.handle_host_event(HostEvent::Error(format!(
+                            "Code buffer '{}' is missing",
+                            session.buffer_name
+                        )));
+                        return;
+                    }
+                }
+            } else {
+                session.last_valid_source.clone()
+            };
+            let unevaluated_changes =
+                code_surface && source_to_save != session.last_valid_source;
+            if let Err(e) = std::fs::write(&session.path, &source_to_save) {
                 let rt = editor.runtime_mut();
                 rt.set_reactive(
                     "SEQ",
@@ -2046,10 +2279,14 @@ pub(super) fn handle(
             editor.refresh_visible_layouts_for_buffer_named("*fx*");
             fx_epoch.fetch_add(1, Ordering::Relaxed);
             ui_epoch.fetch_add(1, Ordering::Relaxed);
-            editor.handle_host_event(HostEvent::Status(format!(
-                "Saved effect '{}'",
-                session.name
-            )));
+            editor.handle_host_event(HostEvent::Status(if unevaluated_changes {
+                format!(
+                    "Saved effect '{}' with unevaluated changes (not hot-swapped)",
+                    session.name
+                )
+            } else {
+                format!("Saved effect '{}'", session.name)
+            }));
         }
 
         "cancel-editor" => {

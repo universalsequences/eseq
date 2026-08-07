@@ -896,8 +896,52 @@ fn effective_z(prim: &MetalPrimitive) -> i32 {
     crate::widget_render::effective_z_index(prim)
 }
 
+// Bootstraps a layout sidecar the way an explicit save would; opening a patch
+// no longer writes one (docs/patch-vs-code-editor-spec.md §3.5).
+fn save_layout_sidecar_for(path: &std::path::Path) {
+    let (_path, patch) = load_patch_from_props(&patcher_props_for_path(path)).unwrap();
+    sidecar::save_current_layout(path, &patch, &PatcherInteractionState::default()).unwrap();
+}
+
 #[test]
-fn missing_layout_sidecar_is_materialized_on_first_load() {
+fn editor_surface_decision_requires_authored_sidecar_and_clean_projection() {
+    let path = temp_patcher_dsp_path("patcher-surface-decision");
+    let clean_source =
+        "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)";
+    fs::write(&path, clean_source).unwrap();
+
+    assert!(
+        !source_opens_in_patch_editor(&path, clean_source, PatcherIntent::Instrument),
+        "no sidecar → code editor"
+    );
+
+    save_layout_sidecar_for(&path);
+    assert!(
+        source_opens_in_patch_editor(&path, clean_source, PatcherIntent::Instrument),
+        "authored sidecar + clean projection → patch editor"
+    );
+
+    let sidecar_path = sidecar::sidecar_path_for_source(&path);
+    let mut json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    json["version"] = serde_json::json!(1);
+    json.as_object_mut().unwrap().remove("authored");
+    fs::write(&sidecar_path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    assert!(
+        !source_opens_in_patch_editor(&path, clean_source, PatcherIntent::Instrument),
+        "pre-authored (v1) sidecars were auto-materialized on open and never count as authored"
+    );
+
+    save_layout_sidecar_for(&path);
+    let island_source = format!("{clean_source}\n(let ((x 1)) x)\n");
+    assert!(
+        !source_opens_in_patch_editor(&path, &island_source, PatcherIntent::Instrument),
+        "source that projects code islands → code editor even with an authored sidecar"
+    );
+}
+
+#[test]
+fn missing_layout_sidecar_is_not_written_on_load() {
     let path = temp_patcher_dsp_path("patcher-sidecar-materialize");
     fs::write(
         &path,
@@ -907,17 +951,26 @@ fn missing_layout_sidecar_is_materialized_on_first_load() {
 
     let (_path, patch) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
     let sidecar_path = sidecar::sidecar_path_for_source(&path);
-    let sidecar = fs::read_to_string(&sidecar_path).expect("sidecar should be written");
-    let json: serde_json::Value = serde_json::from_str(&sidecar).unwrap();
+    assert!(
+        !sidecar_path.exists(),
+        "opening a patch must not write a layout sidecar; layout persists only on explicit save"
+    );
+    assert!(patch.nodes.iter().any(|node| node.id == "phase"));
 
-    assert_eq!(json["version"], 1);
+    save_layout_sidecar_for(&path);
+    let sidecar = fs::read_to_string(&sidecar_path).expect("explicit save writes the sidecar");
+    let json: serde_json::Value = serde_json::from_str(&sidecar).unwrap();
+    assert_eq!(json["version"], 2);
+    assert_eq!(
+        json["authored"], true,
+        "saved sidecars mark the item as patch-authored"
+    );
     assert!(
         json["root"]["nodes"]
             .as_object()
             .expect("root nodes")
             .contains_key("phase")
     );
-    assert!(patch.nodes.iter().any(|node| node.id == "phase"));
 }
 
 #[test]
@@ -928,7 +981,7 @@ fn existing_layout_sidecar_preserves_positions_without_materializing_new_nodes()
         "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)",
     )
     .unwrap();
-    load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    save_layout_sidecar_for(&path);
     let sidecar_path = sidecar::sidecar_path_for_source(&path);
     let mut json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
@@ -969,7 +1022,7 @@ fn layout_sidecar_preserves_optional_node_widths() {
         "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)",
     )
     .unwrap();
-    load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    save_layout_sidecar_for(&path);
     let sidecar_path = sidecar::sidecar_path_for_source(&path);
     let mut json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
@@ -1260,7 +1313,7 @@ fn macro_layout_sidecar_is_scoped_by_macro_name() {
         "(defmacro op (sig) (def shaped (* sig 0.5)) shaped)\n(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(def out1 (op phase))\n(out out1 1 @name audio)",
     )
     .unwrap();
-    load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    save_layout_sidecar_for(&path);
     let sidecar_path = sidecar::sidecar_path_for_source(&path);
     let mut json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
@@ -1329,10 +1382,10 @@ fn stale_and_malformed_sidecar_entries_do_not_change_semantics() {
     fs::write(&sidecar_path, "{ not json").unwrap();
     let (_path, reparsed) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
     assert!(reparsed.nodes.iter().any(|node| node.id == "phase"));
-    assert!(
-        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&sidecar_path).unwrap())
-            .is_ok(),
-        "malformed sidecar should be replaced with a valid materialized layout"
+    assert_eq!(
+        fs::read_to_string(&sidecar_path).unwrap(),
+        "{ not json",
+        "a malformed sidecar is left untouched on load; layout falls back in-memory only"
     );
 }
 
@@ -2956,7 +3009,7 @@ fn agentic_bubble_macro_edit_rematerializes_edited_macro_layout_scope() {
         "(defmacro smooth (sig amt) (def shaped (mix sig amt 0.5)) shaped)\n(def input (in 1))\n(def out1 (smooth input 0.25))\n(out out1)",
     )
     .expect("write source");
-    load_patch_from_props(&patcher_props_for_path(&path)).expect("materialize sidecar");
+    save_layout_sidecar_for(&path);
     let sidecar_path = sidecar::sidecar_path_for_source(&path);
     let mut json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).expect("read sidecar"))
@@ -3156,6 +3209,7 @@ fn patcher_change_payload_does_not_install_emitted_layout_before_source_is_saved
         },
     );
     set_patcher_interaction_state(patcher_state_key(&node), state);
+    save_layout_sidecar_for(&path);
     let sidecar_path = sidecar::sidecar_path_for_source(&path);
     let original_sidecar: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
@@ -12616,6 +12670,7 @@ fn patcher_node_drag_release_reports_layout_change_for_host_layout_payload() {
     let node = patcher_test_node(&path);
     let key = patcher_state_key(&node);
     let root_patch = load_patch_from_props(&node.props).unwrap().1;
+    save_layout_sidecar_for(&path);
     let sidecar_path = sidecar::sidecar_path_for_source(&path);
     let original_sidecar: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();

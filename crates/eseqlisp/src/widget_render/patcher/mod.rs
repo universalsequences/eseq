@@ -48,6 +48,48 @@ pub fn emitted_source_path_from_buffer_name(name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Editor-surface decision for an existing instrument/effect
+/// (docs/patch-vs-code-editor-spec.md §3.2): the patch editor opens only for
+/// patch-authored content — an `authored` layout sidecar AND source the
+/// projector can represent without code islands. Everything else (agent- or
+/// hand-written code, all pre-`authored` sidecars) gets the code editor.
+pub fn source_opens_in_patch_editor(
+    source_path: &Path,
+    source: &str,
+    intent: PatcherIntent,
+) -> bool {
+    if !sidecar::sidecar_is_authored(source_path) {
+        return false;
+    }
+    let parsed = match crate::defmacro_library::default_library_root() {
+        Some(root) => {
+            let (_, library) = cached_defmacro_library(&root);
+            parse_patch_source_with_library(source, intent, &library)
+        }
+        None => parse_patch_source(source, intent),
+    };
+    let Ok(patch) = parsed else {
+        return false;
+    };
+    patch_is_fully_projectable(&patch)
+}
+
+fn patch_is_fully_projectable(patch: &Patch) -> bool {
+    patch.diagnostics.is_empty()
+        && !patch
+            .nodes
+            .iter()
+            .any(|node| node.kind == NodeKind::CodeIsland)
+        && patch.macros.iter().all(|macro_patch| {
+            macro_patch.patch.diagnostics.is_empty()
+                && !macro_patch
+                    .patch
+                    .nodes
+                    .iter()
+                    .any(|node| node.kind == NodeKind::CodeIsland)
+        })
+}
+
 pub struct EmittedSourceBufferSnapshot {
     pub path: String,
     pub buffer_name: String,

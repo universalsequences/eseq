@@ -37,6 +37,35 @@ pub(crate) enum ActiveDeleteTarget {
     },
 }
 
+/// Which editing surface a dsp edit session uses
+/// (docs/patch-vs-code-editor-spec.md §3.2): the patch editor for
+/// patch-authored content and new drafts, a plain DGenLisp text buffer for
+/// everything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EditorSurface {
+    Patch,
+    Code,
+}
+
+pub(super) fn editor_surface_for_existing(
+    path: &Path,
+    source: &str,
+    intent: eseqlisp::widget_render::patcher::PatcherIntent,
+) -> EditorSurface {
+    if eseqlisp::widget_render::patcher::source_opens_in_patch_editor(path, source, intent) {
+        EditorSurface::Patch
+    } else {
+        EditorSurface::Code
+    }
+}
+
+pub(super) fn editor_surface_label(surface: EditorSurface) -> &'static str {
+    match surface {
+        EditorSurface::Patch => "patch",
+        EditorSurface::Code => "code",
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) enum InstrumentEditMode {
     EditExisting {
@@ -61,6 +90,7 @@ pub(super) struct InstrumentEditSession {
     pub(super) visible_revision_valid: bool,
     pub(super) preview_generation: u64,
     pub(super) run_mode: CustomInstrumentRunMode,
+    pub(super) surface: EditorSurface,
     pub(super) mode: InstrumentEditMode,
 }
 
@@ -73,6 +103,7 @@ impl InstrumentEditSession {
         track: usize,
         persisted_source: String,
         run_mode: CustomInstrumentRunMode,
+        surface: EditorSurface,
     ) -> Self {
         Self {
             name,
@@ -85,6 +116,7 @@ impl InstrumentEditSession {
             visible_revision_valid: true,
             preview_generation: 0,
             run_mode,
+            surface,
             mode: InstrumentEditMode::EditExisting { persisted_source },
         }
     }
@@ -110,6 +142,7 @@ impl InstrumentEditSession {
             visible_revision_valid: true,
             preview_generation: 0,
             run_mode: CustomInstrumentRunMode::Instrument,
+            surface: EditorSurface::Patch,
             mode: InstrumentEditMode::CreateDraft {
                 temp_dir,
                 draft_track,
@@ -322,6 +355,7 @@ pub(super) struct EffectEditSession {
     pub(super) last_valid_layout: Option<String>,
     pub(super) visible_revision_valid: bool,
     pub(super) preview_generation: u64,
+    pub(super) surface: EditorSurface,
     pub(super) mode: EffectEditMode,
 }
 
@@ -332,6 +366,7 @@ impl EffectEditSession {
         buffer_name: String,
         target: EffectEditTarget,
         persisted_source: String,
+        surface: EditorSurface,
     ) -> Self {
         Self {
             name,
@@ -342,6 +377,7 @@ impl EffectEditSession {
             last_valid_layout: None,
             visible_revision_valid: true,
             preview_generation: 0,
+            surface,
             mode: EffectEditMode::EditExisting { persisted_source },
         }
     }
@@ -363,6 +399,7 @@ impl EffectEditSession {
             last_valid_layout: None,
             visible_revision_valid: true,
             preview_generation: 0,
+            surface: EditorSurface::Patch,
             mode: EffectEditMode::CreateDraft { temp_dir },
         }
     }
@@ -568,6 +605,14 @@ pub(super) fn instrument_patcher_buffer_source(buffer_name: &str, path: &Path) -
     format!(
         "(effect-buffer \"{buffer_name}\"\n  (patcher\n    :intent :instrument\n    :width :fill\n    :height :fill\n    :path \"{path}\"\n    :on-change (lambda (event)\n      (host-command \"preview-instrument-patch\" event))))\n"
     )
+}
+
+pub(super) fn instrument_code_buffer_name(name: &str) -> String {
+    format!("*instrument-code:{name}*")
+}
+
+pub(super) fn effect_code_buffer_name(name: &str) -> String {
+    format!("*effect-code:{name}*")
 }
 
 pub(super) fn effect_patcher_buffer_source(buffer_name: &str, path: &Path) -> String {

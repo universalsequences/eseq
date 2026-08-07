@@ -6,8 +6,9 @@
         apply_toggle_step_host_command, bus_mixer_targeted_invalidation,
         slice3_track_mixer_invalidation, BusMixerInvalidation, TrackMixerInvalidation,
         build_custom_instrument_ui_source_with_overlay, claim_param_sync_revision,
-        effect_patcher_buffer_source,
-        escape_lisp_string, finish_piano_roll_gesture, instrument_patcher_buffer_source,
+        editor_surface_for_existing, effect_code_buffer_name, effect_patcher_buffer_source,
+        escape_lisp_string, finish_piano_roll_gesture, instrument_code_buffer_name,
+        instrument_patcher_buffer_source, EditorSurface,
         key_should_reveal_sequencer_track, patcher_layout_sidecar_path_for_dsp,
         pull_shared_bus_state, reconciled_track_index,
         restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
@@ -1301,6 +1302,70 @@
         assert!(source.contains(":path \"effects/lexilush/dsp.lisp\""));
         assert!(source.contains("(host-command \"preview-effect-patch\" event)"));
         assert!(!source.contains("defmacro"));
+    }
+
+    #[test]
+    fn editor_surface_routes_by_authored_sidecar_and_projectability() {
+        let dir = std::env::temp_dir().join(format!(
+            "eseq-editor-surface-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dsp_path = dir.join("dsp.lisp");
+        let clean_source = "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)";
+        std::fs::write(&dsp_path, clean_source).unwrap();
+        let intent = eseqlisp::widget_render::patcher::PatcherIntent::Instrument;
+
+        assert_eq!(
+            editor_surface_for_existing(&dsp_path, clean_source, intent),
+            EditorSurface::Code,
+            "no sidecar → code editor"
+        );
+
+        let layout_path = dir.join("dsp.layout.json");
+        std::fs::write(
+            &layout_path,
+            r#"{ "version": 2, "authored": true, "root": { "nodes": {}, "cables": {} } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            editor_surface_for_existing(&dsp_path, clean_source, intent),
+            EditorSurface::Patch,
+            "authored sidecar + projectable source → patch editor"
+        );
+
+        let island_source = format!("{clean_source}\n(let ((x 1)) x)\n");
+        assert_eq!(
+            editor_surface_for_existing(&dsp_path, &island_source, intent),
+            EditorSurface::Code,
+            "code islands demote to the code editor even with an authored sidecar"
+        );
+
+        std::fs::write(
+            &layout_path,
+            r#"{ "version": 1, "root": { "nodes": {}, "cables": {} } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            editor_surface_for_existing(&dsp_path, clean_source, intent),
+            EditorSurface::Code,
+            "auto-materialized v1 sidecars never count as authored"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn code_buffer_names_are_distinct_from_patcher_buffers() {
+        assert_eq!(
+            instrument_code_buffer_name("digitone"),
+            "*instrument-code:digitone*"
+        );
+        assert_eq!(effect_code_buffer_name("lexilush"), "*effect-code:lexilush*");
     }
 
     #[test]

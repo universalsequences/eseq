@@ -1196,9 +1196,11 @@
         (label
           (if (sbrowser-editor-macro-action?) "Defmacro"
             (if (= SEQ.editor-mode "new-instrument") "New Instrument"
-              (if (= SEQ.editor-mode "edit-instrument") "Edit Instrument"
+              (if (= SEQ.editor-mode "edit-instrument")
+                (if (= SEQ.editor-surface "code") "Edit Instrument (code)" "Edit Instrument")
                 (if (= SEQ.editor-mode "new-effect") "New Effect"
-                  (if (= SEQ.editor-mode "edit-effect") "Edit Effect"
+                  (if (= SEQ.editor-mode "edit-effect")
+                    (if (= SEQ.editor-surface "code") "Edit Effect (code)" "Edit Effect")
                     "Editor")))))
           :font-size 12
           :color :white
@@ -1307,6 +1309,17 @@
               :color :red
               :bg :transparent)
             (box))))
+      ;; Eval button (code editor only): compile + hot-swap the buffer
+      (if (= SEQ.editor-surface "code")
+        (button "Eval (C-c C-c)"
+          :variant :secondary
+          :width 13
+          :height 1.2
+          :font-size 10
+          :on-click |x y r|
+            (host-command "evaluate-editor-source" (dict))
+          :color :white)
+        (box))
       ;; Save button
       (if (sbrowser-editor-busy?)
         (box :height 1.2)

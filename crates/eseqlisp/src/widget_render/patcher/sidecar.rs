@@ -16,16 +16,41 @@ use super::state::{
     patch_with_interaction_state, source_connection_id,
 };
 
-const SIDECAR_VERSION: u32 = 1;
+const SIDECAR_VERSION: u32 = 2;
+/// Version-1 sidecars predate the `authored` flag. They were auto-materialized
+/// on patcher open, so their presence does not mean the item was patch-authored;
+/// they load fine but never count as authored.
+const SIDECAR_MIN_SUPPORTED_VERSION: u32 = 1;
 const NODE_PADDING: f32 = 1.0;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct LayoutSidecar {
     version: u32,
+    /// True when this layout was produced by a patch-editor save. Only
+    /// authored sidecars route the item back into the patch editor.
+    #[serde(default)]
+    authored: bool,
     #[serde(default)]
     root: ScopeLayout,
     #[serde(default)]
     macros: BTreeMap<String, ScopeLayout>,
+}
+
+fn sidecar_version_supported(version: u32) -> bool {
+    (SIDECAR_MIN_SUPPORTED_VERSION..=SIDECAR_VERSION).contains(&version)
+}
+
+/// Whether the layout sidecar next to `source_path` marks the item as
+/// patch-authored (version >= 2 with `authored: true`).
+pub(super) fn sidecar_is_authored(source_path: &Path) -> bool {
+    let path = sidecar_path_for_source(source_path);
+    let Ok(source) = fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(sidecar) = serde_json::from_str::<LayoutSidecar>(&source) else {
+        return false;
+    };
+    sidecar.version >= 2 && sidecar.authored
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -75,6 +100,10 @@ pub(super) fn sidecar_path_for_source(source_path: &Path) -> PathBuf {
 }
 
 pub(super) fn apply_or_materialize(source_path: &Path, patch: &mut Patch) -> Result<(), String> {
+    // Opening a patch never writes the sidecar; layout is materialized
+    // in-memory only and persisted on explicit save. (A write here used to
+    // stamp every opened item as "has layout", polluting the patch-vs-code
+    // editor decision — see docs/patch-vs-code-editor-spec.md §3.5.)
     match load_sidecar(source_path) {
         Ok((SidecarStatus::Present, sidecar)) => {
             apply_sidecar(patch, &sidecar, false);
@@ -82,7 +111,7 @@ pub(super) fn apply_or_materialize(source_path: &Path, patch: &mut Patch) -> Res
         }
         Ok((SidecarStatus::Missing, _)) => {
             log_layout_auto_materialize(source_path, "missing-sidecar", patch);
-            save_patch_layout(source_path, patch, "materialize-missing-sidecar")
+            Ok(())
         }
         Err(error) => {
             eprintln!(
@@ -90,7 +119,7 @@ pub(super) fn apply_or_materialize(source_path: &Path, patch: &mut Patch) -> Res
                 source_path.display()
             );
             log_layout_auto_materialize(source_path, "invalid-sidecar", patch);
-            save_patch_layout(source_path, patch, "materialize-invalid-sidecar")
+            Ok(())
         }
     }
 }
@@ -100,6 +129,10 @@ pub(super) fn apply_or_materialize_excluding_macro_scopes(
     patch: &mut Patch,
     excluded_macros: &HashSet<String>,
 ) -> Result<(), String> {
+    // Unlike plain opens, this runs as part of an agentic macro edit that has
+    // already rewritten dsp.lisp on disk, so persisting the rebuilt layout here
+    // is an edit-flow write, not an open-time materialization: without it a
+    // stale sidecar scope would poison every later load of the edited macro.
     match load_sidecar(source_path) {
         Ok((SidecarStatus::Present, mut sidecar)) => {
             sidecar
@@ -147,7 +180,7 @@ pub(super) fn apply_layout_json(
 ) -> Result<(), String> {
     let sidecar: LayoutSidecar = serde_json::from_str(&source)
         .map_err(|error| format!("failed to parse '{source_label}': {error}"))?;
-    if sidecar.version != SIDECAR_VERSION {
+    if !sidecar_version_supported(sidecar.version) {
         return Err(format!(
             "unsupported layout sidecar version {} in '{}'",
             sidecar.version, source_label
@@ -209,7 +242,7 @@ fn load_sidecar(source_path: &Path) -> Result<(SidecarStatus, LayoutSidecar), St
         .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
     let sidecar: LayoutSidecar = serde_json::from_str(&source)
         .map_err(|error| format!("failed to parse '{}': {error}", path.display()))?;
-    if sidecar.version != SIDECAR_VERSION {
+    if !sidecar_version_supported(sidecar.version) {
         return Err(format!(
             "unsupported layout sidecar version {} in '{}'",
             sidecar.version,
@@ -385,6 +418,9 @@ fn sidecar_from_patch(patch: &Patch) -> LayoutSidecar {
     }
     LayoutSidecar {
         version: SIDECAR_VERSION,
+        // Sidecars are only serialized from live patch-editor state, so any
+        // written layout marks the item as patch-authored.
+        authored: true,
         root: scope_layout_from_patch(patch),
         macros,
     }

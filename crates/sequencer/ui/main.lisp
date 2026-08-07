@@ -85,6 +85,12 @@
 (bind-key "C-p" "seq-toggle-play")
 (bind-key "ESC" "seq-clear-ui-selection")
 
+;; Code editor: compile + hot-swap the current dsp code buffer. The host
+;; command no-ops unless a code edit session is active.
+(def seq-eval-editor-code ()
+  (host-command "evaluate-editor-source" (dict)))
+(bind-key "C-c C-c" "seq-eval-editor-code")
+
 (defstate piano-roll-placement :bottom)
 (defstate seq-main-view :session)
 (defstate step-panel-buffer "*sequencer*")
