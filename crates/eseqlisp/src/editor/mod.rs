@@ -36,6 +36,7 @@ use commands::key_str;
 use natives::register_editor_natives;
 
 const TILE_GAP_PX_PER_UNIT: f32 = 15.0;
+const TEXT_HORIZONTAL_SCROLL_MARGIN: usize = 3;
 
 fn tile_resize_cursor(dir: SplitDir) -> WidgetCursor {
     match dir {
@@ -3981,8 +3982,7 @@ impl Editor {
         }
     }
 
-    pub fn clamp_widget_scroll_offsets(&mut self) -> (f32, f32) {
-        let has_inline_widgets = !self.active_buffer().inline_code_widgets().is_empty();
+    fn widget_scroll_limits(&mut self) -> (f32, f32) {
         let viewport_width = self.runtime.layout_cols_exact();
         let viewport_height = self.active_leaf().widget_viewport_height.max(0.0);
         let viewport_height = if viewport_height > 0.0 {
@@ -4003,7 +4003,7 @@ impl Editor {
             .widget_scroll_limits_cache
             .filter(|entry| (entry.0, entry.1, entry.2, entry.3) == cache_key)
             .map(|entry| (entry.4, entry.5));
-        let (max_v, max_h) = cached.unwrap_or_else(|| {
+        cached.unwrap_or_else(|| {
             const SCROLL_SLOP_ROWS: f32 = 0.5;
             let (max_v, max_h) = self
                 .runtime
@@ -4031,14 +4031,30 @@ impl Editor {
                 max_h,
             ));
             (max_v, max_h)
-        });
+        })
+    }
+
+    fn clamp_widget_vertical_scroll_offset_to(&mut self, max_v: f32) {
+        let has_inline_widgets = !self.active_buffer().inline_code_widgets().is_empty();
         let leaf = self.active_leaf_mut();
         leaf.widget_scroll_top = if has_inline_widgets {
             0.0
         } else {
             leaf.widget_scroll_top.clamp(0.0, max_v)
         };
+    }
+
+    pub fn clamp_widget_scroll_offsets(&mut self) -> (f32, f32) {
+        let (max_v, max_h) = self.widget_scroll_limits();
+        self.clamp_widget_vertical_scroll_offset_to(max_v);
+        let leaf = self.active_leaf_mut();
         leaf.widget_scroll_left = leaf.widget_scroll_left.clamp(0.0, max_h);
+        (max_v, max_h)
+    }
+
+    pub(super) fn clamp_widget_vertical_scroll_offset(&mut self) -> (f32, f32) {
+        let (max_v, max_h) = self.widget_scroll_limits();
+        self.clamp_widget_vertical_scroll_offset_to(max_v);
         (max_v, max_h)
     }
 
@@ -6171,7 +6187,12 @@ impl Editor {
             return;
         };
         let buffer = &mut self.buffers[buffer_idx];
+        let scroll_top = buffer.scroll_top;
         buffer.set_text(&snapshot.lines.join("\n"));
+        // Undo restores document state, not navigation state. Keep the current
+        // viewport and let the normal visibility sync move it only when the
+        // restored cursor actually falls outside the visible rows.
+        buffer.scroll_top = scroll_top;
         let row = snapshot.cursor.0.min(buffer.lines.len().saturating_sub(1));
         let col = snapshot.cursor.1.min(buffer.lines[row].chars().count());
         buffer.cursor = (row, col);
@@ -6701,11 +6722,19 @@ impl Editor {
         let viewport_width = viewport_width as usize;
         let leaf = self.active_leaf_mut();
         let scroll_left = leaf.widget_scroll_left.floor() as usize;
+        let scroll_margin = TEXT_HORIZONTAL_SCROLL_MARGIN
+            .min(viewport_width.saturating_sub(1) / 2);
+        let left_margin_edge = scroll_left.saturating_add(scroll_margin);
+        let right_margin_edge = scroll_left
+            .saturating_add(viewport_width.saturating_sub(scroll_margin));
 
-        let next_scroll = if cursor_col < scroll_left {
+        let next_scroll = if cursor_col < left_margin_edge {
+            cursor_col.saturating_sub(scroll_margin)
+        } else if cursor_col >= right_margin_edge {
             cursor_col
-        } else if cursor_col >= scroll_left + viewport_width {
-            cursor_col.saturating_sub(viewport_width.saturating_sub(1))
+                .saturating_add(scroll_margin)
+                .saturating_add(1)
+                .saturating_sub(viewport_width)
         } else {
             scroll_left
         };

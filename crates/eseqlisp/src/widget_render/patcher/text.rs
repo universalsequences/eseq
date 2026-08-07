@@ -2,7 +2,7 @@ use crate::layout::Rect;
 use std::collections::HashMap;
 
 #[cfg(target_os = "macos")]
-use super::super::text_input::closest_char_index_for_x;
+use super::text_metrics::measured_closest_char_index;
 use super::super::text_input::{TextInputState, selection_range as text_selection_range};
 use super::metrics::{MIN_ZOOM, NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET};
 use super::model::MacroPatch;
@@ -23,42 +23,37 @@ pub(super) struct PatcherAutocompleteSuggestion {
     pub(super) documentation: Option<OperatorDocumentation>,
 }
 
-fn patcher_text_char_width_cells() -> f32 {
-    (NODE_FONT_SIZE * 0.55 / 10.0).max(0.25)
-}
-
-pub(super) fn patcher_text_cursor_at_col(rect: Rect, text: &str, local_col: f32) -> usize {
-    patcher_text_cursor_at_col_with_cell_width(rect, text, local_col, 10.0, 1.0)
+pub(super) fn patcher_text_cursor_at_col(rect: Rect, text: &str, local_col: f32) -> Option<usize> {
+    patcher_text_cursor_at_col_with_font_size(rect, text, local_col, NODE_FONT_SIZE, 1.0)
 }
 
 pub(super) fn patcher_text_cursor_at_col_with_zoom(
     rect: Rect,
     text: &str,
     local_col: f32,
+    font_size: f32,
     zoom: f32,
-) -> usize {
-    patcher_text_cursor_at_col_with_cell_width(rect, text, local_col, 10.0, zoom)
+) -> Option<usize> {
+    patcher_text_cursor_at_col_with_font_size(rect, text, local_col, font_size, zoom)
 }
 
-pub(super) fn patcher_text_cursor_at_col_with_cell_width(
+fn patcher_text_cursor_at_col_with_font_size(
     rect: Rect,
     text: &str,
     local_col: f32,
-    cell_w: f32,
+    font_size: f32,
     zoom: f32,
-) -> usize {
+) -> Option<usize> {
     let zoom = zoom.max(MIN_ZOOM);
     let target = ((local_col - rect.col - NODE_TEXT_COL_OFFSET * zoom) / zoom).max(0.0);
     #[cfg(target_os = "macos")]
     {
-        closest_char_index_for_x(text, NODE_FONT_SIZE, target, cell_w).min(text.chars().count())
+        measured_closest_char_index(text, font_size, target)
+            .map(|index| index.min(text.chars().count()))
     }
     #[cfg(not(target_os = "macos"))]
     {
-        ((target / (patcher_text_char_width_cells() * zoom))
-            .round()
-            .max(0.0) as usize)
-            .min(text.chars().count())
+        Some((target.round().max(0.0) as usize).min(text.chars().count()))
     }
 }
 
@@ -324,12 +319,16 @@ pub(super) fn update_patcher_text_edit_pointer(
     edit: &mut PatcherTextEdit,
     rect: Rect,
     local_col: f32,
+    font_size: f32,
     zoom: f32,
     selecting: bool,
     release: bool,
 ) {
-    let cursor_pos =
-        patcher_text_cursor_at_col_with_cell_width(rect, &edit.text, local_col, 10.0, zoom);
+    let Some(cursor_pos) =
+        patcher_text_cursor_at_col_with_font_size(rect, &edit.text, local_col, font_size, zoom)
+    else {
+        return;
+    };
     if selecting {
         if edit.state.selection_anchor.is_none() {
             edit.state.selection_anchor = Some(edit.state.cursor_pos);

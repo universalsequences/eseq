@@ -1,6 +1,6 @@
 use super::super::WidgetDefinition;
 use super::super::WidgetKeyEvent;
-use super::super::text_input::{TextInputState, cache_char_widths, text_width_from_char_cache};
+use super::super::text_input::TextInputState;
 use super::alignment::*;
 use super::display::*;
 use super::emit::{emit_patch_debug_lisp, emit_patch_debug_lisp_for_view};
@@ -14,6 +14,7 @@ use super::model::{
 use super::project::{dgenlisp_operator_documentation, dgenlisp_operator_names};
 use super::render::*;
 use super::state::*;
+use super::text_metrics::{cache_text_widths, measured_text_width};
 use super::writeback::{
     WriteBackError, emit_patch_writeback, emit_patch_writeback_result,
     emit_patch_writeback_result_with_library,
@@ -2461,7 +2462,7 @@ fn node_size_uses_cached_proportional_character_widths() {
         cell_h: 20.0,
         inherited_font_size: NODE_FONT_SIZE,
     };
-    cache_char_widths(label.clone(), NODE_FONT_SIZE, &measure_ctx);
+    cache_text_widths(label.clone(), NODE_FONT_SIZE, &measure_ctx);
 
     let node = PatchNode {
         id: "wide-narrow".to_string(),
@@ -16271,12 +16272,21 @@ fn metal_render_endpoint_drag_replaces_original_selected_cable() {
 fn metal_render_emits_edit_cursor_as_foreground_overlay() {
     let mut state = PatcherInteractionState::default();
     let created_id = allocate_created_node(&mut state, "root", (2.0, 2.0));
+    let edit_text = "mi".to_string();
+    let measurer = VariableWidthTextMeasurer;
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: NODE_FONT_SIZE,
+    };
+    cache_text_widths(edit_text.clone(), NODE_FONT_SIZE, &measure_ctx);
     state.text_edit = Some(PatcherTextEdit {
-        node_id: created_id,
-        text: "phasor".to_string(),
+        node_id: created_id.clone(),
+        text: edit_text,
         original_text: String::new(),
         state: TextInputState {
-            cursor_pos: 6,
+            cursor_pos: 2,
             selection_anchor: None,
             selecting: false,
         },
@@ -16284,16 +16294,19 @@ fn metal_render_emits_edit_cursor_as_foreground_overlay() {
     });
 
     let patch = patch_with_interaction_state(Patch::default(), &state, "root");
+    let draw_rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 100.0,
+        height: 40.0,
+    };
+    let pan = PatcherPanState::default();
+    let node_rect = patch_node_rects(&patch, draw_rect, &pan)[&created_id];
     let mut prims = Vec::new();
     draw_patch(
         &mut prims,
         &patch,
-        Rect {
-            row: 0.0,
-            col: 0.0,
-            width: 100.0,
-            height: 40.0,
-        },
+        draw_rect,
         WidgetViewport {
             cell_w: 10.0,
             cell_h: 20.0,
@@ -16307,23 +16320,29 @@ fn metal_render_emits_edit_cursor_as_foreground_overlay() {
             scroll_left: 0.0,
             inherited_hover: false,
         },
-        &PatcherPanState::default(),
+        &pan,
         &state,
     );
 
-    let cursor_count = prims
+    let cursors = prims
         .iter()
-        .filter(|prim| {
-            matches!(
-                inner_prim(prim),
-                MetalPrimitive::ForegroundRect(rect)
-                    if rect.color == theme::PATCHER_EDIT_CURSOR()
-            )
+        .filter_map(|prim| match inner_prim(prim) {
+            MetalPrimitive::ForegroundRect(rect) if rect.color == theme::PATCHER_EDIT_CURSOR() => {
+                Some(rect)
+            }
+            _ => None,
         })
-        .count();
+        .collect::<Vec<_>>();
     assert_eq!(
-        cursor_count, 1,
+        cursors.len(), 1,
         "active patcher text edit should render exactly one foreground cursor"
+    );
+    let zoom = patcher_zoom(&pan);
+    let expected_col = node_rect.col + (NODE_TEXT_COL_OFFSET + 2.2) * zoom;
+    assert!(
+        (cursors[0].rect.col - expected_col).abs() < 0.001,
+        "cursor must use the measured 18px + 4px glyph advances; expected {expected_col}, got {}",
+        cursors[0].rect.col,
     );
 }
 
@@ -16401,6 +16420,17 @@ fn metal_render_emits_agentic_bubble_body_as_foreground_overlay() {
     let mut state = PatcherInteractionState::default();
     allocate_agentic_bubble(&mut state, (2.0, 3.0));
     set_patcher_interaction_state(key, state);
+    let measurer = VariableWidthTextMeasurer;
+    cache_text_widths(
+        "cmd+k prompt".to_string(),
+        13.0,
+        &MeasureCtx {
+            text_measurer: Some(&measurer),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            inherited_font_size: 13.0,
+        },
+    );
 
     let prims = build_metal_primitives_for_patcher(
         &node,
@@ -16450,12 +16480,24 @@ fn metal_render_uses_wide_wrapped_answer_agentic_bubble() {
     let mut state = PatcherInteractionState::default();
     let bubble_id = allocate_agentic_bubble(&mut state, (2.0, 3.0));
     let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    let answer = "This macro implements a virtual-analog TR-707-style kick drum synthesizer:\n\n1. **Envelopes**: It uses three separate decay histories triggered by 'trig'.\n2. **Pitch Modulation**: The fast envelope creates a rapid downward pitch sweep applied to both resonators."
+        .to_string();
     bubble.state = AgenticBubbleState::Answer {
-        text: "This macro implements a virtual-analog TR-707-style kick drum synthesizer:\n\n1. **Envelopes**: It uses three separate decay histories triggered by 'trig'.\n2. **Pitch Modulation**: The fast envelope creates a rapid downward pitch sweep applied to both resonators."
-            .to_string(),
+        text: answer.clone(),
         answered_at: Instant::now(),
     };
     set_patcher_interaction_state(key, state);
+    let measurer = VariableWidthTextMeasurer;
+    cache_text_widths(
+        answer,
+        13.0,
+        &MeasureCtx {
+            text_measurer: Some(&measurer),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            inherited_font_size: 13.0,
+        },
+    );
 
     let prims = build_metal_primitives_for_patcher(
         &node,
@@ -16510,9 +16552,21 @@ fn metal_render_uses_wide_wrapped_answer_agentic_bubble() {
         answer_lines.len() > 1,
         "answer text should wrap into multiple rendered lines"
     );
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: 13.0,
+    };
+    for line in &answer_lines {
+        cache_text_widths((*line).to_string(), 13.0, &measure_ctx);
+    }
     let max_answer_line_width = answer_lines
         .iter()
-        .map(|line| text_width_from_char_cache(line, 13.0, 13.0 * 0.62 / 10.0))
+        .map(|line| {
+            measured_text_width(line, 13.0)
+                .expect("rendered answer line must have measured glyph advances")
+        })
         .fold(0.0, f32::max);
     assert!(
         max_answer_line_width <= body_width - 1.3 + 0.1,
@@ -16800,7 +16854,7 @@ fn metal_render_places_committed_node_tail_after_measured_space_width() {
         cell_h: 20.0,
         inherited_font_size: NODE_FONT_SIZE,
     };
-    cache_char_widths(label, NODE_FONT_SIZE, &measure_ctx);
+    cache_text_widths(label, NODE_FONT_SIZE, &measure_ctx);
 
     let patch = Patch {
         nodes: vec![PatchNode {
@@ -17563,4 +17617,92 @@ fn typing_into_created_node_never_mutates_source_nodes() {
         }
     }
     reset_patcher_widget_state(key);
+}
+
+const INLINE_MOD_CONSUMER_SOURCE: &str = r#"
+(def signal (in 1))
+(param gain @default 0.5 @mod true @mod-mode additive)
+(def scaled (* signal (mod gain)))
+(out scaled 1)
+"#;
+
+/// Deleting the node that consumed `gain~` must not resurrect the hidden
+/// `mod` accessor node the projector synthesized for the sugar.
+#[test]
+fn deleting_inline_mod_consumer_drops_the_hidden_mod_node() {
+    let root_patch = parse(INLINE_MOD_CONSUMER_SOURCE);
+    let mod_node_id = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "mod")
+        .expect("projector synthesizes a hidden mod node for gain~")
+        .id
+        .clone();
+    assert!(hidden_inline_node_ids(&root_patch).contains(&mod_node_id));
+
+    let mut state = PatcherInteractionState::default();
+    state.selected_nodes.insert("scaled".to_string());
+    assert!(delete_selected_nodes(&mut state, "root"));
+
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    assert!(
+        !visible.nodes.iter().any(|node| node.id == mod_node_id),
+        "the hidden mod accessor must be dropped with its only consumer, nodes={:?}",
+        visible
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.op.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        visible.nodes.iter().any(|node| node
+            .param
+            .as_ref()
+            .is_some_and(|param| param.name == "gain")),
+        "the gain param node itself must survive"
+    );
+
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        !generated.source.contains("(mod "),
+        "regeneration must not persist an orphaned mod accessor:\n{}",
+        generated.source
+    );
+
+    let reparsed = parse(&generated.source);
+    assert!(
+        !reparsed.nodes.iter().any(|node| node.op == "mod"),
+        "reparsing the regenerated source must not surface a mod node:\n{}",
+        generated.source
+    );
+}
+
+/// A user-authored standalone `(def m (mod gain))` is a real node: it must
+/// survive regeneration even when nothing consumes it.
+#[test]
+fn explicit_standalone_mod_def_round_trips_when_unused() {
+    let patch = parse(
+        r#"
+(def signal (in 1))
+(param gain @default 0.5 @mod true @mod-mode additive)
+(def gmod (mod gain))
+(out signal 1)
+"#,
+    );
+    assert!(
+        patch.nodes.iter().any(|node| node.op == "mod"),
+        "explicit mod def should project as a node"
+    );
+    let generated = generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(mod "),
+        "an explicitly authored mod def must survive regeneration:\n{}",
+        generated.source
+    );
+    let reparsed = parse(&generated.source);
+    assert!(
+        reparsed.nodes.iter().any(|node| node.op == "mod"),
+        "explicit mod node must reparse:\n{}",
+        generated.source
+    );
 }

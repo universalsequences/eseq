@@ -1,10 +1,7 @@
 use std::collections::HashMap;
 
 #[cfg(target_os = "macos")]
-use super::super::text_input::{
-    cursor_x_from_char_cache, selection_range as text_selection_range, text_width_from_char_cache,
-    wrap_text_to_measured_lines,
-};
+use super::super::text_input::selection_range as text_selection_range;
 use super::super::{CellBuffer, styled_cell};
 #[cfg(target_os = "macos")]
 use super::super::{
@@ -18,7 +15,9 @@ use crate::layout::{Rect, f64_to_f32};
 use crate::theme;
 use crate::vm::Value;
 
-use super::display::{node_display_label, preview};
+use super::display::{node_display_label, node_font_size, preview};
+#[cfg(target_os = "macos")]
+use super::text_metrics::{measured_cursor_offset, measured_text_width, wrap_measured_text};
 use super::geometry::{
     connection_cable_edit_points, connection_endpoints, node_resize_handle_centers,
     patch_content_size, patch_input_indices, patch_input_slot_counts, patch_node_rects,
@@ -26,8 +25,8 @@ use super::geometry::{
 };
 use super::load_patch_from_props;
 use super::metrics::{
-    CABLE_HANDLE_RADIUS_PX, CODE_NODE_FONT_SIZE, NODE_BORDER_WIDTH_PX, NODE_CORNER_RADIUS_PX,
-    NODE_FONT_SIZE, NODE_RESIZE_HANDLE_SIZE_CELLS, NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX,
+    CABLE_HANDLE_RADIUS_PX, NODE_BORDER_WIDTH_PX, NODE_CORNER_RADIUS_PX,
+    NODE_RESIZE_HANDLE_SIZE_CELLS, NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX,
     PORT_OUTER_DIAMETER_PX, SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
 };
 use super::model::{
@@ -342,7 +341,9 @@ fn draw_agentic_bubbles(
             _ if bubble.prompt.trim().is_empty() => "cmd+k prompt".to_string(),
             _ => bubble.prompt.clone(),
         };
-        let prompt_lines = wrap_agentic_prompt_lines(&prompt, inner_width / zoom, viewport);
+        let Some(prompt_lines) = wrap_agentic_prompt_lines(&prompt, inner_width / zoom) else {
+            continue;
+        };
         let height = ((4.0 + prompt_lines.len() as f32 * 1.18).max(5.8)) * zoom;
         let pending_pulse = match &bubble.state {
             AgenticBubbleState::Pending { .. } => {
@@ -464,7 +465,7 @@ fn draw_agentic_bubbles(
             ));
         }
         if matches!(bubble.state, AgenticBubbleState::Editing) {
-            push_agentic_bubble_cursor(prims, bubble, x, y, inner_width, viewport, zoom);
+            push_agentic_bubble_cursor(prims, bubble, x, y, inner_width, zoom);
         }
     }
 }
@@ -476,14 +477,15 @@ fn push_agentic_bubble_cursor(
     x: f32,
     y: f32,
     inner_width: f32,
-    viewport: WidgetViewport,
     zoom: f32,
 ) {
     let cursor_pos = bubble
         .text_state
         .cursor_pos
         .min(bubble.prompt.chars().count());
-    let lines = wrap_agentic_prompt_lines(&bubble.prompt, inner_width / zoom, viewport);
+    let Some(lines) = wrap_agentic_prompt_lines(&bubble.prompt, inner_width / zoom) else {
+        return;
+    };
     let cursor_line_index = lines
         .iter()
         .position(|line| cursor_pos >= line.start && cursor_pos <= line.end)
@@ -492,10 +494,16 @@ fn push_agentic_bubble_cursor(
         .get(cursor_line_index)
         .map(|line| line.start)
         .unwrap_or(0);
-    let cursor_before_line =
-        cursor_x_from_char_cache(&bubble.prompt, 13.0, line_start, viewport.cell_w);
-    let cursor_before_prompt =
-        cursor_x_from_char_cache(&bubble.prompt, 13.0, cursor_pos, viewport.cell_w);
+    let Some(cursor_before_line) =
+        measured_cursor_offset(&bubble.prompt, 13.0, line_start)
+    else {
+        return;
+    };
+    let Some(cursor_before_prompt) =
+        measured_cursor_offset(&bubble.prompt, 13.0, cursor_pos)
+    else {
+        return;
+    };
     let cursor_x = x + 0.65 * zoom + (cursor_before_prompt - cursor_before_line).max(0.0) * zoom;
     prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
         rect: Rect {
@@ -521,12 +529,8 @@ fn push_z_layered(prims: &mut Vec<MetalPrimitive>, z_index: i32, layer: Vec<Meta
 fn wrap_agentic_prompt_lines(
     text: &str,
     max_width_cells: f32,
-    viewport: WidgetViewport,
-) -> Vec<super::super::text_input::WrappedLine> {
-    if text.trim().is_empty() {
-        return wrap_text_to_measured_lines("", max_width_cells, 13.0, viewport.cell_w);
-    }
-    wrap_text_to_measured_lines(text, max_width_cells, 13.0, viewport.cell_w)
+) -> Option<Vec<super::text_metrics::MeasuredLine>> {
+    wrap_measured_text(text, max_width_cells, 13.0)
 }
 
 #[cfg(target_os = "macos")]
@@ -884,9 +888,10 @@ fn push_hovered_port_tooltip(
     let center = port_center(node_rect, port_index, port_count, is_input);
     let font_size = 10.5;
     let text = preview(&text, 48);
-    let fallback_char_width = font_size * 0.6 / viewport.cell_w.max(1.0);
-    let text_width_cells = (text_width_from_char_cache(&text, font_size, fallback_char_width)
-        * zoom)
+    let Some(measured_text_width) = measured_text_width(&text, font_size) else {
+        return;
+    };
+    let text_width_cells = (measured_text_width * zoom)
         .max(4.0 * zoom)
         .min(32.0 * zoom);
     let padding_x = 0.55 * zoom;
@@ -1471,15 +1476,16 @@ fn push_node(
         );
     }
     push_z_layered(prims, node_base_z + PatcherZSlot::Ports as i32, port_prims);
+    let font_size = node_font_size(node);
     let mut selection_prims = Vec::new();
-    push_node_edit_selection(&mut selection_prims, rect, viewport, edit, zoom);
+    push_node_edit_selection(&mut selection_prims, rect, edit, font_size, zoom);
     push_z_layered(
         prims,
         node_base_z + PatcherZSlot::EditSelection as i32,
         selection_prims,
     );
     let mut text_prims = Vec::new();
-    push_node_label(&mut text_prims, node, rect, text, edit, viewport, zoom);
+    push_node_label(&mut text_prims, node, rect, text, edit, zoom);
     if let Some(diagnostic) = &node.diagnostic {
         text_prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
@@ -1497,7 +1503,7 @@ fn push_node(
     }
     push_z_layered(prims, node_base_z + PatcherZSlot::Text as i32, text_prims);
     let mut cursor_prims = Vec::new();
-    push_node_edit_cursor(&mut cursor_prims, rect, viewport, edit, zoom);
+    push_node_edit_cursor(&mut cursor_prims, rect, edit, font_size, zoom);
     push_z_layered(
         prims,
         node_base_z + PatcherZSlot::EditCursor as i32,
@@ -1621,8 +1627,8 @@ fn push_autocomplete_panel_chrome(
 fn push_node_edit_selection(
     prims: &mut Vec<MetalPrimitive>,
     rect: Rect,
-    viewport: WidgetViewport,
     edit: Option<&PatcherTextEdit>,
+    font_size: f32,
     zoom: f32,
 ) {
     let Some(edit) = edit else {
@@ -1631,12 +1637,15 @@ fn push_node_edit_selection(
     let Some((start, end)) = text_selection_range(&edit.state) else {
         return;
     };
-    let x = rect.col
-        + NODE_TEXT_COL_OFFSET * zoom
-        + cursor_x_from_char_cache(&edit.text, NODE_FONT_SIZE, start, viewport.cell_w) * zoom;
-    let end_x = rect.col
-        + NODE_TEXT_COL_OFFSET * zoom
-        + cursor_x_from_char_cache(&edit.text, NODE_FONT_SIZE, end, viewport.cell_w) * zoom;
+    let Some(start_x) = measured_cursor_offset(&edit.text, font_size, start) else {
+        return;
+    };
+    let Some(selection_end_x) = measured_cursor_offset(&edit.text, font_size, end)
+    else {
+        return;
+    };
+    let x = rect.col + NODE_TEXT_COL_OFFSET * zoom + start_x * zoom;
+    let end_x = rect.col + NODE_TEXT_COL_OFFSET * zoom + selection_end_x * zoom;
     let width = end_x - x;
     if width <= 0.0 {
         return;
@@ -1656,17 +1665,18 @@ fn push_node_edit_selection(
 fn push_node_edit_cursor(
     prims: &mut Vec<MetalPrimitive>,
     rect: Rect,
-    viewport: WidgetViewport,
     edit: Option<&PatcherTextEdit>,
+    font_size: f32,
     zoom: f32,
 ) {
     let Some(edit) = edit else {
         return;
     };
     let cursor_pos = edit.state.cursor_pos.min(edit.text.chars().count());
-    let x = rect.col
-        + NODE_TEXT_COL_OFFSET * zoom
-        + cursor_x_from_char_cache(&edit.text, NODE_FONT_SIZE, cursor_pos, viewport.cell_w) * zoom;
+    let Some(cursor_x) = measured_cursor_offset(&edit.text, font_size, cursor_pos) else {
+        return;
+    };
+    let x = rect.col + NODE_TEXT_COL_OFFSET * zoom + cursor_x * zoom;
     prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
         rect: Rect {
             row: rect.row + 0.23 * zoom,
@@ -1685,14 +1695,9 @@ fn push_node_label(
     rect: Rect,
     head_color: crate::backend::Color,
     edit: Option<&PatcherTextEdit>,
-    viewport: WidgetViewport,
     zoom: f32,
 ) {
-    let font_size = if node.kind == NodeKind::CodeIsland {
-        CODE_NODE_FONT_SIZE
-    } else {
-        NODE_FONT_SIZE
-    };
+    let font_size = node_font_size(node);
     let text_row = if node.kind == NodeKind::CodeIsland {
         rect.row + 0.55 * zoom
     } else {
@@ -1732,8 +1737,11 @@ fn push_node_label(
         },
     ));
     if !tail.is_empty() {
-        let tail_col = text_col
-            + cursor_x_from_char_cache(&label, font_size, tail_start, viewport.cell_w) * zoom;
+        let Some(tail_offset) = measured_cursor_offset(&label, font_size, tail_start)
+        else {
+            return;
+        };
+        let tail_col = text_col + tail_offset * zoom;
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
                 row: text_row,

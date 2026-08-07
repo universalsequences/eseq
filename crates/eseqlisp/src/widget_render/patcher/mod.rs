@@ -15,6 +15,7 @@ mod state;
 #[cfg(test)]
 mod tests;
 mod text;
+mod text_metrics;
 mod writeback;
 
 use std::cell::RefCell;
@@ -754,7 +755,7 @@ use interaction::{
     open_selected_macro_node, pan_patcher_by_delta, pan_patcher_by_wheel,
     promote_created_macro_definition, reset_patcher_pan, zoom_patcher_by_magnify,
 };
-use metrics::{DEFAULT_HEIGHT, DEFAULT_WIDTH, NODE_FONT_SIZE, TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL};
+use metrics::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL};
 use state::{
     AgenticBubbleState, AgenticBubbleTarget, active_patcher_patch, active_patcher_view_key,
     allocate_agentic_bubble, allocate_agentic_bubble_with_target, debug_log_edit_event,
@@ -769,7 +770,8 @@ use text::{
     move_patcher_autocomplete_selection, patcher_autocomplete_is_open,
 };
 
-use super::text_input::{TextEditOutcome, apply_text_entry_key, cache_char_widths};
+use super::text_input::{TextEditOutcome, apply_text_entry_key};
+use text_metrics::cache_text_widths;
 use super::{CellBuffer, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent};
 #[cfg(target_os = "macos")]
 use super::{MetalPrimitive, WidgetViewport};
@@ -2834,7 +2836,8 @@ fn cache_patcher_text_widths(node: &Value, ctx: &MeasureCtx<'_>) {
     let patch = active_patcher_patch(&root_patch, &interaction_state);
     let patch = patch_with_interaction_state(patch, &interaction_state, &view_key);
     for patch_node in &patch.nodes {
-        cache_char_widths(node_display_label(patch_node), NODE_FONT_SIZE, ctx);
+        let font_size = display::node_font_size(patch_node);
+        cache_text_widths(node_display_label(patch_node), font_size, ctx);
     }
     if let Some(tooltip) = interaction_state
         .hovered_input_port
@@ -2847,13 +2850,23 @@ fn cache_patcher_text_widths(node: &Value, ctx: &MeasureCtx<'_>) {
                 .and_then(|port| render::output_port_tooltip(&patch, port))
         })
     {
-        cache_char_widths(preview(&tooltip, 48), 10.5, ctx);
+        cache_text_widths(preview(&tooltip, 48), 10.5, ctx);
     }
     if let Some(edit) = interaction_state.text_edit {
-        cache_char_widths(edit.text, NODE_FONT_SIZE, ctx);
+        if let Some(edit_node) = patch.nodes.iter().find(|node| node.id == edit.node_id) {
+            cache_text_widths(edit.text, display::node_font_size(edit_node), ctx);
+        }
     }
     for bubble in interaction_state.agentic_bubbles.values() {
-        cache_char_widths(bubble.prompt.clone(), 13.0, ctx);
+        let visible_text = match &bubble.state {
+            state::AgenticBubbleState::Answer { text, .. } => text.clone(),
+            _ if bubble.prompt.trim().is_empty() => "cmd+k prompt".to_string(),
+            _ => bubble.prompt.clone(),
+        };
+        cache_text_widths(visible_text, 13.0, ctx);
+        if matches!(bubble.state, state::AgenticBubbleState::Editing) {
+            cache_text_widths(bubble.prompt.clone(), 13.0, ctx);
+        }
     }
 }
 

@@ -125,7 +125,8 @@
       :sequencer-step-selected-border '(0.90 0.92 0.96)
       :sequencer-step-off-fill        '(0.055 0.058 0.065)
       :sequencer-step-off-fill-alt    '(0.25 0.255 0.26)
-      :patcher-bg           '(0.08 0.08 0.08)
+      ;:patcher-bg           '(0.08 0.08 0.08)
+      :patcher-bg '(0.12 0.13 0.14)  ; Main rounded buffer surface
       :patcher-grid-minor   '(0.22 0.23 0.25 0.34)
       :patcher-grid-major   '(0.32 0.33 0.36 0.46)
       :patcher-text         '(0.88 0.88 0.89)

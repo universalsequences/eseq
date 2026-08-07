@@ -369,13 +369,21 @@ fn inline_raw_param(patch: &Patch, connection: &PatchConnection) -> Option<Inlin
 }
 
 fn inline_mod_param(patch: &Patch, connection: &PatchConnection) -> Option<InlineInput> {
-    let mod_node = patch
-        .nodes
-        .iter()
-        .find(|node| node.id == connection.from_node)?;
+    let param = inline_mod_accessor_param(patch, &connection.from_node)?;
+    Some(InlineInput::ModParam(param.name.clone()))
+}
+
+/// Is `node_id` a projector-synthesized `(mod param)` accessor — the nested
+/// expression behind the `param~` sugar? Such a node exists only to serve the
+/// expression of the node that consumes it; the user never authored it and
+/// never sees it on the canvas. Returns the modulatable param it reads.
+fn inline_mod_accessor_param<'a>(patch: &'a Patch, node_id: &str) -> Option<&'a ParamNodeInfo> {
+    let mod_node = patch.nodes.iter().find(|node| node.id == node_id)?;
     if mod_node.op != "mod" {
         return None;
     }
+    // A user-authored `(def m (mod gain))` is a BindingValue, not a nested
+    // expression: it is a real node and must never be garbage-collected.
     if !matches!(
         mod_node.source.as_ref().map(|source| &source.owner),
         Some(SourceOwner::NestedExpr { .. })
@@ -389,9 +397,27 @@ fn inline_mod_param(patch: &Patch, connection: &PatchConnection) -> Option<Inlin
     let param = patch
         .nodes
         .iter()
-        .find(|node| node.id == inbound.from_node)?;
-    let param = param.param.as_ref()?;
-    param
-        .modulatable
-        .then(|| InlineInput::ModParam(param.name.clone()))
+        .find(|node| node.id == inbound.from_node)?
+        .param
+        .as_ref()?;
+    param.modulatable.then_some(param)
+}
+
+/// Synthesized `param~` accessors that no longer have any consumer — their
+/// only reason to exist died with the node whose expression contained them.
+/// See docs/patch-vs-code-editor-spec.md §4.2b: synthesized helper nodes are
+/// never persisted when orphaned.
+pub fn orphaned_inline_mod_node_ids(patch: &Patch) -> HashSet<String> {
+    patch
+        .nodes
+        .iter()
+        .filter(|node| {
+            !patch
+                .connections
+                .iter()
+                .any(|connection| connection.from_node == node.id)
+        })
+        .filter(|node| inline_mod_accessor_param(patch, &node.id).is_some())
+        .map(|node| node.id.clone())
+        .collect()
 }

@@ -14,7 +14,7 @@ use crate::parser::{ASTParser, Expression, Parser, format_expression};
 
 use super::model::{
     ArgValue, ConnectionKind, MacroOrigin, NodeKind, Patch, PatchConnection, PatchNode,
-    PatcherIntent, hidden_inline_node_ids,
+    PatcherIntent, hidden_inline_node_ids, orphaned_inline_mod_node_ids,
 };
 use super::project::{dgenlisp_constant_names, dgenlisp_operator_names};
 
@@ -898,18 +898,26 @@ fn binding_base_for_node(node: &PatchNode) -> String {
 /// with complete calls are kept (emitted as unused defs) so they survive
 /// save + reload; live nodes are never omitted, so genuinely broken live
 /// patches still surface the missing-input sentinel / compile diagnostics.
+///
+/// The "keep complete dead nodes" rule applies to user-authored nodes only:
+/// projector-synthesized `param~` accessors that lost their consumer are
+/// dropped outright (§4.2b) so deleting `(* a gain~)` never leaves a
+/// standalone `(def mod0 (mod gain))` behind.
 fn omitted_dead_node_ids(
     patch: &Patch,
     roles: &HashMap<&str, NodeRole>,
     inbound: &BTreeMap<(&str, usize), &PatchConnection>,
 ) -> HashSet<String> {
     let live = live_node_ids(patch, roles);
+    let orphaned_inline_mods = orphaned_inline_mod_node_ids(patch);
     let mut omitted: HashSet<String> = patch
         .nodes
         .iter()
         .filter(|node| roles.get(node.id.as_str()) == Some(&NodeRole::Value))
         .filter(|node| !live.contains(node.id.as_str()))
-        .filter(|node| node_call_is_incomplete(patch, inbound, node))
+        .filter(|node| {
+            orphaned_inline_mods.contains(&node.id) || node_call_is_incomplete(patch, inbound, node)
+        })
         .map(|node| node.id.clone())
         .collect();
     // Propagate: a dead node whose input references an omitted node cannot be

@@ -1,6 +1,7 @@
 # Patch Editor vs Code Editor Split
 
-Status: DRAFT (rev 1)
+Status: rev 2 — Phases 1 + 2 BUILT (commits 7df57e8d, 64814000, 72624fbc on
+`patch-code-editor-split`); remaining: Phase 1b, 3, 4 + §8 deferred tail
 Scope: editor selection + kill write-back. Bottom-panel layout redesign is explicitly OUT of scope (separate effort).
 
 ## 1. Motivation
@@ -189,6 +190,18 @@ produces a call — the `defmacro` definition still persists — while a LIVE
 node with a missing input keeps the missing-input sentinel (and macro calls
 emit their full arity), so genuinely broken patches still surface diagnostics.
 
+The "complete dead nodes survive" rule covers user-authored nodes only:
+projector-synthesized helper nodes are never persisted once orphaned. The one
+such helper today is the hidden `(mod p)` accessor the projector nests behind
+the `p~` sugar — the user never authored it and never sees it. When its only
+consumer is deleted (`(* a gain~)` goes away), the accessor is garbage-
+collected with it, both in `patch_with_interaction_state` (so it never pops
+into view as a bare `gain -> mod` node) and in the generator's omission set
+(so it never lands in the source as `(def mod0 (mod gain))`). The
+discriminant is the source owner: `NestedExpr` = synthesized helper,
+`BindingValue` = a real `(def m (mod gain))` the user wrote, which round-trips
+unchanged even when unused.
+
 ### 4.3 What gets deleted
 
 - All surgical edit application in `writeback.rs`: `SourceDocument` mutation paths
@@ -325,9 +338,29 @@ only for true special forms. Doc-panel rendering in the text editor (the patcher
   skipping it would let a stale macro scope poison later loads. Sidecar format
   is now v2 + `authored: true` on every save; v1 still loads. Patch editor
   internals otherwise untouched.
-- **Phase 1b — autocomplete unification** (§5.4). Independent, small.
-- **Phase 2 — kill write-back.** Deterministic generator + round-trip tests, delete
-  surgical writeback machinery, v2 `authored` sidecar written on save, promotion (§3.3)
-  and eject (§3.4) actions, agentic-edit rule (§4.5).
-- **Phase 3 — patch editor undo** (§4.4).
-- **Phase 4 — polish.** Text-editor doc panel, "new via code" if wanted.
+- **Phase 1b — autocomplete unification** (§5.4). Independent, small. Deferred by
+  user choice; not started.
+- **Phase 2 — kill write-back. BUILT 2026-08-07** (commit 64814000 + fixes 72624fbc).
+  Deterministic generator (`patcher/generate.rs`) with round-trip + real-compiler
+  tests, payload switch in `patcher_writeback_payload`, promotion
+  (`promote-editor-to-patch` + "Open as patch") and eject (`eject-editor-to-code`,
+  layout kept for re-promotion), agentic-edit rule (§4.5). Post-build fixes added
+  §4.2a (interaction `created-N` ids never persist as bindings; allocation skips
+  taken ids, healing poisoned files) and §4.2b (dead-code emission policy:
+  liveness = reachability from `out`; dead+incomplete omitted but layout preserved,
+  dead+complete emitted as unused defs, defmacros always persist). Two model gaps
+  closed along the way: `Patch.host_modulators` (hidden `@modulator` defs now
+  round-trip) and top-level `(param …)` emission (dgen `(mod name)` resolution).
+- **Phase 3 — patch editor undo** (§4.4). Not started.
+- **Phase 4 — polish.** Text-editor doc panel, "new via code" if wanted. Not started.
+
+### Deferred tail (known, deliberate)
+
+- **Full `writeback.rs` deletion**: the surgical `SourceDocument` machinery still
+  powers the macro-library flows (save-to-library / fork / staged-edit flush) and
+  the agentic candidate splice. Rebuilding those on the generator unlocks deleting
+  the rest (~7k lines and its ~300 tests migrate or die with it).
+- **Builtin-call attributes** (e.g. `@max-delay` on an arbitrary call): not
+  represented in the patch model, so promoting source that uses them and then
+  editing regenerates WITHOUT them — silent loss. Either reject at promotion
+  (§3.3) or add attribute storage to `PatchNode`.

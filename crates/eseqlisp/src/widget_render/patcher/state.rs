@@ -22,7 +22,7 @@ use super::model::{
     ArgValue, BindingTarget, CableEndpoint, CableSegmentInfo, ConnectionKind, InputPortRef,
     InputPresentation, MacroPatch, MacroSignature, NodeKind, OutputPortRef, ParamNodeInfo, Patch,
     PatchConnection, PatchNode, PatcherIntent, SourceOwner, hidden_inline_node_ids,
-    refresh_patch_inline_inputs,
+    orphaned_inline_mod_node_ids, refresh_patch_inline_inputs,
 };
 use super::project::dgenlisp_operator_names;
 use super::prop_str;
@@ -1154,8 +1154,26 @@ pub(super) fn patch_with_interaction_state(
                 source: None,
             }),
     );
+    drop_orphaned_inline_mod_nodes(&mut patch);
     refresh_patch_inline_inputs(&mut patch);
     patch
+}
+
+/// The projector desugars `gain~` into a hidden `(mod gain)` accessor node
+/// nested inside its consumer's expression. Deleting the consumer must take
+/// the accessor with it: otherwise the helper the user never authored pops
+/// into view as a bare `gain -> mod` node, and regeneration persists it as a
+/// standalone `(def mod0 (mod gain))`.
+/// See docs/patch-vs-code-editor-spec.md §4.2b.
+fn drop_orphaned_inline_mod_nodes(patch: &mut Patch) {
+    let orphaned = orphaned_inline_mod_node_ids(patch);
+    if orphaned.is_empty() {
+        return;
+    }
+    patch.nodes.retain(|node| !orphaned.contains(&node.id));
+    patch.connections.retain(|connection| {
+        !orphaned.contains(&connection.from_node) && !orphaned.contains(&connection.to_node)
+    });
 }
 
 fn refresh_macro_instance_outputs(

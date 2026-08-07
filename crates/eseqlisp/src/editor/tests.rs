@@ -2414,6 +2414,42 @@ fn vim_undo_and_redo_restore_text_edits() {
 }
 
 #[test]
+fn undo_and_redo_preserve_viewport_when_restored_cursor_is_visible() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            vim_mode: true,
+            ..EditorConfig::default()
+        },
+    );
+    let source = (0..80)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    editor.open_scratch_buffer("*test*", &source);
+    editor.set_layout_viewport(20, 10);
+    editor.active_buffer_mut().cursor = (45, 0);
+    editor.active_buffer_mut().scroll_top = 40;
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+
+    assert_eq!(editor.active_buffer().text(), source);
+    assert_eq!(editor.active_buffer().scroll_top, 40);
+
+    editor.handle_key(KeyEvent::new(
+        KeyCode::Char('r'),
+        KeyModifiers::CONTROL,
+    ));
+
+    assert_eq!(editor.active_buffer().lines[45], "Xline 45");
+    assert_eq!(editor.active_buffer().scroll_top, 40);
+}
+
+#[test]
 fn plain_typing_coalesces_into_one_undo_snapshot() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(
@@ -9902,7 +9938,35 @@ fn text_only_right_arrow_keeps_cursor_visible_horizontally() {
     editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
 
     assert_eq!(editor.active_buffer().cursor, (0, 10));
-    assert_eq!(editor.widget_scroll_left(), 1.0);
+    assert_eq!(editor.widget_scroll_left(), 4.0);
+}
+
+#[test]
+fn text_horizontal_scroll_stays_fixed_until_cursor_reaches_left_margin() {
+    for view_mode in [super::ViewMode::TextOnly, super::ViewMode::Both] {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "01234567890123456789");
+        editor.active_buffer_mut().view_mode = view_mode;
+        editor.set_layout_viewport(10, 8);
+        editor.active_buffer_mut().cursor = (0, 9);
+        editor.active_leaf_mut().widget_scroll_left = 4.0;
+
+        let frame = crate::frame::build_render_frame(&mut editor, 10, 8);
+        assert_eq!(frame.widget_scroll_left, 4.0);
+
+        for expected_col in [8, 7] {
+            editor.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+            let frame = crate::frame::build_render_frame(&mut editor, 10, 8);
+            assert_eq!(editor.active_buffer().cursor, (0, expected_col));
+            assert_eq!(frame.widget_scroll_left, 4.0);
+        }
+
+        editor.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        let frame = crate::frame::build_render_frame(&mut editor, 10, 8);
+        assert_eq!(editor.active_buffer().cursor, (0, 6));
+        assert_eq!(frame.widget_scroll_left, 3.0);
+    }
 }
 
 #[test]
@@ -9936,7 +10000,7 @@ fn text_buffer_right_arrow_keeps_cursor_visible_horizontally() {
     editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
 
     assert_eq!(editor.active_buffer().cursor, (0, 10));
-    assert_eq!(editor.widget_scroll_left(), 1.0);
+    assert_eq!(editor.widget_scroll_left(), 4.0);
 }
 
 #[test]
