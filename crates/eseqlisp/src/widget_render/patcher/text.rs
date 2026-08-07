@@ -133,6 +133,7 @@ pub(super) fn patcher_autocomplete_suggestions(
 
 fn local_macro_documentation(macro_patch: &MacroPatch) -> OperatorDocumentation {
     OperatorDocumentation {
+        category: Some("macro".to_string()),
         summary: None,
         signatures: vec![if macro_patch.params.is_empty() {
             format!("({})", macro_patch.name)

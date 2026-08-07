@@ -19,10 +19,11 @@ use super::metrics::{
     DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM, PAN_OVERSCROLL_MIN_CELLS, PAN_OVERSCROLL_VIEWPORT_FACTOR,
 };
 use super::model::{
-    ArgValue, BindingTarget, CableEndpoint, CableSegmentInfo, ConnectionKind, InputPortRef,
-    InputPresentation, MacroPatch, MacroSignature, NodeKind, OutputPortRef, ParamNodeInfo, Patch,
-    PatchConnection, PatchNode, PatcherIntent, SourceOwner, hidden_inline_node_ids,
-    orphaned_inline_mod_node_ids, refresh_patch_inline_inputs,
+    ArgValue, BindingTarget, CableEndpoint, CableSegmentInfo, ConnectionKind, ExprPath,
+    InputPortRef, InputPresentation, MacroPatch, MacroSignature, NodeKind, NodeSource,
+    OutputPortRef, ParamNodeInfo, Patch, PatchConnection, PatchNode, PatcherIntent, SourceExprId,
+    SourceFormId, SourceOwner, SourceScopeId, hidden_inline_node_ids, orphaned_inline_mod_node_ids,
+    refresh_patch_inline_inputs,
 };
 use super::project::dgenlisp_operator_names;
 use super::prop_str;
@@ -1154,9 +1155,182 @@ pub(super) fn patch_with_interaction_state(
                 source: None,
             }),
     );
+    desugar_editor_mod_suffix_args(&mut patch);
     drop_orphaned_inline_mod_nodes(&mut patch);
     refresh_patch_inline_inputs(&mut patch);
     patch
+}
+
+/// `gain~` typed into a node's text is UI-level sugar, not DGenLisp: the real
+/// form is `(mod gain)`, and the compiler rejects the bare `gain~` symbol with
+/// "unknown symbol". Desugar it here, in the model, into exactly the structure
+/// parsing `(* x (mod gain))` from source produces — a `NestedExpr`-owned `mod`
+/// accessor node fed by the param, wired into the consumer slot with the
+/// `InlineModParam` presentation. Doing it at model level (rather than at
+/// emission) keeps the in-memory patch free of bogus `name~` symbols, so
+/// display, generation, orphan GC (§4.2b) and reparse round-trip all treat a
+/// typed `gain~` identically to a source-authored `(mod gain)`.
+///
+/// A `name~` whose base is not a modulatable param is left alone and flagged
+/// with a node diagnostic — silently emitting it would produce source the
+/// DGenLisp compiler rejects.
+///
+/// The common flow is a *retype*: `(* x gain)` already projects a `gain -> node`
+/// edge, so typing `* gain~` must replace that plain reference with the
+/// accessor. Only a reference to that same param is replaced — an unrelated
+/// cable into the slot still wins, exactly as it does over a typed literal.
+fn desugar_editor_mod_suffix_args(patch: &mut Patch) {
+    if !patch.nodes.iter().any(|node| {
+        node.args
+            .iter()
+            .any(|arg| matches!(arg, ArgValue::Literal(value) if mod_suffix_base(value).is_some()))
+    }) {
+        return;
+    }
+
+    let param_nodes = patch
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let param = node.param.as_ref()?;
+            Some((param.name.clone(), (node.id.clone(), param.modulatable)))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut inbound: HashMap<(String, usize), String> = HashMap::new();
+    for connection in &patch.connections {
+        inbound
+            .entry((connection.to_node.clone(), connection.to_input))
+            .or_insert_with(|| connection.from_node.clone());
+    }
+    let mut taken_ids = patch
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<HashSet<_>>();
+
+    let mut accessors: Vec<PatchNode> = Vec::new();
+    let mut cables: Vec<PatchConnection> = Vec::new();
+    let mut replaced_slots: HashSet<(String, usize)> = HashSet::new();
+
+    for node in &mut patch.nodes {
+        if matches!(node.kind, NodeKind::Param | NodeKind::Constant) {
+            continue;
+        }
+        for idx in 0..node.args.len() {
+            let ArgValue::Literal(value) = &node.args[idx] else {
+                continue;
+            };
+            let Some(name) = mod_suffix_base(value) else {
+                continue;
+            };
+            let param_node = param_nodes.get(&name);
+            let existing = inbound.get(&(node.id.clone(), idx));
+            // An unrelated cable owns the slot; leave the text alone.
+            if let Some(from) = existing
+                && param_node.is_none_or(|(param_node_id, _)| param_node_id != from)
+            {
+                continue;
+            }
+            let Some((param_node_id, true)) = param_node else {
+                if node.diagnostic.is_none() {
+                    node.diagnostic = Some(format!(
+                        "`{name}~` requires `{name}` to be declared as a modulatable param (@mod true)"
+                    ));
+                }
+                continue;
+            };
+            if existing.is_some() {
+                replaced_slots.insert((node.id.clone(), idx));
+            }
+            let mut accessor_id = format!("{}-mod{idx}", node.id);
+            while taken_ids.contains(&accessor_id) {
+                accessor_id.push('_');
+            }
+            taken_ids.insert(accessor_id.clone());
+
+            node.args[idx] = ArgValue::ConnectedExpr;
+            accessors.push(inline_mod_accessor_node(&accessor_id, node.position));
+            cables.push(PatchConnection {
+                from_node: param_node_id.clone(),
+                from_output: 0,
+                to_node: accessor_id.clone(),
+                to_input: 0,
+                kind: ConnectionKind::Forward,
+                segment: None,
+                presentation: InputPresentation::Cable,
+                presentation_override: None,
+                source: None,
+            });
+            cables.push(PatchConnection {
+                from_node: accessor_id,
+                from_output: 0,
+                to_node: node.id.clone(),
+                to_input: idx,
+                kind: ConnectionKind::Forward,
+                segment: None,
+                presentation: InputPresentation::InlineModParam,
+                presentation_override: None,
+                source: None,
+            });
+        }
+    }
+
+    if !replaced_slots.is_empty() {
+        patch.connections.retain(|connection| {
+            !replaced_slots.contains(&(connection.to_node.clone(), connection.to_input))
+        });
+    }
+    patch.nodes.extend(accessors);
+    patch.connections.extend(cables);
+}
+
+/// The projector-synthesized `(mod param)` accessor behind `param~`. `NestedExpr`
+/// ownership is what marks it as synthesized rather than user-authored — see
+/// `inline_mod_accessor_param` in model.rs.
+fn inline_mod_accessor_node(id: &str, position: (f32, f32)) -> PatchNode {
+    PatchNode {
+        id: id.to_string(),
+        op: "mod".to_string(),
+        kind: NodeKind::Builtin,
+        label: "mod".to_string(),
+        args: vec![ArgValue::ConnectedExpr],
+        outputs: vec!["out".to_string()],
+        position,
+        width: None,
+        param: None,
+        inline_inputs: vec![None],
+        diagnostic: None,
+        source: Some(NodeSource {
+            owner: SourceOwner::NestedExpr {
+                expr: SourceExprId {
+                    form_id: SourceFormId {
+                        scope: SourceScopeId::Root,
+                        index: 0,
+                    },
+                    path: ExprPath::default(),
+                },
+            },
+            expr: None,
+            call_shape: None,
+        }),
+    }
+}
+
+/// `gain~` -> `gain`. Rejects a bare `~`, and anything whose base is not a
+/// plausible symbol (numbers, punctuation), so literals never get mangled.
+fn mod_suffix_base(value: &str) -> Option<String> {
+    let base = value.strip_suffix('~')?;
+    if base.is_empty() || base.parse::<f64>().is_ok() {
+        return None;
+    }
+    let mut chars = base.chars();
+    let first = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    chars
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        .then(|| base.to_string())
 }
 
 /// The projector desugars `gain~` into a hidden `(mod gain)` accessor node

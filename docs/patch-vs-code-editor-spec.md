@@ -190,6 +190,13 @@ produces a call — the `defmacro` definition still persists — while a LIVE
 node with a missing input keeps the missing-input sentinel (and macro calls
 emit their full arity), so genuinely broken patches still surface diagnostics.
 
+"Macro-instance arity" here covers the dgenlisp *preamble* defmacros too
+(`svf`, `adsr`, `polyblep`, … — the standard-library macros the backend
+attaches to every compiled source, identified by the `preamble` category in the
+bundled operator manifest that already drives the node's inlet count): they
+expand with a fixed parameter list, so a dead unwired instance is omitted like
+any other macro instance rather than emitted as an arity-error `(svf)`.
+
 The "complete dead nodes survive" rule covers user-authored nodes only:
 projector-synthesized helper nodes are never persisted once orphaned. The one
 such helper today is the hidden `(mod p)` accessor the projector nests behind

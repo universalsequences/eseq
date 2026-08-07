@@ -11671,7 +11671,7 @@ fn segment_row_drag_clamps_normal_and_wraparound_cases() {
 }
 
 #[test]
-fn super_y_toggles_selected_cable_segmentation() {
+fn super_y_initializes_selected_cable_segment_at_rendered_midpoint_after_zoom() {
     let source = r#"
         (def pitch (in 1 @name pitch))
         (def sig (phasor pitch))
@@ -11707,13 +11707,31 @@ fn super_y_toggles_selected_cable_segmentation() {
         animation: Default::default(),
     };
     let key = patcher_state_key(&node);
-    set_patcher_interaction_state(
+    set_patcher_pan_state(
         key,
-        PatcherInteractionState {
-            selected_cable: Some(selected_cable.clone()),
+        PatcherPanState {
+            zoom: 1.6,
+            viewport_width: node.rect.width,
+            viewport_height: node.rect.height,
+            content_width: node.rect.width,
+            content_height: node.rect.height,
             ..Default::default()
         },
     );
+    let mut interaction = PatcherInteractionState {
+        selected_cable: Some(selected_cable.clone()),
+        ..Default::default()
+    };
+    set_connection_segment_edit(
+        &mut interaction,
+        "root",
+        patch.connections.first().unwrap(),
+        Some(CableSegmentInfo {
+            is_segmented: false,
+            segment_row: 0.0,
+        }),
+    );
+    set_patcher_interaction_state(key, interaction);
 
     let initial_state = get_patcher_interaction_state(key);
     let initial_patch = patch_with_interaction_state(patch.clone(), &initial_state, "root");
@@ -11723,6 +11741,33 @@ fn super_y_toggles_selected_cable_segmentation() {
         .find(|connection| source_connection_id(connection) == selected_cable)
         .and_then(|connection| connection.segment.as_ref())
         .is_some_and(|segment| segment.is_segmented);
+    assert!(!initially_segmented, "test cable must begin unsegmented");
+
+    let pan = get_patcher_pan_state(key);
+    let node_rects = patch_node_rects(&initial_patch, node.rect, &pan);
+    let input_indices = patch_input_indices(&initial_patch);
+    let input_slot_counts = patch_input_slot_counts(&initial_patch, &input_indices);
+    let output_counts = patch_output_counts(&initial_patch);
+    let connection = initial_patch
+        .connections
+        .iter()
+        .find(|connection| source_connection_id(connection) == selected_cable)
+        .unwrap();
+    let (start, end) = connection_endpoints(
+        connection,
+        &node_rects,
+        &input_indices,
+        &input_slot_counts,
+        &output_counts,
+    )
+    .unwrap();
+    let expected_rendered_row = (start.1 + end.1) * 0.5;
+    let expected_model_row = screen_to_model(
+        node.rect,
+        &pan,
+        ((start.0 + end.0) * 0.5, expected_rendered_row),
+    )
+    .1;
 
     assert!(
         PATCHER_WIDGET
@@ -11745,6 +11790,18 @@ fn super_y_toggles_selected_cable_segmentation() {
         .and_then(|connection| connection.segment)
         .unwrap();
     assert_ne!(segment.is_segmented, initially_segmented);
+    assert!(
+        (segment.segment_row - expected_model_row).abs() < 1e-5,
+        "Cmd+Y must store the midpoint in model coordinates: got {}, expected {}",
+        segment.segment_row,
+        expected_model_row
+    );
+    let rendered_row =
+        patcher_origin(node.rect, &pan).1 + segment.segment_row * patcher_zoom(&pan);
+    assert!(
+        (rendered_row - expected_rendered_row).abs() < 1e-5,
+        "new segment rendered at {rendered_row}, expected cable midpoint {expected_rendered_row}"
+    );
 }
 
 #[test]
@@ -16680,30 +16737,72 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
         "selected operator documentation should render in a separate panel to the right"
     );
     assert!(
-        prims
-            .iter()
-            .filter(|prim| {
-                matches!(
-                    inner_prim(prim),
-                    MetalPrimitive::WidgetInstance { widget_type, instance, .. }
-                        if widget_type == "patcher-node"
-                            && instance.color_a == theme::PATCHER_AUTOCOMPLETE_BORDER().to_rgba()
-                            && instance.color_b == theme::PATCHER_AUTOCOMPLETE_BG().to_rgba()
-                )
-            })
-            .count()
-            >= 2,
-        "autocomplete list and selected-documentation panels should both render full bordered chrome"
+        prims.iter().any(|prim| {
+            matches!(
+                inner_prim(prim),
+                MetalPrimitive::WidgetInstance { widget_type, instance, .. }
+                    if widget_type == "patcher-panel"
+                        && instance.color_a == theme::PATCHER_AUTOCOMPLETE_BORDER().to_rgba()
+                        && instance.color_b == theme::PATCHER_AUTOCOMPLETE_BG().to_rgba()
+            )
+        }),
+        "autocomplete list should render flat panel chrome, not node chrome"
     );
     assert!(
         prims.iter().any(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::ForegroundRect(rect)
-                    if rect.color == theme::PATCHER_AUTOCOMPLETE_SELECTED_BG()
+                MetalPrimitive::WidgetInstance { widget_type, instance, .. }
+                    if widget_type == "patcher-panel"
+                        && instance.color_a == theme::PATCHER_AUTOCOMPLETE_DOC_BORDER().to_rgba()
+                        && instance.color_b == theme::PATCHER_AUTOCOMPLETE_DOC_BG().to_rgba()
             )
         }),
-        "autocomplete panel should render the selected row highlight"
+        "documentation panel should render flat panel chrome with its own themed colors"
+    );
+    assert!(
+        !prims.iter().any(|prim| {
+            matches!(
+                inner_prim(prim),
+                MetalPrimitive::WidgetInstance { widget_type, instance, .. }
+                    if widget_type == "patcher-node"
+                        && instance.color_b == theme::PATCHER_AUTOCOMPLETE_BG().to_rgba()
+            )
+        }),
+        "autocomplete chrome must not reuse the node shader"
+    );
+    assert!(
+        prims.iter().any(|prim| {
+            matches!(
+                inner_prim(prim),
+                MetalPrimitive::WidgetInstance { widget_type, instance, .. }
+                    if widget_type == "box"
+                        && instance.color_a == theme::PATCHER_AUTOCOMPLETE_SELECTED_BG().to_rgba()
+                        && instance.corner_radius > 0.0
+            )
+        }),
+        "autocomplete panel should render the selected row as a rounded highlight bar"
+    );
+    assert!(
+        prims.iter().any(|prim| {
+            matches!(
+                inner_prim(prim),
+                MetalPrimitive::ProportionalText(text)
+                    if text.text == "biquad"
+                        && text.fg == theme::PATCHER_AUTOCOMPLETE_SELECTED_TEXT()
+            )
+        }),
+        "selected suggestion name should use the themed accent text color"
+    );
+    assert!(
+        prims.iter().any(|prim| {
+            matches!(
+                inner_prim(prim),
+                MetalPrimitive::ProportionalText(text)
+                    if text.fg == theme::PATCHER_AUTOCOMPLETE_CATEGORY_TEXT()
+            )
+        }),
+        "suggestion rows should render the operator category in the dimmed category color"
     );
 }
 
@@ -17530,6 +17629,140 @@ fn fully_wired_macro_instance_emits_call_and_enforces_signature() {
     reset_patcher_widget_state(key);
 }
 
+// ── Preamble (stdlib defmacro) instances follow the same dead-code rule ──
+//
+// `svf`, `adsr`, `polyblep`, … are defmacros the backend attaches to every
+// compiled source. They have a fixed arity just like a patch-local macro, so
+// an unwired/partially wired dead instance must be omitted rather than emitted
+// as `(svf)` — which is an arity error at compile time.
+
+fn preamble_instance_source(node: &LayoutNode) -> (Value, String) {
+    let Value::Map(map) = patcher_writeback_payload(node) else {
+        panic!("expected payload map");
+    };
+    let status = payload_field(&map, "status").unwrap_or(Value::Nil);
+    let Some(Value::String(source)) = payload_field(&map, "source") else {
+        panic!("expected source: {:?}", payload_field(&map, "diagnostic"));
+    };
+    (status, source)
+}
+
+#[test]
+fn disconnected_created_preamble_macro_instance_emits_no_call() {
+    let (node, key) = bug3_starter_node_and_key("patcher-dead-preamble-disconnected");
+    let mut state = PatcherInteractionState::default();
+    let instance = allocate_created_text_node(&mut state, "root", "svf");
+    set_patcher_interaction_state(key, state);
+
+    let (status, source) = preamble_instance_source(&node);
+    assert_eq!(
+        status,
+        Value::Keyword("valid".to_string()),
+        "a disconnected preamble macro instance must not invalidate the patch:\n{source}"
+    );
+    assert!(
+        !source.contains("(svf"),
+        "no call to the unwired preamble macro instance may be emitted:\n{source}"
+    );
+    assert!(
+        parse_patch_source(&source, PatcherIntent::Effect).is_ok(),
+        "regenerated source must reparse cleanly:\n{source}"
+    );
+    let Value::Map(map) = patcher_writeback_payload(&node) else {
+        panic!("expected payload map");
+    };
+    let Some(Value::String(layout)) = payload_field(&map, "layout") else {
+        panic!("expected layout");
+    };
+    let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
+    assert!(
+        !layout_json["root"]["nodes"][&instance].is_null(),
+        "omitted preamble node's position must survive in the layout payload: {layout}"
+    );
+    reset_patcher_widget_state(key);
+}
+
+#[test]
+fn partially_wired_dead_preamble_macro_instance_emits_no_call() {
+    let (node, key) = bug3_starter_node_and_key("patcher-dead-preamble-partial");
+    let mut state = PatcherInteractionState::default();
+    let instance = allocate_created_text_node(&mut state, "root", "svf");
+    connect_output_to_input(&mut state, "root", "input", &instance, 0);
+    set_patcher_interaction_state(key, state);
+
+    let (status, source) = preamble_instance_source(&node);
+    assert_eq!(
+        status,
+        Value::Keyword("valid".to_string()),
+        "a partially wired dead preamble instance must not invalidate the patch:\n{source}"
+    );
+    assert!(
+        !source.contains("(svf"),
+        "partially wired dead preamble instance must not emit a call:\n{source}"
+    );
+    reset_patcher_widget_state(key);
+}
+
+#[test]
+fn dead_preamble_macro_rule_is_generic_not_svf_specific() {
+    let (node, key) = bug3_starter_node_and_key("patcher-dead-preamble-generic");
+    let mut state = PatcherInteractionState::default();
+    let _ = allocate_created_text_node(&mut state, "root", "polyblep");
+    set_patcher_interaction_state(key, state);
+
+    let (status, source) = preamble_instance_source(&node);
+    assert_eq!(
+        status,
+        Value::Keyword("valid".to_string()),
+        "a disconnected `polyblep` instance must not invalidate the patch:\n{source}"
+    );
+    assert!(
+        !source.contains("(polyblep"),
+        "unwired dead `polyblep` must be omitted just like `svf`:\n{source}"
+    );
+    reset_patcher_widget_state(key);
+}
+
+#[test]
+fn fully_wired_preamble_macro_instance_emits_call_and_round_trips() {
+    let (node, key) = bug3_starter_node_and_key("patcher-live-preamble-wired");
+    let mut state = PatcherInteractionState::default();
+    let instance = allocate_created_text_node(&mut state, "root", "svf 1200 0.7 0");
+    let (_path, root_patch) = load_patch_from_props(&node.props).unwrap();
+    let old = root_patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == "audio")
+        .unwrap();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key("root", &source_connection_id(old)));
+    connect_output_to_input(&mut state, "root", "shaped", &instance, 0);
+    connect_output_to_input(&mut state, "root", &instance, "audio", 0);
+    set_patcher_interaction_state(key, state);
+
+    let (status, source) = preamble_instance_source(&node);
+    assert_eq!(
+        status,
+        Value::Keyword("valid".to_string()),
+        "a fully wired preamble instance should produce a valid patch:\n{source}"
+    );
+    assert!(
+        source.contains("(svf shaped 1200 0.7 0)"),
+        "live preamble instance must emit its full call:\n{source}"
+    );
+    let reparsed = parse_patch_source(&source, PatcherIntent::Effect)
+        .expect("regenerated source must reparse cleanly");
+    let svf_node = reparsed
+        .nodes
+        .iter()
+        .find(|candidate| candidate.op == "svf")
+        .expect("svf node must round-trip");
+    assert_eq!(svf_node.diagnostic, None);
+    reset_patcher_widget_state(key);
+}
+
 #[test]
 fn dead_but_complete_nodes_are_still_emitted_as_unused_defs() {
     // Documented policy choice: a valid dead def is preserved (omitting it
@@ -17706,3 +17939,362 @@ fn explicit_standalone_mod_def_round_trips_when_unused() {
         generated.source
     );
 }
+
+/// Retype a node's text to reference `param~`: the sugar must desugar in the
+/// model, so generation emits `(mod param)` and never the bogus `param~`
+/// symbol (which the DGenLisp compiler rejects with "unknown symbol").
+#[test]
+fn editing_node_text_to_mod_suffix_generates_mod_expression_and_round_trips() {
+    let root_patch = parse(
+        r#"
+(def signal (in 1))
+(param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+(def scaled (* signal gain))
+(out scaled 1)
+"#,
+    );
+    let scaled = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "scaled")
+        .expect("scaled node");
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", scaled, node_display_label(scaled));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "scaled"))
+        .unwrap()
+        .text = "* gain~".to_string();
+
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let scaled = visible
+        .nodes
+        .iter()
+        .find(|node| node.id == "scaled")
+        .expect("scaled node");
+    assert_eq!(node_display_label(scaled), "* gain~");
+    assert_eq!(
+        source_connection_for_input(&visible, "scaled", 1).presentation,
+        InputPresentation::InlineModParam
+    );
+    let accessor_id = visible
+        .nodes
+        .iter()
+        .find(|node| node.op == "mod")
+        .expect("typed gain~ must synthesize a mod accessor node")
+        .id
+        .clone();
+    assert!(
+        hidden_inline_node_ids(&visible).contains(&accessor_id),
+        "the synthesized accessor must be hidden from the canvas"
+    );
+
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        !generated.source.contains("gain~"),
+        "the `gain~` sugar must never reach generated DGenLisp:\n{}",
+        generated.source
+    );
+    assert!(
+        generated.source.contains("(mod gain)"),
+        "typed `gain~` must generate a nested (mod gain):\n{}",
+        generated.source
+    );
+
+    // Round trip: the regenerated source reparses back to the same sugar.
+    let reparsed = parse(&generated.source);
+    let scaled = reparsed
+        .nodes
+        .iter()
+        .find(|node| node.op == "*")
+        .expect("reparsed multiply node");
+    assert_eq!(node_display_label(scaled), "* gain~");
+}
+
+/// The user's exact flow: make an existing plain param modulatable by editing
+/// its text, then retype each reference to `name~`. Order of the edits within
+/// the session must not matter — both are applied at commit time.
+#[test]
+fn making_param_modulatable_then_typing_mod_suffix_regenerates_valid_source() {
+    let root_patch = parse(
+        r#"
+(def signal (in 1))
+(def carrier (in 2))
+(param modindex @default 0.5 @min 0 @max 1)
+(def a (* signal modindex))
+(def b (* carrier modindex))
+(def summed (+ a b))
+(out summed 1)
+"#,
+    );
+    let mut state = PatcherInteractionState::default();
+    // References are retyped FIRST, while `modindex` is still a plain param.
+    for id in ["a", "b"] {
+        let node = root_patch
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .expect("reference node");
+        ensure_source_node_edit(&mut state, "root", node, node_display_label(node));
+        state
+            .edit_state
+            .nodes
+            .get_mut(&node_edit_key("root", id))
+            .unwrap()
+            .text = "* modindex~".to_string();
+    }
+    // ...and only then is the param made modulatable.
+    let param = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "modindex")
+        .expect("modindex param");
+    ensure_source_node_edit(&mut state, "root", param, node_display_label(param));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "modindex"))
+        .unwrap()
+        .text = "param modindex @min 0 @max 1 @mod true @mod-mode additive".to_string();
+
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    // Each reference gets its OWN accessor node, exactly as two source-authored
+    // `(mod modindex)` uses would project.
+    assert_eq!(
+        visible.nodes.iter().filter(|node| node.op == "mod").count(),
+        2,
+        "each `modindex~` reference owns its own accessor"
+    );
+    for id in ["a", "b"] {
+        let node = visible
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .expect("reference node");
+        assert_eq!(node_display_label(node), "* modindex~");
+        assert_eq!(node.diagnostic, None, "{id} should not be flagged");
+    }
+
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        !generated.source.contains("modindex~"),
+        "generated source must not contain the sugar:\n{}",
+        generated.source
+    );
+    assert_eq!(
+        generated.source.matches("(mod modindex)").count(),
+        2,
+        "both references must emit a nested (mod modindex):\n{}",
+        generated.source
+    );
+    let reparsed = parse(&generated.source);
+    assert!(
+        reparsed.diagnostics.is_empty(),
+        "regenerated source must reparse cleanly: {:?}\n{}",
+        reparsed.diagnostics,
+        generated.source
+    );
+
+    // Deleting a consumer GCs its accessor (§4.2b) — no phantom mod node, no
+    // standalone `(def mod0 (mod modindex))` in the regenerated source.
+    let mut after_delete_state = state.clone();
+    after_delete_state.selected_nodes.insert("b".to_string());
+    assert!(delete_selected_nodes(&mut after_delete_state, "root"));
+    let after_delete = sidecar::root_patch_with_interaction(&root_patch, &after_delete_state);
+    assert_eq!(
+        after_delete
+            .nodes
+            .iter()
+            .filter(|node| node.op == "mod")
+            .count(),
+        1,
+        "deleting a `modindex~` consumer must take its accessor with it"
+    );
+    let regenerated =
+        generate::generate_patch_source(&after_delete, PatcherIntent::Instrument).unwrap();
+    assert_eq!(
+        regenerated.source.matches("(mod modindex)").count(),
+        1,
+        "only the surviving reference may emit an accessor:\n{}",
+        regenerated.source
+    );
+}
+
+/// `name~` where `name` is not a modulatable param is a user error: flag it on
+/// the node rather than silently synthesizing an accessor.
+#[test]
+fn mod_suffix_on_non_modulatable_param_is_flagged_not_desugared() {
+    let root_patch = parse(
+        r#"
+(def signal (in 1))
+(param cutoff @default 1000)
+(def filtered (* signal cutoff))
+(out filtered 1)
+"#,
+    );
+    let filtered = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "filtered")
+        .expect("filtered node");
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", filtered, node_display_label(filtered));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "filtered"))
+        .unwrap()
+        .text = "* cutoff~".to_string();
+
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    assert!(
+        !visible.nodes.iter().any(|node| node.op == "mod"),
+        "a non-modulatable param must not get a synthesized mod accessor"
+    );
+    let filtered = visible
+        .nodes
+        .iter()
+        .find(|node| node.id == "filtered")
+        .expect("filtered node");
+    assert!(
+        filtered
+            .diagnostic
+            .as_deref()
+            .is_some_and(|diagnostic| diagnostic.contains("modulatable param")),
+        "expected a modulatable-param diagnostic, got {:?}",
+        filtered.diagnostic
+    );
+}
+
+
+#[test]
+fn default_layout_never_overlaps_wide_params_and_named_inputs() {
+    let patch = parse(
+        r#"
+            (param attack 0.01 0.001 2.0)
+            (param decay 0.2 0.001 2.0)
+            (param sustain 0.5 0.0 1.0)
+            (param release 0.4 0.001 4.0)
+            (param detune 0.0 -12.0 12.0)
+            (param drive 1.0 0.0 8.0)
+            (param level 0.8 0.0 1.0)
+            (def gate (in 1 @name gate))
+            (def pitch (in 2 @name pitch))
+            (def velocity (in 3 @name velocity))
+            (def trigger (in 4 @name trigger))
+            (def clock (in 5 @name clock))
+            (def osc (phasor pitch))
+            (def env (adsr gate attack decay sustain release))
+            (def sig (* osc env))
+            (out sig 1 @name audio)
+            "#,
+    );
+
+    let input_indices = patch_input_indices(&patch);
+    let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+    let output_counts = patch_output_counts(&patch);
+    let rects = patch
+        .nodes
+        .iter()
+        .map(|node| {
+            let input_count = input_slot_counts.get(&node.id).copied().unwrap_or(0);
+            let output_count = output_counts.get(&node.id).copied().unwrap_or(0);
+            let (width, height) = node_size_for_ports(node, input_count, output_count);
+            (
+                node.id.clone(),
+                Rect {
+                    col: node.position.0,
+                    row: node.position.1,
+                    width,
+                    height,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+
+    // Every node must be sized from its label, not collapsed to the minimum
+    // width: the auto layout runs before any glyph advance is measured.
+    for (id, rect) in &rects {
+        let node = patch.nodes.iter().find(|node| &node.id == id).unwrap();
+        let label_len = node_display_label(node).chars().count();
+        if label_len > 12 {
+            assert!(
+                rect.width > NODE_MIN_WIDTH,
+                "node {id} with label {label_len} chars long should be wider than the minimum: {rect:?}"
+            );
+        }
+    }
+
+    for (a_idx, (a_id, a)) in rects.iter().enumerate() {
+        for (b_id, b) in rects.iter().skip(a_idx + 1) {
+            let overlaps_x = a.col < b.col + b.width && b.col < a.col + a.width;
+            let overlaps_y = a.row < b.row + b.height && b.row < a.row + a.height;
+            assert!(
+                !(overlaps_x && overlaps_y),
+                "default layout placed {a_id} {a:?} overlapping {b_id} {b:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn default_layout_keeps_named_inputs_clear_of_the_param_stack() {
+    let patch = parse(
+        r#"
+            (param attack 0.01 0.001 2.0)
+            (param decay 0.2 0.001 2.0)
+            (param sustain 0.5 0.0 1.0)
+            (param release 0.4 0.001 4.0)
+            (def gate (in 1 @name gate))
+            (def pitch (in 2 @name pitch))
+            (def osc (phasor pitch))
+            (def env (adsr gate attack decay sustain release))
+            (def sig (* osc env))
+            (out sig 1 @name audio)
+            "#,
+    );
+    let node = |id: &str| patch.nodes.iter().find(|node| node.id == id).unwrap();
+    let width = |id: &str| {
+        let input_indices = patch_input_indices(&patch);
+        let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+        let output_counts = patch_output_counts(&patch);
+        let target = node(id);
+        node_size_for_ports(
+            target,
+            input_slot_counts.get(&target.id).copied().unwrap_or(0),
+            output_counts.get(&target.id).copied().unwrap_or(0),
+        )
+        .0
+    };
+
+    let param_right_edge = ["attack", "decay", "sustain", "release"]
+        .into_iter()
+        .map(|id| node(id).position.0 + width(id))
+        .fold(0.0_f32, f32::max);
+    for input in ["gate", "pitch"] {
+        assert!(
+            node(input).position.0 >= param_right_edge,
+            "named input {input} at {:?} should start right of the param stack edge {param_right_edge}",
+            node(input).position
+        );
+    }
+
+    // Signal flow still reads top-down: sources on top, out at the bottom.
+    let sources_bottom = ["attack", "gate", "pitch"]
+        .into_iter()
+        .map(|id| node(id).position.1)
+        .fold(0.0_f32, f32::max);
+    let out_row = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .expect("out node")
+        .position
+        .1;
+    assert!(
+        out_row > sources_bottom,
+        "out node should sit below every source: out_row={out_row} sources_bottom={sources_bottom}"
+    );
+}
+

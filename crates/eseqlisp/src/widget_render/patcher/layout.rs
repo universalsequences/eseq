@@ -548,13 +548,29 @@ impl LayoutGraph {
                 .copied()
                 .map(|idx| (idx, self.ideal_x_for_node(idx, patch)))
                 .collect::<Vec<_>>();
-            let mut next_x = VIEW_PADDING_X;
+            let mut next_x = self.rank_content_left_edge(&stacked_params, patch);
             for (idx, ideal) in ideals {
                 let x = ideal.max(next_x);
                 patch.nodes[idx].position.0 = x;
                 next_x = x + self.real_nodes[idx].width + NODE_COLUMN_GAP;
             }
         }
+    }
+
+    /// Left edge available to a rank's non-param nodes.
+    ///
+    /// Stacked params own a column of their own at the left of the rank and are
+    /// excluded from every later horizontal sweep, so the remaining nodes have
+    /// to start to the right of that column - otherwise a node whose ideal x is
+    /// near the padding (an `in` pulled under its consumer's inlet, say) lands
+    /// on top of the param stack.
+    fn rank_content_left_edge(&self, stacked_params: &[usize], patch: &Patch) -> f32 {
+        stacked_params
+            .iter()
+            .map(|idx| patch.nodes[*idx].position.0 + self.real_nodes[*idx].width)
+            .fold(f32::NEG_INFINITY, f32::max)
+            .max(VIEW_PADDING_X - NODE_COLUMN_GAP)
+            + NODE_COLUMN_GAP
     }
 
     fn ideal_x_for_node(&self, idx: usize, patch: &Patch) -> f32 {
@@ -827,7 +843,7 @@ impl LayoutGraph {
                     })
             });
 
-            let mut next_x = VIEW_PADDING_X;
+            let mut next_x = self.rank_content_left_edge(&stacked_params, patch);
             for idx in real_rank {
                 let x = patch.nodes[idx].position.0.max(next_x);
                 patch.nodes[idx].position.0 = x;
@@ -1288,7 +1304,9 @@ fn rank_metrics(rank: &[usize], nodes: &[WorkNode], patch: &Patch) -> RankMetric
             .iter()
             .map(|real_idx| nodes[*real_idx].height)
             .sum::<f32>()
-            + PARAM_STACK_VERTICAL_GAP * stacked_params.len().saturating_sub(1) as f32;
+            // One gap per param: the stack's internal gaps plus a trailing one
+            // so the next rank does not start flush against the last param.
+            + PARAM_STACK_VERTICAL_GAP * stacked_params.len() as f32;
         needs_gap = true;
     }
 

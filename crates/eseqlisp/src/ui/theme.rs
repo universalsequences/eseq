@@ -155,6 +155,15 @@ pub struct Theme {
     pub patcher_autocomplete_bg: Color,
     pub patcher_autocomplete_border: Color,
     pub patcher_autocomplete_selected_bg: Color,
+    pub patcher_autocomplete_text: Color,
+    pub patcher_autocomplete_selected_text: Color,
+    pub patcher_autocomplete_category_text: Color,
+    pub patcher_autocomplete_doc_bg: Color,
+    pub patcher_autocomplete_doc_border: Color,
+    pub patcher_autocomplete_doc_text: Color,
+    pub patcher_tooltip_bg: Color,
+    pub patcher_tooltip_border: Color,
+    pub patcher_tooltip_text: Color,
     pub patcher_back_button_bg: Color,
     pub patcher_back_button_hover_bg: Color,
     pub patcher_back_button_border: Color,
@@ -819,17 +828,62 @@ theme_slots!(
     (
         patcher_autocomplete_bg,
         PATCHER_AUTOCOMPLETE_BG,
-        Color::rgba(0.11, 0.11, 0.14, 0.96)
+        Color::from_hex(0x17, 0x18, 0x1b)
     ),
     (
         patcher_autocomplete_border,
         PATCHER_AUTOCOMPLETE_BORDER,
-        Color::from_hex(0x40, 0x40, 0x4a)
+        Color::from_hex(0x2e, 0x30, 0x36)
     ),
     (
         patcher_autocomplete_selected_bg,
         PATCHER_AUTOCOMPLETE_SELECTED_BG,
-        Color::rgba(0.22, 0.39, 0.68, 0.72)
+        Color::from_hex(0x32, 0x35, 0x3d)
+    ),
+    (
+        patcher_autocomplete_text,
+        PATCHER_AUTOCOMPLETE_TEXT,
+        Color::from_hex(0x4c, 0xe0, 0x72)
+    ),
+    (
+        patcher_autocomplete_selected_text,
+        PATCHER_AUTOCOMPLETE_SELECTED_TEXT,
+        Color::from_hex(0x6a, 0xf0, 0x8d)
+    ),
+    (
+        patcher_autocomplete_category_text,
+        PATCHER_AUTOCOMPLETE_CATEGORY_TEXT,
+        Color::from_hex(0x74, 0x78, 0x82)
+    ),
+    (
+        patcher_autocomplete_doc_bg,
+        PATCHER_AUTOCOMPLETE_DOC_BG,
+        Color::from_hex(0x15, 0x16, 0x19)
+    ),
+    (
+        patcher_autocomplete_doc_border,
+        PATCHER_AUTOCOMPLETE_DOC_BORDER,
+        Color::from_hex(0x2b, 0x2d, 0x33)
+    ),
+    (
+        patcher_autocomplete_doc_text,
+        PATCHER_AUTOCOMPLETE_DOC_TEXT,
+        Color::from_hex(0xa8, 0xac, 0xb8)
+    ),
+    (
+        patcher_tooltip_bg,
+        PATCHER_TOOLTIP_BG,
+        Color::from_hex(0x17, 0x18, 0x1b)
+    ),
+    (
+        patcher_tooltip_border,
+        PATCHER_TOOLTIP_BORDER,
+        Color::from_hex(0x2e, 0x30, 0x36)
+    ),
+    (
+        patcher_tooltip_text,
+        PATCHER_TOOLTIP_TEXT,
+        Color::from_hex(0xd2, 0xd6, 0xdf)
     ),
     (
         patcher_back_button_bg,

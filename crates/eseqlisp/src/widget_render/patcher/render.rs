@@ -48,8 +48,20 @@ use super::state::{
 #[cfg(target_os = "macos")]
 use super::text::patcher_autocomplete_suggestions;
 
+/// Flat completion-menu chrome (Zed-style): moderate panel radius, a slightly
+/// tighter radius on the selected row, and a crisp hairline border that stays
+/// 1px regardless of patcher zoom.
 #[cfg(target_os = "macos")]
-const AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX: f32 = 9.0;
+const AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX: f32 = 14.0;
+#[cfg(target_os = "macos")]
+const AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX: f32 = 1.0;
+#[cfg(target_os = "macos")]
+const AUTOCOMPLETE_ROW_CORNER_RADIUS_PX: f32 = 8.0;
+/// Horizontal inset of the selected-row bar from the panel edge, in cells.
+#[cfg(target_os = "macos")]
+const AUTOCOMPLETE_ROW_INSET_CELLS: f32 = 0.22;
+#[cfg(target_os = "macos")]
+const PATCHER_TOOLTIP_CORNER_RADIUS_PX: f32 = 5.0;
 #[cfg(target_os = "macos")]
 const PATCHER_OVERLAY_Z: i32 = 1_000_000;
 
@@ -895,9 +907,9 @@ fn push_hovered_port_tooltip(
         .max(4.0 * zoom)
         .min(32.0 * zoom);
     let padding_x = 0.55 * zoom;
-    let padding_y = 0.35 * zoom;
+    let padding_y = 0.12 * zoom;
     let width = text_width_cells + padding_x * 2.0;
-    let height = 1.15 * zoom + padding_y * 2.0;
+    let height = 1.0 * zoom + padding_y * 2.0;
     let row = if is_input {
         center.1 - height - 0.45 * zoom
     } else {
@@ -910,24 +922,25 @@ fn push_hovered_port_tooltip(
         width,
         height,
     };
-    push_autocomplete_panel_chrome(
+    push_flat_panel_chrome(
         prims,
         panel,
-        theme::PATCHER_AUTOCOMPLETE_BG(),
-        theme::PATCHER_AUTOCOMPLETE_BORDER(),
+        theme::PATCHER_TOOLTIP_BG(),
+        theme::PATCHER_TOOLTIP_BORDER(),
         viewport,
         zoom,
+        PATCHER_TOOLTIP_CORNER_RADIUS_PX,
     );
     prims.push(MetalPrimitive::ProportionalText(
         MetalProportionalTextPrimitive {
-            row: panel.row + padding_y + 0.1 * zoom,
+            row: panel.row + padding_y + 0.04 * zoom,
             col: panel.col + padding_x,
             align_width: panel.width - padding_x * 2.0,
             h_align: 0.0,
             text,
             font_size,
             scale: zoom,
-            fg: theme::PATCHER_TEXT(),
+            fg: theme::PATCHER_TOOLTIP_TEXT(),
             bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
         },
     ));
@@ -1083,49 +1096,91 @@ fn push_autocomplete_panel(
     }
     let row_height = 1.35 * zoom;
     let padding = 0.45 * zoom;
-    let panel_width = (node_rect.width.max(18.0 * zoom)).min(28.0 * zoom);
+    let panel_width = (node_rect.width.max(36.0 * zoom)).min(56.0 * zoom);
     let panel = Rect {
         row: node_rect.row + node_rect.height + 0.35 * zoom,
         col: node_rect.col,
         width: panel_width,
         height: padding * 2.0 + row_height * suggestions.len() as f32,
     };
-    push_autocomplete_panel_chrome(
+    push_flat_panel_chrome(
         prims,
         panel,
         theme::PATCHER_AUTOCOMPLETE_BG(),
         theme::PATCHER_AUTOCOMPLETE_BORDER(),
         viewport,
         zoom,
+        AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
     );
+    let name_font_size = 11.5;
+    let category_font_size = 9.5;
+    let text_col = panel.col + 1.4 * zoom;
+    let text_right = panel.col + panel.width - 1.4 * zoom;
+    let selected_index = edit.autocomplete_selected.min(suggestions.len() - 1);
     for (index, suggestion) in suggestions.iter().enumerate() {
         let row = panel.row + padding + index as f32 * row_height;
-        if index == edit.autocomplete_selected.min(suggestions.len() - 1) {
-            prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
-                rect: Rect {
-                    row,
-                    col: panel.col + 0.25 * zoom,
-                    width: panel.width - 0.5 * zoom,
-                    height: row_height,
+        let selected = index == selected_index;
+        if selected {
+            push_rounded_rect(
+                prims,
+                Rect {
+                    row: row + 0.05 * zoom,
+                    col: panel.col + AUTOCOMPLETE_ROW_INSET_CELLS * zoom,
+                    width: panel.width - AUTOCOMPLETE_ROW_INSET_CELLS * 2.0 * zoom,
+                    height: (row_height - 0.1 * zoom).max(0.1),
                 },
-                color: theme::PATCHER_AUTOCOMPLETE_SELECTED_BG(),
-            }));
+                theme::PATCHER_AUTOCOMPLETE_SELECTED_BG(),
+                viewport,
+                AUTOCOMPLETE_ROW_CORNER_RADIUS_PX * zoom,
+                false,
+            );
         }
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
                 row: row + 0.18 * zoom,
-                col: panel.col + 0.8 * zoom,
-                align_width: panel.width - 1.6 * zoom,
+                col: text_col,
+                align_width: text_right - text_col,
                 h_align: 0.0,
                 text: suggestion.name.clone(),
-                font_size: 11.5,
+                font_size: name_font_size,
                 scale: zoom,
-                fg: theme::PATCHER_NODE_TAIL_TEXT(),
+                fg: if selected {
+                    theme::PATCHER_AUTOCOMPLETE_SELECTED_TEXT()
+                } else {
+                    theme::PATCHER_AUTOCOMPLETE_TEXT()
+                },
+                bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+            },
+        ));
+        let Some(category) = suggestion
+            .documentation
+            .as_ref()
+            .and_then(|documentation| documentation.category.clone())
+        else {
+            continue;
+        };
+        let name_width = approx_text_width_cells(&suggestion.name, name_font_size, viewport);
+        let category_width = approx_text_width_cells(&category, category_font_size, viewport);
+        // Right-align the category at the panel edge (Zed-style); skip it when
+        // the name could plausibly collide with it. Widths are estimates, so
+        // leave a generous gap rather than trusting them to the pixel.
+        if (name_width + category_width + 2.0) * zoom > text_right - text_col {
+            continue;
+        }
+        prims.push(MetalPrimitive::ProportionalText(
+            MetalProportionalTextPrimitive {
+                row: row + 0.32 * zoom,
+                col: text_col,
+                align_width: text_right - text_col,
+                h_align: 1.0,
+                text: category,
+                font_size: category_font_size,
+                scale: zoom,
+                fg: theme::PATCHER_AUTOCOMPLETE_CATEGORY_TEXT(),
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
             },
         ));
     }
-    let selected_index = edit.autocomplete_selected.min(suggestions.len() - 1);
     push_autocomplete_documentation_panel(
         prims,
         panel,
@@ -1133,6 +1188,17 @@ fn push_autocomplete_panel(
         viewport,
         zoom,
     );
+}
+
+/// Width of `text` in layout cells. Falls back to an average-advance estimate
+/// when the glyph-advance cache has no entry: suggestion names and category
+/// labels are never measured during layout, so the cache is empty for them.
+#[cfg(target_os = "macos")]
+fn approx_text_width_cells(text: &str, font_size: f32, viewport: WidgetViewport) -> f32 {
+    measured_text_width(text, font_size).unwrap_or_else(|| {
+        let char_px = font_size * 0.55;
+        text.chars().count() as f32 * char_px / viewport.cell_w.max(1.0)
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -1148,9 +1214,9 @@ fn push_autocomplete_documentation_panel(
         return;
     }
     let row_height = 1.08 * zoom;
-    let padding = 0.65 * zoom;
+    let padding = 0.8 * zoom;
     let panel_width = 46.0 * zoom;
-    let align_width = panel_width - 1.6 * zoom;
+    let align_width = panel_width - 1.8 * zoom;
     let visual_line_count =
         autocomplete_wrapped_doc_line_count(&lines, align_width, viewport, zoom);
     let panel = Rect {
@@ -1159,13 +1225,14 @@ fn push_autocomplete_documentation_panel(
         width: panel_width,
         height: padding * 2.0 + row_height * visual_line_count as f32,
     };
-    push_autocomplete_panel_chrome(
+    push_flat_panel_chrome(
         prims,
         panel,
-        theme::PATCHER_AUTOCOMPLETE_BG(),
-        theme::PATCHER_AUTOCOMPLETE_BORDER(),
+        theme::PATCHER_AUTOCOMPLETE_DOC_BG(),
+        theme::PATCHER_AUTOCOMPLETE_DOC_BORDER(),
         viewport,
         zoom,
+        AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
     );
     let max_chars = autocomplete_doc_wrap_chars(align_width, viewport, zoom);
     let mut visual_index = 0;
@@ -1174,13 +1241,13 @@ fn push_autocomplete_documentation_panel(
             prims.push(MetalPrimitive::ProportionalText(
                 MetalProportionalTextPrimitive {
                     row: panel.row + padding + visual_index as f32 * row_height,
-                    col: panel.col + 0.8 * zoom,
+                    col: panel.col + 0.9 * zoom,
                     align_width,
                     h_align: 0.0,
                     text: wrapped,
                     font_size: 10.0,
                     scale: zoom,
-                    fg: theme::PATCHER_TEXT_MUTED(),
+                    fg: theme::PATCHER_AUTOCOMPLETE_DOC_TEXT(),
                     bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
                 },
             ));
@@ -1585,26 +1652,27 @@ fn push_node_chrome(
 }
 
 #[cfg(target_os = "macos")]
-fn push_autocomplete_panel_chrome(
+fn push_flat_panel_chrome(
     prims: &mut Vec<MetalPrimitive>,
     rect: Rect,
     bg: crate::backend::Color,
     border: crate::backend::Color,
     viewport: WidgetViewport,
     zoom: f32,
+    radius_px: f32,
 ) {
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
     prims.push(MetalPrimitive::WidgetInstance {
-        widget_type: "patcher-node".to_string(),
+        widget_type: "patcher-panel".to_string(),
         instance: WidgetInstance {
             ndc_min,
             ndc_max,
             value_t: 0.0,
             orientation: 0.0,
             itime: viewport.time_seconds,
-            uniform_a: [NODE_BORDER_WIDTH_PX * zoom, 0.0, 0.0, 0.0],
+            uniform_a: [AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX, 0.0, 0.0, 0.0],
             uniform_b: [0.0; 4],
             uniform_c: [0.0; 4],
             uniform_d: [0.0; 4],
@@ -1612,11 +1680,7 @@ fn push_autocomplete_panel_chrome(
             color_b: bg.to_rgba(),
             color_c: [0.0; 4],
             color_d: [0.0; 4],
-            corner_radius: normalized_corner_radius(
-                rect,
-                viewport,
-                AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX * zoom,
-            ),
+            corner_radius: normalized_corner_radius(rect, viewport, radius_px * zoom),
             pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
         },
         is_background: false,

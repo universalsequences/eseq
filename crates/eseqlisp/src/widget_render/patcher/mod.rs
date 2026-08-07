@@ -2731,8 +2731,8 @@ fn toggle_selected_cable_segmented(
             &input_slot_counts,
             &output_counts,
         ) {
-            let origin = geometry::patcher_origin(node.rect, &pan_state);
-            segment.segment_row = ((start.1 + end.1) * 0.5) - origin.1;
+            let midpoint = ((start.0 + end.0) * 0.5, (start.1 + end.1) * 0.5);
+            segment.segment_row = geometry::screen_to_model(node.rect, &pan_state, midpoint).1;
         }
     }
     set_connection_segment_edit(state, view_key, &connection, Some(segment));

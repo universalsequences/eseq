@@ -1394,6 +1394,7 @@ pub fn widget_shader_sources() -> Vec<(&'static str, Option<&'static str>, &'sta
     shaders.push(("tile-chrome", None, TILE_CHROME_SHADER));
     shaders.push(("tile-tab", None, TILE_TAB_SHADER));
     shaders.push(("patcher-node", None, PATCHER_NODE_SHADER));
+    shaders.push(("patcher-panel", None, PATCHER_PANEL_SHADER));
     shaders.push(("patcher-port", None, PATCHER_PORT_SHADER));
     shaders.push(("patcher-back-chevron", None, PATCHER_BACK_CHEVRON_SHADER));
     for definition in WIDGET_DEFINITIONS {
@@ -4048,6 +4049,41 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     if (mask < 0.002) { discard_fragment(); }
     return float4(col.rgb, col.a * mask);
+}
+"#;
+
+/// Flat panel chrome: solid fill, crisp uniform border, rounded corners.
+///
+/// `color_a` = border color, `color_b` = fill color, `uniform_a.x` = border
+/// width in device pixels, `corner_radius` = normalized radius (see
+/// `normalized_corner_radius`). Deliberately unlit — no gradient, no specular —
+/// so completion menus and tooltips read as flat surfaces instead of nodes.
+#[cfg(target_os = "macos")]
+pub const PATCHER_PANEL_SHADER: &str = r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float aspect = max(in.aspect, 0.001);
+    float2 localPos = float2((in.uv.x - 0.5) * 2.0 * aspect, (in.uv.y - 0.5) * 2.0);
+    float2 sdfSize = float2(aspect, 1.0);
+    float cornerRadius = min(in.corner_radius, min(aspect, 1.0));
+
+    float dist = sdf_rounded_rect(localPos, sdfSize, cornerRadius);
+    float derivative = max(fwidth(dist), 0.001);
+    float outerAlpha = smoothstep(derivative, -derivative, dist);
+    if (outerAlpha <= 0.001) {
+        discard_fragment();
+    }
+
+    float borderThickness = max(in.uniform_a.x, 0.0) * derivative;
+    float2 innerSize = max(sdfSize - float2(borderThickness), float2(0.001));
+    float innerDist = sdf_rounded_rect(localPos, innerSize, max(cornerRadius - borderThickness, 0.0));
+    float innerDerivative = max(fwidth(innerDist), 0.001);
+    float innerAlpha = smoothstep(innerDerivative, -innerDerivative, innerDist);
+    float borderMask = outerAlpha * (1.0 - innerAlpha);
+
+    float3 color = mix(in.color_b.rgb, in.color_a.rgb, borderMask);
+    float alpha = mix(in.color_b.a, in.color_a.a, borderMask);
+    return float4(color, alpha * outerAlpha);
 }
 "#;
 

@@ -1349,6 +1349,9 @@ pub(super) fn dgenlisp_operator_names() -> &'static HashSet<String> {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct OperatorDocumentation {
+    /// Short kind label from the manifest (`arithmetic`, `tensor_op`, …),
+    /// rendered dimmed after the symbol name in the completion list.
+    pub(super) category: Option<String>,
     pub(super) summary: Option<String>,
     pub(super) signatures: Vec<String>,
     pub(super) inputs: Vec<OperatorPortDocumentation>,
@@ -1383,6 +1386,14 @@ pub(super) fn dgenlisp_operator_documentation() -> &'static HashMap<String, Oper
                 continue;
             };
             let doc = OperatorDocumentation {
+                category: operator
+                    .get("category")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|category| {
+                        !category.is_empty()
+                            && !matches!(*category, "uncategorized" | "internal" | "preamble")
+                    })
+                    .map(|category| category.replace('_', " ")),
                 summary: operator
                     .get("summary")
                     .and_then(serde_json::Value::as_str)
@@ -1496,6 +1507,50 @@ pub(super) fn dgenlisp_operator_port_shapes() -> &'static HashMap<String, Operat
             );
         }
         shapes
+    })
+}
+
+/// Fixed arities of the dgenlisp *preamble* defmacros — the standard-library
+/// macros the backend attaches to every compiled source (`svf`, `adsr`,
+/// `polyblep`, …). Unlike builtin operators, which tolerate trailing-slot
+/// trimming, these expand as macros with a fixed parameter list, so a call
+/// with fewer arguments is an arity error. The patcher uses this to classify
+/// an unwired instance the same way it classifies a patch-local macro
+/// instance (§4.2b dead-code omission).
+pub(super) fn dgenlisp_preamble_macro_arities() -> &'static HashMap<String, usize> {
+    static PREAMBLE_MACRO_ARITIES: OnceLock<HashMap<String, usize>> = OnceLock::new();
+    PREAMBLE_MACRO_ARITIES.get_or_init(|| {
+        let metadata: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../sequencer/tools/dgenlisp-operators.json"
+        ))
+        .expect("bundled dgenlisp-operators.json must be valid JSON");
+        let operators = metadata
+            .get("operators")
+            .and_then(serde_json::Value::as_array)
+            .expect("bundled dgenlisp-operators.json must contain an operators array");
+        let mut arities = HashMap::new();
+        for operator in operators {
+            if operator.get("category").and_then(serde_json::Value::as_str) != Some("preamble") {
+                continue;
+            }
+            let Some(name) = operator.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let arity = documented_required_input_count(operator);
+            if arity == 0 {
+                continue;
+            }
+            arities.insert(name.to_string(), arity);
+            if let Some(aliases) = operator
+                .get("aliases")
+                .and_then(serde_json::Value::as_array)
+            {
+                for alias in aliases.iter().filter_map(serde_json::Value::as_str) {
+                    arities.insert(alias.to_string(), arity);
+                }
+            }
+        }
+        arities
     })
 }
 

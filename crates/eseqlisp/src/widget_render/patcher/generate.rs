@@ -16,7 +16,9 @@ use super::model::{
     ArgValue, ConnectionKind, MacroOrigin, NodeKind, Patch, PatchConnection, PatchNode,
     PatcherIntent, hidden_inline_node_ids, orphaned_inline_mod_node_ids,
 };
-use super::project::{dgenlisp_constant_names, dgenlisp_operator_names};
+use super::project::{
+    dgenlisp_constant_names, dgenlisp_operator_names, dgenlisp_preamble_macro_arities,
+};
 
 const MISSING_INPUT_SENTINEL: &str = "__patcher_missing_input__";
 
@@ -583,21 +585,15 @@ impl<'a> ScopeEmitter<'a> {
     fn emit_call_expr(&mut self, node: &'a PatchNode) -> Result<String, String> {
         let mut parts = vec![node.op.clone()];
         let last_needed = self.last_needed_arg_index(node);
-        // Macro calls have a fixed arity: a live instance with unfilled
+        // Macro calls (patch-local/library instances and preamble defmacros
+        // like `svf`) have a fixed arity: a live instance with unfilled
         // trailing parameters must emit missing-input sentinels (a genuinely
         // broken patch surfaces a diagnostic) rather than silently emitting a
         // shorter call. Builtins keep the trailing-slot trim.
-        let emit_count = if node.kind == NodeKind::MacroInstance {
-            self.patch
-                .macros
-                .iter()
-                .find(|macro_patch| macro_patch.name == node.op)
-                .map(|macro_patch| macro_patch.params.len())
-                .filter(|arity| *arity > 0)
-                .unwrap_or_else(|| last_needed.map_or(0, |last| last + 1))
-        } else {
-            last_needed.map_or(0, |last| last + 1)
-        };
+        let trimmed_count = last_needed.map_or(0, |last| last + 1);
+        let emit_count = fixed_macro_arity(self.patch, node)
+            .filter(|arity| *arity > 0)
+            .map_or(trimmed_count, |arity| arity.max(trimmed_count));
         for idx in 0..emit_count {
             let connection = self.inbound.get(&(node.id.as_str(), idx)).copied();
             if let Some(connection) = connection {
@@ -983,6 +979,28 @@ fn live_node_ids(patch: &Patch, roles: &HashMap<&str, NodeRole>) -> HashSet<Stri
 /// `emit_call_expr`: an empty or diagnosed (unknown) op, a gap in front of a
 /// filled slot (missing-input sentinel), or — for macro instances, whose
 /// arity is fixed — any unfilled parameter slot.
+/// Fixed parameter count for nodes that expand as a *macro*, whose call must
+/// carry every argument: patch-local / library macro instances (arity from the
+/// macro's own parameter list) and dgenlisp preamble defmacros such as `svf`
+/// (arity from the bundled operator manifest — the same data that draws the
+/// node's inlets). `None` for builtin operators, which tolerate trailing-slot
+/// trimming.
+fn fixed_macro_arity(patch: &Patch, node: &PatchNode) -> Option<usize> {
+    if node.kind == NodeKind::MacroInstance {
+        return Some(
+            patch
+                .macros
+                .iter()
+                .find(|macro_patch| macro_patch.name == node.op)
+                .map(|macro_patch| macro_patch.params.len())
+                .unwrap_or(node.args.len()),
+        );
+    }
+    dgenlisp_preamble_macro_arities()
+        .get(node.op.trim())
+        .copied()
+}
+
 fn node_call_is_incomplete(
     patch: &Patch,
     inbound: &BTreeMap<(&str, usize), &PatchConnection>,
@@ -995,13 +1013,7 @@ fn node_call_is_incomplete(
         inbound.contains_key(&(node.id.as_str(), idx))
             || matches!(node.args.get(idx), Some(ArgValue::Literal(_)))
     };
-    if node.kind == NodeKind::MacroInstance {
-        let arity = patch
-            .macros
-            .iter()
-            .find(|macro_patch| macro_patch.name == node.op)
-            .map(|macro_patch| macro_patch.params.len())
-            .unwrap_or(node.args.len());
+    if let Some(arity) = fixed_macro_arity(patch, node) {
         return (0..arity).any(|idx| !slot_filled(idx));
     }
     let mut last_filled: Option<usize> = None;
