@@ -16,7 +16,7 @@ use super::model::{
     ArgValue, ConnectionKind, MacroOrigin, NodeKind, Patch, PatchConnection, PatchNode,
     PatcherIntent, hidden_inline_node_ids,
 };
-use super::project::dgenlisp_constant_names;
+use super::project::{dgenlisp_constant_names, dgenlisp_operator_names};
 
 const MISSING_INPUT_SENTINEL: &str = "__patcher_missing_input__";
 
@@ -183,6 +183,15 @@ struct ScopeEmitter<'a> {
     view_key: String,
     is_macro: bool,
     roles: HashMap<&'a str, NodeRole>,
+    /// Dead-code omission (docs/patch-vs-code-editor-spec.md §4): value nodes
+    /// that do not reach any `out` node AND whose call would be incomplete
+    /// (missing required inputs, empty/unknown op, unfilled macro arity) are
+    /// left out of the generated source entirely. They keep existing in the
+    /// interaction state and the layout sidecar, matching the pre-regeneration
+    /// system where uncommitted incomplete nodes never entered the source.
+    /// Dead nodes whose calls ARE complete are still emitted as harmless
+    /// unused defs so they survive a save + reload.
+    omitted: HashSet<String>,
     nodes: HashMap<&'a str, &'a PatchNode>,
     /// (to_node, to_input) -> connection, deterministic pick.
     inbound: BTreeMap<(&'a str, usize), &'a PatchConnection>,
@@ -248,11 +257,13 @@ impl<'a> ScopeEmitter<'a> {
                 .entry((connection.to_node.as_str(), connection.to_input))
                 .or_insert(connection);
         }
+        let omitted = omitted_dead_node_ids(patch, &roles, &inbound);
         let mut emitter = Self {
             patch,
             view_key,
             is_macro,
             roles,
+            omitted,
             nodes,
             inbound,
             names: HashMap::new(),
@@ -285,6 +296,13 @@ impl<'a> ScopeEmitter<'a> {
         for constant in dgenlisp_constant_names() {
             self.used_names.insert(constant.clone());
         }
+        // Bindings must never shadow operator names: op-derived names for
+        // interaction-created nodes (`binding_base_for_node`) would otherwise
+        // emit forms like `(def cos (cos x))`, making later references to the
+        // binding ambiguous with the operator.
+        for operator in dgenlisp_operator_names() {
+            self.used_names.insert(operator.clone());
+        }
         for macro_patch in &self.patch.macros {
             self.used_names.insert(macro_patch.name.clone());
         }
@@ -315,7 +333,8 @@ impl<'a> ScopeEmitter<'a> {
                     self.names.insert(node.id.clone(), names.join("_"));
                     self.output_names.insert(node.id.clone(), names);
                 } else {
-                    let name = self.claim_unique(&sanitize_binding(&node.id));
+                    let base = binding_base_for_node(node);
+                    let name = self.claim_unique(&base);
                     self.names.insert(node.id.clone(), name);
                 }
             }
@@ -332,6 +351,7 @@ impl<'a> ScopeEmitter<'a> {
             .nodes
             .iter()
             .filter(|node| self.roles.get(node.id.as_str()) == Some(&role))
+            .filter(|node| !self.omitted.contains(node.id.as_str()))
             .collect::<Vec<_>>();
         match role {
             NodeRole::MacroParam | NodeRole::Input | NodeRole::Out => {
@@ -563,7 +583,22 @@ impl<'a> ScopeEmitter<'a> {
     fn emit_call_expr(&mut self, node: &'a PatchNode) -> Result<String, String> {
         let mut parts = vec![node.op.clone()];
         let last_needed = self.last_needed_arg_index(node);
-        for idx in 0..last_needed.map_or(0, |last| last + 1) {
+        // Macro calls have a fixed arity: a live instance with unfilled
+        // trailing parameters must emit missing-input sentinels (a genuinely
+        // broken patch surfaces a diagnostic) rather than silently emitting a
+        // shorter call. Builtins keep the trailing-slot trim.
+        let emit_count = if node.kind == NodeKind::MacroInstance {
+            self.patch
+                .macros
+                .iter()
+                .find(|macro_patch| macro_patch.name == node.op)
+                .map(|macro_patch| macro_patch.params.len())
+                .filter(|arity| *arity > 0)
+                .unwrap_or_else(|| last_needed.map_or(0, |last| last + 1))
+        } else {
+            last_needed.map_or(0, |last| last + 1)
+        };
+        for idx in 0..emit_count {
             let connection = self.inbound.get(&(node.id.as_str(), idx)).copied();
             if let Some(connection) = connection {
                 let reference = self.reference_expr(connection)?;
@@ -670,6 +705,10 @@ impl<'a> ScopeEmitter<'a> {
         });
         for connection in connections {
             if self.roles.get(connection.to_node.as_str()) != Some(&NodeRole::History) {
+                continue;
+            }
+            // A write fed by an omitted dead node has no emitted source binding.
+            if self.omitted.contains(&connection.from_node) {
                 continue;
             }
             let history = self.names[&connection.to_node].clone();
@@ -805,9 +844,168 @@ fn out_binding_base(node: &PatchNode) -> String {
     if is_plain_name {
         return sanitize_binding(label);
     }
+    // Interaction-created outs must not leak their `created-N` interaction id
+    // into a persistent `@name` (see `binding_base_for_node`).
+    if is_interaction_created_id(&node.id) {
+        return "audio".to_string();
+    }
     // The editable display label omits `@name`, so a dragged/edited out keeps
     // its identity through the node id (which the parser derived from @name).
     sanitize_binding(&node.id)
+}
+
+/// True for node ids minted by the interaction layer (`allocate_created_node`).
+/// These are session-scoped identities and must never become binding names in
+/// generated source: a reload would parse them back as node ids, and the next
+/// session's `created-N` counter would collide with them, visually splicing
+/// existing cables into freshly created nodes and corrupting regeneration.
+fn is_interaction_created_id(id: &str) -> bool {
+    id.strip_prefix("created-")
+        .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+/// Binding base for a single-output node: source-derived ids keep their name;
+/// interaction-created ids get a deterministic, op-derived name instead.
+fn binding_base_for_node(node: &PatchNode) -> String {
+    if !is_interaction_created_id(&node.id) {
+        return sanitize_binding(&node.id);
+    }
+    match node.kind {
+        NodeKind::Param => node
+            .param
+            .as_ref()
+            .map(|param| sanitize_binding(&param.name))
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "param-value".to_string()),
+        NodeKind::In => label_attribute(&node.label, "@name")
+            .map(|name| sanitize_binding(&name))
+            .unwrap_or_else(|| format!("in{}", node_channel(node))),
+        NodeKind::Constant => "value".to_string(),
+        _ => {
+            if node.op.trim().is_empty() {
+                "node".to_string()
+            } else {
+                sanitize_binding(&node.op)
+            }
+        }
+    }
+}
+
+/// Dead-code omission set: value-role nodes that (a) cannot reach any `out`
+/// node through the connection graph and (b) would emit an incomplete call —
+/// empty/unknown op, a missing-input gap, or an unfilled macro arity — plus,
+/// transitively, dead value nodes that reference an omitted node. Dead nodes
+/// with complete calls are kept (emitted as unused defs) so they survive
+/// save + reload; live nodes are never omitted, so genuinely broken live
+/// patches still surface the missing-input sentinel / compile diagnostics.
+fn omitted_dead_node_ids(
+    patch: &Patch,
+    roles: &HashMap<&str, NodeRole>,
+    inbound: &BTreeMap<(&str, usize), &PatchConnection>,
+) -> HashSet<String> {
+    let live = live_node_ids(patch, roles);
+    let mut omitted: HashSet<String> = patch
+        .nodes
+        .iter()
+        .filter(|node| roles.get(node.id.as_str()) == Some(&NodeRole::Value))
+        .filter(|node| !live.contains(node.id.as_str()))
+        .filter(|node| node_call_is_incomplete(patch, inbound, node))
+        .map(|node| node.id.clone())
+        .collect();
+    // Propagate: a dead node whose input references an omitted node cannot be
+    // emitted either (its reference would have no binding).
+    loop {
+        let mut grew = false;
+        for node in &patch.nodes {
+            if roles.get(node.id.as_str()) != Some(&NodeRole::Value)
+                || live.contains(node.id.as_str())
+                || omitted.contains(node.id.as_str())
+            {
+                continue;
+            }
+            let references_omitted = inbound
+                .range((node.id.as_str(), 0)..=(node.id.as_str(), usize::MAX))
+                .any(|(_, connection)| omitted.contains(&connection.from_node));
+            if references_omitted {
+                omitted.insert(node.id.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    omitted
+}
+
+/// Node ids from which some `out` node is reachable (reverse reachability over
+/// all connections, feedback included so history writers stay live when the
+/// history is read on a live path).
+fn live_node_ids(patch: &Patch, roles: &HashMap<&str, NodeRole>) -> HashSet<String> {
+    let mut feeds: HashMap<&str, Vec<&str>> = HashMap::new();
+    for connection in &patch.connections {
+        feeds
+            .entry(connection.to_node.as_str())
+            .or_default()
+            .push(connection.from_node.as_str());
+    }
+    let mut live: HashSet<String> = HashSet::new();
+    let mut stack: Vec<&str> = patch
+        .nodes
+        .iter()
+        .filter(|node| roles.get(node.id.as_str()) == Some(&NodeRole::Out))
+        .map(|node| node.id.as_str())
+        .collect();
+    while let Some(node_id) = stack.pop() {
+        if !live.insert(node_id.to_string()) {
+            continue;
+        }
+        if let Some(sources) = feeds.get(node_id) {
+            for source in sources {
+                if !live.contains(*source) {
+                    stack.push(source);
+                }
+            }
+        }
+    }
+    live
+}
+
+/// Would emitting this node's call produce an incomplete form? Mirrors
+/// `emit_call_expr`: an empty or diagnosed (unknown) op, a gap in front of a
+/// filled slot (missing-input sentinel), or — for macro instances, whose
+/// arity is fixed — any unfilled parameter slot.
+fn node_call_is_incomplete(
+    patch: &Patch,
+    inbound: &BTreeMap<(&str, usize), &PatchConnection>,
+    node: &PatchNode,
+) -> bool {
+    if node.op.trim().is_empty() || node.diagnostic.is_some() {
+        return true;
+    }
+    let slot_filled = |idx: usize| {
+        inbound.contains_key(&(node.id.as_str(), idx))
+            || matches!(node.args.get(idx), Some(ArgValue::Literal(_)))
+    };
+    if node.kind == NodeKind::MacroInstance {
+        let arity = patch
+            .macros
+            .iter()
+            .find(|macro_patch| macro_patch.name == node.op)
+            .map(|macro_patch| macro_patch.params.len())
+            .unwrap_or(node.args.len());
+        return (0..arity).any(|idx| !slot_filled(idx));
+    }
+    let mut last_filled: Option<usize> = None;
+    for idx in 0..node.args.len() {
+        if slot_filled(idx) {
+            last_filled = Some(idx);
+        }
+    }
+    let Some(last_filled) = last_filled else {
+        return false;
+    };
+    (0..last_filled).any(|idx| !slot_filled(idx))
 }
 
 fn out_modulator_attr(node: &PatchNode) -> Option<usize> {

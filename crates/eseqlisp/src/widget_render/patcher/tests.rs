@@ -1897,21 +1897,25 @@ fn build_persistence_case(
             }
             connect_output_to_input(&mut state, "root", &literal, &phasor, 0);
             connect_output_to_input(&mut state, "root", &phasor, "tri", 1);
+            // Interaction-created ids never persist; expectations use the
+            // deterministic op-derived emitted bindings.
+            let literal = "value";
+            let phasor = "phasor-2";
             expectations
                 .nodes
-                .push(expected_node("root", &literal, literal_position));
+                .push(expected_node("root", literal, literal_position));
             expectations
                 .nodes
-                .push(expected_node("root", &phasor, phasor_position));
+                .push(expected_node("root", phasor, phasor_position));
             expectations
                 .connections
-                .push(expected_connection("root", &literal, 0, &phasor, 0));
+                .push(expected_connection("root", literal, 0, phasor, 0));
             expectations
                 .connections
-                .push(expected_connection("root", "trigger", 0, &phasor, 1));
+                .push(expected_connection("root", "trigger", 0, phasor, 1));
             expectations
                 .connections
-                .push(expected_connection("root", &phasor, 0, "tri", 1));
+                .push(expected_connection("root", phasor, 0, "tri", 1));
             expectations
                 .source_contains
                 .push(format!("(def {literal} 0.5)"));
@@ -1940,21 +1944,25 @@ fn build_persistence_case(
             connect_output_to_input(&mut state, "root", "phase", &multiply, 0);
             connect_output_to_input(&mut state, "root", &multiply, &cosine, 0);
             connect_output_to_input(&mut state, "root", &cosine, "tri", 0);
+            // Emitted bindings: "* 2" -> mul; "cos" -> cos-2 (operator names
+            // are reserved, so op-named nodes get a suffix).
+            let multiply = "mul";
+            let cosine = "cos-2";
             expectations
                 .nodes
-                .push(expected_node("root", &multiply, mul_position));
+                .push(expected_node("root", multiply, mul_position));
             expectations
                 .nodes
-                .push(expected_node("root", &cosine, cos_position));
+                .push(expected_node("root", cosine, cos_position));
             expectations
                 .connections
-                .push(expected_connection("root", "phase", 0, &multiply, 0));
+                .push(expected_connection("root", "phase", 0, multiply, 0));
             expectations
                 .connections
-                .push(expected_connection("root", &multiply, 0, &cosine, 0));
+                .push(expected_connection("root", multiply, 0, cosine, 0));
             expectations
                 .connections
-                .push(expected_connection("root", &cosine, 0, "tri", 0));
+                .push(expected_connection("root", cosine, 0, "tri", 0));
             expectations
                 .source_contains
                 .push(format!("(def {multiply} (* phase 2))"));
@@ -2022,29 +2030,32 @@ fn build_persistence_case(
             }
             connect_output_to_input(&mut state, "macro:fold", &literal, &phasor, 0);
             connect_output_to_input(&mut state, "macro:fold", &phasor, "shaped", 2);
+            // Interaction-created ids never persist (op-derived bindings).
+            let literal = "value";
+            let phasor = "phasor-2";
             expectations
                 .nodes
-                .push(expected_node("macro:fold", &literal, literal_position));
+                .push(expected_node("macro:fold", literal, literal_position));
             expectations
                 .nodes
-                .push(expected_node("macro:fold", &phasor, phasor_position));
+                .push(expected_node("macro:fold", phasor, phasor_position));
             expectations.connections.push(expected_connection(
                 "macro:fold",
-                &literal,
+                literal,
                 0,
-                &phasor,
+                phasor,
                 0,
             ));
             expectations.connections.push(expected_connection(
                 "macro:fold",
                 "amt",
                 0,
-                &phasor,
+                phasor,
                 1,
             ));
             expectations.connections.push(expected_connection(
                 "macro:fold",
-                &phasor,
+                phasor,
                 0,
                 "shaped",
                 2,
@@ -2076,21 +2087,24 @@ fn build_persistence_case(
                 .insert(connection_edit_key("root", &source_connection_id(old)));
             connect_output_to_input(&mut state, "root", &value, &shaper, 0);
             connect_output_to_input(&mut state, "root", &shaper, "shaped", 0);
+            // Interaction-created ids never persist (op-derived bindings).
+            let value = "value";
+            let shaper = "mix-2";
             expectations
                 .nodes
-                .push(expected_node("root", &value, value_position));
+                .push(expected_node("root", value, value_position));
             expectations
                 .nodes
-                .push(expected_node("root", &shaper, shaper_position));
+                .push(expected_node("root", shaper, shaper_position));
             expectations
                 .connections
-                .push(expected_connection("root", &value, 0, &shaper, 0));
+                .push(expected_connection("root", value, 0, shaper, 0));
             expectations
                 .connections
-                .push(expected_connection("root", "phase", 0, &shaper, 1));
+                .push(expected_connection("root", "phase", 0, shaper, 1));
             expectations
                 .connections
-                .push(expected_connection("root", &shaper, 0, "shaped", 0));
+                .push(expected_connection("root", shaper, 0, "shaped", 0));
             expectations
                 .source_contains
                 .push(format!("(def {shaper} (mix {value} phase 0.25))"));
@@ -3226,10 +3240,24 @@ fn patcher_change_payload_does_not_install_emitted_layout_before_source_is_saved
         Some(Value::String(layout)) => layout,
         other => panic!("expected emitted layout string, got {other:?}"),
     };
+    // Interaction-created ids never persist as bindings (they would collide
+    // with the next session's `created-N` counter); the layout keys the node
+    // by its emitted op-derived binding, carrying the created position.
     assert!(
-        layout.contains(&created),
-        "created node ids are stable emitted bindings and key the layout"
+        !layout.contains(&created),
+        "interaction-created id must not leak into the emitted layout: {layout}"
     );
+    let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
+    let emitted_id = layout_json["root"]["nodes"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, position)| {
+            (position["x"].as_f64().unwrap_or(f64::NAN) - 222.0).abs() < 0.0001
+                && (position["y"].as_f64().unwrap_or(f64::NAN) - 33.0).abs() < 0.0001
+        })
+        .map(|(id, _)| id.clone())
+        .expect("emitted layout should carry the created node position under its new binding");
 
     let installed: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
@@ -3252,7 +3280,7 @@ fn patcher_change_payload_does_not_install_emitted_layout_before_source_is_saved
         reloaded
             .nodes
             .iter()
-            .any(|patch_node| patch_node.id == created),
+            .any(|patch_node| patch_node.id == emitted_id),
         "saved source and sidecar should reload with emitted ids"
     );
 }
@@ -3390,12 +3418,19 @@ fn finalized_create_instrument_flow_reopens_with_saved_created_node_layout() {
         Some(Value::String(layout)) => layout,
         other => panic!("expected emitted layout string, got {other:?}"),
     };
+    // Interaction-created ids never persist; the multiply is emitted under
+    // its deterministic op-derived binding.
+    let emitted_multiply = "mul";
     assert!(
-        source.contains(&format!("(def {multiply} (* phase 3))")),
+        source.contains(&format!("(def {emitted_multiply} (* phase 3))")),
         "created multiply should be materialized before final save:\n{source}"
     );
+    assert!(
+        !source.contains(&multiply),
+        "interaction-created id must not leak into generated source:\n{source}"
+    );
     let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
-    let mul_layout = &layout_json["root"]["nodes"][&multiply];
+    let mul_layout = &layout_json["root"]["nodes"][emitted_multiply];
     assert!(
         (mul_layout["x"].as_f64().unwrap() - placed_position.0 as f64).abs() < 0.0001
             && (mul_layout["y"].as_f64().unwrap() - placed_position.1 as f64).abs() < 0.0001,
@@ -3411,7 +3446,7 @@ fn finalized_create_instrument_flow_reopens_with_saved_created_node_layout() {
     let mul = reloaded
         .nodes
         .iter()
-        .find(|patch_node| patch_node.id == multiply)
+        .find(|patch_node| patch_node.id == emitted_multiply)
         .expect("finalized patch should reload generated multiply node");
     assert_eq!(mul.position, placed_position);
 }
@@ -3575,28 +3610,37 @@ fn existing_instrument_edit_reopens_with_created_chain_layout_after_deleting_sou
         Some(Value::String(layout)) => layout,
         other => panic!("expected emitted layout string, got {other:?}"),
     };
+    // Interaction-created ids never persist; the chain is emitted under
+    // deterministic op-derived bindings ("mul", "cos-2" — "cos" itself is a
+    // reserved operator name).
+    let emitted_multiply = "mul";
+    let emitted_cosine = "cos-2";
     assert!(
-        source.contains(&format!("(def {multiply} (* phase 1))"))
-            && source.contains(&format!("(def {cosine} (cos {multiply})"))
-            && source.contains(&format!("(* {cosine} env velocity")),
+        source.contains(&format!("(def {emitted_multiply} (* phase 1))"))
+            && source.contains(&format!("(def {emitted_cosine} (cos {emitted_multiply})"))
+            && source.contains(&format!("(* {emitted_cosine} env velocity")),
         "created replacement chain should be materialized before save:\n{source}"
+    );
+    assert!(
+        !source.contains(&multiply) && !source.contains(&cosine),
+        "interaction-created ids must not leak into generated source:\n{source}"
     );
     let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
     assert!(
-        (layout_json["root"]["nodes"][&multiply]["x"].as_f64().unwrap() - mul_position.0 as f64)
+        (layout_json["root"]["nodes"][emitted_multiply]["x"].as_f64().unwrap() - mul_position.0 as f64)
             .abs()
             < 0.0001
-            && (layout_json["root"]["nodes"][&multiply]["y"].as_f64().unwrap()
+            && (layout_json["root"]["nodes"][emitted_multiply]["y"].as_f64().unwrap()
                 - mul_position.1 as f64)
                 .abs()
                 < 0.0001,
         "emitted layout should keep created multiply position: {layout}"
     );
     assert!(
-        (layout_json["root"]["nodes"][&cosine]["x"].as_f64().unwrap() - cos_position.0 as f64)
+        (layout_json["root"]["nodes"][emitted_cosine]["x"].as_f64().unwrap() - cos_position.0 as f64)
             .abs()
             < 0.0001
-            && (layout_json["root"]["nodes"][&cosine]["y"].as_f64().unwrap()
+            && (layout_json["root"]["nodes"][emitted_cosine]["y"].as_f64().unwrap()
                 - cos_position.1 as f64)
                 .abs()
                 < 0.0001,
@@ -3611,7 +3655,7 @@ fn existing_instrument_edit_reopens_with_created_chain_layout_after_deleting_sou
         reloaded
             .nodes
             .iter()
-            .find(|patch_node| patch_node.id == multiply)
+            .find(|patch_node| patch_node.id == emitted_multiply)
             .unwrap()
             .position,
         mul_position
@@ -3620,7 +3664,7 @@ fn existing_instrument_edit_reopens_with_created_chain_layout_after_deleting_sou
         reloaded
             .nodes
             .iter()
-            .find(|patch_node| patch_node.id == cosine)
+            .find(|patch_node| patch_node.id == emitted_cosine)
             .unwrap()
             .position,
         cos_position
@@ -3675,10 +3719,16 @@ fn semantic_save_payload_maps_created_literal_layout_to_generated_constant_bindi
         other => panic!("expected emitted layout string, got {other:?}"),
     };
 
+    // Interaction-created ids never persist as bindings; the constant gets a
+    // deterministic op-derived name ("value") and the phasor an op-derived
+    // name that never shadows the operator itself.
     assert!(
-        source.contains(&format!("(def {literal} 0.3)"))
-            && source.contains(&format!("(def {phasor} (phasor {literal}))")),
+        source.contains("(def value 0.3)") && source.contains("(def phasor-2 (phasor value))"),
         "created literal should materialize as a named constant feeding phasor:\n{source}"
+    );
+    assert!(
+        !source.contains(&literal) && !source.contains(&phasor),
+        "interaction-created ids must not leak into generated source:\n{source}"
     );
     let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
     assert!(
@@ -3686,19 +3736,28 @@ fn semantic_save_payload_maps_created_literal_layout_to_generated_constant_bindi
         "layout should not use literal text as the saved node id: {layout}"
     );
     assert!(
-        (layout_json["root"]["nodes"][&literal]["x"]
+        (layout_json["root"]["nodes"]["value"]["x"]
             .as_f64()
             .unwrap()
             - literal_position.0 as f64)
             .abs()
             < 0.0001
-            && (layout_json["root"]["nodes"][&literal]["y"]
+            && (layout_json["root"]["nodes"]["value"]["y"]
                 .as_f64()
                 .unwrap()
                 - literal_position.1 as f64)
                 .abs()
                 < 0.0001,
-        "layout should keep the visible constant position under the created id: {layout}"
+        "layout should keep the visible constant position under the emitted binding: {layout}"
+    );
+    assert!(
+        (layout_json["root"]["nodes"]["phasor-2"]["x"]
+            .as_f64()
+            .unwrap()
+            - phasor_position.0 as f64)
+            .abs()
+            < 0.0001,
+        "layout should keep the created phasor position under the emitted binding: {layout}"
     );
 }
 
@@ -17086,4 +17145,422 @@ fn eject_flips_authored_flag_but_keeps_layout_for_repromotion() {
     let repromoted: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
     assert_eq!(repromoted["root"]["nodes"], before["root"]["nodes"]);
+}
+
+
+// ── Created-node identity vs source bindings (regression: node-splice bug) ──
+//
+// Older generated sources persisted interaction ids (`created-N`) as binding
+// names. A fresh session's `created-N` counter then collided with those source
+// node ids: the existing node's cables visually spliced into the newly created
+// node, and regeneration rewired a→b into a→c→b for real (deleting c then
+// destroyed a→b). These tests pin both halves of the fix: allocation skips
+// taken ids, and the generator never emits interaction ids as bindings.
+
+const POISONED_CREATED_ID_SOURCE: &str = "(def gate (in 1 @name gate))\n\
+     (def created-1 (phasor 220))\n\
+     (def created-0 (* created-1 6.28))\n\
+     (def created-2 (cos created-0))\n\
+     (out created-2 1 @name audio)\n";
+
+#[test]
+fn double_click_created_node_id_skips_ids_taken_by_source_nodes() {
+    let path = temp_patcher_dsp_path("patcher-created-id-collision");
+    fs::write(&path, POISONED_CREATED_ID_SOURCE).unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    reset_patcher_widget_state(key);
+    let (_path, root_patch) = load_patch_from_props(&node.props).unwrap();
+
+    assert!(handle_patcher_double_click(&node, 90.0, 90.0));
+    let state = get_patcher_interaction_state(key);
+    let created = state
+        .text_edit
+        .as_ref()
+        .expect("double-click on empty canvas should start a created-node text edit")
+        .node_id
+        .clone();
+    assert!(
+        !root_patch.nodes.iter().any(|source| source.id == created),
+        "created node id '{created}' must not collide with a source node id"
+    );
+
+    // (a) no connection may touch the created node, (b) every pre-existing
+    // connection survives verbatim.
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    assert!(
+        visible
+            .connections
+            .iter()
+            .all(|connection| connection.from_node != created && connection.to_node != created),
+        "no cable may attach to a freshly created node"
+    );
+    let connection_ids = |patch: &Patch| {
+        let mut ids = patch
+            .connections
+            .iter()
+            .map(source_connection_id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    };
+    assert_eq!(
+        connection_ids(&visible),
+        connection_ids(&root_patch),
+        "pre-existing connections must survive node creation verbatim"
+    );
+
+    // (c) deleting the created node leaves the semantic signature unchanged.
+    // (Created nodes are deleted by dropping their interaction edit, as
+    // `delete_selected_nodes` does — they have no source to mark deleted.)
+    let mut state = state;
+    state.text_edit = None;
+    state
+        .edit_state
+        .nodes
+        .remove(&node_edit_key("root", &created));
+    let after_delete = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let identity = |_: &str, id: &str| id.to_string();
+    assert_eq!(
+        generation_semantic_signature(&after_delete, &identity),
+        generation_semantic_signature(&root_patch, &identity),
+        "deleting the created node must not change the patch model"
+    );
+    let generated =
+        generate::generate_patch_source(&after_delete, PatcherIntent::Instrument).unwrap();
+    let reparsed = parse(&generated.source);
+    let renames = generated.renamed_node_ids.clone();
+    let mapped = move |scope: &str, id: &str| {
+        renames
+            .get(&(scope.to_string(), id.to_string()))
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
+    };
+    assert_eq!(
+        generation_semantic_signature(&reparsed, &identity),
+        generation_semantic_signature(&root_patch, &mapped),
+        "regeneration after create+delete must reproduce the original model"
+    );
+    reset_patcher_widget_state(key);
+}
+
+#[test]
+fn generated_source_never_persists_interaction_created_ids() {
+    let patch = parse(POISONED_CREATED_ID_SOURCE);
+    let mut state = PatcherInteractionState::default();
+    // Simulate the fixed allocation path: the id skips taken source ids.
+    let taken = patch
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<HashSet<_>>();
+    let created = allocate_created_node_avoiding(&mut state, "root", (50.0, 50.0), &taken);
+    assert!(!taken.contains(&created));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &created))
+        .unwrap()
+        .text = "tanh gate".to_string();
+    let visible = sidecar::root_patch_with_interaction(&patch, &state);
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        !generated.source.contains("(def created-"),
+        "generated source must not contain interaction-created binding names:\n{}",
+        generated.source
+    );
+    // The poisoned legacy ids are healed to op-derived names, and the rename
+    // map carries their layout to the new bindings.
+    for legacy in ["created-0", "created-1", "created-2"] {
+        assert!(
+            generated
+                .renamed_node_ids
+                .contains_key(&("root".to_string(), legacy.to_string())),
+            "legacy created-N source node '{legacy}' should be renamed on regeneration"
+        );
+    }
+    // Pre-existing edges survive (modulo renames): a→b never becomes a→c→b.
+    let reparsed = parse(&generated.source);
+    let renames = generated.renamed_node_ids.clone();
+    let renamed = move |id: &str| {
+        renames
+            .get(&("root".to_string(), id.to_string()))
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
+    };
+    for (from, to, to_input) in [
+        ("created-1", "created-0", 0usize),
+        ("created-0", "created-2", 0usize),
+        ("created-2", "audio", 0usize),
+    ] {
+        assert!(
+            reparsed.connections.iter().any(|connection| {
+                connection.from_node == renamed(from)
+                    && connection.to_node == renamed(to)
+                    && connection.to_input == to_input
+            }),
+            "edge {from}->{to}:{to_input} must survive regeneration:\n{}",
+            generated.source
+        );
+    }
+}
+
+// ── Dead-code omission (regression: disconnected nodes invalidated the patch) ──
+//
+// Liveness = "reaches some out node". Dead nodes with incomplete calls
+// (empty/unknown op, missing-input gap, unfilled macro arity) are omitted from
+// the generated source and live on in the interaction state + layout payload;
+// dead nodes with complete calls are still emitted as unused defs so they
+// survive save + reload. Live nodes keep the existing missing-input sentinel
+// behavior.
+
+fn bug3_starter_node_and_key(name: &str) -> (LayoutNode, u64) {
+    let path = temp_patcher_dsp_path(name);
+    fs::write(
+        &path,
+        "(def input (in 1 @name input))\n\
+         (def shaped (tanh input))\n\
+         (out shaped 1 @name audio)\n",
+    )
+    .unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    reset_patcher_widget_state(key);
+    load_patch_from_props(&node.props).unwrap();
+    (node, key)
+}
+
+fn bug3_macro_instance_state(instance_text: &str) -> (PatcherInteractionState, String) {
+    let mut state = PatcherInteractionState::default();
+    let instance = allocate_created_text_node(&mut state, "root", instance_text);
+    state.edit_state.created_macros.insert(
+        "softfold".to_string(),
+        PatcherMacroEdit {
+            name: "softfold".to_string(),
+            instance_node_id: instance.clone(),
+            source: Some("(defmacro softfold (sig amt) (tanh (* sig amt)))".to_string()),
+        },
+    );
+    (state, instance)
+}
+
+fn payload_field(
+    map: &HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>,
+    key: &str,
+) -> Option<Value> {
+    map.get(key).map(|value| value.borrow().clone())
+}
+
+#[test]
+fn disconnected_created_macro_instance_keeps_patch_valid_without_a_call() {
+    let (node, key) = bug3_starter_node_and_key("patcher-dead-macro-disconnected");
+    let (state, instance) = bug3_macro_instance_state("softfold");
+    set_patcher_interaction_state(key, state);
+
+    let Value::Map(map) = patcher_writeback_payload(&node) else {
+        panic!("expected payload map");
+    };
+    assert_eq!(
+        payload_field(&map, "status"),
+        Some(Value::Keyword("valid".to_string())),
+        "a disconnected macro instance must not invalidate the patch: {:?}",
+        payload_field(&map, "diagnostic")
+    );
+    let Some(Value::String(source)) = payload_field(&map, "source") else {
+        panic!("expected source");
+    };
+    assert!(
+        source.contains("(defmacro softfold"),
+        "the macro definition must persist even without call sites:\n{source}"
+    );
+    assert!(
+        !source.contains("(softfold") || !source.replace("(defmacro softfold", "").contains("(softfold"),
+        "no call to the disconnected macro instance may be emitted:\n{source}"
+    );
+    // (d) the omitted instance keeps its layout in the emitted layout payload.
+    let Some(Value::String(layout)) = payload_field(&map, "layout") else {
+        panic!("expected layout");
+    };
+    let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
+    assert!(
+        !layout_json["root"]["nodes"][&instance].is_null(),
+        "omitted node's position must survive in the layout payload: {layout}"
+    );
+    reset_patcher_widget_state(key);
+}
+
+#[test]
+fn partially_wired_dead_macro_instance_keeps_patch_valid() {
+    let (node, key) = bug3_starter_node_and_key("patcher-dead-macro-partial");
+    let (mut state, instance) = bug3_macro_instance_state("softfold");
+    // Wire inlet 1 only; the output still reaches no out node.
+    connect_output_to_input(&mut state, "root", "input", &instance, 0);
+    set_patcher_interaction_state(key, state);
+
+    let Value::Map(map) = patcher_writeback_payload(&node) else {
+        panic!("expected payload map");
+    };
+    assert_eq!(
+        payload_field(&map, "status"),
+        Some(Value::Keyword("valid".to_string())),
+        "a partially wired dead macro instance must not invalidate the patch: {:?}",
+        payload_field(&map, "diagnostic")
+    );
+    let Some(Value::String(source)) = payload_field(&map, "source") else {
+        panic!("expected source");
+    };
+    assert!(
+        source.contains("(defmacro softfold") && !source.contains("(softfold input"),
+        "partially wired dead instance must not emit a call:\n{source}"
+    );
+    reset_patcher_widget_state(key);
+}
+
+#[test]
+fn fully_wired_macro_instance_emits_call_and_enforces_signature() {
+    let (node, key) = bug3_starter_node_and_key("patcher-live-macro-wired");
+    let (mut state, instance) = bug3_macro_instance_state("softfold");
+    let (_path, root_patch) = load_patch_from_props(&node.props).unwrap();
+    // Route input through the instance into the out (replacing shaped→audio).
+    let old = root_patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == "audio")
+        .unwrap();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key("root", &source_connection_id(old)));
+    connect_output_to_input(&mut state, "root", "input", &instance, 0);
+    connect_output_to_input(&mut state, "root", "shaped", &instance, 1);
+    connect_output_to_input(&mut state, "root", &instance, "audio", 0);
+    set_patcher_interaction_state(key, state.clone());
+
+    let Value::Map(map) = patcher_writeback_payload(&node) else {
+        panic!("expected payload map");
+    };
+    assert_eq!(
+        payload_field(&map, "status"),
+        Some(Value::Keyword("valid".to_string())),
+        "a fully wired macro instance should produce a valid patch: {:?}",
+        payload_field(&map, "diagnostic")
+    );
+    let Some(Value::String(source)) = payload_field(&map, "source") else {
+        panic!("expected source");
+    };
+    assert!(
+        source.contains("(softfold input shaped)"),
+        "live instance must emit its call:\n{source}"
+    );
+
+    // Once live, the signature is enforced: drop inlet 2 and the incomplete
+    // call surfaces instead of being silently omitted.
+    let mut broken = state;
+    broken.edit_state.connections.retain(|_, edit| {
+        !(edit.to.node_id == instance && edit.to.input_index == 1)
+    });
+    set_patcher_interaction_state(key, broken);
+    let Value::Map(map) = patcher_writeback_payload(&node) else {
+        panic!("expected payload map");
+    };
+    let status = payload_field(&map, "status");
+    let live_incomplete_surfaced = status != Some(Value::Keyword("valid".to_string()))
+        || matches!(
+            payload_field(&map, "source"),
+            Some(Value::String(source)) if source.contains("__patcher_missing_input__")
+        );
+    assert!(
+        live_incomplete_surfaced,
+        "a live macro instance with a missing input must surface a diagnostic, not vanish"
+    );
+    reset_patcher_widget_state(key);
+}
+
+#[test]
+fn dead_but_complete_nodes_are_still_emitted_as_unused_defs() {
+    // Documented policy choice: a valid dead def is preserved (omitting it
+    // would lose the node on save + reload); only incomplete dead nodes are
+    // dropped from the source.
+    let source = "(def input (in 1 @name input))\n\
+                  (def unused (tanh input))\n\
+                  (out input 1 @name audio)\n";
+    let patch = parse(source);
+    let generated = generate::generate_patch_source(&patch, PatcherIntent::Effect).unwrap();
+    assert!(
+        generated.source.contains("(def unused (tanh input))"),
+        "complete dead defs must survive regeneration:\n{}",
+        generated.source
+    );
+}
+
+#[test]
+fn empty_created_node_does_not_invalidate_generation() {
+    let patch = parse(
+        "(def input (in 1 @name input))\n\
+         (out input 1 @name audio)\n",
+    );
+    let mut state = PatcherInteractionState::default();
+    let created = allocate_created_node(&mut state, "root", (30.0, 30.0));
+    let visible = sidecar::root_patch_with_interaction(&patch, &state);
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Effect)
+        .expect("an uncommitted empty node must not break generation");
+    assert!(
+        !generated.source.contains(&created) && !generated.source.contains("()"),
+        "empty created node must be omitted from the source:\n{}",
+        generated.source
+    );
+    let identity = |_: &str, id: &str| id.to_string();
+    assert_eq!(
+        generation_semantic_signature(&parse(&generated.source), &identity),
+        generation_semantic_signature(&patch, &identity),
+        "empty created node must not change the emitted model"
+    );
+}
+
+#[test]
+fn typing_into_created_node_never_mutates_source_nodes() {
+    // Regression (typing-lag / node-splice family): when the created node's
+    // interaction id collided with a `created-N` source binding, every
+    // keystroke of the in-canvas text edit also overrode the SOURCE node's
+    // op/label/args — visibly corrupting the existing node and its cables
+    // while typing. Unique allocation keeps keystrokes scoped to the new node.
+    let path = temp_patcher_dsp_path("patcher-typing-scoped-to-created-node");
+    fs::write(&path, POISONED_CREATED_ID_SOURCE).unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    reset_patcher_widget_state(key);
+    let (_path, root_patch) = load_patch_from_props(&node.props).unwrap();
+    let source_ops = root_patch
+        .nodes
+        .iter()
+        .map(|patch_node| (patch_node.id.clone(), patch_node.op.clone()))
+        .collect::<HashMap<_, _>>();
+
+    assert!(handle_patcher_double_click(&node, 90.0, 90.0));
+    for ch in "tanh".chars() {
+        let event = PATCHER_WIDGET.key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Char(ch),
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(event.is_some(), "text edit should consume typed keys");
+        let state = get_patcher_interaction_state(key);
+        let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+        for (id, op) in &source_ops {
+            let matching_ops = visible
+                .nodes
+                .iter()
+                .filter(|visible_node| visible_node.id == *id)
+                .map(|visible_node| visible_node.op.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matching_ops,
+                vec![op.clone()],
+                "typing into the created node must not touch source node '{id}'"
+            );
+        }
+    }
+    reset_patcher_widget_state(key);
 }

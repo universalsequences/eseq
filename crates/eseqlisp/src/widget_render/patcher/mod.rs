@@ -18,7 +18,7 @@ mod text;
 mod writeback;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -335,6 +335,18 @@ pub fn resolve_agentic_bubble(
     }
     let source = std::fs::read_to_string(path)
         .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
+    // Ids already present in the source model must not be reused for the
+    // created macro-instance node (older generated sources can contain
+    // `created-N` bindings).
+    let taken_node_ids = parse_source_with_default_library(&source, intent)
+        .map(|patch| {
+            patch
+                .nodes
+                .iter()
+                .map(|node| node.id.clone())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
     let mut wrote = false;
     for key in keys {
         let mut interaction = state::get_patcher_interaction_state(key);
@@ -349,6 +361,7 @@ pub fn resolve_agentic_bubble(
             bubble.position,
             macro_name,
             macro_source,
+            &taken_node_ids,
         );
         if !wrote {
             // §4.5: the agent's code becomes the model and is regenerated
@@ -476,8 +489,10 @@ fn materialize_agentic_macro_edit(
     position: (f32, f32),
     macro_name: &str,
     macro_source: &str,
+    taken_node_ids: &HashSet<String>,
 ) -> MaterializedAgenticMacro {
-    let node_id = state::allocate_created_node(interaction, "root", position);
+    let node_id =
+        state::allocate_created_node_avoiding(interaction, "root", position, taken_node_ids);
     let node_key = state::node_edit_key("root", &node_id);
     if let Some(edit) = interaction.edit_state.nodes.get_mut(&node_key) {
         edit.text = macro_name.to_string();

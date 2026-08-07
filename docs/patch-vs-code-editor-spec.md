@@ -162,6 +162,33 @@ New emitter (seed: `emit.rs::emit_patch_debug_lisp`, currently debug-only) repla
 - Round-trip invariant (test): `parse(generate(patch)) == patch` (modulo layout),
   and `generate(parse(generate(patch))) == generate(patch)`.
 
+### 4.2a Created-node identity never persists
+
+Interaction ids minted by `allocate_created_node` (`created-N`) are session
+identities, not names. The generator maps them to deterministic op-derived
+bindings (`* 2` → `mul`, `cos` → `cos-2` — operator names are reserved so a
+binding never shadows an op), reporting the mapping in `renamed_node_ids` so
+the layout sidecar follows. Persisting `created-N` as a binding is forbidden:
+a reload parses it back as a node id, and the next session's counter collides
+with it — the existing node's cables visually splice into the newly created
+node and regeneration rewires a→b into a→c→b. As a second guard, allocation
+(`allocate_created_node_avoiding`) skips any id already present in the model,
+which also heals sources written before this rule existed.
+
+### 4.2b Dead code is not emitted
+
+Liveness = "reaches some `out` node" (reverse reachability over all
+connections, feedback included). Value nodes that are dead AND whose call is
+incomplete — empty/unknown op, a missing-input gap, or an unfilled macro-
+instance arity — are omitted from the generated source; they persist only in
+the interaction state and the layout payload (matching the pre-regeneration
+system, where uncommitted incomplete nodes never entered the source). Dead
+nodes with complete calls ARE emitted as unused defs: omitting them would lose
+them on save + reload. A disconnected created macro instance therefore never
+produces a call — the `defmacro` definition still persists — while a LIVE
+node with a missing input keeps the missing-input sentinel (and macro calls
+emit their full arity), so genuinely broken patches still surface diagnostics.
+
 ### 4.3 What gets deleted
 
 - All surgical edit application in `writeback.rs`: `SourceDocument` mutation paths

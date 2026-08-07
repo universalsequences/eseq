@@ -685,8 +685,28 @@ pub(super) fn allocate_created_node(
     view_key: &str,
     position: (f32, f32),
 ) -> String {
-    let id = format!("created-{}", state.edit_state.next_created_node);
-    state.edit_state.next_created_node += 1;
+    allocate_created_node_avoiding(state, view_key, position, &HashSet::new())
+}
+
+/// Allocate a created-node id that collides neither with other interaction
+/// edits (via the counter) nor with any id in `taken_node_ids` — the current
+/// patch model's node ids. Sources written by older builds of the generator
+/// can legitimately contain `created-N` bindings; reusing such an id would
+/// visually attach that node's cables to the new node and corrupt the next
+/// regeneration (existing edges splice through the new node).
+pub(super) fn allocate_created_node_avoiding(
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+    position: (f32, f32),
+    taken_node_ids: &HashSet<String>,
+) -> String {
+    let id = loop {
+        let candidate = format!("created-{}", state.edit_state.next_created_node);
+        state.edit_state.next_created_node += 1;
+        if !taken_node_ids.contains(&candidate) {
+            break candidate;
+        }
+    };
     state.edit_state.nodes.insert(
         node_edit_key(view_key, &id),
         PatcherNodeEdit {

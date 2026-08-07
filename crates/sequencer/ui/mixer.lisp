@@ -738,7 +738,7 @@
       :selected-background-color :mixer-strip-selected-bg
       :muted-background-color :mixer-strip-muted-bg
       :border-width 2
-      :corner-radius 10
+      :corner-radius 16
       :border-color :mixer-strip-border
       :selected-border-color :mixer-strip-selected-border
       :muted-border-color :mixer-strip-border
@@ -995,7 +995,7 @@
       :width 10.3 :height 13.8
       :background-color (mixer-v2-strip-bg selected (nth SEQ.bus-mutes i))
       :border-width 2
-      :corner-radius 10
+      :corner-radius 16
       :border-color (mixer-v2-strip-border selected)
       :drop-hover-border-color :mixer-strip-selected-border
       :padding 0.45
@@ -1198,7 +1198,7 @@
       (c (mixer-v2-group-color gidx))
       (selected (mixer-v2-group-selected? gidx)))
     (box
-      :corner-radius 12
+      :corner-radius 16
       :padding 0.2
       :background-color (rgba (nth c 0) (nth c 1) (nth c 2) (if selected 1.0 0.78))
       :border-width (if selected 4 2)
@@ -1240,7 +1240,7 @@
     :border-width 2
     :border-color :mixer-strip-border
     :drop-hover-border-color :mixer-strip-selected-border
-    :corner-radius 10
+    :corner-radius 16
     :padding 0.5
     :align :center
     :drop-types (list "sample" "instrument" "sound" "track-badge")

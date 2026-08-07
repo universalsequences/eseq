@@ -26,7 +26,8 @@ use super::model::{CableEndpoint, CableSegmentInfo, InputPortRef, NodeKind, Outp
 use super::state::{
     AlignmentAxis, AlignmentSnapState, PatcherDragState, PatcherInteractionState, PatcherMacroEdit,
     PatcherPanState, active_patcher_patch, active_patcher_view_key, allocate_created_connection,
-    allocate_created_node, bring_nodes_to_front, connection_id_from_ports, debug_log_edit_event,
+    allocate_created_node_avoiding, bring_nodes_to_front, connection_id_from_ports,
+    debug_log_edit_event,
     delete_connection_edit_or_mark_deleted, ensure_source_node_edit, get_patcher_interaction_state,
     get_patcher_pan_state, node_edit_key, ordered_patch_nodes, patch_with_created_macros,
     patch_with_interaction_state, patcher_state_key, set_connection_segment_edit,
@@ -1073,7 +1074,17 @@ pub(super) fn handle_patcher_double_click(
     }
 
     let position = screen_to_model(node.rect, &pan_state, (local_col, local_row));
-    let created_id = allocate_created_node(&mut state, &view_key, position);
+    // Older generated sources can contain `created-N` bindings; the new
+    // node's interaction id must not collide with any model node id, or the
+    // existing node's cables visually splice into the new node and the next
+    // regeneration corrupts the patch.
+    let taken_node_ids = patch
+        .nodes
+        .iter()
+        .map(|patch_node| patch_node.id.clone())
+        .collect::<HashSet<_>>();
+    let created_id =
+        allocate_created_node_avoiding(&mut state, &view_key, position, &taken_node_ids);
     begin_patcher_text_edit(&mut state, created_id, String::new(), 0);
     set_patcher_interaction_state(key, state);
     true

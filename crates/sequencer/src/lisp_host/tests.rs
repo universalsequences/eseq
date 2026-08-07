@@ -11577,9 +11577,15 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             )
             .expect("patcher writeback should insert created phasor multiply chain");
 
+        // Interaction-created ids never persist as bindings; the chain is
+        // emitted under deterministic op-derived names.
         assert!(
-            emitted.contains("(phasor created-") && emitted.contains("(* "),
+            emitted.contains("(phasor ") && emitted.contains("(* "),
             "emitted source should contain the inserted phasor multiply chain:\n{emitted}"
+        );
+        assert!(
+            !emitted.contains("(def created-"),
+            "interaction-created ids must not leak into generated source:\n{emitted}"
         );
         compile_instrument_with_asset_base(&emitted, 44_100, path.parent()).unwrap_or_else(
             |error| panic!("patcher-edited instrument source should compile:\n{error}\n{emitted}"),

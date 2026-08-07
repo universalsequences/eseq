@@ -632,6 +632,23 @@ fn overlay_scope_visible_layout(
             connection.segment = *segment;
         }
     }
+
+    // Nodes visible in the editor but omitted from the generated source
+    // (dead incomplete nodes, see generate.rs) still carry their layout in
+    // the sidecar payload: they keep living in the interaction state, and
+    // dropping their positions here would make them jump or vanish on the
+    // next layout reload. Deleted nodes never appear in `visible`, so this
+    // only re-adds omitted-but-alive nodes.
+    let mut omitted_visible = visible
+        .nodes
+        .iter()
+        .filter(|node| {
+            let emitted_id = mapped_node_id(view_key, &node.id, node_id_map);
+            !live_node_ids.contains(emitted_id.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    emitted.nodes.append(&mut omitted_visible);
     let visible_presentations = visible
         .connections
         .iter()
