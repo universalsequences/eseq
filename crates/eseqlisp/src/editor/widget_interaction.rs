@@ -42,6 +42,12 @@ fn list_contains_string(value: &Value, needle: &str) -> bool {
 }
 
 fn node_accepts_drag_type(node: &LayoutNode, drag_type: &str) -> bool {
+    // The patcher canvas accepts macro drops natively (no lisp on-drop prop):
+    // the drop is handled inside the patcher widget and persisted through its
+    // existing on-change writeback chain.
+    if node.widget_type == "patcher" {
+        return widget_render::patcher::patcher_accepts_drop(node, drag_type);
+    }
     if !node.props.contains_key("on-drop") {
         return false;
     }
@@ -1867,6 +1873,11 @@ impl Editor {
         let local_row = precise_row - content_row as f32 + self.total_scroll_top();
         let (target, hit_row, hit_col) =
             deepest_drop_target(layout, local_row, local_col, &drag_type)?;
+        if target.widget_type == "patcher" {
+            return crate::widget_render::patcher::handle_patcher_drop(
+                &target, &drag_type, &payload, hit_col, hit_row,
+            );
+        }
         let callback = target.props.get("on-drop")?.clone();
         eprintln!(
             "widget-drop: dispatch drag_type={drag_type}; target_type={}; target_key={:?}; payload={payload:?}",

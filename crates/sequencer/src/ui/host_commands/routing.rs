@@ -234,7 +234,7 @@ pub(super) fn handle(
             sync_track_mixer_state(rt, &app, &state);
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
-            editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+            refresh_visible_mixer_layouts(editor);
             ui_epoch.fetch_add(1, Ordering::Relaxed);
         }
         "set-track-bus-send" => {

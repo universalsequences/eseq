@@ -833,6 +833,7 @@
             "ui/effects/step-buffer.lisp",
             "ui/piano-roll.lisp",
             "ui/mixer.lisp",
+            "ui/patch-macros.lisp",
             "ui/transport.lisp",
             "ui/agent.lisp",
             "ui/step-grid.lisp",
@@ -18877,6 +18878,7 @@
 
         let transport = tile("*transport*").rect;
         let patcher = tile("*instrument-patcher:test*").rect;
+        let macros = tile("*patch-macros*").rect;
         let samples = tile("*samples*").rect;
         let mixer = tile("*patch-mixer*").rect;
         let fx = tile("*fx*").rect;
@@ -18884,6 +18886,13 @@
         assert!(
             transport.row < patcher.row && patcher.row + patcher.height <= samples.row,
             "patcher mode should stack transport, patcher, then bottom bar; transport={transport:?} patcher={patcher:?} samples={samples:?}"
+        );
+        assert!(
+            (macros.row - patcher.row).abs() <= 0.1
+                && macros.col < patcher.col
+                && macros.width >= 21.0
+                && macros.width <= 27.0,
+            "macro sidebar should sit left of the patcher canvas at its fixed width; macros={macros:?} patcher={patcher:?}"
         );
         assert!(
             patcher.height > samples.height * 4.0,
@@ -18897,7 +18906,7 @@
         );
         assert!(
             (samples.width - 28.0).abs() <= 1.0
-                && (mixer.width - 15.0).abs() <= 1.0
+                && (mixer.width - 10.0).abs() <= 1.0
                 && fx.width > mixer.width
                 && (samples.row - mixer.row).abs() <= 0.1
                 && (mixer.row - fx.row).abs() <= 0.1,
@@ -18947,6 +18956,159 @@
                 && mixer.width > 0.0
                 && fx.width > 0.0,
             "with samples hidden, patch-mixer/fx should remain visible in the patcher bottom bar; mixer={mixer:?} fx={fx:?}"
+        );
+    }
+
+    #[test]
+    fn metal_seq_patch_macros_buffer_renders_widget_tree() {
+        let editor = full_grid_editor_for_scroll_tests();
+        let buffer = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*patch-macros*")
+            .expect("*patch-macros* buffer should be created at UI load");
+        assert!(
+            buffer.widget_tree.is_some(),
+            "*patch-macros* effect-buffer should build a widget tree"
+        );
+    }
+
+    #[test]
+    fn scan_patch_macro_source_collects_calls_and_imports() {
+        let scan = crate::edit_sessions::scan_patch_macro_source(
+            "(use-defmacro dcblock)\n\
+             (defmacro comb (x) (dcblock (* x 0.5)))\n\
+             (defmacro reverb (in) (+ (comb in) (comb (* in 2))))\n\
+             (def input (in 1))\n\
+             (out (reverb input) 1)",
+        );
+        assert_eq!(scan.imports, vec!["dcblock".to_string()]);
+        let names: Vec<&str> = scan
+            .locals
+            .iter()
+            .map(|(name, _, _)| name.as_str())
+            .collect();
+        assert_eq!(names, vec!["comb", "reverb"]);
+        let comb_calls = &scan.locals[0].2;
+        assert!(
+            comb_calls.contains(&"dcblock".to_string()),
+            "comb should record its dcblock call: {comb_calls:?}"
+        );
+        let reverb_calls = &scan.locals[1].2;
+        assert!(
+            reverb_calls.contains(&"comb".to_string()),
+            "reverb should record its comb call (deduped): {reverb_calls:?}"
+        );
+        assert_eq!(
+            reverb_calls.iter().filter(|call| *call == "comb").count(),
+            1,
+            "calls should be deduped"
+        );
+    }
+
+    #[test]
+    fn metal_seq_patch_macros_sidebar_nests_call_structure() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(reactive-set "SEQ" "editor-patch-macros"
+                     (list (dict :name "reverb" :params (list "in") :calls (list "comb"))
+                           (dict :name "comb" :params (list "x") :calls (list "dcblock"))))"#,
+            )
+            .expect("set patch macros");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(reactive-set "SEQ" "editor-library-macros"
+                     (list (dict :name "dcblock" :params (list "x") :calls (list) :used true)))"#,
+            )
+            .expect("set library macros");
+
+        // In Patch shows only the root (reverb); comb is nested beneath it,
+        // and the library macro dcblock nests beneath comb.
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (nth (patch-macros-items) 1) :name)")
+                .unwrap(),
+            Some(Value::String("reverb".to_string())),
+            "reverb should be the only In Patch root"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (nth (get (nth (patch-macros-items) 1) :children) 0) :name)")
+                .unwrap(),
+            Some(Value::String("comb".to_string())),
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(
+                    "(get (nth (get (nth (get (nth (patch-macros-items) 1) :children) 0) :children) 0) :name)"
+                )
+                .unwrap(),
+            Some(Value::String("dcblock".to_string())),
+        );
+        // Used library macros get the distinct icon.
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (nth (patch-macros-items) 3) :icon)")
+                .unwrap(),
+            Some(Value::Keyword("sliders".to_string())),
+            "library section row for a used macro should use the :sliders icon"
+        );
+    }
+
+    #[test]
+    fn metal_seq_patch_macros_sidebar_items_and_filtering() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(reactive-set "SEQ" "editor-patch-macros"
+                     (list (dict :name "wobble" :params (list "x"))))"#,
+            )
+            .expect("set patch macros");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(reactive-set "SEQ" "editor-library-macros"
+                     (list (dict :name "gain2" :params (list "in" "amount"))
+                           (dict :name "simposc" :params (list "freq"))))"#,
+            )
+            .expect("set library macros");
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len (patch-macros-items))")
+                .unwrap(),
+            Some(Value::Number(5.0)),
+            "two section headers plus three macro rows"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set! patch-macros-filter "GAIN")"#)
+            .expect("set filter");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(len (patch-macros-items))")
+                .unwrap(),
+            Some(Value::Number(2.0)),
+            "case-insensitive filter should keep only the Library header and gain2"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(get (nth (patch-macros-items) 1) :name)")
+                .unwrap(),
+            Some(Value::String("gain2".to_string())),
+            "macro rows should carry the drag payload name"
         );
     }
 

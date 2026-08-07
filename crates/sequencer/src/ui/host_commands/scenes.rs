@@ -722,8 +722,8 @@ pub(super) fn handle(
             sync_sidebar_browser(rt, &app, ct);
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
-            if editor_has_visible_buffer(&editor, "*mixer*") {
-                editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+            if editor_has_visible_mixer_buffer(editor) {
+                refresh_visible_mixer_layouts(editor);
             }
             ctx.frame.prev_pattern_epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
             ctx.frame.prev_track_button_states = track_button_state_snapshot(&state);
@@ -936,8 +936,8 @@ pub(super) fn handle(
                         let started = Instant::now();
                         editor.refresh_runtime_side_effects();
                         side_effects_elapsed = started.elapsed();
-                        if editor_has_visible_buffer(&editor, "*mixer*") {
-                            editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+                        if editor_has_visible_mixer_buffer(editor) {
+                            refresh_visible_mixer_layouts(editor);
                         }
                         ctx.frame.prev_pattern_epoch =
                             state.transport.pattern_epoch.load(Ordering::Relaxed);

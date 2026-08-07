@@ -160,7 +160,7 @@ pub(crate) fn reactive_tick_and_render(
         let bus_playheads = bus_playhead_snapshot(&app);
         let epoch = ctx.shared.state.transport.pattern_epoch.load(Ordering::Relaxed);
         let metal_visible = editor_has_visible_buffer(&editor, "*metal*");
-        let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
+        let mixer_visible = editor_has_visible_mixer_buffer(&editor);
         let sequencer_visible = editor_has_visible_buffer(&editor, "*sequencer*");
         let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
         let step_visible = editor_has_visible_buffer(&editor, "*step*");
@@ -1376,6 +1376,74 @@ pub(crate) fn reactive_tick_and_render(
             refresh_visible_samples_after_cycle = true;
             needs_reactive_cycle = true;
         }
+        // Macro sidebar: local defmacros scanned from the active edit-session
+        // source, plus the saved-macro library. Republished only when the
+        // session source changes (the library is re-read then too — saving a
+        // macro to the library rewrites the source, so the two coincide).
+        let editor_patch_source = ctx
+            .sessions
+            .instrument_edit_session
+            .as_ref()
+            .map(|session| session.last_valid_source.as_str())
+            .or_else(|| {
+                ctx.sessions
+                    .effect_edit_session
+                    .as_ref()
+                    .map(|session| session.last_valid_source.as_str())
+            });
+        let sidebar_fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            editor_patch_source.hash(&mut hasher);
+            hasher.finish()
+        };
+        if sidebar_fingerprint != ctx.frame.prev_editor_macro_sidebar_fingerprint {
+            let scan = editor_patch_source
+                .map(scan_patch_macro_source)
+                .unwrap_or_else(|| scan_patch_macro_source(""));
+            let library_macros = if editor_patch_source.is_some() {
+                eseqlisp::widget_render::patcher::macro_library_sidebar_entries()
+            } else {
+                Vec::new()
+            };
+            let rt = editor.runtime_mut();
+            rt.set_reactive(
+                "SEQ",
+                "editor-patch-macros",
+                build_patch_macro_sidebar_value(&scan.locals),
+            );
+            rt.set_reactive(
+                "SEQ",
+                "editor-library-macros",
+                build_library_macro_sidebar_value(&library_macros, &scan.imports),
+            );
+            ctx.frame.prev_editor_macro_sidebar_fingerprint = sidebar_fingerprint;
+            needs_reactive_cycle = true;
+        }
+        // The macro sidebar's selected row mirrors the macro view open in the
+        // patcher ("" = root view).
+        let open_macro = ctx
+            .sessions
+            .instrument_edit_session
+            .as_ref()
+            .map(|session| session.path.as_path())
+            .or_else(|| {
+                ctx.sessions
+                    .effect_edit_session
+                    .as_ref()
+                    .map(|session| session.path.as_path())
+            })
+            .and_then(eseqlisp::widget_render::patcher::active_macro_view_for_path)
+            .unwrap_or_default();
+        if open_macro != ctx.frame.prev_editor_open_macro {
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                "editor-open-macro",
+                Value::String(open_macro.clone()),
+            );
+            ctx.frame.prev_editor_open_macro = open_macro;
+            needs_reactive_cycle = true;
+        }
 
         if needs_reactive_cycle {
             let profile_cycle = profile_pattern_reactive_cycle;
@@ -1396,7 +1464,7 @@ pub(crate) fn reactive_tick_and_render(
             }
             if refresh_visible_mixer_after_cycle {
                 let started = Instant::now();
-                editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+                refresh_visible_mixer_layouts(editor);
                 refresh_mixer_elapsed = started.elapsed();
             }
             if refresh_visible_samples_after_cycle {

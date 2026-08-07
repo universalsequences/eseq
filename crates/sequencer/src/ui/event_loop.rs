@@ -65,6 +65,8 @@ pub(crate) fn run_event_loop(
     };
     let mut frame = FrameDiffState {
         prev_editor_macro_action: (String::new(), String::new()),
+        prev_editor_macro_sidebar_fingerprint: u64::MAX,
+        prev_editor_open_macro: String::new(),
         prev_playing: false,
         prev_bpm: 0,
         prev_playhead: u32::MAX,
@@ -258,8 +260,8 @@ pub(crate) fn run_event_loop(
             );
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
-            if editor_has_visible_buffer(&editor, "*mixer*") {
-                editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+            if editor_has_visible_mixer_buffer(&editor) {
+                refresh_visible_mixer_layouts(&mut editor);
             }
             editor.mark_needs_redraw();
             frame.prev_queued_track_clips = queued_track_clips;

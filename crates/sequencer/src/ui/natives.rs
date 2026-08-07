@@ -2774,6 +2774,9 @@ pub(crate) fn init_runtime(
                 ("editor-buffer-name", Value::String(String::new())),
                 ("editor-active-macro-name", Value::String(String::new())),
                 ("editor-active-macro-action", Value::String(String::new())),
+                ("editor-patch-macros", Value::List(vec![])),
+                ("editor-library-macros", Value::List(vec![])),
+                ("editor-open-macro", Value::String(String::new())),
                 (
                     "editor-instrument-run-mode",
                     Value::String("instrument".to_string()),

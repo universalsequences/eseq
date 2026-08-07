@@ -107,6 +107,91 @@ fn writeback_with_library_adds_import_for_used_library_macro() {
 }
 
 #[test]
+fn dropping_macro_item_creates_macro_node_and_emits_writeback() {
+    let library = temp_defmacro_library("drop", &[("shape", "(defmacro shape (x) (* x 2))")]);
+    let source = "(def input (in 1))\n(out input 1)";
+    let path = std::env::temp_dir().join(format!(
+        "eseqlisp-patcher-macro-drop-{}.lisp",
+        std::process::id()
+    ));
+    fs::write(&path, source).unwrap();
+    let mut node = patcher_test_node(&path);
+    node.props.insert(
+        "defmacro-library-root".to_string(),
+        Value::String(library.root().display().to_string()),
+    );
+
+    let payload = Value::Map(HashMap::from([(
+        "name".to_string(),
+        std::rc::Rc::new(std::cell::RefCell::new(Value::String("shape".to_string()))),
+    )]));
+    assert!(
+        handle_patcher_drop(&node, "sample", &payload, 40.0, 15.0).is_none(),
+        "non-macro drags must be rejected"
+    );
+
+    let output = handle_patcher_drop(&node, "dgen-macro", &payload, 40.0, 15.0)
+        .expect("macro drop should emit a writeback output");
+
+    let state = get_patcher_interaction_state(patcher_state_key(&node));
+    assert!(
+        state
+            .edit_state
+            .nodes
+            .values()
+            .any(|edit| edit.text == "shape"),
+        "drop should stage a created node calling the macro"
+    );
+
+    let Value::Map(payload) = &output.args[0] else {
+        panic!("writeback payload should be a map");
+    };
+    assert!(
+        matches!(&*payload.get("status").unwrap().borrow(), Value::Keyword(kind) if kind == "valid"),
+        "drop writeback should be valid"
+    );
+    let Value::String(emitted) = payload.get("source").unwrap().borrow().clone() else {
+        panic!("payload source should be a string");
+    };
+    assert!(
+        emitted.contains("(use-defmacro shape)"),
+        "emitted source should import the dropped library macro:\n{emitted}"
+    );
+}
+
+#[test]
+fn navigate_patcher_view_preserves_staged_edits() {
+    let path = std::env::temp_dir().join(format!(
+        "eseqlisp-patcher-navigate-{}.lisp",
+        std::process::id()
+    ));
+    fs::write(&path, "(def input (in 1))\n(out input 1)").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    allocate_created_text_node(&mut state, "root", "gain2");
+    set_patcher_interaction_state(key, state);
+
+    navigate_patcher_view_for_path(&path, Some("shape"));
+    assert_eq!(
+        active_macro_view_for_path(&path),
+        Some("shape".to_string())
+    );
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        state
+            .edit_state
+            .nodes
+            .values()
+            .any(|edit| edit.text == "gain2"),
+        "navigation must preserve staged edits"
+    );
+
+    navigate_patcher_view_for_path(&path, None);
+    assert_eq!(active_macro_view_for_path(&path), None);
+}
+
+#[test]
 fn staged_library_macro_edits_overlay_compile_library_without_writing_package() {
     let library = temp_defmacro_library(
         "staged-overlay",
@@ -14072,6 +14157,73 @@ fn defmacro_created_node_promotes_to_macro_instance_text() {
 }
 
 #[test]
+fn defmacro_created_inside_macro_view_promotes_and_writes_back() {
+    let source = "(defmacro reverb (input) (* input 0.5))\n(def sig (in 1))\n(def wet (reverb sig))\n(out wet 1)";
+    let root_patch = parse(source);
+    let mut state = PatcherInteractionState {
+        active_macro: Some("reverb".to_string()),
+        ..Default::default()
+    };
+    let view_key = "macro:reverb";
+    let created_id = allocate_created_node(&mut state, view_key, (3.0, 4.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(view_key, &created_id))
+        .unwrap()
+        .text = "defmacro comb".to_string();
+
+    assert!(promote_created_macro_definition(
+        &root_patch,
+        &mut state,
+        view_key,
+        &created_id,
+    ));
+    assert_eq!(
+        state
+            .edit_state
+            .nodes
+            .get(&node_edit_key(view_key, &created_id))
+            .map(|edit| edit.text.as_str()),
+        Some("comb")
+    );
+
+    let emitted = emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap();
+    assert!(
+        emitted.contains("(defmacro comb (input) (* input 1.0))"),
+        "created macro should emit as a top-level defmacro:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("(defmacro reverb"),
+        "enclosing macro must survive:\n{emitted}"
+    );
+}
+
+#[test]
+fn defmacro_created_inside_its_own_macro_view_is_refused() {
+    let root_patch = parse("(def sig (in 1))\n(out sig 1)");
+    let mut state = PatcherInteractionState {
+        active_macro: Some("comb".to_string()),
+        ..Default::default()
+    };
+    let view_key = "macro:comb";
+    let created_id = allocate_created_node(&mut state, view_key, (3.0, 4.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(view_key, &created_id))
+        .unwrap()
+        .text = "defmacro comb".to_string();
+
+    assert!(!promote_created_macro_definition(
+        &root_patch,
+        &mut state,
+        view_key,
+        &created_id,
+    ));
+}
+
+#[test]
 fn writeback_created_macro_emits_default_valid_defmacro_without_placeholder_call() {
     let source = "(def sig (in 1))\n(out sig 1)";
     let root_patch = parse(source);
@@ -18387,4 +18539,154 @@ fn estimated_label_width_calibrates_against_measured_advances() {
         "an unmeasured label should be estimated from the measured advances: \
          estimated={estimated} expected={expected} ratio={ratio}"
     );
+}
+
+#[test]
+fn cmd_enter_creates_empty_node_below_selected_node() {
+    let path = temp_patcher_source_path("cmd-enter-create-below");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = get_patcher_interaction_state(key);
+    let view_key = active_patcher_view_key(&state);
+    let anchor = allocate_created_text_node(&mut state, &view_key, "sine 220");
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(&view_key, &anchor))
+        .unwrap()
+        .position = (5.0, 5.0);
+    state.selected_nodes.clear();
+    state.selected_nodes.insert(anchor.clone());
+    set_patcher_interaction_state(key, state);
+
+    let event = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    assert!(event.is_some(), "cmd+enter should be consumed");
+
+    let state = get_patcher_interaction_state(key);
+    let edit = state
+        .text_edit
+        .as_ref()
+        .expect("cmd+enter should open a text edit on the new node");
+    assert_ne!(edit.node_id, anchor);
+    assert!(edit.text.is_empty());
+    let created = state
+        .edit_state
+        .nodes
+        .get(&node_edit_key(&view_key, &edit.node_id))
+        .expect("created node edit");
+    assert_eq!(created.position.0, 5.0, "new node keeps the anchor column");
+    assert!(
+        created.position.1 > 5.0,
+        "new node should sit below the anchor: {:?}",
+        created.position
+    );
+}
+
+#[test]
+fn cmd_up_connects_last_two_touched_nodes_on_first_ports() {
+    let path = temp_patcher_source_path("cmd-up-connect");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = get_patcher_interaction_state(key);
+    let view_key = active_patcher_view_key(&state);
+    let upper = allocate_created_text_node(&mut state, &view_key, "sine 220");
+    let lower = allocate_created_text_node(&mut state, &view_key, "mul 0.5");
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(&view_key, &upper))
+        .unwrap()
+        .position = (4.0, 2.0);
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(&view_key, &lower))
+        .unwrap()
+        .position = (4.0, 9.0);
+    note_touched_node(&mut state, &upper);
+    note_touched_node(&mut state, &lower);
+    set_patcher_interaction_state(key, state);
+
+    let event = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    assert!(
+        matches!(
+            event,
+            Some(crate::widget_render::WidgetEvent::Custom(Value::Keyword(ref kind)))
+                if kind == "semantic-change"
+        ),
+        "cmd+up should emit a semantic change"
+    );
+
+    let state = get_patcher_interaction_state(key);
+    let connection = state
+        .edit_state
+        .connections
+        .values()
+        .next()
+        .expect("created connection edit");
+    assert_eq!(connection.from.node_id, upper);
+    assert_eq!(connection.from.output_index, 0);
+    assert_eq!(connection.to.node_id, lower);
+    assert_eq!(connection.to.input_index, 0);
+}
+
+#[test]
+fn cmd_up_touch_order_ignores_vertical_order_for_direction() {
+    // Touching the lower node first must still cable the upper node's outlet
+    // into the lower node's inlet — signal flows down the canvas.
+    let path = temp_patcher_source_path("cmd-up-connect-reversed-touch");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = get_patcher_interaction_state(key);
+    let view_key = active_patcher_view_key(&state);
+    let upper = allocate_created_text_node(&mut state, &view_key, "sine 220");
+    let lower = allocate_created_text_node(&mut state, &view_key, "mul 0.5");
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(&view_key, &upper))
+        .unwrap()
+        .position = (4.0, 2.0);
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key(&view_key, &lower))
+        .unwrap()
+        .position = (4.0, 9.0);
+    note_touched_node(&mut state, &lower);
+    note_touched_node(&mut state, &upper);
+    set_patcher_interaction_state(key, state);
+
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+
+    let state = get_patcher_interaction_state(key);
+    let connection = state
+        .edit_state
+        .connections
+        .values()
+        .next()
+        .expect("created connection edit");
+    assert_eq!(connection.from.node_id, upper);
+    assert_eq!(connection.to.node_id, lower);
 }

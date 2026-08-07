@@ -126,6 +126,10 @@ pub(super) struct PatcherInteractionState {
     pub(super) agentic_bubbles: HashMap<String, AgenticBubble>,
     pub(super) agentic_morph_nodes: HashMap<String, Instant>,
     pub(super) z_order: HashMap<String, Vec<String>>,
+    /// Recently interacted node ids for the active view, oldest first. Feeds
+    /// the cmd+enter "create below" anchor and the cmd+up "connect last two"
+    /// shortcut; cleared on macro navigation.
+    pub(super) touched_nodes: Vec<String>,
     pub(super) last_pointer_model_position: Option<(f32, f32)>,
     pub(super) active_macro: Option<String>,
     pub(super) drag: Option<PatcherDragState>,
@@ -681,6 +685,17 @@ pub(super) fn input_presentation_key(view_key: &str, node_id: &str, input_index:
     format!("{view_key}::{node_id}:{input_index}")
 }
 
+const MAX_TOUCHED_NODES: usize = 8;
+
+pub(super) fn note_touched_node(state: &mut PatcherInteractionState, node_id: &str) {
+    state.touched_nodes.retain(|id| id != node_id);
+    state.touched_nodes.push(node_id.to_string());
+    if state.touched_nodes.len() > MAX_TOUCHED_NODES {
+        let excess = state.touched_nodes.len() - MAX_TOUCHED_NODES;
+        state.touched_nodes.drain(..excess);
+    }
+}
+
 pub(super) fn allocate_created_node(
     state: &mut PatcherInteractionState,
     view_key: &str,
@@ -937,6 +952,7 @@ pub(super) fn delete_selected_nodes(state: &mut PatcherInteractionState, view_ke
     });
 
     state.selected_nodes.clear();
+    state.touched_nodes.retain(|id| !selected_nodes.contains(id));
     state.selected_cable = None;
     state.drag = None;
     state.text_edit = None;

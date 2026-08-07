@@ -296,6 +296,34 @@ pub fn reset_patcher_state_for_path(path: impl AsRef<std::path::Path>, intent: P
     state::reset_patcher_widget_states_for_path(path, key);
 }
 
+/// The macro view currently open in the patcher for `path`, if any
+/// (None = root view). Drives the macro sidebar's selected row.
+pub fn active_macro_view_for_path(path: impl AsRef<std::path::Path>) -> Option<String> {
+    state::patcher_keys_for_path(path.as_ref())
+        .into_iter()
+        .find_map(|key| state::get_patcher_interaction_state(key).active_macro)
+}
+
+/// Navigate the patcher for `path` to a macro view (or the root with None),
+/// preserving staged edits — unlike `reload_patcher_macro_view_for_path`,
+/// which resets the whole interaction state after a save.
+pub fn navigate_patcher_view_for_path(
+    path: impl AsRef<std::path::Path>,
+    macro_name: Option<&str>,
+) {
+    for key in state::patcher_keys_for_path(path.as_ref()) {
+        let mut state = state::get_patcher_interaction_state(key);
+        state.active_macro = macro_name.map(str::to_string);
+        state.selected_nodes.clear();
+        state.selected_cable = None;
+        state.hovered_node = None;
+        state.hover_back_button = false;
+        state.drag = None;
+        state.text_edit = None;
+        state::set_patcher_interaction_state(key, state);
+    }
+}
+
 pub fn reload_patcher_macro_view_for_path(
     path: impl AsRef<std::path::Path>,
     macro_name: impl Into<String>,
@@ -556,6 +584,68 @@ pub fn patcher_has_text_edit(node: &crate::layout::LayoutNode) -> bool {
     state.text_edit.is_some() || state::editing_agentic_bubble_id(&state).is_some()
 }
 
+/// Drag type accepted by the patcher canvas: macro items dragged from the
+/// macro sidebar. Dropping one creates a node calling that macro.
+pub const PATCHER_MACRO_DRAG_TYPE: &str = "dgen-macro";
+
+pub fn patcher_accepts_drop(node: &LayoutNode, drag_type: &str) -> bool {
+    node.widget_type == "patcher" && drag_type == PATCHER_MACRO_DRAG_TYPE
+}
+
+fn macro_drop_payload_name(payload: &Value) -> Option<String> {
+    let Value::Map(map) = payload else {
+        return None;
+    };
+    let name = map.get("name").or_else(|| map.get("label"))?;
+    match &*name.borrow() {
+        Value::String(name) if !name.trim().is_empty() => Some(name.trim().to_string()),
+        _ => None,
+    }
+}
+
+/// Drop a macro item onto the patcher canvas: allocate a created node whose
+/// text is the macro call at the drop point, then emit the standard writeback
+/// payload so the host persists and recompiles exactly as for a typed node.
+pub fn handle_patcher_drop(
+    node: &LayoutNode,
+    drag_type: &str,
+    payload: &Value,
+    local_col: f32,
+    local_row: f32,
+) -> Option<super::EventOutput> {
+    if !patcher_accepts_drop(node, drag_type) {
+        return None;
+    }
+    let macro_name = macro_drop_payload_name(payload)?;
+    let key = state::patcher_state_key(node);
+    let (_, root_patch) = load_patch_from_props(&node.props).ok()?;
+    let mut state = state::get_patcher_interaction_state(key);
+    // A macro view must not gain a node calling the macro it defines.
+    if state.active_macro.as_deref() == Some(macro_name.as_str()) {
+        return None;
+    }
+    let view_key = state::active_patcher_view_key(&state);
+    let patch = state::active_patcher_patch(&root_patch, &state);
+    let patch = state::patch_with_interaction_state(patch, &state, &view_key);
+    let mut pan_state = state::get_patcher_pan_state(key);
+    interaction::sync_patcher_pan_bounds_from_patch(node, &mut pan_state, &patch);
+    let position = geometry::screen_to_model(node.rect, &pan_state, (local_col, local_row));
+    let taken_node_ids = patch
+        .nodes
+        .iter()
+        .map(|patch_node| patch_node.id.clone())
+        .collect::<HashSet<_>>();
+    let created_id =
+        state::allocate_created_node_avoiding(&mut state, &view_key, position, &taken_node_ids);
+    state
+        .edit_state
+        .nodes
+        .get_mut(&state::node_edit_key(&view_key, &created_id))?
+        .text = macro_name;
+    state::set_patcher_interaction_state(key, state);
+    patcher_change_output(node, patcher_writeback_payload(node))
+}
+
 #[cfg(any(test, feature = "patcher-test-support"))]
 pub fn emit_patch_writeback_with_inserted_node_before_first_output(
     source: &str,
@@ -750,10 +840,11 @@ pub fn emit_patch_writeback_with_created_phasor_multiply_before_first_output(
 use display::{node_display_label, preview};
 use emit::debug_log_patch_lisp;
 use interaction::{
-    PatcherChangeKind, handle_patcher_double_click, handle_patcher_pointer_down,
-    handle_patcher_pointer_drag, handle_patcher_pointer_moved, handle_patcher_pointer_up,
-    open_selected_macro_node, pan_patcher_by_delta, pan_patcher_by_wheel,
-    promote_created_macro_definition, reset_patcher_pan, zoom_patcher_by_magnify,
+    PatcherChangeKind, connect_last_touched_nodes, create_patcher_node_below_anchor,
+    handle_patcher_double_click, handle_patcher_pointer_down, handle_patcher_pointer_drag,
+    handle_patcher_pointer_moved, handle_patcher_pointer_up, open_selected_macro_node,
+    pan_patcher_by_delta, pan_patcher_by_wheel, promote_created_macro_definition,
+    reset_patcher_pan, zoom_patcher_by_magnify,
 };
 use metrics::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL};
 use state::{
@@ -934,6 +1025,28 @@ impl WidgetDefinition for PatcherWidget {
         if let Some(bubble_id) = editing_agentic_bubble_id(&state) {
             return handle_agentic_bubble_edit_key(node, key, state, bubble_id, key_event);
         }
+        if key_event.modifiers.contains(KeyModifiers::SUPER) {
+            match key_event.code {
+                KeyCode::Enter => {
+                    let committed = commit_active_patcher_text_edit(node, &mut state, &view_key);
+                    create_patcher_node_below_anchor(node, &mut state, &view_key);
+                    set_patcher_interaction_state(key, state);
+                    return Some(patcher_semantic_event(committed));
+                }
+                KeyCode::Up => {
+                    let committed = commit_active_patcher_text_edit(node, &mut state, &view_key);
+                    let connected = connect_last_touched_nodes(node, &mut state, &view_key);
+                    if (committed || connected)
+                        && let Some(patch) = debug_patch_for_state(node, &state, &view_key)
+                    {
+                        debug_log_patch_lisp(&view_key, &patch);
+                    }
+                    set_patcher_interaction_state(key, state);
+                    return Some(patcher_semantic_event(committed || connected));
+                }
+                _ => {}
+            }
+        }
         if state.text_edit.is_none() {
             return match key_event.code {
                 KeyCode::Char('y') | KeyCode::Char('Y')
@@ -1042,21 +1155,7 @@ impl WidgetDefinition for PatcherWidget {
         }
         match key_event.code {
             KeyCode::Enter if state.text_edit.is_some() => {
-                let committed_node_id = state.text_edit.as_ref().map(|edit| edit.node_id.clone());
-                let changed = commit_patcher_text_edit(&mut state, &view_key);
-                let promoted_macro = committed_node_id.as_deref().is_some_and(|node_id| {
-                    load_patch_from_props(&node.props)
-                        .ok()
-                        .is_some_and(|(_, root_patch)| {
-                            promote_created_macro_definition(
-                                &root_patch,
-                                &mut state,
-                                &view_key,
-                                node_id,
-                            )
-                        })
-                });
-                let changed = changed || promoted_macro;
+                let changed = commit_active_patcher_text_edit(node, &mut state, &view_key);
                 if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
                     debug_log_patch_lisp(&view_key, &patch);
                 }
@@ -1194,6 +1293,25 @@ impl WidgetDefinition for PatcherWidget {
     ) -> Vec<MetalPrimitive> {
         render::build_metal_primitives_for_patcher(node, viewport)
     }
+}
+
+/// Commit the active node text edit (if any) including created-macro
+/// promotion; returns whether the patch semantically changed.
+fn commit_active_patcher_text_edit(
+    node: &LayoutNode,
+    state: &mut state::PatcherInteractionState,
+    view_key: &str,
+) -> bool {
+    let Some(committed_node_id) = state.text_edit.as_ref().map(|edit| edit.node_id.clone()) else {
+        return false;
+    };
+    let changed = commit_patcher_text_edit(state, view_key);
+    let promoted_macro = load_patch_from_props(&node.props)
+        .ok()
+        .is_some_and(|(_, root_patch)| {
+            promote_created_macro_definition(&root_patch, state, view_key, &committed_node_id)
+        });
+    changed || promoted_macro
 }
 
 fn handle_agentic_bubble_edit_key(
@@ -1557,6 +1675,31 @@ fn defmacro_library_fingerprint(root: &Path) -> u64 {
         }
     }
     hasher.finish()
+}
+
+/// Library macro entries for the macro sidebar:
+/// (name, params, outputs, summary, imports). `imports` are the package's own
+/// `use-defmacro` dependencies, so the sidebar can nest library call chains.
+pub type MacroLibrarySidebarEntry = (String, Vec<String>, Vec<String>, Option<String>, Vec<String>);
+
+pub fn macro_library_sidebar_entries() -> Vec<MacroLibrarySidebarEntry> {
+    let Some(root) = crate::defmacro_library::default_library_root() else {
+        return Vec::new();
+    };
+    let (_, library) = cached_defmacro_library(&root);
+    library
+        .packages()
+        .values()
+        .map(|package| {
+            (
+                package.name.clone(),
+                package.params.clone(),
+                package.outputs.clone(),
+                package.manifest.summary.clone(),
+                package.imports.clone(),
+            )
+        })
+        .collect()
 }
 
 fn cached_defmacro_library(root: &Path) -> (u64, Rc<DefmacroLibrary>) {

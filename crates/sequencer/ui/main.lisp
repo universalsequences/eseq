@@ -18,6 +18,7 @@
 (defstate samples-sidebar-visible true)
 (defstate mixer-panel-visible true)
 (defstate lower-panel-visible true)
+(defstate patch-macros-panel-visible true)
 
 ; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync 6=delay
 (defstate param-mode 0)
@@ -72,6 +73,7 @@
 
 (load "@/ui/browser.lisp")
 (load "@/ui/mixer.lisp")
+(load "@/ui/patch-macros.lisp")
 (load "@/ui/effects.lisp")
 (load "@/ui/macros.lisp")
 (load "@/ui/piano-roll.lisp")
@@ -615,21 +617,43 @@
 (def seq-patcher-bottom-bar-visible? ()
   (or samples-sidebar-visible mixer-panel-visible lower-panel-visible))
 
+;; Macro sidebar to the left of the patch editor: defmacros in the patch +
+;; the saved macro library (see ui/patch-macros.lisp).
+(def seq-patch-macros-panel-layout-spec ()
+  (seq-collapsible-panel-layout-spec "*patch-macros*"
+    (lambda () (seq-hide-patch-macros-panel))
+    22 26 nil nil))
+
+(def seq-patcher-canvas-layout-spec (patcher-buffer)
+  (list :buf patcher-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20))
+
+(def seq-patcher-main-layout-spec (patcher-buffer)
+  (if patch-macros-panel-visible
+    (list :cols :gap 1
+      0.15 (seq-patch-macros-panel-layout-spec)
+      0.85 (seq-patcher-canvas-layout-spec patcher-buffer))
+    (seq-patcher-canvas-layout-spec patcher-buffer)))
+
 (def seq-instrument-patcher-layout-spec (patcher-buffer)
   (if (seq-patcher-bottom-bar-visible?)
     (list :rows :gap 1
       0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
-      0.80 (list :buf patcher-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20)
+      0.80 (seq-patcher-main-layout-spec patcher-buffer)
       0.15 (seq-patcher-bottom-bar-layout-spec))
     (list :rows :gap 1
       0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
-      0.95 (list :buf patcher-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20))))
+      0.95 (seq-patcher-main-layout-spec patcher-buffer))))
 
 (def seq-instrument-patcher-source-layout-spec (patcher-buffer source-buffer)
   (let ((main-layout
-          (list :cols :gap 1
-            0.62 (list :buf patcher-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20)
-            0.38 (list :buf source-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20))))
+          (if patch-macros-panel-visible
+            (list :cols :gap 1
+              0.14 (seq-patch-macros-panel-layout-spec)
+              0.53 (seq-patcher-canvas-layout-spec patcher-buffer)
+              0.33 (list :buf source-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20))
+            (list :cols :gap 1
+              0.62 (seq-patcher-canvas-layout-spec patcher-buffer)
+              0.38 (list :buf source-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 20)))))
     (if (seq-patcher-bottom-bar-visible?)
       (list :rows :gap 1
         0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
@@ -718,6 +742,18 @@
       (set! lower-panel-visible false)
       (seq-refresh-current-layout))
     nil))
+
+(def seq-hide-patch-macros-panel ()
+  (if patch-macros-panel-visible
+    (do
+      (set! patch-macros-panel-visible false)
+      (seq-refresh-current-layout))
+    nil))
+
+(def seq-toggle-patch-macros-panel ()
+  (do
+    (set! patch-macros-panel-visible (not patch-macros-panel-visible))
+    (seq-refresh-current-layout)))
 
 (def seq-toggle-samples-sidebar ()
   (do

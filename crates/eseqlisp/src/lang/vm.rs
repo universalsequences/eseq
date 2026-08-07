@@ -2460,6 +2460,20 @@ pub fn register_core_natives(vm: &mut VM) {
         Value::String(chars[start..end].iter().collect())
     });
 
+    // (str-contains? haystack needle) → case-insensitive substring test
+    vm.register_native("str-contains?", |args| {
+        let (Some(Value::String(haystack)), Some(Value::String(needle))) =
+            (args.first(), args.get(1))
+        else {
+            return Value::Bool(false);
+        };
+        Value::Bool(
+            haystack
+                .to_lowercase()
+                .contains(needle.to_lowercase().as_str()),
+        )
+    });
+
     // (source val ...) → concatenated evaluable Lisp source
     vm.register_native("source", |args| {
         let mut s = String::new();

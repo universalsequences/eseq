@@ -11506,6 +11506,30 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn compile_instrument_hoists_macro_body_mod_params() {
+        // A `@mod true` param declared inside a defmacro body with a `(mod ...)`
+        // reference: DGenLisp's validator only sees top-level params, so the
+        // compile pipeline hoists it (hoist_defmacro_params).
+        let source = r#"
+            (def gate (in 1 @name gate))
+            (def mod1 (in 6 @name mod1 @modulator 1))
+            (defmacro reverb123 (input)
+              (param xyz @min 0.3 @max 8 @mod true @mod-mode additive)
+              (def m (mod xyz))
+              (* input m))
+            (out (reverb123 gate) 1)
+        "#;
+
+        let json = compile_instrument(source, 44_100)
+            .expect("param+mod inside a macro body should compile via the hoist");
+        let manifest = parse_manifest(&json).expect("manifest parses");
+        assert!(
+            manifest.params.iter().any(|param| param.name == "xyz"),
+            "hoisted macro param should appear in the manifest"
+        );
+    }
+
+    #[test]
     fn patcher_writeback_for_real_instrument_compiles() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("instruments/bass/bad-subbass1/dsp.lisp");

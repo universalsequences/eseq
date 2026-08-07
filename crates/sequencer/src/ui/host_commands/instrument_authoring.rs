@@ -13,6 +13,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "promote-editor-to-patch",
     "eject-editor-to-code",
     "toggle-instrument-patcher-source",
+    "open-editor-macro-view",
     "enter-new-effect-editor",
     "save-new-effect",
     "enter-edit-effect",
@@ -1794,6 +1795,33 @@ pub(super) fn handle(
             }
         }
 
+        // Macro sidebar navigation: open a macro's patcher view (empty or
+        // missing name = back to the root view). Preserves staged edits.
+        "open-editor-macro-view" => {
+            let (path, buffer_name) =
+                if let Some(session) = ctx.sessions.instrument_edit_session.as_ref() {
+                    (session.path.clone(), session.buffer_name.clone())
+                } else if let Some(session) = ctx.sessions.effect_edit_session.as_ref() {
+                    (session.path.clone(), session.buffer_name.clone())
+                } else {
+                    editor.handle_host_event(HostEvent::Status(
+                        "No patch edit session is active".to_string(),
+                    ));
+                    return;
+                };
+            let macro_name = match &payload {
+                Value::Map(map) => map.get("name").and_then(|cell| match &*cell.borrow() {
+                    Value::String(name) if !name.is_empty() => Some(name.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            };
+            eseqlisp::widget_render::patcher::navigate_patcher_view_for_path(
+                &path,
+                macro_name.as_deref(),
+            );
+            editor.refresh_visible_layouts_for_buffer_named(&buffer_name);
+        }
         "toggle-instrument-patcher-source" => {
             let (buffer_name, path, last_valid_source) =
                 if let Some(session) = ctx.sessions.instrument_edit_session.as_ref() {

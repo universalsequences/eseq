@@ -585,6 +585,115 @@ pub(super) struct PendingAgenticBubble {
     >,
 }
 
+/// Macro sidebar facts scanned from a patch source: top-level
+/// `(defmacro name (params...) body...)` forms (with the head symbols each
+/// body calls, for nesting) and `(use-defmacro name)` library imports.
+pub(super) struct PatchMacroScan {
+    /// (name, params, called head symbols in definition order, deduped)
+    pub(super) locals: Vec<(String, Vec<String>, Vec<String>)>,
+    pub(super) imports: Vec<String>,
+}
+
+fn collect_call_head_symbols(expr: &Expression, seen: &mut Vec<String>) {
+    let Expression::List(items) = expr else {
+        return;
+    };
+    if let Some(Expression::Symbol(head)) = items.first() {
+        if !seen.contains(head) {
+            seen.push(head.clone());
+        }
+    }
+    for item in items {
+        collect_call_head_symbols(item, seen);
+    }
+}
+
+pub(super) fn scan_patch_macro_source(source: &str) -> PatchMacroScan {
+    let mut scan = PatchMacroScan {
+        locals: Vec::new(),
+        imports: Vec::new(),
+    };
+    let Ok(tokens) = Parser::new(source.to_string()).parse() else {
+        return scan;
+    };
+    let Ok(exprs) = ASTParser::new(tokens).parse() else {
+        return scan;
+    };
+    for expr in &exprs {
+        let Expression::List(items) = expr else {
+            continue;
+        };
+        match items.as_slice() {
+            [
+                Expression::Symbol(head),
+                Expression::Symbol(name),
+                Expression::List(params),
+                body @ ..,
+            ] if head == "defmacro" => {
+                let params = params
+                    .iter()
+                    .filter_map(|param| match param {
+                        Expression::Symbol(param) => Some(param.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let mut calls = Vec::new();
+                for expr in body {
+                    collect_call_head_symbols(expr, &mut calls);
+                }
+                calls.retain(|call| call != name);
+                scan.locals.push((name.clone(), params, calls));
+            }
+            [Expression::Symbol(head), Expression::Symbol(name)] if head == "use-defmacro" => {
+                scan.imports.push(name.clone());
+            }
+            _ => {}
+        }
+    }
+    scan
+}
+
+pub(super) fn build_patch_macro_sidebar_value(
+    entries: &[(String, Vec<String>, Vec<String>)],
+) -> Value {
+    Value::List(
+        entries
+            .iter()
+            .map(|(name, params, calls)| {
+                std::rc::Rc::new(std::cell::RefCell::new(values::map_value(vec![
+                    ("name", Value::String(name.clone())),
+                    ("params", values::build_string_list(params)),
+                    ("calls", values::build_string_list(calls)),
+                ])))
+            })
+            .collect(),
+    )
+}
+
+pub(super) fn build_library_macro_sidebar_value(
+    entries: &[eseqlisp::widget_render::patcher::MacroLibrarySidebarEntry],
+    used: &[String],
+) -> Value {
+    Value::List(
+        entries
+            .iter()
+            .map(|(name, params, outputs, summary, imports)| {
+                std::rc::Rc::new(std::cell::RefCell::new(values::map_value(vec![
+                    ("name", Value::String(name.clone())),
+                    ("params", values::build_string_list(params)),
+                    ("outputs", values::build_string_list(outputs)),
+                    (
+                        "summary",
+                        Value::String(summary.clone().unwrap_or_default()),
+                    ),
+                    ("calls", values::build_string_list(imports)),
+                    ("used", Value::Bool(used.contains(name))),
+                ])))
+            })
+            .collect(),
+    )
+}
+
 pub(super) fn extract_macro_name_from_defmacro(source: &str) -> Option<String> {
     let tokens = Parser::new(source.to_string()).parse().ok()?;
     let exprs = ASTParser::new(tokens).parse().ok()?;
@@ -951,6 +1060,19 @@ pub(super) fn editor_has_visible_buffer(editor: &Editor, name: &str) -> bool {
 
 pub(super) fn track_meter_bindings_visible(mixer_visible: bool, sequencer_visible: bool) -> bool {
     mixer_visible || sequencer_visible
+}
+
+/// `*patch-mixer*` (the reduced strip in the patch editor) renders the same
+/// meter/strip bindings as `*mixer*`, so anything gated on mixer visibility
+/// must treat either buffer as "the mixer is on screen".
+pub(super) fn editor_has_visible_mixer_buffer(editor: &Editor) -> bool {
+    editor_has_visible_buffer(editor, "*mixer*")
+        || editor_has_visible_buffer(editor, "*patch-mixer*")
+}
+
+pub(super) fn refresh_visible_mixer_layouts(editor: &mut Editor) {
+    editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+    editor.refresh_visible_layouts_for_buffer_named("*patch-mixer*");
 }
 
 pub(super) fn reconciled_track_index(

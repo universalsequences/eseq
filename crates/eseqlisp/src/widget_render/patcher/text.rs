@@ -12,7 +12,7 @@ use super::project::{
 };
 use super::state::{
     PatcherInteractionState, PatcherNodeOrigin, PatcherTextEdit, debug_log_edit_event,
-    node_edit_key,
+    node_edit_key, note_touched_node,
 };
 
 pub(super) const PATCHER_AUTOCOMPLETE_MAX_ITEMS: usize = 8;
@@ -65,6 +65,7 @@ pub(super) fn begin_patcher_text_edit(
 ) {
     state.selected_nodes.clear();
     state.selected_nodes.insert(node_id.clone());
+    note_touched_node(state, &node_id);
     state.selected_cable = None;
     state.drag = None;
     state.text_edit = Some(PatcherTextEdit {

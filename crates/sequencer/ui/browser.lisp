@@ -27,7 +27,7 @@
 (defstate sbrowser-script-save-mode "")  ;; "" or "new-script"
 
 (defwidget editor-spinner
-  :width 3.0 :height 1.25
+  :width 6.0 :height 4.25
   :animates true
   :shader
   (let ((phase (* itime 5.4))
@@ -54,8 +54,8 @@
         (material :color (rgba 0.22 0.52 1.0 (+ 0.35 (* 0.65 p4))))))))
 
 (def sbrowser-editor-status-row (text color)
-  (h-stack :width :fill :height 1.35 :gap 0.5 :align :center
-    (editor-spinner :width 2.8 :height 1.15)
+  (h-stack :width :fill :height 1.35 :gap 0.5 :align :baseline
+    (editor-spinner :width 6.8 :height 4.15)
     (label text
       :font-size 9
       :color color
@@ -1204,14 +1204,8 @@
                     "Editor")))))
           :font-size 12
           :color :white
-          :bg :transparent)
-        (box :bg :dark-gray :width 6 :height 1.5 :align :center
-          :on-click |x y r|
-            (if SEQ.editor-canceling nil (host-command "cancel-editor" (dict)))
-          (label "cancel"
-            :font-size 9
-            :color (if SEQ.editor-canceling :dim :gray)
-            :bg :transparent)))
+          :bg :transparent))
+      
       (if (sbrowser-editor-macro-action?)
         (v-stack :width :fill :gap 0.35
           (label "Current macro"
@@ -1231,57 +1225,28 @@
             :color :white
             :bg :transparent))
         (if (= SEQ.editor-mode "new-instrument")
-        (v-stack :width :fill :gap 0.35
-          (label "Draft patch"
-            :font-size 9
-            :color :gray
-            :bg :transparent)
-          (label (str "track " (+ SEQ.current-track 1))
-            :font-size 11
-            :color :white
-            :bg :transparent)
-          (label "Mode"
-            :font-size 9
-            :color :gray
-            :bg :transparent)
-          (h-stack :width :fill :gap 0.35
-            (button "Instrument"
-              :variant (if (= SEQ.editor-instrument-run-mode "instrument") :primary :secondary)
-              :width 8.5
-              :height 1.2
-              :font-size 9
-              :on-click |x y r|
-                (host-command "set-draft-instrument-run-mode" (dict :run-mode "instrument"))
-              :color :white)
-            (button "Free Patch"
-              :variant (if (= SEQ.editor-instrument-run-mode "free_patch") :primary :secondary)
-              :width 8.5
-              :height 1.2
-              :font-size 9
-              :on-click |x y r|
-                (host-command "set-draft-instrument-run-mode" (dict :run-mode "free_patch"))
-              :color :white))
-          (label "Save as"
-            :font-size 9
-            :color :gray
-            :bg :transparent)
-          (text-input
-            :width :fill
-            :value sbrowser-editor-name
-            :placeholder "instrument-name"
-            :on-change (lambda (v) (set! sbrowser-editor-name v))
-            :height 1.5
-            :font-size 12))
-        (if (= SEQ.editor-mode "new-effect")
           (v-stack :width :fill :gap 0.35
-            (label "Draft patch"
+            (label "Mode"
               :font-size 9
               :color :gray
               :bg :transparent)
-            (label (str "track " (+ SEQ.current-track 1))
-              :font-size 11
-              :color :white
-              :bg :transparent)
+            (h-stack :width :fill :gap 0.35
+              (button "Instrument"
+                :variant (if (= SEQ.editor-instrument-run-mode "instrument") :primary :secondary)
+                :width 8.5
+                :height 1.2
+                :font-size 9
+                :on-click |x y r|
+                (host-command "set-draft-instrument-run-mode" (dict :run-mode "instrument"))
+                :color :white)
+              (button "Free Patch"
+                :variant (if (= SEQ.editor-instrument-run-mode "free_patch") :primary :secondary)
+                :width 8.5
+                :height 1.2
+                :font-size 9
+                :on-click |x y r|
+                (host-command "set-draft-instrument-run-mode" (dict :run-mode "free_patch"))
+                :color :white))
             (label "Save as"
               :font-size 9
               :color :gray
@@ -1289,15 +1254,36 @@
             (text-input
               :width :fill
               :value sbrowser-editor-name
-              :placeholder "effect-name"
+              :placeholder "instrument-name"
               :on-change (lambda (v) (set! sbrowser-editor-name v))
               :height 1.5
               :font-size 12))
-          ;; For edit modes, show the file name
-          (label SEQ.editor-buffer-name
-            :font-size 10
-            :color :gray
-            :bg :transparent))))
+          (if (= SEQ.editor-mode "new-effect")
+            (v-stack :width :fill :gap 0.35
+              (label "Draft patch"
+                :font-size 9
+                :color :gray
+                :bg :transparent)
+              (label (str "track " (+ SEQ.current-track 1))
+                :font-size 11
+                :color :white
+                :bg :transparent)
+              (label "Save as"
+                :font-size 9
+                :color :gray
+                :bg :transparent)
+              (text-input
+                :width :fill
+                :value sbrowser-editor-name
+                :placeholder "effect-name"
+                :on-change (lambda (v) (set! sbrowser-editor-name v))
+                :height 1.5
+                :font-size 12))
+            ;; For edit modes, show the file name
+            (label SEQ.editor-buffer-name
+              :font-size 10
+              :color :gray
+              :bg :transparent))))
       ;; Status display
       (if SEQ.editor-canceling
         (sbrowser-editor-status-row "Canceling..." :gray)
@@ -1317,59 +1303,70 @@
           :height 1.2
           :font-size 10
           :on-click |x y r|
-            (host-command "evaluate-editor-source" (dict))
+          (host-command "evaluate-editor-source" (dict))
           :color :white)
         (box))
       ;; Open as patch (code editor, edit-existing): promote to the patch editor
       (if (and (= SEQ.editor-surface "code")
-               (or (= SEQ.editor-mode "edit-instrument") (= SEQ.editor-mode "edit-effect")))
+          (or (= SEQ.editor-mode "edit-instrument") (= SEQ.editor-mode "edit-effect")))
         (button "Open as patch"
           :variant :secondary
           :width 13
           :height 1.2
           :font-size 10
           :on-click |x y r|
-            (host-command "promote-editor-to-patch" (dict))
+          (host-command "promote-editor-to-patch" (dict))
           :color :white)
         (box))
       ;; Eject to code (patch editor, edit-existing only)
       (if (and (= SEQ.editor-surface "patch")
-               (or (= SEQ.editor-mode "edit-instrument") (= SEQ.editor-mode "edit-effect")))
+          (or (= SEQ.editor-mode "edit-instrument") (= SEQ.editor-mode "edit-effect")))
         (button "Eject to code"
           :variant :secondary
           :width 13
           :height 1.2
           :font-size 10
           :on-click |x y r|
-            (host-command "eject-editor-to-code" (dict))
+          (host-command "eject-editor-to-code" (dict))
           :color :white)
         (box))
       ;; Save button
       (if (sbrowser-editor-busy?)
         (box :height 1.2)
-        (button
-          (if (sbrowser-editor-macro-action?)
-            (sbrowser-editor-macro-action-label)
-            (if (= SEQ.editor-mode "new-instrument")
-            "Finalize"
-            (if (= SEQ.editor-mode "new-effect")
-              "Save & Add"
-            "Save")))
-          :variant :primary
-          :width (if (sbrowser-editor-macro-action?) 13.5 10)
-          :height 1.2
-          :font-size 11
-          :on-click |x y r|
+        (h-stack :align :baseline
+          (button
+            (if (sbrowser-editor-macro-action?)
+              (sbrowser-editor-macro-action-label)
+              (if (= SEQ.editor-mode "new-instrument")
+                "Finalize"
+                (if (= SEQ.editor-mode "new-effect")
+                  "Save & Add"
+                  "Save")))
+            :variant :primary
+            :width (if (sbrowser-editor-macro-action?) 13.5 10)
+            :height 1.2
+            :font-size 11
+            :on-click |x y r|
             (if (sbrowser-editor-macro-action?)
               (host-command "save-active-editor-macro" (dict))
               (if (= SEQ.editor-mode "new-instrument")
-              (host-command "save-new-instrument" (dict :name sbrowser-editor-name))
-              (if (= SEQ.editor-mode "edit-instrument")
-                (host-command "update-instrument" (dict :name SEQ.sidebar-instrument-name))
-                (if (= SEQ.editor-mode "new-effect")
-                  (host-command "save-new-effect" (dict :name sbrowser-editor-name))
-                  (host-command "update-effect" (dict))))))
-          :color :white)))))
+                (host-command "save-new-instrument" (dict :name sbrowser-editor-name))
+                (if (= SEQ.editor-mode "edit-instrument")
+                  (host-command "update-instrument" (dict :name SEQ.sidebar-instrument-name))
+                  (if (= SEQ.editor-mode "new-effect")
+                    (host-command "save-new-effect" (dict :name sbrowser-editor-name))
+                    (host-command "update-effect" (dict))))))
+            :color :white)
+          (box :bg :dark-gray :width 6 :height 1.5 :align :center
+            :on-click |x y r|
+            (if SEQ.editor-canceling nil (host-command "cancel-editor" (dict)))
+            (button "cancel"
+              :font-size 9
+              :height 1.2
+              :color (if SEQ.editor-canceling :white :white)
+              :background-color :gray)))            
+        )
+      )))
 
 (def sbrowser-editor-panel ()
   (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1))

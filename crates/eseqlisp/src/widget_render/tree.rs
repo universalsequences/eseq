@@ -218,6 +218,23 @@ fn get_expand_all_prop(props: &HashMap<String, Value>) -> bool {
     matches!(props.get("expand-all"), Some(Value::Bool(true)))
 }
 
+/// With `:selection-follows-external true`, the highlighted row is always the
+/// `:selected-path` / `:selected-label` match — clicks and drags never claim
+/// the highlight (they still fire callbacks and move the keyboard cursor).
+fn selection_follows_external(props: &HashMap<String, Value>) -> bool {
+    matches!(
+        props.get("selection-follows-external"),
+        Some(Value::Bool(true))
+    )
+}
+
+/// With `:activate-parents true`, double-clicking a row that has children
+/// fires `on-activate` like a leaf (the default reserves parent rows for
+/// expand/collapse only).
+fn activate_parents(props: &HashMap<String, Value>) -> bool {
+    matches!(props.get("activate-parents"), Some(Value::Bool(true)))
+}
+
 /// Extract the :items prop from a raw Value node (measure phase).
 fn get_items_value(node: &Value) -> Value {
     let Value::Map(map) = node else {
@@ -537,7 +554,7 @@ pub(crate) fn selection_view_hint(node: &LayoutNode) -> Option<(String, usize, f
     }
     normalize_state_for_visible_rows(widget_key, &mut state, &rows);
     let selection_key = state.synced_selection.clone()?;
-    let selected_row = if state.cursor_view_active {
+    let selected_row = if state.cursor_view_active && !selection_follows_external(&node.props) {
         state.cursor_row
     } else {
         state.external_selected_row?
@@ -1049,7 +1066,10 @@ impl WidgetDefinition for TreeWidget {
         let row_relative = local_row - node.rect.row + scroll_offset;
         let row_idx = (row_relative / rh).floor() as usize;
         let row = rows.get(row_idx)?;
-        if row.has_children || !row_is_interactive(row) {
+        if !row_is_interactive(row) {
+            return None;
+        }
+        if row.has_children && !activate_parents(&node.props) {
             return None;
         }
         state.cursor_row = row_idx;
@@ -1169,7 +1189,8 @@ impl WidgetDefinition for TreeWidget {
             // Row background — only draw the alternate stripe. The other rows
             // are left as the underlying panel background.
             let is_interactive = row_is_interactive(row);
-            let raw_selected = if state.cursor_view_active {
+            let raw_selected = if state.cursor_view_active && !selection_follows_external(&node.props)
+            {
                 state.cursor_row == i
             } else {
                 state.external_selected_row == Some(i)
