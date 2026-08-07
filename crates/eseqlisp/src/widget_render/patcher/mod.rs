@@ -840,20 +840,22 @@ pub fn emit_patch_writeback_with_created_phasor_multiply_before_first_output(
 use display::{node_display_label, preview};
 use emit::debug_log_patch_lisp;
 use interaction::{
-    PatcherChangeKind, connect_last_touched_nodes, create_patcher_node_below_anchor,
-    handle_patcher_double_click, handle_patcher_pointer_down, handle_patcher_pointer_drag,
-    handle_patcher_pointer_moved, handle_patcher_pointer_up, open_selected_macro_node,
-    pan_patcher_by_delta, pan_patcher_by_wheel, promote_created_macro_definition,
-    reset_patcher_pan, zoom_patcher_by_magnify,
+    PatcherChangeKind, connect_last_touched_nodes, copy_selected_patcher_nodes,
+    create_patcher_node_below_anchor, handle_patcher_double_click, handle_patcher_pointer_down,
+    handle_patcher_pointer_drag, handle_patcher_pointer_moved, handle_patcher_pointer_up,
+    open_selected_macro_node, pan_patcher_by_delta, pan_patcher_by_wheel,
+    paste_patcher_clipboard, promote_created_macro_definition, reset_patcher_pan,
+    zoom_patcher_by_magnify,
 };
 use metrics::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL};
 use state::{
     AgenticBubbleState, AgenticBubbleTarget, active_patcher_patch, active_patcher_view_key,
-    allocate_agentic_bubble, allocate_agentic_bubble_with_target, debug_log_edit_event,
+    allocate_agentic_bubble, allocate_agentic_bubble_with_target, apply_patcher_history_step,
+    debug_log_edit_event,
     debug_log_writeback_event, delete_connection_edit_or_mark_deleted, delete_selected_nodes,
     editing_agentic_bubble_id, get_patcher_interaction_state, patch_with_interaction_state,
     patcher_state_key, patcher_state_key_from_parts, set_connection_segment_edit,
-    set_patcher_interaction_state,
+    set_patcher_interaction_state, set_patcher_interaction_state_without_history,
 };
 use text::{
     apply_patcher_autocomplete, cancel_patcher_text_edit,
@@ -1029,12 +1031,20 @@ impl WidgetDefinition for PatcherWidget {
             match key_event.code {
                 KeyCode::Enter => {
                     let committed = commit_active_patcher_text_edit(node, &mut state, &view_key);
+                    if committed {
+                        // Flush the committed text edit as its own undo step
+                        // before the next created node opens a fresh gesture.
+                        set_patcher_interaction_state(key, state.clone());
+                    }
                     create_patcher_node_below_anchor(node, &mut state, &view_key);
                     set_patcher_interaction_state(key, state);
                     return Some(patcher_semantic_event(committed));
                 }
                 KeyCode::Up => {
                     let committed = commit_active_patcher_text_edit(node, &mut state, &view_key);
+                    if committed {
+                        set_patcher_interaction_state(key, state.clone());
+                    }
                     let connected = connect_last_touched_nodes(node, &mut state, &view_key);
                     if (committed || connected)
                         && let Some(patch) = debug_patch_for_state(node, &state, &view_key)
@@ -1049,6 +1059,53 @@ impl WidgetDefinition for PatcherWidget {
         }
         if state.text_edit.is_none() {
             return match key_event.code {
+                // Cmd+Z / Cmd+Shift+Z: graph-level undo/redo. The app-level
+                // sequencer history shortcut yields to a focused patcher
+                // (input.rs sequencer_history_shortcut), so the key arrives
+                // here. Cmd+C/V arrive with SUPER rewritten to CONTROL by
+                // normalize_command_shortcuts, hence the intersects checks.
+                KeyCode::Char('z') | KeyCode::Char('Z')
+                    if key_event
+                        .modifiers
+                        .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL)
+                        && !key_event.modifiers.contains(KeyModifiers::ALT)
+                        && state.drag.is_none() =>
+                {
+                    let redo = key_event.modifiers.contains(KeyModifiers::SHIFT);
+                    if apply_patcher_history_step(key, &mut state, redo) {
+                        if let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                            debug_log_patch_lisp(&view_key, &patch);
+                        }
+                        set_patcher_interaction_state_without_history(key, state);
+                        Some(patcher_semantic_event(true))
+                    } else {
+                        None
+                    }
+                }
+                KeyCode::Char('c') | KeyCode::Char('C')
+                    if key_event
+                        .modifiers
+                        .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL)
+                        && !state.selected_nodes.is_empty() =>
+                {
+                    if copy_selected_patcher_nodes(node, &state, &view_key) {
+                        Some(WidgetEvent::Custom(Value::Nil))
+                    } else {
+                        None
+                    }
+                }
+                KeyCode::Char('v') | KeyCode::Char('V')
+                    if key_event
+                        .modifiers
+                        .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL) =>
+                {
+                    let changed = paste_patcher_clipboard(node, &mut state, &view_key);
+                    if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                        debug_log_patch_lisp(&view_key, &patch);
+                    }
+                    set_patcher_interaction_state(key, state);
+                    Some(patcher_semantic_event(changed))
+                }
                 KeyCode::Char('y') | KeyCode::Char('Y')
                     if state.selected_cable.is_some()
                         && key_event.modifiers.contains(KeyModifiers::SUPER) =>

@@ -72,6 +72,13 @@ fn widget_captures_text_input(node: &eseqlisp::layout::LayoutNode) -> bool {
         || eseqlisp::widget_render::patcher::patcher_has_text_edit(node)
 }
 
+/// A focused patcher owns Cmd+Z/Cmd+Shift+Z for its graph-level undo history,
+/// so the app-level sequencer history shortcut must let the key fall through
+/// to the widget key path.
+fn focused_widget_is_patcher(editor: &Editor) -> bool {
+    focused_widget_matches(editor, |node| node.widget_type == "patcher")
+}
+
 fn active_buffer_accepts_global_ui_shortcuts(editor: &Editor) -> bool {
     matches!(editor.active_buffer().view_mode, ViewMode::UiOnly)
 }
@@ -94,6 +101,7 @@ pub(crate) fn sequencer_history_shortcut(
         || editor.prompt_text().is_some()
         || !active_buffer_accepts_global_ui_shortcuts(editor)
         || focused_widget_captures_text_input(editor)
+        || focused_widget_is_patcher(editor)
     {
         return None;
     }

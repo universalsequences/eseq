@@ -18690,3 +18690,257 @@ fn cmd_up_touch_order_ignores_vertical_order_for_direction() {
     assert_eq!(connection.from.node_id, upper);
     assert_eq!(connection.to.node_id, lower);
 }
+
+#[test]
+fn patcher_undo_redo_round_trips_created_node() {
+    let path = temp_patcher_source_path("patcher-undo-created");
+    fs::write(&path, "(def input (in 1))\n(out input 1)").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    let created = allocate_created_text_node(&mut state, "root", "cycle 220");
+    set_patcher_interaction_state(key, state);
+    assert_eq!(patcher_history_for_key(key).undo.len(), 1, "create is one undo step");
+
+    let undone = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('z'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    assert!(undone.is_some(), "undo should be consumed");
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        !state
+            .edit_state
+            .nodes
+            .contains_key(&node_edit_key("root", &created)),
+        "undo should remove the created node"
+    );
+    let history = patcher_history_for_key(key);
+    assert_eq!(history.undo.len(), 0);
+    assert_eq!(history.redo.len(), 1);
+
+    let redone = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('Z'),
+            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        },
+    );
+    assert!(redone.is_some(), "redo should be consumed");
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        state
+            .edit_state
+            .nodes
+            .contains_key(&node_edit_key("root", &created)),
+        "redo should restore the created node"
+    );
+
+    // Redo stack is now empty: a second redo is not consumed.
+    let empty_redo = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('z'),
+            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        },
+    );
+    assert!(empty_redo.is_none(), "empty redo stack should not consume the key");
+}
+
+#[test]
+fn patcher_undo_restores_deleted_selection() {
+    let path = temp_patcher_source_path("patcher-undo-delete");
+    fs::write(&path, "(def input (in 1))\n(out input 1)").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    let created = allocate_created_text_node(&mut state, "root", "cycle 220");
+    state.selected_nodes.insert(created.clone());
+    set_patcher_interaction_state(key, state);
+
+    let deleted = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Backspace,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+    assert!(deleted.is_some(), "delete should be consumed");
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        !state
+            .edit_state
+            .nodes
+            .contains_key(&node_edit_key("root", &created))
+    );
+    assert_eq!(
+        patcher_history_for_key(key).undo.len(),
+        2,
+        "create and delete are separate undo steps"
+    );
+
+    let undone = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('z'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    assert!(undone.is_some());
+    let state = get_patcher_interaction_state(key);
+    let restored = state
+        .edit_state
+        .nodes
+        .get(&node_edit_key("root", &created))
+        .expect("undo should restore the deleted node");
+    assert_eq!(restored.text, "cycle 220");
+}
+
+#[test]
+fn patcher_undo_gesture_coalescing_skips_noop_transitions() {
+    let path = temp_patcher_source_path("patcher-undo-noop");
+    fs::write(&path, "(def input (in 1))\n(out input 1)").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    // Hover/selection churn without edit-state changes records nothing.
+    let mut state = get_patcher_interaction_state(key);
+    state.hovered_node = Some("input".to_string());
+    set_patcher_interaction_state(key, state.clone());
+    state.selected_nodes.insert("input".to_string());
+    set_patcher_interaction_state(key, state.clone());
+    assert_eq!(patcher_history_for_key(key).undo.len(), 0);
+
+    // A text-edit gesture that ends back at its base (cancelled created node)
+    // records nothing either.
+    let created = allocate_created_node(&mut state, "root", (1.0, 1.0));
+    text::begin_patcher_text_edit(&mut state, created, String::new(), 0);
+    set_patcher_interaction_state(key, state.clone());
+    cancel_patcher_text_edit(&mut state, "root");
+    set_patcher_interaction_state(key, state);
+    assert_eq!(patcher_history_for_key(key).undo.len(), 0);
+}
+
+#[test]
+fn patcher_copy_paste_duplicates_selection_and_wires() {
+    let path = temp_patcher_source_path("patcher-copy-paste");
+    fs::write(&path, "(def input (in 1))\n(out input 1)").unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    let source_node = allocate_created_text_node(&mut state, "root", "cycle 220");
+    let dest_node = allocate_created_text_node(&mut state, "root", "mul 0.5");
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &source_node))
+        .unwrap()
+        .position = (3.0, 4.0);
+    connect_output_to_input(&mut state, "root", &source_node, &dest_node, 0);
+    state.selected_nodes.insert(source_node.clone());
+    state.selected_nodes.insert(dest_node.clone());
+    set_patcher_interaction_state(key, state);
+
+    let copied = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    assert!(copied.is_some(), "copy should be consumed");
+
+    // Paste arrives with SUPER rewritten to CONTROL by
+    // normalize_command_shortcuts; the widget accepts either.
+    let pasted = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('v'),
+            modifiers: KeyModifiers::CONTROL,
+        },
+    );
+    assert!(pasted.is_some(), "paste should be consumed");
+
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(state.edit_state.nodes.len(), 4, "paste adds two nodes");
+    assert_eq!(state.selected_nodes.len(), 2, "pasted nodes are selected");
+    assert!(!state.selected_nodes.contains(&source_node));
+    assert!(!state.selected_nodes.contains(&dest_node));
+
+    let pasted_texts = state
+        .selected_nodes
+        .iter()
+        .map(|id| {
+            state.edit_state.nodes[&node_edit_key("root", id)]
+                .text
+                .clone()
+        })
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        pasted_texts,
+        HashSet::from(["cycle 220".to_string(), "mul 0.5".to_string()])
+    );
+
+    let internal_wire = state.edit_state.connections.values().find(|edit| {
+        state.selected_nodes.contains(&edit.from.node_id)
+            && state.selected_nodes.contains(&edit.to.node_id)
+    });
+    assert!(
+        internal_wire.is_some(),
+        "the wire internal to the selection is remapped onto the pasted nodes"
+    );
+
+    let pasted_cycle = state
+        .selected_nodes
+        .iter()
+        .map(|id| &state.edit_state.nodes[&node_edit_key("root", id)])
+        .find(|edit| edit.text == "cycle 220")
+        .unwrap();
+    assert_eq!(
+        pasted_cycle.position,
+        (5.0, 6.0),
+        "first paste offsets the copied position by one paste step"
+    );
+
+    // Undo removes the whole paste as one step.
+    let undone = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('z'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    assert!(undone.is_some());
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(state.edit_state.nodes.len(), 2, "undo removes both pasted nodes");
+}
+
+#[test]
+fn patcher_paste_rejects_macro_self_reference() {
+    let path = temp_patcher_source_path("patcher-paste-macro-guard");
+    fs::write(&path, "(def input (in 1))\n(out input 1)").unwrap();
+    let node = patcher_test_node(&path);
+
+    set_patcher_clipboard(PatcherClipboard {
+        nodes: vec![PatcherClipboardNode {
+            text: "wobble 1".to_string(),
+            position: (0.0, 0.0),
+            width: None,
+        }],
+        connections: Vec::new(),
+        paste_serial: 0,
+    });
+    let mut state = PatcherInteractionState::default();
+    state.active_macro = Some("wobble".to_string());
+    assert!(
+        !paste_patcher_clipboard(&node, &mut state, "macro:wobble"),
+        "a macro view must not gain a node calling the macro it defines"
+    );
+    assert!(state.edit_state.nodes.is_empty());
+}

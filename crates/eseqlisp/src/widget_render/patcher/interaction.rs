@@ -27,16 +27,18 @@ use super::metrics::{
 };
 use super::model::{CableEndpoint, CableSegmentInfo, InputPortRef, NodeKind, OutputPortRef, Patch};
 use super::state::{
-    AlignmentAxis, AlignmentSnapState, PatcherDragState, PatcherInteractionState, PatcherMacroEdit,
+    AlignmentAxis, AlignmentSnapState, PatcherClipboard, PatcherClipboardConnection,
+    PatcherClipboardNode, PatcherDragState, PatcherInteractionState, PatcherMacroEdit,
     PatcherPanState, active_patcher_patch, active_patcher_view_key, allocate_created_connection,
     allocate_created_node_avoiding, bring_nodes_to_front, connection_id_from_ports,
     debug_log_edit_event,
     delete_connection_edit_or_mark_deleted, ensure_source_node_edit, get_patcher_interaction_state,
-    note_touched_node,
+    next_patcher_clipboard_paste, note_touched_node,
     get_patcher_pan_state, node_edit_key, ordered_patch_nodes, patch_with_created_macros,
     patch_with_interaction_state, patcher_state_key, set_connection_segment_edit,
-    set_node_edit_position, set_node_edit_width, set_patcher_interaction_state,
-    set_patcher_pan_state, source_connection_id, sync_patcher_z_order,
+    set_node_edit_position, set_node_edit_width, set_patcher_clipboard,
+    set_patcher_interaction_state, set_patcher_pan_state, source_connection_id,
+    sync_patcher_z_order,
 };
 use super::text::{
     begin_patcher_text_edit, commit_patcher_text_edit, patcher_text_cursor_at_col_with_zoom,
@@ -1230,6 +1232,146 @@ pub(super) fn connect_last_touched_nodes(
             node_id: dest,
             input_index: to_input,
         },
+    );
+    true
+}
+
+/// Cmd+C: capture the selected nodes (header text + geometry) and the wires
+/// internal to the selection into the process-local patcher clipboard.
+pub(super) fn copy_selected_patcher_nodes(
+    node: &LayoutNode,
+    state: &PatcherInteractionState,
+    view_key: &str,
+) -> bool {
+    if state.selected_nodes.is_empty() {
+        return false;
+    }
+    let Ok((_, root_patch)) = load_patch_from_props(&node.props) else {
+        return false;
+    };
+    let patch = active_patcher_patch(&root_patch, state);
+    let patch = patch_with_interaction_state(patch, state, view_key);
+    let mut index_by_id = std::collections::HashMap::new();
+    let mut nodes = Vec::new();
+    for patch_node in &patch.nodes {
+        if !state.selected_nodes.contains(&patch_node.id) {
+            continue;
+        }
+        let text = node_display_label(patch_node);
+        if text.trim().is_empty() {
+            continue;
+        }
+        index_by_id.insert(patch_node.id.clone(), nodes.len());
+        nodes.push(PatcherClipboardNode {
+            text,
+            position: patch_node.position,
+            width: patch_node.width,
+        });
+    }
+    if nodes.is_empty() {
+        return false;
+    }
+    let mut connections = Vec::new();
+    for connection in &patch.connections {
+        let (Some(&from_index), Some(&to_index)) = (
+            index_by_id.get(&connection.from_node),
+            index_by_id.get(&connection.to_node),
+        ) else {
+            continue;
+        };
+        let entry = PatcherClipboardConnection {
+            from_index,
+            from_output: connection.from_output,
+            to_index,
+            to_input: connection.to_input,
+        };
+        if !connections.contains(&entry) {
+            connections.push(entry);
+        }
+    }
+    set_patcher_clipboard(PatcherClipboard {
+        nodes,
+        connections,
+        paste_serial: 0,
+    });
+    debug_log_edit_event(&format!("copy-selection view={view_key}"), state);
+    true
+}
+
+const PASTE_OFFSET_CELLS: f32 = 2.0;
+
+/// Cmd+V: re-create the clipboard's nodes as created nodes offset from their
+/// copied positions (staggered per repeated paste), remap the internal wires
+/// onto the new ids, and select the pasted nodes.
+pub(super) fn paste_patcher_clipboard(
+    node: &LayoutNode,
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+) -> bool {
+    let Some(clipboard) = next_patcher_clipboard_paste() else {
+        return false;
+    };
+    if clipboard.nodes.is_empty() {
+        return false;
+    }
+    // A macro view must not gain a node calling the macro it defines (same
+    // guard as the sidebar drop path).
+    if let Some(active_macro) = state.active_macro.as_deref()
+        && clipboard.nodes.iter().any(|clip_node| {
+            clip_node.text.split_whitespace().next() == Some(active_macro)
+        })
+    {
+        return false;
+    }
+    let Ok((_, root_patch)) = load_patch_from_props(&node.props) else {
+        return false;
+    };
+    let patch = active_patcher_patch(&root_patch, state);
+    let patch = patch_with_interaction_state(patch, state, view_key);
+    let taken_node_ids = patch
+        .nodes
+        .iter()
+        .map(|patch_node| patch_node.id.clone())
+        .collect::<HashSet<_>>();
+    let offset = PASTE_OFFSET_CELLS * clipboard.paste_serial as f32;
+    let mut new_ids = Vec::with_capacity(clipboard.nodes.len());
+    for clip_node in &clipboard.nodes {
+        let position = (
+            clip_node.position.0 + offset,
+            clip_node.position.1 + offset,
+        );
+        let created_id =
+            allocate_created_node_avoiding(state, view_key, position, &taken_node_ids);
+        if let Some(edit) = state
+            .edit_state
+            .nodes
+            .get_mut(&node_edit_key(view_key, &created_id))
+        {
+            edit.text = clip_node.text.clone();
+            edit.width = clip_node.width;
+        }
+        note_touched_node(state, &created_id);
+        new_ids.push(created_id);
+    }
+    for connection in &clipboard.connections {
+        allocate_created_connection(
+            state,
+            view_key,
+            OutputPortRef {
+                node_id: new_ids[connection.from_index].clone(),
+                output_index: connection.from_output,
+            },
+            InputPortRef {
+                node_id: new_ids[connection.to_index].clone(),
+                input_index: connection.to_input,
+            },
+        );
+    }
+    state.selected_nodes = new_ids.iter().cloned().collect();
+    state.selected_cable = None;
+    debug_log_edit_event(
+        &format!("paste-clipboard view={view_key} nodes={}", new_ids.len()),
+        state,
     );
     true
 }

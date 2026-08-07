@@ -358,7 +358,14 @@ only for true special forms. Doc-panel rendering in the text editor (the patcher
   dead+complete emitted as unused defs, defmacros always persist). Two model gaps
   closed along the way: `Patch.host_modulators` (hidden `@modulator` defs now
   round-trip) and top-level `(param …)` emission (dgen `(mod name)` resolution).
-- **Phase 3 — patch editor undo** (§4.4). Not started.
+- **Phase 3 — patch editor undo** (§4.4). BUILT: bounded `PatchEditState`
+  snapshot stacks per widget (`PatcherHistory`, state.rs), recorded centrally in
+  `set_patcher_interaction_state` with gesture coalescing (open drag/text edit =
+  one step); Cmd+Z/Cmd+Shift+Z handled in the patcher `key_event`, with
+  `sequencer_history_shortcut` yielding to any focused patcher. History drops on
+  `reset_patcher_widget_state` (one base-source epoch). Node-selection
+  copy/paste (Cmd+C/Cmd+V, process-local clipboard with internal-wire remap)
+  landed alongside.
 - **Phase 4 — polish.** Text-editor doc panel, "new via code" if wanted. Not started.
 
 ### Deferred tail (known, deliberate)

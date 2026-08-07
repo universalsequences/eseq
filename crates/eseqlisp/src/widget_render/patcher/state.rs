@@ -62,6 +62,10 @@ thread_local! {
         RefCell::new(HashMap::new());
     static PATCHER_PATH_KEYS: RefCell<HashMap<String, Vec<u64>>> =
         RefCell::new(HashMap::new());
+    static PATCHER_HISTORIES: RefCell<HashMap<u64, PatcherHistory>> =
+        RefCell::new(HashMap::new());
+    static PATCHER_CLIPBOARD: RefCell<Option<PatcherClipboard>> =
+        RefCell::new(None);
 }
 
 pub(super) fn patcher_state_key(node: &LayoutNode) -> u64 {
@@ -384,6 +388,24 @@ pub(super) fn get_patcher_interaction_state(key: u64) -> PatcherInteractionState
 pub(super) fn set_patcher_interaction_state(key: u64, state: PatcherInteractionState) {
     let changed = PATCHER_INTERACTION_STATES.with(|states| {
         let mut states = states.borrow_mut();
+        record_patcher_history_transition(key, states.get(&key), &state);
+        let old = states.insert(key, state.clone());
+        old.as_ref() != Some(&state)
+    });
+    if changed {
+        bump_widget_state_generation();
+    }
+}
+
+/// Store interaction state while an undo/redo is being applied: the edit-state
+/// transition must not be recorded as a fresh gesture (it would clobber the
+/// redo stack the application just built).
+pub(super) fn set_patcher_interaction_state_without_history(
+    key: u64,
+    state: PatcherInteractionState,
+) {
+    let changed = PATCHER_INTERACTION_STATES.with(|states| {
+        let mut states = states.borrow_mut();
         let old = states.insert(key, state.clone());
         old.as_ref() != Some(&state)
     });
@@ -396,9 +418,181 @@ pub(super) fn reset_patcher_widget_state(key: u64) {
     let pan_changed = PATCHER_PAN_STATES.with(|states| states.borrow_mut().remove(&key).is_some());
     let interaction_changed =
         PATCHER_INTERACTION_STATES.with(|states| states.borrow_mut().remove(&key).is_some());
+    PATCHER_HISTORIES.with(|histories| histories.borrow_mut().remove(&key));
     if pan_changed || interaction_changed {
         bump_widget_state_generation();
     }
+}
+
+const PATCHER_HISTORY_LIMIT: usize = 64;
+
+/// Graph-level undo history for one patcher widget. Each undo step is a full
+/// `PatchEditState` snapshot taken at the start of a committed gesture;
+/// restoring one regenerates + recompiles through the normal semantic-change
+/// payload, so no source reconciliation is needed (spec
+/// docs/patch-vs-code-editor-spec.md §4.4). Snapshots are only valid within
+/// one base-source epoch: `reset_patcher_widget_state` (which runs after every
+/// save rewrites the source) drops the whole history.
+#[derive(Clone, Debug, Default)]
+pub(super) struct PatcherHistory {
+    pub(super) undo: Vec<PatchEditState>,
+    pub(super) redo: Vec<PatchEditState>,
+    /// `edit_state` as of the start of the in-flight gesture (an open drag or
+    /// text edit); committed as one undo step when the gesture closes.
+    pub(super) pending_gesture_base: Option<PatchEditState>,
+}
+
+/// Undo-relevant equality: the created-id counters only ever grow (a
+/// cancelled gesture keeps its bump) and must not make an otherwise reverted
+/// edit state look like a change worth an undo step.
+fn edit_states_equivalent(left: &PatchEditState, right: &PatchEditState) -> bool {
+    left.nodes == right.nodes
+        && left.deleted_nodes == right.deleted_nodes
+        && left.connections == right.connections
+        && left.deleted_connections == right.deleted_connections
+        && left.input_presentations == right.input_presentations
+        && left.created_macros == right.created_macros
+}
+
+fn push_patcher_undo_step(history: &mut PatcherHistory, base: PatchEditState) {
+    history.undo.push(base);
+    if history.undo.len() > PATCHER_HISTORY_LIMIT {
+        let excess = history.undo.len() - PATCHER_HISTORY_LIMIT;
+        history.undo.drain(..excess);
+    }
+    history.redo.clear();
+}
+
+/// Observe an interaction-state transition and fold it into undo history.
+/// A gesture is "open" while a drag or text edit is active; edit-state changes
+/// made during an open gesture coalesce into one undo step, committed on the
+/// first store with the gesture closed. A gesture that ends back at its base
+/// (e.g. Esc canceling a fresh created node) records nothing.
+fn record_patcher_history_transition(
+    key: u64,
+    previous: Option<&PatcherInteractionState>,
+    next: &PatcherInteractionState,
+) {
+    let previous_edit = previous.map(|state| &state.edit_state);
+    PATCHER_HISTORIES.with(|histories| {
+        let mut histories = histories.borrow_mut();
+        let history = histories.entry(key).or_default();
+        let default_edit = PatchEditState::default();
+        let previous_edit = previous_edit.unwrap_or(&default_edit);
+        let edit_changed = !edit_states_equivalent(previous_edit, &next.edit_state);
+        if edit_changed && history.pending_gesture_base.is_none() {
+            history.pending_gesture_base = Some(previous_edit.clone());
+        }
+        let gesture_open = next.drag.is_some() || next.text_edit.is_some();
+        if !gesture_open
+            && let Some(base) = history.pending_gesture_base.take()
+            && !edit_states_equivalent(&base, &next.edit_state)
+        {
+            push_patcher_undo_step(history, base);
+        }
+    });
+}
+
+/// Apply one undo (or redo) step to `state`, moving the replaced edit state to
+/// the opposite stack. Returns false when the stack is empty. The caller must
+/// store the state via `set_patcher_interaction_state_without_history` and emit
+/// a semantic change so the patch regenerates and recompiles.
+pub(super) fn apply_patcher_history_step(
+    key: u64,
+    state: &mut PatcherInteractionState,
+    redo: bool,
+) -> bool {
+    PATCHER_HISTORIES.with(|histories| {
+        let mut histories = histories.borrow_mut();
+        let history = histories.entry(key).or_default();
+        // A leftover gesture base should have been committed when the gesture
+        // closed; commit it now rather than losing the step.
+        if let Some(base) = history.pending_gesture_base.take()
+            && !edit_states_equivalent(&base, &state.edit_state)
+        {
+            push_patcher_undo_step(history, base);
+        }
+        let (from, to) = if redo {
+            (&mut history.redo, &mut history.undo)
+        } else {
+            (&mut history.undo, &mut history.redo)
+        };
+        let Some(mut snapshot) = from.pop() else {
+            return false;
+        };
+        // Created-id counters only ever grow: keep the newer counter so ids
+        // allocated after an undo can never collide with ids still referenced
+        // by snapshots on either stack.
+        snapshot.next_created_node = snapshot
+            .next_created_node
+            .max(state.edit_state.next_created_node);
+        snapshot.next_created_connection = snapshot
+            .next_created_connection
+            .max(state.edit_state.next_created_connection);
+        to.push(state.edit_state.clone());
+        state.edit_state = snapshot;
+        state.selected_nodes.clear();
+        state.selected_cable = None;
+        state.text_edit = None;
+        state.drag = None;
+        debug_log_edit_event(if redo { "redo" } else { "undo" }, state);
+        true
+    })
+}
+
+#[cfg(test)]
+pub(super) fn patcher_history_for_key(key: u64) -> PatcherHistory {
+    PATCHER_HISTORIES.with(|histories| {
+        histories
+            .borrow()
+            .get(&key)
+            .cloned()
+            .unwrap_or_default()
+    })
+}
+
+/// One copied node: its editable header text plus geometry. Paste re-creates
+/// it as a created node, so fidelity matches retyping the header by hand.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PatcherClipboardNode {
+    pub(super) text: String,
+    pub(super) position: (f32, f32),
+    pub(super) width: Option<f32>,
+}
+
+/// A wire internal to the copied selection, endpoints as indices into
+/// `PatcherClipboard::nodes` so paste can remap them onto the new node ids.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PatcherClipboardConnection {
+    pub(super) from_index: usize,
+    pub(super) from_output: usize,
+    pub(super) to_index: usize,
+    pub(super) to_input: usize,
+}
+
+/// Process-local patcher clipboard, shared across patcher widgets so a
+/// selection copied in one patch can be pasted into another.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct PatcherClipboard {
+    pub(super) nodes: Vec<PatcherClipboardNode>,
+    pub(super) connections: Vec<PatcherClipboardConnection>,
+    /// Number of pastes since this clipboard was captured; staggers repeated
+    /// pastes so they don't stack on the same spot.
+    pub(super) paste_serial: u32,
+}
+
+pub(super) fn set_patcher_clipboard(clipboard: PatcherClipboard) {
+    PATCHER_CLIPBOARD.with(|slot| *slot.borrow_mut() = Some(clipboard));
+}
+
+/// Take the clipboard for a paste, bumping its serial in place.
+pub(super) fn next_patcher_clipboard_paste() -> Option<PatcherClipboard> {
+    PATCHER_CLIPBOARD.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let clipboard = slot.as_mut()?;
+        clipboard.paste_serial += 1;
+        Some(clipboard.clone())
+    })
 }
 
 pub(super) fn reset_patcher_widget_states_for_path(path: impl AsRef<Path>, fallback_key: u64) {
