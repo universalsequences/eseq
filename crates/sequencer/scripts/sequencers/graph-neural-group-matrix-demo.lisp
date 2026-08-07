@@ -777,6 +777,9 @@
                     (ggm-edit-group-cell "group-gain" r c v)))))
 
             ;; ── H: activity→threshold coupling (positive = suppress, negative = excite) ──
+            ;; Bipolar, so :control :pie — wedge sweep = |H| from zero, clockwise
+            ;; orange = suppression, counter-clockwise blue = excitation; an empty
+            ;; ring is an untouched (zero) coupling.
             (v-stack :gap ggm-matrix-column-gap
               (label "H couple" :width 8 :height (ggm-matrix-header-spacer-height) :font-size 8 :h-align :center :color :dim :bg :transparent)
               (matrix
@@ -787,9 +790,11 @@
                 :height (ggm-matrix-data-height ggm-group-count)
                 :min -2
                 :max 2
+                :control :pie
                 :background :mixer-strip-bg
                 :color (rgba 0.9 0.5 0.16 1)
-                :empty-fill-color (rgba 0.04 0.04 0.05 1)
+                :negative-color (rgba 0.3 0.55 0.95 1)
+                :empty-fill-color (rgba 0.16 0.17 0.2 1)
                 :stroke-color (rgba 0.62 0.5 0.36 1)
                 :stroke-width 1.5
                 :stroke-active-only true

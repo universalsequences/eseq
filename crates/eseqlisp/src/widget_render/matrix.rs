@@ -41,6 +41,9 @@ enum MatrixControl {
     Circle,
     Line,
     Grid,
+    /// Radial wedge per cell for bipolar data: sweep angle = magnitude from the
+    /// center value, direction + color = sign. Zero renders as an empty ring.
+    Pie,
 }
 
 fn value_cell(value: Value) -> Rc<RefCell<Value>> {
@@ -117,7 +120,50 @@ fn control_from_props(props: &HashMap<String, Value>) -> MatrixControl {
         {
             MatrixControl::Grid
         }
+        Some(Value::Keyword(value)) | Some(Value::String(value))
+            if matches!(value.as_str(), "pie" | "wedge" | "radial") =>
+        {
+            MatrixControl::Pie
+        }
         _ => MatrixControl::Circle,
+    }
+}
+
+/// Center a `:pie` cell sweeps from: the `zero` prop when given, else 0 for a
+/// range that spans zero (bipolar), else the range minimum.
+fn pie_center(props: &HashMap<String, Value>) -> f32 {
+    let min = get_f32_prop(props, "min", 0.0);
+    let max = get_f32_prop(props, "max", 1.0);
+    let lo = min.min(max);
+    let hi = min.max(max);
+    let default = if lo < 0.0 && hi > 0.0 { 0.0 } else { lo };
+    get_f32_prop(props, "zero", default).clamp(lo, hi)
+}
+
+/// Wedge sweep fraction (0..1) and sign (+1/-1) of a value around the pie
+/// center. Each side normalizes over its own span, like diverging display.
+fn pie_display(props: &HashMap<String, Value>, value: f32) -> (f32, f32) {
+    let min = get_f32_prop(props, "min", 0.0);
+    let max = get_f32_prop(props, "max", 1.0);
+    let lo = min.min(max);
+    let hi = min.max(max);
+    let center = pie_center(props);
+    if value >= center {
+        let span = hi - center;
+        let mag = if span > f32::EPSILON {
+            ((value - center) / span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (mag, 1.0)
+    } else {
+        let span = center - lo;
+        let mag = if span > f32::EPSILON {
+            ((center - value) / span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (mag, -1.0)
     }
 }
 
@@ -450,15 +496,29 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
             let matrix_col = ((x as f32 / width_u16 as f32) * cols as f32)
                 .floor()
                 .min((cols - 1) as f32) as usize;
-            let t = display_value(props, matrix[matrix_row][matrix_col]);
-            let ch = if t >= 0.66 {
-                '#'
-            } else if t >= 0.33 {
-                '+'
-            } else if t > 0.0 {
-                '.'
+            let value = matrix[matrix_row][matrix_col];
+            let ch = if control_from_props(props) == MatrixControl::Pie {
+                let (t, sign) = pie_display(props, value);
+                match (t, sign < 0.0) {
+                    (t, false) if t >= 0.66 => '#',
+                    (t, false) if t >= 0.33 => '+',
+                    (t, false) if t > 0.0 => '.',
+                    (t, true) if t >= 0.66 => '%',
+                    (t, true) if t >= 0.33 => '-',
+                    (t, true) if t > 0.0 => ',',
+                    _ => ' ',
+                }
             } else {
-                ' '
+                let t = display_value(props, value);
+                if t >= 0.66 {
+                    '#'
+                } else if t >= 0.33 {
+                    '+'
+                } else if t > 0.0 {
+                    '.'
+                } else {
+                    ' '
+                }
             };
             buf.set(row_u16 + y, col_u16 + x, styled_cell(ch, fg, Some(bg)));
         }
@@ -502,7 +562,42 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     float ringMask = 0.0;
     float innerMask = 0.0;
-    if (control > 1.5) {
+    if (control > 2.5) {
+        // Pie: wedge sweep = magnitude from the center value, starting at 12
+        // o'clock; positive sweeps clockwise, negative counter-clockwise. Sign
+        // arrives in uniform_a.w; zero leaves an empty ring so untouched cells
+        // stay visibly neutral.
+        float sweepDir = in.uniform_a.w < 0.0 ? -1.0 : 1.0;
+        float sweep = value * 6.2831853;
+        float ang = atan2(p.x, p.y) * sweepDir;
+        if (ang < 0.0) {
+            ang += 6.2831853;
+        }
+        float discMask = smoothstep(pix, 0.0, d - radius) * inCell;
+        float outlineDist = abs(d - radius) - ringThickness * 0.5;
+        float outlineMask = smoothstep(pix, 0.0, outlineDist) * inCell;
+        // Angular antialias width grows toward the center (arc length per pixel).
+        float angAA = pix / max(d, 0.05);
+        float wedgeAngMask = value >= 0.999 ? 1.0 : smoothstep(0.0, angAA, sweep - ang);
+        float wedgeMask = discMask * wedgeAngMask * step(0.0005, value);
+
+        // Composite bg -> neutral outline ring -> signed wedge -> stroke ring.
+        float4 acc = in.color_b;
+        float outlineA = outlineMask * in.color_c.a * 0.6;
+        acc.rgb = mix(acc.rgb, in.color_c.rgb, outlineA);
+        acc.a = outlineA + acc.a * (1.0 - outlineA);
+        float fillA = wedgeMask * in.color_a.a;
+        acc.rgb = mix(acc.rgb, in.color_a.rgb, fillA);
+        acc.a = fillA + acc.a * (1.0 - fillA);
+        float strokeHalfP = in.uniform_b.x * 0.5;
+        if (in.uniform_b.y > 0.5 && strokeHalfP > 0.0) {
+            float strokeMaskP = smoothstep(pix, 0.0, abs(d - radius) - strokeHalfP) * inCell;
+            float strokeA = strokeMaskP * in.color_d.a;
+            acc.rgb = mix(acc.rgb, in.color_d.rgb, strokeA);
+            acc.a = strokeA + acc.a * (1.0 - strokeA);
+        }
+        return float4(acc.rgb, acc.a * inCell);
+    } else if (control > 1.5) {
         float fillAlpha = clamp(in.color_a.a * value, 0.0, 1.0);
         float bgAlpha = clamp(in.color_b.a, 0.0, 1.0);
         float outAlpha = fillAlpha + bgAlpha * (1.0 - fillAlpha);
@@ -750,7 +845,16 @@ impl WidgetDefinition for MatrixWidget {
         let state = get_state(node.widget_id);
         let control = control_from_props(&node.props);
         let color = fill_color(&node.props);
-        let negative_color = negative_fill_color(&node.props, color);
+        // Pie cells encode sign in color, so an unset negative color must still
+        // contrast with the positive fill; other modes keep the legacy fallback.
+        let negative_color = negative_fill_color(
+            &node.props,
+            if control == MatrixControl::Pie {
+                Color::rgba(0.30, 0.55, 0.95, 1.0)
+            } else {
+                color
+            },
+        );
         let bg = background_color(&node.props);
         let border = empty_fill_color(&node.props, bg);
         let hover_border = resolve_named_color(
@@ -783,13 +887,22 @@ impl WidgetDefinition for MatrixWidget {
                 } else {
                     border
                 };
-                let t = display_value(&node.props, *value);
-                let cell_color = if get_bool_prop(&node.props, "diverging", false)
-                    && *value < get_f32_prop(&node.props, "zero", 0.0)
-                {
-                    negative_color
+                // Pie mode is inherently diverging: magnitude sweeps from the
+                // derived center, sign picks direction (shader) and color (here).
+                let (t, cell_color, pie_sign) = if control == MatrixControl::Pie {
+                    let (magnitude, sign) = pie_display(&node.props, *value);
+                    let cell_color = if sign < 0.0 { negative_color } else { color };
+                    (magnitude, cell_color, sign)
                 } else {
-                    color
+                    let t = display_value(&node.props, *value);
+                    let cell_color = if get_bool_prop(&node.props, "diverging", false)
+                        && *value < get_f32_prop(&node.props, "zero", 0.0)
+                    {
+                        negative_color
+                    } else {
+                        color
+                    };
+                    (t, cell_color, 0.0)
                 };
                 let rect = Rect {
                     row: cell_row,
@@ -813,10 +926,11 @@ impl WidgetDefinition for MatrixWidget {
                                 MatrixControl::Circle => 0.0,
                                 MatrixControl::Line => 1.0,
                                 MatrixControl::Grid => 2.0,
+                                MatrixControl::Pie => 3.0,
                             },
                             if is_clicked { 1.0 } else { 0.0 },
                             state.release_time,
-                            0.0,
+                            pie_sign,
                         ],
                         uniform_b: [
                             stroke_width_p,
@@ -959,6 +1073,48 @@ mod tests {
 
         props.insert("control".to_string(), Value::String("squares".to_string()));
         assert_eq!(control_from_props(&props), MatrixControl::Grid);
+    }
+
+    #[test]
+    fn control_prop_accepts_pie_mode_aliases() {
+        let mut props = HashMap::new();
+        props.insert("control".to_string(), Value::Keyword("pie".to_string()));
+        assert_eq!(control_from_props(&props), MatrixControl::Pie);
+
+        props.insert("control".to_string(), Value::String("radial".to_string()));
+        assert_eq!(control_from_props(&props), MatrixControl::Pie);
+    }
+
+    #[test]
+    fn pie_display_derives_center_and_splits_sign_over_each_span() {
+        // Bipolar range: center defaults to 0, each side normalizes over its span.
+        let bipolar = HashMap::from([
+            ("min".to_string(), Value::Number(-2.0)),
+            ("max".to_string(), Value::Number(2.0)),
+        ]);
+        assert_eq!(pie_display(&bipolar, 0.0), (0.0, 1.0));
+        assert_eq!(pie_display(&bipolar, 2.0), (1.0, 1.0));
+        assert_eq!(pie_display(&bipolar, -2.0), (1.0, -1.0));
+        assert_eq!(pie_display(&bipolar, 1.0), (0.5, 1.0));
+        assert_eq!(pie_display(&bipolar, -1.0), (0.5, -1.0));
+
+        // Unipolar range: center falls back to min, everything reads positive.
+        let unipolar = HashMap::from([
+            ("min".to_string(), Value::Number(0.0)),
+            ("max".to_string(), Value::Number(2.0)),
+        ]);
+        assert_eq!(pie_display(&unipolar, 0.0), (0.0, 1.0));
+        assert_eq!(pie_display(&unipolar, 1.0), (0.5, 1.0));
+
+        // Explicit :zero overrides the derived center.
+        let shifted = HashMap::from([
+            ("min".to_string(), Value::Number(-2.0)),
+            ("max".to_string(), Value::Number(2.0)),
+            ("zero".to_string(), Value::Number(1.0)),
+        ]);
+        assert_eq!(pie_display(&shifted, 2.0), (1.0, 1.0));
+        assert_eq!(pie_display(&shifted, -2.0), (1.0, -1.0));
+        assert_eq!(pie_display(&shifted, 1.0), (0.0, 1.0));
     }
 
     #[test]
@@ -1389,6 +1545,78 @@ mod tests {
         };
         assert_eq!(instance.uniform_b[1], 0.0);
         assert_eq!(instance.color_d, [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pie_control_encodes_sign_in_uniform_and_color() {
+        let mut props = HashMap::new();
+        props.insert("rows".to_string(), Value::Number(1.0));
+        props.insert("cols".to_string(), Value::Number(3.0));
+        props.insert("control".to_string(), Value::Keyword("pie".to_string()));
+        props.insert("min".to_string(), Value::Number(-2.0));
+        props.insert("max".to_string(), Value::Number(2.0));
+        props.insert("color".to_string(), Value::String("#ff8000".to_string()));
+        props.insert(
+            "negative-color".to_string(),
+            Value::String("#0080ff".to_string()),
+        );
+        props.insert(
+            "value".to_string(),
+            list(vec![list(vec![
+                Value::Number(1.0),
+                Value::Number(-1.0),
+                Value::Number(0.0),
+            ])]),
+        );
+        let node = matrix_node(props);
+
+        let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, test_viewport());
+        let instances: Vec<_> = prims
+            .iter()
+            .map(|prim| match prim {
+                MetalPrimitive::WidgetInstance { instance, .. } => instance,
+                _ => panic!("expected widget instance"),
+            })
+            .collect();
+        assert_eq!(instances.len(), 3);
+        let positive = Color::rgba(1.0, 0x80 as f32 / 255.0, 0.0, 1.0).to_rgba();
+        let negative = Color::rgba(0.0, 0x80 as f32 / 255.0, 1.0, 1.0).to_rgba();
+
+        // Every pie cell selects shader mode 3.
+        for instance in &instances {
+            assert_eq!(instance.uniform_a[0], 3.0);
+        }
+        // +1.0 over a 0..2 span: half sweep, positive direction, positive fill.
+        assert_eq!(instances[0].value_t, 0.5);
+        assert_eq!(instances[0].uniform_a[3], 1.0);
+        assert_eq!(instances[0].color_a, positive);
+        // -1.0: same magnitude, negative direction, negative fill.
+        assert_eq!(instances[1].value_t, 0.5);
+        assert_eq!(instances[1].uniform_a[3], -1.0);
+        assert_eq!(instances[1].color_a, negative);
+        // 0.0: empty wedge (neutral ring only).
+        assert_eq!(instances[2].value_t, 0.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn non_pie_modes_leave_sign_uniform_neutral() {
+        let mut props = HashMap::new();
+        props.insert("rows".to_string(), Value::Number(1.0));
+        props.insert("cols".to_string(), Value::Number(1.0));
+        props.insert(
+            "value".to_string(),
+            list(vec![list(vec![Value::Number(0.5)])]),
+        );
+        let node = matrix_node(props);
+
+        let prims = MATRIX_WIDGET.build_metal_primitives("matrix", &node, test_viewport());
+        let [MetalPrimitive::WidgetInstance { instance, .. }] = prims.as_slice() else {
+            panic!("expected one widget instance");
+        };
+        assert_eq!(instance.uniform_a[0], 0.0);
+        assert_eq!(instance.uniform_a[3], 0.0);
     }
 
     #[cfg(target_os = "macos")]
