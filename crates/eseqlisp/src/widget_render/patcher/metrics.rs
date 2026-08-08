@@ -18,6 +18,11 @@ pub(super) const MAX_ZOOM: f32 = 2.5;
 pub(super) const NODE_BORDER_WIDTH_PX: f32 = 3.75;
 pub(super) const NODE_CORNER_RADIUS_PX: f32 = 28.0;
 pub(super) const NODE_FONT_SIZE: f32 = 16.0;
+/// Completion morph for cmd+k bubbles: the square bubble chrome eases into the
+/// node's rounded chrome over the shape window, then the "just materialized"
+/// border tint settles back to the resting border over the colour window.
+pub(super) const AGENTIC_MORPH_SHAPE_SECS: f32 = 0.28;
+pub(super) const AGENTIC_MORPH_COLOR_SECS: f32 = 0.6;
 pub(super) const CODE_NODE_FONT_SIZE: f32 = 11.0;
 pub(super) const NODE_TEXT_COL_OFFSET: f32 = 0.92;
 pub(super) const NODE_RESIZE_HANDLE_SIZE_CELLS: f32 = 0.42;

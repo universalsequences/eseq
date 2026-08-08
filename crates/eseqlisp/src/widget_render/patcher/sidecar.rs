@@ -571,21 +571,31 @@ fn overlay_visible_layout(
         .iter()
         .map(|macro_patch| (macro_patch.name.as_str(), &macro_patch.patch))
         .collect::<HashMap<_, _>>();
+    // A macro created in this session (Cmd+E encapsulation, or an agentic
+    // Cmd+K macro) has no entry in `original.macros` — it exists only in the
+    // interaction state. Requiring an original scope here silently dropped its
+    // whole body layout from the emitted sidecar, so the nodes reappeared at
+    // `assign_layout`'s auto-positions on the next load. Only `visible` is
+    // load-bearing; `original` merely supplies pre-edit node identity for the
+    // text-presentation overrides and tolerates being empty.
+    let empty = Patch::default();
     for macro_patch in &mut emitted.macros {
-        if let (Some(original_patch), Some(visible_patch)) = (
-            original_macros.get(macro_patch.name.as_str()),
-            visible_macros.get(macro_patch.name.as_str()),
-        ) {
-            let view_key = format!("macro:{}", macro_patch.name);
-            overlay_scope_visible_layout(
-                &mut macro_patch.patch,
-                original_patch,
-                visible_patch,
-                &view_key,
-                interaction_state,
-                node_id_map,
-            );
-        }
+        let Some(visible_patch) = visible_macros.get(macro_patch.name.as_str()) else {
+            continue;
+        };
+        let original_patch = original_macros
+            .get(macro_patch.name.as_str())
+            .copied()
+            .unwrap_or(&empty);
+        let view_key = format!("macro:{}", macro_patch.name);
+        overlay_scope_visible_layout(
+            &mut macro_patch.patch,
+            original_patch,
+            visible_patch,
+            &view_key,
+            interaction_state,
+            node_id_map,
+        );
     }
 }
 

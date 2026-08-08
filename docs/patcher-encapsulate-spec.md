@@ -1,6 +1,8 @@
 # Patcher: Encapsulate Selection into a `defmacro` (Cmd+E)
 
-Status: design, unbuilt
+Status: BUILT (`patcher/encapsulate.rs`, 18 tests). §5.4, §6.4 and the
+root-view restriction changed during implementation — see §12 for what the
+code actually does and why.
 Owner: alec
 Related: `docs/patch-vs-code-editor-spec.md`, `docs/PATCHER_SPEC.md`,
 `docs/patch-macro-sidebar` work, `~/code/swift/patch-editor/Sources/Engine/SubpatchEncapsulator.swift`
@@ -125,9 +127,9 @@ rewriting, no writeback path, no new persistence format.
   patcher key handler (`patcher/mod.rs:1019` `key_event`), alongside the
   existing Cmd+Enter / Cmd+Up / Cmd+C / Cmd+V / Cmd+K cases.
 - **Result:** the selected nodes vanish from the current view, replaced by a
-  single macro-instance node at the selection's top-left. It is selected, and
-  its text editor opens with the generated name pre-filled and fully selected,
-  so typing replaces it. Esc keeps the generated name.
+  single macro-instance node at the selection's top-left, named `sub1` and left
+  selected. Double-click it and type to rename (§12.5 — the editor is not
+  auto-opened, which would fold the encapsulation into a later undo step).
 - **Feedback:** returns `patcher_semantic_event(true)` — the same
   regenerate-and-recompile payload every other structural edit returns.
 - **Navigating in:** Enter on the selected instance opens the macro view
@@ -522,10 +524,102 @@ Run scoped: `cargo test -p eseqlisp patcher::` — never package-wide, never wit
   a strictly harder problem: the macro may have multiple instances.
 - **Contextual menu.** Cmd+E only; the menu wires to the same entry point when
   it exists.
-- **Encapsulating inside a macro view.** The code paths are view-key generic
-  and it should work, but the "a macro must not gain an instance of itself"
-  guard (`interaction.rs:991`, and the paste guard at `interaction.rs:1319`)
-  applies. v1 refuses when `view_key != "root"` until that is tested.
 - **Promoting the new macro to the shared defmacro library.** The existing
   save-to-library action (`PatcherMacroLibraryActionKind::SaveToLibrary`)
   already covers it once the macro exists.
+
+## 12. What changed while building it
+
+Four things the design got wrong or left underspecified. All four are covered
+by tests in `patcher/tests.rs`.
+
+### 12.1 `node_display_label` alone loses argument slots
+
+§5.4 said to carry each moved node as its `node_display_label` text, the way
+Cmd+V paste does. Probing the real model showed that is lossy in two ways,
+because a created node's arguments are *always* `[implicit cable slot, then
+inline args at index+1]` (`node_from_editor_text`, `state.rs`):
+
+- **Trailing cable slots vanish.** A two-cable `(- a b)` renders as bare `-`.
+  Recreated, `-` has a single input slot (its documented arity), so the second
+  cable is dropped at generation.
+- **A literal at index 0 cannot survive.** `(* 2 3)` renders as `* 2 3`, which
+  recreates as `[ConnectedExpr, 2, 3]` — a *three*-argument call whose first
+  slot has nothing in it. It regenerates as
+  `(* __patcher_missing_input__ 2 3)`. This is a live Cmd+C/Cmd+V bug today;
+  encapsulation must not inherit it.
+
+`encapsulated_node_text` fixes both:
+
+- every slot from 1 up to the highest one carrying a literal or a cable gets an
+  explicit token, `?` standing in for a cable — so `(- a b)` becomes `- ?`;
+- a literal at index 0 with no cable is **hoisted into its own constant node**
+  wired into slot 0, which is exactly how the projector already normalizes a
+  source-level `(- 5 x)`.
+
+With both in place, original argument index *k* maps to recreated index *k* for
+every node — no index remapping is needed anywhere.
+
+The paste path still has the index-0 bug. Worth fixing separately by reusing
+`encapsulated_node_text`.
+
+### 12.2 Bare `in K` gives the macro a parameter named `out-2`
+
+`macro_param_name` (`generate.rs:807`) reads `@name` first, then falls back to
+the node's *output* name. A created `in 1` node's output is called `out`, which
+is reserved, so `claim_unique` renames it and the macro emits
+`(defmacro sub1 (out-2) …)`. The interface nodes are created as
+`in K @name inputK`.
+
+### 12.3 A history node's editable header is `history`, not its op
+
+`NodeKind::History` nodes have `op = "make-history"` but display (and parse) as
+`history`. They also carry no positional arguments — the single input slot is
+the `write-history` feedback cable. So histories, like constants, take
+`node_display_label` verbatim rather than going through the token builder.
+
+### 12.4 `param~` needed no special handling
+
+§6.4 predicted a `node_display_label_with_slots_cleared` helper. It is
+unnecessary: the inline `mod` accessor is backed by a real connection, so the
+token rule in §12.1 already renders that slot as `?`, and the new instance
+cable's `InputPresentation::Cable` override is what un-hides the accessor and
+keeps it off the orphan-GC list. The whole case falls out of the general rules.
+
+### 12.5 Naming
+
+Rename landed as designed (`rename_created_macro`), hooked into
+`commit_active_patcher_text_edit` alongside the existing created-macro
+promotion. The text editor is **not** auto-opened on the new instance: doing so
+would open an undo gesture that swallowed the encapsulation itself into a
+later coalesced step. Encapsulate gives you `sub1`; double-click it and type to
+rename.
+
+### 12.6 Encapsulating inside a macro view
+
+Originally scoped out (v1 refused when `view_key != "root"`). Now supported:
+Cmd+E works in whatever scope you are looking at, and the instance node lands
+in that scope.
+
+Nothing structural had to change — every path was already view-key generic.
+Three things make it work:
+
+- **`defmacro` is always top level.** `created_macros` is a flat map, not a
+  per-scope one, so a macro created while editing `shaper` still registers as a
+  top-level definition; only the *instance* goes into `macro:shaper`.
+  `active_patcher_patch` copies the full macro list into whatever scope is
+  open, so the new macro resolves for signature and autocomplete immediately.
+- **Self-reference is impossible by construction.** The generated name is
+  checked against every macro in scope, which includes the one being edited —
+  encapsulating inside `sub1` yields `sub2`, never a second `sub1`.
+- **Forward references between local macros compile.** The generator emits
+  local macros sorted by name, not by dependency, so `shaper` (emitted first)
+  calls `sub1` (emitted after it). `cmd_e_encapsulates_inside_a_macro_view`
+  runs the generated source through the real DGenLisp compiler to hold that
+  guarantee down, since it is the generator's ordering that would break it.
+
+**Known limitation, pre-existing and not introduced here:** `active_macro` is a
+single `Option<String>`, so the patcher tracks one level of depth. After
+encapsulating inside `shaper` and opening `sub1`, the breadcrumb reads
+`root / dsp.lisp / sub1` and going back returns to the root, not to `shaper`.
+Fixing that means turning `active_macro` into a stack.

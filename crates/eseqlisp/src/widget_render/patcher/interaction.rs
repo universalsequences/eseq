@@ -1029,7 +1029,7 @@ pub(super) fn parse_created_macro_definition_text(text: &str) -> Option<String> 
     is_valid_created_macro_name(name).then(|| name.to_string())
 }
 
-fn is_valid_created_macro_name(name: &str) -> bool {
+pub(super) fn is_valid_created_macro_name(name: &str) -> bool {
     !name.is_empty()
         && !name.chars().any(char::is_whitespace)
         && !name

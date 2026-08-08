@@ -4,6 +4,9 @@ use super::super::text_input::TextInputState;
 use super::alignment::*;
 use super::display::*;
 use super::emit::{emit_patch_debug_lisp, emit_patch_debug_lisp_for_view};
+use super::encapsulate::{
+    BodyKey, EncapsulationPlan, EncapsulationRefusal, PlannedCable, plan_encapsulation,
+};
 use super::geometry::*;
 use super::interaction::*;
 use super::metrics::*;
@@ -30,7 +33,7 @@ use crate::vm::Value;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn parse(source: &str) -> Patch {
     parse_patch_source(source, PatcherIntent::Instrument).unwrap()
@@ -218,10 +221,7 @@ fn navigate_patcher_view_preserves_staged_edits() {
     set_patcher_interaction_state(key, state);
 
     navigate_patcher_view_for_path(&path, Some("shape"));
-    assert_eq!(
-        active_macro_view_for_path(&path),
-        Some("shape".to_string())
-    );
+    assert_eq!(active_macro_view_for_path(&path), Some("shape".to_string()));
     let state = get_patcher_interaction_state(key);
     assert!(
         state
@@ -1094,6 +1094,34 @@ fn patcher_props_for_path(path: &std::path::Path) -> HashMap<String, Value> {
 #[cfg(target_os = "macos")]
 fn inner_prim(prim: &MetalPrimitive) -> &MetalPrimitive {
     crate::widget_render::innermost_primitive(prim)
+}
+
+/// Sizes, in cells, of the agentic-bubble bodies in `prims`. Bubbles share the
+/// `patcher-node` chrome shader with real nodes (so the completion morph can
+/// interpolate between them), so they are told apart by size — a bubble is far
+/// larger than any node.
+#[cfg(target_os = "macos")]
+fn agentic_bubble_body_sizes(
+    prims: &[MetalPrimitive],
+    viewport: WidgetViewport,
+) -> Vec<(f32, f32)> {
+    prims
+        .iter()
+        .filter_map(|prim| match inner_prim(prim) {
+            MetalPrimitive::WidgetInstance {
+                widget_type,
+                instance,
+                ..
+            } if widget_type == "patcher-node" => {
+                let width = (instance.ndc_max[0] - instance.ndc_min[0]) / 2.0 * viewport.vp_w
+                    / viewport.cell_w;
+                let height = (instance.ndc_min[1] - instance.ndc_max[1]) / 2.0 * viewport.vp_h
+                    / viewport.cell_h;
+                (width > 10.0 && height > 4.0).then_some((width, height))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -2244,20 +2272,12 @@ fn build_persistence_case(
             expectations
                 .nodes
                 .push(expected_node("macro:fold", phasor, phasor_position));
-            expectations.connections.push(expected_connection(
-                "macro:fold",
-                literal,
-                0,
-                phasor,
-                0,
-            ));
-            expectations.connections.push(expected_connection(
-                "macro:fold",
-                "amt",
-                0,
-                phasor,
-                1,
-            ));
+            expectations
+                .connections
+                .push(expected_connection("macro:fold", literal, 0, phasor, 0));
+            expectations
+                .connections
+                .push(expected_connection("macro:fold", "amt", 0, phasor, 1));
             expectations.connections.push(expected_connection(
                 "macro:fold",
                 phasor,
@@ -3168,6 +3188,105 @@ fn agentic_bubble_macro_edit_resolution_replaces_macro_and_keeps_instance() {
     assert!(state.agentic_morph_nodes.contains_key("shaped"));
 }
 
+/// The completion morph eases the node's chrome out of the bubble's square box
+/// and into its own rounded chrome, then hands off to the resting node.
+#[cfg(target_os = "macos")]
+#[test]
+fn agentic_completion_morph_interpolates_bubble_box_into_node_chrome() {
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let origin = (1.0, 2.0);
+    let zoom = 1.0;
+    let node_rect = Rect {
+        col: 21.0,
+        row: 12.0,
+        width: 5.8,
+        height: 1.58,
+    };
+    let bg = theme::PATCHER_NODE_BG();
+    let border = theme::PATCHER_NODE_BORDER();
+    let pose = AgenticBubblePose {
+        model_rect: (4.0, 6.0, 18.0, 5.8),
+        fill: [0.1, 0.15, 0.2, 0.94],
+        border: [0.3, 0.8, 0.9, 1.0],
+    };
+    let morph_at = |ago: Duration| AgenticMorph {
+        started_at: Instant::now() - ago,
+        from: Some(pose),
+    };
+
+    let (rect, corner, fill, _) = agentic_morph_chrome(
+        &morph_at(Duration::ZERO),
+        node_rect,
+        bg,
+        border,
+        viewport,
+        origin,
+        zoom,
+    )
+    .expect("morph in flight at t=0");
+    assert!(
+        (rect.col - 5.0).abs() < 0.2 && (rect.width - 18.0).abs() < 0.2,
+        "morph starts at the bubble's rect, got {rect:?}"
+    );
+    assert!(
+        (corner - SQUARE_CORNER_RADIUS).abs() < 1e-4,
+        "morph starts square, got {corner}"
+    );
+    assert!(
+        (fill.r - pose.fill[0]).abs() < 0.02,
+        "morph starts at the bubble's fill"
+    );
+
+    let (rect, corner, fill, _) = agentic_morph_chrome(
+        &morph_at(Duration::from_secs_f32(AGENTIC_MORPH_SHAPE_SECS)),
+        node_rect,
+        bg,
+        border,
+        viewport,
+        origin,
+        zoom,
+    )
+    .expect("morph still in flight while the border settles");
+    assert!(
+        (rect.col - node_rect.col).abs() < 0.1 && (rect.width - node_rect.width).abs() < 0.1,
+        "shape lands on the node's rect, got {rect:?}"
+    );
+    assert!(
+        corner > SQUARE_CORNER_RADIUS * 10.0,
+        "shape lands rounded, got {corner}"
+    );
+    assert!(
+        (fill.r - bg.r).abs() < 0.01,
+        "colour lands on the node's background"
+    );
+
+    assert!(
+        agentic_morph_chrome(
+            &morph_at(Duration::from_secs_f32(AGENTIC_MORPH_COLOR_SECS + 0.01)),
+            node_rect,
+            bg,
+            border,
+            viewport,
+            origin,
+            zoom,
+        )
+        .is_none(),
+        "a finished morph hands off to the resting node chrome"
+    );
+}
+
 #[test]
 fn agentic_bubble_macro_edit_resolution_updates_all_registered_widgets() {
     let path = temp_patcher_source_path("agentic-bubble-edit-multi-widget");
@@ -3832,20 +3951,30 @@ fn existing_instrument_edit_reopens_with_created_chain_layout_after_deleting_sou
     );
     let layout_json: serde_json::Value = serde_json::from_str(&layout).unwrap();
     assert!(
-        (layout_json["root"]["nodes"][emitted_multiply]["x"].as_f64().unwrap() - mul_position.0 as f64)
+        (layout_json["root"]["nodes"][emitted_multiply]["x"]
+            .as_f64()
+            .unwrap()
+            - mul_position.0 as f64)
             .abs()
             < 0.0001
-            && (layout_json["root"]["nodes"][emitted_multiply]["y"].as_f64().unwrap()
+            && (layout_json["root"]["nodes"][emitted_multiply]["y"]
+                .as_f64()
+                .unwrap()
                 - mul_position.1 as f64)
                 .abs()
                 < 0.0001,
         "emitted layout should keep created multiply position: {layout}"
     );
     assert!(
-        (layout_json["root"]["nodes"][emitted_cosine]["x"].as_f64().unwrap() - cos_position.0 as f64)
+        (layout_json["root"]["nodes"][emitted_cosine]["x"]
+            .as_f64()
+            .unwrap()
+            - cos_position.0 as f64)
             .abs()
             < 0.0001
-            && (layout_json["root"]["nodes"][emitted_cosine]["y"].as_f64().unwrap()
+            && (layout_json["root"]["nodes"][emitted_cosine]["y"]
+                .as_f64()
+                .unwrap()
                 - cos_position.1 as f64)
                 .abs()
                 < 0.0001,
@@ -3941,15 +4070,10 @@ fn semantic_save_payload_maps_created_literal_layout_to_generated_constant_bindi
         "layout should not use literal text as the saved node id: {layout}"
     );
     assert!(
-        (layout_json["root"]["nodes"]["value"]["x"]
-            .as_f64()
-            .unwrap()
-            - literal_position.0 as f64)
+        (layout_json["root"]["nodes"]["value"]["x"].as_f64().unwrap() - literal_position.0 as f64)
             .abs()
             < 0.0001
-            && (layout_json["root"]["nodes"]["value"]["y"]
-                .as_f64()
-                .unwrap()
+            && (layout_json["root"]["nodes"]["value"]["y"].as_f64().unwrap()
                 - literal_position.1 as f64)
                 .abs()
                 < 0.0001,
@@ -12000,8 +12124,7 @@ fn super_y_initializes_selected_cable_segment_at_rendered_midpoint_after_zoom() 
         segment.segment_row,
         expected_model_row
     );
-    let rendered_row =
-        patcher_origin(node.rect, &pan).1 + segment.segment_row * patcher_zoom(&pan);
+    let rendered_row = patcher_origin(node.rect, &pan).1 + segment.segment_row * patcher_zoom(&pan);
     assert!(
         (rendered_row - expected_rendered_row).abs() < 1e-5,
         "new segment rendered at {rendered_row}, expected cable midpoint {expected_rendered_row}"
@@ -16700,7 +16823,8 @@ fn metal_render_emits_edit_cursor_as_foreground_overlay() {
         })
         .collect::<Vec<_>>();
     assert_eq!(
-        cursors.len(), 1,
+        cursors.len(),
+        1,
         "active patcher text edit should render exactly one foreground cursor"
     );
     let zoom = patcher_zoom(&pan);
@@ -16798,35 +16922,55 @@ fn metal_render_emits_agentic_bubble_body_as_foreground_overlay() {
         },
     );
 
-    let prims = build_metal_primitives_for_patcher(
-        &node,
-        WidgetViewport {
-            cell_w: 10.0,
-            cell_h: 20.0,
-            vp_w: 1000.0,
-            vp_h: 800.0,
-            time_seconds: 0.0,
-            focused_widget_id: None,
-            focused_branch: false,
-            overlay_viewport_bottom: 40.0,
-            scroll_top: 0.0,
-            scroll_left: 0.0,
-            inherited_hover: false,
-        },
-    );
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let prims = build_metal_primitives_for_patcher(&node, viewport);
 
-    let foreground_bubble_rects = prims
+    assert_eq!(
+        agentic_bubble_body_sizes(&prims, viewport).len(),
+        1,
+        "agentic bubble body must render exactly one chrome instance"
+    );
+    let bubble_z = prims
         .iter()
         .filter(|prim| {
             matches!(
                 inner_prim(prim),
-                MetalPrimitive::ForegroundRect(rect)
-                    if rect.rect.width > 10.0 && rect.rect.height > 4.0
+                MetalPrimitive::WidgetInstance { widget_type, instance, .. }
+                    if widget_type == "patcher-node"
+                        && (instance.ndc_max[0] - instance.ndc_min[0]) / 2.0 * viewport.vp_w
+                            / viewport.cell_w
+                            > 10.0
             )
         })
-        .count();
-    assert_eq!(
-        foreground_bubble_rects, 1,
+        .map(effective_z)
+        .max()
+        .expect("bubble chrome");
+    let node_z = prims
+        .iter()
+        .filter(|prim| {
+            matches!(
+                inner_prim(prim),
+                MetalPrimitive::WidgetInstance { widget_type, .. }
+                    if widget_type == "patcher-port" || widget_type == "patcher-cable"
+            )
+        })
+        .map(effective_z)
+        .max()
+        .unwrap_or(i32::MIN);
+    assert!(
+        bubble_z > node_z,
         "agentic bubble body must render in the foreground layer above cables and ports"
     );
 }
@@ -16865,33 +17009,23 @@ fn metal_render_uses_wide_wrapped_answer_agentic_bubble() {
         },
     );
 
-    let prims = build_metal_primitives_for_patcher(
-        &node,
-        WidgetViewport {
-            cell_w: 10.0,
-            cell_h: 20.0,
-            vp_w: 1000.0,
-            vp_h: 800.0,
-            time_seconds: 0.0,
-            focused_widget_id: None,
-            focused_branch: false,
-            overlay_viewport_bottom: 40.0,
-            scroll_top: 0.0,
-            scroll_left: 0.0,
-            inherited_hover: false,
-        },
-    );
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let prims = build_metal_primitives_for_patcher(&node, viewport);
 
-    let body_width = prims
-        .iter()
-        .filter_map(|prim| match inner_prim(prim) {
-            MetalPrimitive::ForegroundRect(rect)
-                if rect.rect.width > 10.0 && rect.rect.height > 4.0 =>
-            {
-                Some(rect.rect.width)
-            }
-            _ => None,
-        })
+    let (body_width, _) = agentic_bubble_body_sizes(&prims, viewport)
+        .into_iter()
         .next()
         .expect("answer bubble body");
     assert!(
@@ -17333,7 +17467,6 @@ fn metal_render_places_committed_node_tail_after_measured_space_width() {
     );
 }
 
-
 // ── Deterministic generation round-trip (docs/patch-vs-code-editor-spec.md §4.2) ──
 
 const GENERATION_STARTER_INSTRUMENT: &str = r#"(def gate (in 1 @name gate))
@@ -17419,7 +17552,12 @@ fn generation_semantic_signature(patch: &Patch, mapped: &dyn Fn(&str, &str) -> S
     let mut host_modulators = patch
         .host_modulators
         .iter()
-        .map(|input| format!("host-mod {} ch={} slot={}", input.name, input.channel, input.slot))
+        .map(|input| {
+            format!(
+                "host-mod {} ch={} slot={}",
+                input.name, input.channel, input.slot
+            )
+        })
         .collect::<Vec<_>>();
     host_modulators.sort();
     lines.append(&mut host_modulators);
@@ -17450,11 +17588,17 @@ fn assert_generation_roundtrip(
         g1.source
     );
     let p1 = parse(&g1.source).unwrap_or_else(|error| {
-        panic!("{case_name}: generated source failed to parse: {error}\n{}", g1.source)
+        panic!(
+            "{case_name}: generated source failed to parse: {error}\n{}",
+            g1.source
+        )
     });
     assert!(
         p1.diagnostics.is_empty()
-            && !p1.nodes.iter().any(|node| node.kind == NodeKind::CodeIsland),
+            && !p1
+                .nodes
+                .iter()
+                .any(|node| node.kind == NodeKind::CodeIsland),
         "{case_name}: generated source must project with zero code islands: {:?}\n{}",
         p1.diagnostics,
         g1.source
@@ -17515,7 +17659,10 @@ fn generation_roundtrip_lexilush_effect() {
 fn generation_roundtrip_defmacro_library_patch() {
     let library = temp_defmacro_library(
         "generation-roundtrip",
-        &[("shape2", "(defmacro shape2 (x amt) (* (tanh (* x amt)) 0.5))")],
+        &[(
+            "shape2",
+            "(defmacro shape2 (x amt) (* (tanh (* x amt)) 0.5))",
+        )],
     );
     let source = "(use-defmacro shape2)\n\
                   (def input (in 1 @name input))\n\
@@ -17567,7 +17714,11 @@ fn promote_source_to_patch_stamps_authored_sidecar_for_clean_source() {
     assert!(!sidecar::sidecar_is_authored(&path));
     promote_source_to_patch(&path, source, PatcherIntent::Effect).unwrap();
     assert!(sidecar::sidecar_is_authored(&path));
-    assert!(source_opens_in_patch_editor(&path, source, PatcherIntent::Effect));
+    assert!(source_opens_in_patch_editor(
+        &path,
+        source,
+        PatcherIntent::Effect
+    ));
 }
 
 #[test]
@@ -17609,7 +17760,6 @@ fn eject_flips_authored_flag_but_keeps_layout_for_repromotion() {
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
     assert_eq!(repromoted["root"]["nodes"], before["root"]["nodes"]);
 }
-
 
 // ── Created-node identity vs source bindings (regression: node-splice bug) ──
 //
@@ -17837,7 +17987,10 @@ fn disconnected_created_macro_instance_keeps_patch_valid_without_a_call() {
         "the macro definition must persist even without call sites:\n{source}"
     );
     assert!(
-        !source.contains("(softfold") || !source.replace("(defmacro softfold", "").contains("(softfold"),
+        !source.contains("(softfold")
+            || !source
+                .replace("(defmacro softfold", "")
+                .contains("(softfold"),
         "no call to the disconnected macro instance may be emitted:\n{source}"
     );
     // (d) the omitted instance keeps its layout in the emitted layout payload.
@@ -17919,9 +18072,10 @@ fn fully_wired_macro_instance_emits_call_and_enforces_signature() {
     // Once live, the signature is enforced: drop inlet 2 and the incomplete
     // call surfaces instead of being silently omitted.
     let mut broken = state;
-    broken.edit_state.connections.retain(|_, edit| {
-        !(edit.to.node_id == instance && edit.to.input_index == 1)
-    });
+    broken
+        .edit_state
+        .connections
+        .retain(|_, edit| !(edit.to.node_id == instance && edit.to.input_index == 1));
     set_patcher_interaction_state(key, broken);
     let Value::Map(map) = patcher_writeback_payload(&node) else {
         panic!("expected payload map");
@@ -19057,7 +19211,11 @@ fn patcher_undo_redo_round_trips_created_node() {
     let mut state = get_patcher_interaction_state(key);
     let created = allocate_created_text_node(&mut state, "root", "cycle 220");
     set_patcher_interaction_state(key, state);
-    assert_eq!(patcher_history_for_key(key).undo.len(), 1, "create is one undo step");
+    assert_eq!(
+        patcher_history_for_key(key).undo.len(),
+        1,
+        "create is one undo step"
+    );
 
     let undone = PATCHER_WIDGET.key_event(
         &node,
@@ -19104,7 +19262,10 @@ fn patcher_undo_redo_round_trips_created_node() {
             modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
         },
     );
-    assert!(empty_redo.is_none(), "empty redo stack should not consume the key");
+    assert!(
+        empty_redo.is_none(),
+        "empty redo stack should not consume the key"
+    );
 }
 
 #[test]
@@ -19274,7 +19435,11 @@ fn patcher_copy_paste_duplicates_selection_and_wires() {
     );
     assert!(undone.is_some());
     let state = get_patcher_interaction_state(key);
-    assert_eq!(state.edit_state.nodes.len(), 2, "undo removes both pasted nodes");
+    assert_eq!(
+        state.edit_state.nodes.len(),
+        2,
+        "undo removes both pasted nodes"
+    );
 }
 
 #[test]
@@ -19331,5 +19496,901 @@ fn regeneration_without_a_library_drops_an_unused_import() {
     assert!(
         !generated.contains("use-defmacro"),
         "an import nothing calls is still garbage-collected:\n{generated}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cmd+E encapsulation (docs/patcher-encapsulate-spec.md)
+// ---------------------------------------------------------------------------
+
+fn encapsulation_plan(source: &str, selected: &[&str]) -> EncapsulationPlan {
+    let patch = parse(source);
+    let selection = selected
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<HashSet<_>>();
+    plan_encapsulation(&patch, &selection, "sub1".to_string()).expect("plan")
+}
+
+fn encapsulation_refusal(source: &str, selected: &[&str]) -> EncapsulationRefusal {
+    let patch = parse(source);
+    let selection = selected
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<HashSet<_>>();
+    plan_encapsulation(&patch, &selection, "sub1".to_string()).expect_err("refusal")
+}
+
+fn body_text(plan: &EncapsulationPlan, key: &BodyKey) -> String {
+    plan.body_nodes
+        .iter()
+        .find(|planned| planned.key == *key)
+        .unwrap_or_else(|| panic!("missing body node {key:?}"))
+        .text
+        .clone()
+}
+
+fn encapsulate_via_key_event(node: &LayoutNode) -> Option<WidgetEvent> {
+    PATCHER_WIDGET.key_event(
+        node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('e'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    )
+}
+
+#[test]
+fn empty_created_macro_seed_projects_to_a_bare_macro_scope() {
+    // The seed for an encapsulated macro must contribute no body nodes of its
+    // own; the body arrives entirely as created-node edits.
+    let patch = parse(&format!(
+        "{}\n(def g (in 1 @name gate))\n(out 1 g)\n",
+        empty_created_macro_source("sub1")
+    ));
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "sub1")
+        .expect("sub1 projected");
+    assert!(macro_patch.params.is_empty());
+    assert!(macro_patch.patch.nodes.is_empty());
+    assert!(patch.diagnostics.is_empty(), "{:?}", patch.diagnostics);
+}
+
+#[test]
+fn encapsulation_shares_one_inlet_across_a_fanned_out_source() {
+    // One external source feeding three selected nodes is ONE macro parameter
+    // that fans out inside, not three.
+    let plan = encapsulation_plan(
+        "(def g (in 1 @name gate))\n\
+         (def a (* g 2))\n\
+         (def b (* g 3))\n\
+         (def c (* g 4))\n\
+         (out 1 (+ (+ a b) c))\n",
+        &["a", "b", "c"],
+    );
+
+    assert_eq!(plan.inlets.len(), 1, "{:?}", plan.inlets);
+    assert_eq!(plan.inlets[0].external_source.node_id, "g");
+    assert_eq!(plan.inlets[0].internal_destinations.len(), 3);
+    let inlet_cables = plan
+        .body_cables
+        .iter()
+        .filter(|cable| cable.from == BodyKey::Inlet(0))
+        .count();
+    assert_eq!(inlet_cables, 3, "the `in` node fans out inside the macro");
+}
+
+#[test]
+fn encapsulation_shares_one_outlet_across_a_fanned_out_internal_source() {
+    // The Swift SubpatchEncapsulator keys outlets on the external destination
+    // and would emit two identical outlets here; keying on the internal source
+    // port gives one return value with two parent cables.
+    let plan = encapsulation_plan(
+        "(def g (in 1 @name gate))\n\
+         (def a (* g 2))\n\
+         (def x (+ a 1))\n\
+         (def y (- a 1))\n\
+         (out 1 (* x y))\n",
+        &["a"],
+    );
+
+    assert_eq!(plan.outlets.len(), 1, "{:?}", plan.outlets);
+    assert_eq!(plan.outlets[0].internal_source.node_id, "a");
+    let mut destinations = plan.outlets[0]
+        .external_destinations
+        .iter()
+        .map(|port| port.node_id.clone())
+        .collect::<Vec<_>>();
+    destinations.sort();
+    assert_eq!(destinations, vec!["x".to_string(), "y".to_string()]);
+}
+
+#[test]
+fn encapsulation_without_crossing_outputs_still_returns_a_value() {
+    let plan = encapsulation_plan(
+        "(def g (in 1 @name gate))\n\
+         (def a (* g 2))\n\
+         (def b (* a 3))\n\
+         (out 1 g)\n",
+        &["a", "b"],
+    );
+
+    assert_eq!(plan.inlets.len(), 1);
+    assert_eq!(plan.outlets.len(), 1, "a macro must return something");
+    assert_eq!(plan.outlets[0].internal_source.node_id, "b");
+    assert!(plan.outlets[0].external_destinations.is_empty());
+}
+
+#[test]
+fn encapsulation_port_order_is_independent_of_connection_vec_order() {
+    let source = "(def g (in 1 @name gate))\n\
+                  (def p (in 2 @name pitch))\n\
+                  (def hi (* g 2))\n\
+                  (def lo (* p 3))\n\
+                  (def a (+ hi lo))\n\
+                  (out 1 a)\n";
+    let selection = ["a"]
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<HashSet<_>>();
+
+    let mut forward = parse(source);
+    set_patch_node_position(&mut forward, "hi", (0.0, 0.0));
+    set_patch_node_position(&mut forward, "lo", (10.0, 0.0));
+    let mut reversed = forward.clone();
+    reversed.connections.reverse();
+
+    let forward_plan = plan_encapsulation(&forward, &selection, "sub1".to_string()).unwrap();
+    let reversed_plan = plan_encapsulation(&reversed, &selection, "sub1".to_string()).unwrap();
+
+    let ports = |plan: &EncapsulationPlan| {
+        plan.inlets
+            .iter()
+            .map(|inlet| {
+                (
+                    inlet.external_source.node_id.clone(),
+                    inlet.internal_destinations[0].input_index,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ports(&forward_plan), ports(&reversed_plan));
+    assert_eq!(
+        ports(&forward_plan),
+        vec![("hi".to_string(), 0), ("lo".to_string(), 1)],
+        "inlet order follows the internal destination slots"
+    );
+}
+
+#[test]
+fn encapsulated_node_text_keeps_argument_slots_aligned() {
+    // A two-cable `(- a b)` renders as a bare `-` through `node_display_label`,
+    // and a recreated bare `-` has a single input slot — the second cable would
+    // be silently dropped at generation. Every slot up to the highest used one
+    // gets an explicit token.
+    let plan = encapsulation_plan(
+        "(def g (in 1 @name gate))\n\
+         (def p (in 2 @name pitch))\n\
+         (def d (- g p))\n\
+         (out 1 d)\n",
+        &["d"],
+    );
+    assert_eq!(body_text(&plan, &BodyKey::Moved("d".to_string())), "- ?");
+
+    // A trailing literal survives as a literal, and the cabled slot 0 stays
+    // implicit.
+    let plan = encapsulation_plan(
+        "(def g (in 1 @name gate))\n(def m (* g 0.5))\n(out 1 m)\n",
+        &["m"],
+    );
+    assert_eq!(body_text(&plan, &BodyKey::Moved("m".to_string())), "* 0.5");
+}
+
+#[test]
+fn encapsulation_hoists_a_slot_zero_literal_into_its_own_constant() {
+    // A created node's arguments always begin with an implicit cable slot, so a
+    // literal sitting at index 0 cannot survive as text. Left alone it
+    // regenerates as `(* __patcher_missing_input__ 2 3)`.
+    let plan = encapsulation_plan(
+        "(def g (in 1 @name gate))\n(def a (* 2 3))\n(out 1 (+ a g))\n",
+        &["a"],
+    );
+
+    assert_eq!(body_text(&plan, &BodyKey::Moved("a".to_string())), "* 3");
+    assert_eq!(
+        body_text(&plan, &BodyKey::HoistedConstant("a".to_string())),
+        "2"
+    );
+    assert!(
+        plan.body_cables.contains(&PlannedCable {
+            from: BodyKey::HoistedConstant("a".to_string()),
+            from_output: 0,
+            to: BodyKey::Moved("a".to_string()),
+            to_input: 0,
+        }),
+        "{:?}",
+        plan.body_cables
+    );
+}
+
+#[test]
+fn encapsulation_refuses_scope_bound_nodes() {
+    for (source, selected) in [
+        (
+            "(def gain (param gain 0.5))\n(def a (* gain 2))\n(out 1 a)\n",
+            vec!["gain", "a"],
+        ),
+        (
+            "(def g (in 1 @name gate))\n(def a (* g 2))\n(out 1 a)\n",
+            vec!["g", "a"],
+        ),
+    ] {
+        assert_eq!(
+            encapsulation_refusal(source, &selected),
+            EncapsulationRefusal::ScopeBoundNode,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn encapsulation_refuses_a_non_convex_selection() {
+    // `a -> mid -> c` with a and c selected: collapsing them into one atomic
+    // call makes `instance -> mid -> instance`, a cycle the generator cannot
+    // emit. (Max's `p` subpatch is not atomic and tolerates this.)
+    assert_eq!(
+        encapsulation_refusal(
+            "(def g (in 1 @name gate))\n\
+             (def a (* g 2))\n\
+             (def mid (+ a 1))\n\
+             (def c (* mid 3))\n\
+             (out 1 c)\n",
+            &["a", "c"],
+        ),
+        EncapsulationRefusal::NotConvex
+    );
+}
+
+#[test]
+fn encapsulation_allows_a_history_that_moves_wholly_inside() {
+    // Macros own per-expansion histories (see `latch_on_trigger` in
+    // instruments/core/triton/dsp.lisp), so this must not be refused.
+    let plan = encapsulation_plan(
+        "(def g (in 1 @name gate))\n\
+         (make-history h)\n\
+         (def prev (read-history h))\n\
+         (def nxt (* prev 0.5))\n\
+         (write-history h nxt)\n\
+         (out 1 (+ prev g))\n",
+        &["h", "nxt"],
+    );
+    assert_eq!(
+        body_text(&plan, &BodyKey::Moved("h".to_string())),
+        "history"
+    );
+    assert_eq!(plan.outlets.len(), 1);
+    assert_eq!(plan.outlets[0].internal_source.node_id, "h");
+}
+
+#[test]
+fn encapsulation_refuses_a_history_written_and_read_across_the_boundary() {
+    assert_eq!(
+        encapsulation_refusal(
+            "(def g (in 1 @name gate))\n\
+             (make-history h)\n\
+             (def prev (read-history h))\n\
+             (def outside (* g 2))\n\
+             (write-history h outside)\n\
+             (out 1 (+ prev g))\n",
+            &["h"],
+        ),
+        EncapsulationRefusal::HistoryStraddlesBoundary
+    );
+}
+
+#[test]
+fn cmd_e_encapsulates_the_selection_and_regenerates_a_defmacro() {
+    let path = temp_patcher_source_path("encapsulate-end-to-end");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n(def a (* g 2))\n(def b (+ a 1))\n(out 1 b)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string(), "b".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+
+    assert!(encapsulate_via_key_event(&node).is_some(), "cmd+e consumed");
+
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        state.edit_state.created_macros.contains_key("sub1"),
+        "{:?}",
+        state.edit_state.created_macros
+    );
+    assert_eq!(state.selected_nodes.len(), 1, "the instance is selected");
+
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let source = generate::generate_patch_source(&visible, PatcherIntent::Instrument)
+        .expect("generate")
+        .source;
+
+    assert!(
+        source.contains("(defmacro sub1 (input1)"),
+        "one inferred parameter:\n{source}"
+    );
+    assert!(source.contains("(sub1 g)"), "instance call:\n{source}");
+    assert!(
+        !source.contains("__patcher_missing_input__"),
+        "no unfilled slots:\n{source}"
+    );
+
+    // The generated source must round-trip: reparsing it is what the save path
+    // does before it accepts the payload.
+    let reparsed = parse_patch_source(&source, PatcherIntent::Instrument).expect("reparse");
+    assert!(
+        reparsed.diagnostics.is_empty(),
+        "{:?}",
+        reparsed.diagnostics
+    );
+    assert!(
+        reparsed.macros.iter().any(|m| m.name == "sub1"),
+        "sub1 survives the round trip"
+    );
+}
+
+#[test]
+fn cmd_e_encapsulation_is_a_single_undo_step() {
+    let path = temp_patcher_source_path("encapsulate-undo");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n(def a (* g 2))\n(def b (+ a 1))\n(out 1 b)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string(), "b".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    let before = get_patcher_interaction_state(key).edit_state.clone();
+
+    encapsulate_via_key_event(&node);
+    assert!(
+        get_patcher_interaction_state(key)
+            .edit_state
+            .created_macros
+            .contains_key("sub1")
+    );
+
+    let event = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('z'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    assert!(event.is_some(), "cmd+z consumed");
+
+    let after = get_patcher_interaction_state(key).edit_state.clone();
+    assert!(
+        after.created_macros.is_empty(),
+        "one undo removes the whole encapsulation: {:?}",
+        after.created_macros
+    );
+    assert_eq!(after.deleted_nodes, before.deleted_nodes);
+    assert_eq!(after.nodes.len(), before.nodes.len());
+}
+
+#[test]
+fn encapsulated_macro_body_layout_survives_the_save_payload() {
+    // Regression for the sidecar overlay gap: a macro created in this session
+    // has no scope in the on-disk patch, and requiring one dropped its whole
+    // body layout from the emitted sidecar.
+    let path = temp_patcher_dsp_path("encapsulate-layout");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n(def a (* g 2))\n(def b (+ a 1))\n(out 1 b)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string(), "b".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    encapsulate_via_key_event(&node);
+
+    let state = get_patcher_interaction_state(key);
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let layout = sidecar::current_layout_json(&root_patch, &state).expect("layout json");
+    let parsed: serde_json::Value = serde_json::from_str(&layout).expect("parse layout");
+
+    let scope = parsed
+        .get("macros")
+        .and_then(|macros| macros.get("sub1"))
+        .and_then(|scope| scope.get("nodes"))
+        .and_then(|nodes| nodes.as_object())
+        .expect("sub1 layout scope");
+    assert!(
+        scope.len() >= 4,
+        "in + out + two moved nodes carry positions: {scope:?}"
+    );
+}
+
+#[test]
+fn retyping_an_encapsulated_instance_renames_the_macro() {
+    let path = temp_patcher_source_path("encapsulate-rename");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n(def a (* g 2))\n(def b (+ a 1))\n(out 1 b)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string(), "b".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    encapsulate_via_key_event(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    let instance_id = state.edit_state.created_macros["sub1"]
+        .instance_node_id
+        .clone();
+    let body_edits = state
+        .edit_state
+        .nodes
+        .values()
+        .filter(|edit| edit.view_key == "macro:sub1")
+        .count();
+    assert!(body_edits > 0);
+
+    state.text_edit = Some(PatcherTextEdit {
+        node_id: instance_id.clone(),
+        text: "wobble".to_string(),
+        original_text: "sub1".to_string(),
+        state: TextInputState::default(),
+        autocomplete_selected: 0,
+    });
+    assert!(commit_active_patcher_text_edit(&node, &mut state, "root"));
+
+    assert!(state.edit_state.created_macros.contains_key("wobble"));
+    assert!(!state.edit_state.created_macros.contains_key("sub1"));
+    assert_eq!(
+        state
+            .edit_state
+            .nodes
+            .values()
+            .filter(|edit| edit.view_key == "macro:wobble")
+            .count(),
+        body_edits,
+        "the whole body is re-keyed to the new scope"
+    );
+    assert!(
+        state
+            .edit_state
+            .connections
+            .values()
+            .all(|edit| edit.view_key != "macro:sub1")
+    );
+
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let source = generate::generate_patch_source(&visible, PatcherIntent::Instrument)
+        .expect("generate")
+        .source;
+    assert!(source.contains("(defmacro wobble"), "{source}");
+    assert!(!source.contains("sub1"), "{source}");
+}
+
+#[test]
+fn encapsulation_with_two_outlets_returns_a_tuple() {
+    let path = temp_patcher_source_path("encapsulate-tuple");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n\
+         (def a (* g 2))\n\
+         (def b (+ g 1))\n\
+         (out 1 (* a b))\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string(), "b".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    encapsulate_via_key_event(&node);
+
+    let state = get_patcher_interaction_state(key);
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let source = generate::generate_patch_source(&visible, PatcherIntent::Instrument)
+        .expect("generate")
+        .source;
+
+    assert!(
+        source.contains("(tuple "),
+        "two outlets return a tuple:\n{source}"
+    );
+    assert!(
+        source.contains("(def (") && source.contains("(sub1 g)"),
+        "the instance destructures both outputs:\n{source}"
+    );
+    assert!(!source.contains("__patcher_missing_input__"), "{source}");
+    let reparsed = parse_patch_source(&source, PatcherIntent::Instrument).expect("reparse");
+    assert!(
+        reparsed.diagnostics.is_empty(),
+        "{:?}",
+        reparsed.diagnostics
+    );
+}
+
+#[test]
+fn encapsulating_a_node_fed_by_param_sugar_keeps_the_mod_accessor_outside() {
+    // `gain~` is UI sugar for a hidden `(mod gain)` accessor node. `mod` needs a
+    // real modulatable param, which a macro parameter is not, so the accessor
+    // has to stay in the enclosing scope and feed an ordinary inlet.
+    let path = temp_patcher_source_path("encapsulate-mod-sugar");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n\
+         (def gain (param gain 0.5 @mod true))\n\
+         (def a (* g (mod gain)))\n\
+         (out 1 a)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let before = patch_with_interaction_state(
+        root_patch.clone(),
+        &get_patcher_interaction_state(key),
+        "root",
+    );
+    let accessor = before
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.op == "mod")
+        .expect("mod accessor node")
+        .id
+        .clone();
+    assert!(
+        hidden_inline_node_ids(&before).contains(&accessor),
+        "the accessor starts hidden behind the `gain~` sugar"
+    );
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    encapsulate_via_key_event(&node);
+
+    let state = get_patcher_interaction_state(key);
+    let plan_view = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    assert!(
+        !hidden_inline_node_ids(&plan_view).contains(&accessor),
+        "the accessor is a real node on the canvas once it feeds the instance"
+    );
+    assert!(
+        plan_view
+            .nodes
+            .iter()
+            .any(|patch_node| patch_node.id == accessor),
+        "the accessor is not garbage-collected as an orphan"
+    );
+
+    let body_text = state
+        .edit_state
+        .nodes
+        .values()
+        .filter(|edit| edit.view_key == "macro:sub1")
+        .map(|edit| edit.text.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        body_text.iter().all(|text| !text.contains('~')),
+        "the moved node must not carry `gain~` into the macro: {body_text:?}"
+    );
+
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let source = generate::generate_patch_source(&visible, PatcherIntent::Instrument)
+        .expect("generate")
+        .source;
+    assert!(source.contains("(mod gain)"), "{source}");
+    let reparsed = parse_patch_source(&source, PatcherIntent::Instrument).expect("reparse");
+    assert!(
+        reparsed.diagnostics.is_empty(),
+        "{:?}",
+        reparsed.diagnostics
+    );
+}
+
+#[test]
+fn cmd_e_encapsulates_inside_a_macro_view() {
+    let path = temp_patcher_source_path("encapsulate-in-macro");
+    fs::write(
+        &path,
+        "(defmacro shaper (drive)\n\
+        \x20 (def scaled (* drive 2))\n\
+        \x20 (def curved (tanh scaled))\n\
+        \x20 (* curved 0.5))\n\
+        (def g (in 1 @name gate))\n\
+        (out 1 (shaper g))\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    // Navigate into the macro, then select two of its body nodes.
+    let mut state = get_patcher_interaction_state(key);
+    state.active_macro = Some("shaper".to_string());
+    state.selected_nodes = ["scaled".to_string(), "curved".to_string()]
+        .into_iter()
+        .collect();
+    set_patcher_interaction_state(key, state);
+    assert_eq!(
+        active_patcher_view_key(&get_patcher_interaction_state(key)),
+        "macro:shaper"
+    );
+
+    assert!(encapsulate_via_key_event(&node).is_some(), "cmd+e consumed");
+
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        state.edit_state.created_macros.contains_key("sub1"),
+        "{:?}",
+        state.edit_state.created_macros
+    );
+    // The instance lands in the macro we were editing, not at the root.
+    let instance_id = state.edit_state.created_macros["sub1"]
+        .instance_node_id
+        .clone();
+    let instance_edit = state
+        .edit_state
+        .nodes
+        .get(&node_edit_key("macro:shaper", &instance_id))
+        .expect("instance edit lives in the macro view");
+    assert_eq!(instance_edit.text, "sub1");
+    assert!(
+        state
+            .edit_state
+            .nodes
+            .values()
+            .any(|edit| edit.view_key == "macro:sub1"),
+        "the new macro has a body of its own"
+    );
+
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let source = generate::generate_patch_source(&visible, PatcherIntent::Instrument)
+        .expect("generate")
+        .source;
+
+    assert!(
+        source.contains("(defmacro sub1 (input1)"),
+        "the new macro is a top-level defmacro:\n{source}"
+    );
+    assert!(
+        source.contains("(defmacro shaper (drive)"),
+        "the enclosing macro survives:\n{source}"
+    );
+    assert!(
+        source.contains("(sub1 drive)"),
+        "the instance calls the new macro from inside `shaper`:\n{source}"
+    );
+    assert!(!source.contains("__patcher_missing_input__"), "{source}");
+
+    let reparsed = parse_patch_source(&source, PatcherIntent::Instrument).expect("reparse");
+    assert!(
+        reparsed.diagnostics.is_empty(),
+        "{:?}",
+        reparsed.diagnostics
+    );
+    // A macro calling a macro emitted after it must still compile — the
+    // generator orders local macros alphabetically, not by dependency.
+    compile_patch_source_with_dgenlisp(&source)
+        .unwrap_or_else(|error| panic!("generated source must compile:\n{error}\n{source}"));
+}
+
+#[test]
+fn encapsulating_inside_a_macro_never_names_the_macro_after_itself() {
+    // A macro gaining an instance of itself would be infinite expansion. The
+    // generated name is checked against every macro in scope, which includes
+    // the one being edited.
+    let path = temp_patcher_source_path("encapsulate-in-sub1");
+    fs::write(
+        &path,
+        "(defmacro sub1 (drive)\n\
+        \x20 (def scaled (* drive 2))\n\
+        \x20 (def curved (tanh scaled))\n\
+        \x20 (* curved 0.5))\n\
+        (def g (in 1 @name gate))\n\
+        (out 1 (sub1 g))\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.active_macro = Some("sub1".to_string());
+    state.selected_nodes = ["scaled".to_string(), "curved".to_string()]
+        .into_iter()
+        .collect();
+    set_patcher_interaction_state(key, state);
+    encapsulate_via_key_event(&node);
+
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        !state.edit_state.created_macros.contains_key("sub1"),
+        "the existing `sub1` must not be shadowed"
+    );
+    assert!(
+        state.edit_state.created_macros.contains_key("sub2"),
+        "{:?}",
+        state.edit_state.created_macros
+    );
+}
+// ---------------------------------------------------------------------------
+// Orphaned-macro collection
+// ---------------------------------------------------------------------------
+
+/// Encapsulate, then delete the instance. The staged definition has to go with
+/// it — otherwise it lands in the emitted source as a macro nothing calls, and
+/// the patch collects invisible orphans as macros are added and removed.
+#[test]
+fn deleting_the_last_instance_of_a_session_created_macro_collects_the_definition() {
+    let path = temp_patcher_source_path("collect-created-macro");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n(def a (* g 2))\n(def b (+ a 1))\n(out 1 b)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string(), "b".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    encapsulate_via_key_event(&node);
+
+    let state = get_patcher_interaction_state(key);
+    let instance = state
+        .edit_state
+        .created_macros
+        .get("sub1")
+        .map(|edit| edit.instance_node_id.clone())
+        .expect("encapsulation staged `sub1` with an instance");
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = std::iter::once(instance).collect();
+    set_patcher_interaction_state(key, state);
+    assert!(
+        PATCHER_WIDGET
+            .key_event(
+                &node,
+                WidgetKeyEvent {
+                    code: KeyCode::Backspace,
+                    modifiers: KeyModifiers::NONE,
+                },
+            )
+            .is_some(),
+        "delete consumed"
+    );
+
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        state.edit_state.created_macros.is_empty(),
+        "the orphaned macro is collected: {:?}",
+        state.edit_state.created_macros
+    );
+    assert!(
+        state
+            .edit_state
+            .nodes
+            .values()
+            .all(|edit| edit.view_key != "macro:sub1"),
+        "its staged body edits go with it"
+    );
+
+    let source = fs::read_to_string(&path).expect("read source");
+    let emitted =
+        emit_patch_writeback(&source, PatcherIntent::Instrument, &state).expect("writeback");
+    assert!(
+        !emitted.contains("defmacro sub1"),
+        "no orphan definition reaches the source:\n{emitted}"
+    );
+}
+
+/// Collection is by reference count, not by the recorded instance node: a
+/// second instance keeps the definition alive when the first one is deleted.
+#[test]
+fn deleting_one_of_two_instances_keeps_a_session_created_macro() {
+    let path = temp_patcher_source_path("keep-created-macro");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n(def a (* g 2))\n(def b (+ a 1))\n(out 1 b)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string(), "b".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    encapsulate_via_key_event(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    let first = state.edit_state.created_macros["sub1"]
+        .instance_node_id
+        .clone();
+    // A second call site, the way dragging the macro out of the sidebar makes one.
+    let second = allocate_created_node(&mut state, "root", (40.0, 40.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &second))
+        .expect("second instance")
+        .text = "sub1".to_string();
+    state.selected_nodes = std::iter::once(first).collect();
+    set_patcher_interaction_state(key, state);
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Backspace,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        state.edit_state.created_macros.contains_key("sub1"),
+        "the surviving instance keeps the definition alive"
+    );
+}
+
+/// A macro that only an orphaned macro called must go too — collection runs to
+/// a fixpoint rather than one level deep.
+#[test]
+fn collecting_an_orphaned_macro_cascades_to_the_macros_only_it_called() {
+    let mut state = PatcherInteractionState::default();
+    for (name, view, text) in [
+        ("outer", "root", "outer"),
+        ("inner", "macro:outer", "inner"),
+    ] {
+        let id = allocate_created_node(&mut state, view, (0.0, 0.0));
+        state
+            .edit_state
+            .nodes
+            .get_mut(&node_edit_key(view, &id))
+            .expect("node edit")
+            .text = text.to_string();
+        state.edit_state.created_macros.insert(
+            name.to_string(),
+            PatcherMacroEdit {
+                name: name.to_string(),
+                instance_node_id: id,
+                source: None,
+            },
+        );
+    }
+    assert_eq!(state.edit_state.created_macros.len(), 2);
+
+    // Drop the root instance of `outer`; `inner` is only reachable through it.
+    state
+        .edit_state
+        .nodes
+        .retain(|_, edit| edit.view_key != "root");
+    assert!(prune_unreferenced_created_macros(&mut state));
+    assert!(
+        state.edit_state.created_macros.is_empty(),
+        "both go: {:?}",
+        state.edit_state.created_macros
     );
 }

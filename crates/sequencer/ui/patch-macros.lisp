@@ -4,8 +4,9 @@
 ;; ("Library"; macros imported by the patch get the :sliders icon). Rows drag
 ;; into the patch editor as "dgen-macro" items; dropping one creates a node
 ;; calling that macro at the drop point. The blue selected row always mirrors
-;; the macro view open in the patcher (SEQ.editor-open-macro); double-click a
-;; row to open that macro's view.
+;; the macro view open in the patcher (SEQ.editor-open-macro); single-click an
+;; "In Patch" row to open that macro's view. Library rows only open on
+;; double-click, so click-dragging one into the patch does not navigate.
 
 (def patch-macros-filter (state ""))
 
@@ -19,22 +20,28 @@
 (def patch-macros-lib-icon (m)
   (if (get m :used) :sliders :dial))
 
-(def patch-macros-lib-leaf (m)
+;; :click-opens marks rows that jump to their macro view on a single click.
+;; Only rows under "In Patch" set it — "Library" rows are primarily drag
+;; sources, and opening a view mid-drag-start feels like a misfire.
+(def patch-macros-lib-leaf (m click-opens)
   (dict :label (get m :name)
         :name (get m :name)
         :kind "library-macro"
         :icon (patch-macros-lib-icon m)
+        :click-opens click-opens
         :drop-target false))
 
-;; Library macros can import other library macros; nest those too.
+;; Library macros can import other library macros; nest those too. Only
+;; reachable from the "In Patch" call tree, so these rows open on click.
 (def patch-macros-lib-item (m depth)
   (let ((kids (patch-macros-child-items (get m :calls) depth)))
     (if (= (len kids) 0)
-      (patch-macros-lib-leaf m)
+      (patch-macros-lib-leaf m true)
       (dict :label (get m :name)
             :name (get m :name)
             :kind "library-macro"
             :icon (patch-macros-lib-icon m)
+            :click-opens true
             :drop-target false
             :children kids))))
 
@@ -63,11 +70,13 @@
             :name (get m :name)
             :kind "patch-macro"
             :icon :dial
+            :click-opens true
             :drop-target false)
       (dict :label (get m :name)
             :name (get m :name)
             :kind "patch-macro"
             :icon :dial
+            :click-opens true
             :drop-target false
             :children kids))))
 
@@ -96,7 +105,7 @@
       (list)
       (append
         (list (patch-macros-header "Library"))
-        (map (lambda (m) (patch-macros-lib-leaf m)) visible)))))
+        (map (lambda (m) (patch-macros-lib-leaf m false)) visible)))))
 
 ;; Search active: flatten both sections to matching rows.
 (def patch-macros-flat-patch-section ()
@@ -110,6 +119,7 @@
                      :name (get m :name)
                      :kind "patch-macro"
                      :icon :dial
+                     :click-opens true
                      :drop-target false))
              visible)))))
 
@@ -122,6 +132,13 @@
   (if (= (get item :kind) "header")
     nil
     (host-command "open-editor-macro-view" (dict :name (get item :name)))))
+
+;; Single-click path: only "In Patch" rows navigate. Library rows stay inert
+;; so a click-and-drag out of the sidebar never yanks the view away.
+(def patch-macros-click (item)
+  (if (= (get item :click-opens) true)
+    (patch-macros-activate item)
+    nil))
 
 (def patch-macros-search-row ()
   (box :width :fill :padding 0.25
@@ -163,5 +180,11 @@
               :selected-label (if (= SEQ.editor-open-macro "") nil SEQ.editor-open-macro)
               :selection-follows-external true
               :activate-parents true
+              ;; Single click opens the macro view for "In Patch" rows: leaf
+              ;; rows dispatch `select`, parent rows dispatch `toggle` (they
+              ;; also expand or collapse). `activate` stays wired for
+              ;; double-click / Enter, which works on Library rows too.
+              :on-select (lambda (item) (patch-macros-click item))
+              :on-toggle (lambda (item) (patch-macros-click item))
               :on-activate (lambda (item) (patch-macros-activate item))
               :on-modified-activate (lambda (item) (patch-macros-activate item)))))))))

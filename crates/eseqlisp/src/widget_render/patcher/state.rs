@@ -128,7 +128,7 @@ pub(super) struct PatcherInteractionState {
     pub(super) edit_state: PatchEditState,
     pub(super) text_edit: Option<PatcherTextEdit>,
     pub(super) agentic_bubbles: HashMap<String, AgenticBubble>,
-    pub(super) agentic_morph_nodes: HashMap<String, Instant>,
+    pub(super) agentic_morph_nodes: HashMap<String, AgenticMorph>,
     pub(super) z_order: HashMap<String, Vec<String>>,
     /// Recently interacted node ids for the active view, oldest first. Feeds
     /// the cmd+enter "create below" anchor and the cmd+up "connect last two"
@@ -232,6 +232,48 @@ pub(super) enum AgenticBubbleState {
         raw_output: String,
         failed_at: Instant,
     },
+}
+
+/// The pose an agentic bubble last rendered at, in model space (so it stays
+/// correct if the view pans or zooms mid-morph).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct AgenticBubblePose {
+    /// `(x, y, width, height)` in patch-model cells.
+    pub(super) model_rect: (f32, f32, f32, f32),
+    pub(super) fill: [f32; 4],
+    pub(super) border: [f32; 4],
+}
+
+/// A node that has just been materialized from an agentic bubble, and is easing
+/// from that bubble's square chrome into its own rounded node chrome.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct AgenticMorph {
+    pub(super) started_at: Instant,
+    /// The bubble's final pose. `None` when no pose was recorded (headless or
+    /// non-macOS render paths), in which case the node just appears.
+    pub(super) from: Option<AgenticBubblePose>,
+}
+
+thread_local! {
+    /// Poses of the bubbles drawn in the most recent frame, keyed by bubble id.
+    /// The renderer rebuilds this every frame, which also prunes bubbles that
+    /// have gone away.
+    ///
+    /// This is a side channel rather than a field on `AgenticBubble` because a
+    /// bubble is removed in the same state write that inserts its node, so
+    /// there is no frame where both exist to read the start pose from — and
+    /// writing the pose back into the interaction state each frame would bump
+    /// the widget-state generation on every tick.
+    static AGENTIC_BUBBLE_POSES: RefCell<HashMap<String, AgenticBubblePose>> =
+        RefCell::new(HashMap::new());
+}
+
+pub(super) fn set_agentic_bubble_poses(poses: HashMap<String, AgenticBubblePose>) {
+    AGENTIC_BUBBLE_POSES.with(|cell| *cell.borrow_mut() = poses);
+}
+
+pub(super) fn agentic_bubble_pose(bubble_id: &str) -> Option<AgenticBubblePose> {
+    AGENTIC_BUBBLE_POSES.with(|cell| cell.borrow().get(bubble_id).copied())
 }
 
 impl AgenticBubble {
@@ -1112,6 +1154,78 @@ pub(super) fn delete_connection_edit_or_mark_deleted(
     changed
 }
 
+/// Drop session-created macros that nothing instantiates any more, along with
+/// the staged edits for their bodies. A created macro is only ever reachable
+/// from an editor node whose text is its name, so the node edits are the whole
+/// reference set — once the last instance node is gone the definition is dead
+/// and must not survive into the emitted source.
+///
+/// Runs to a fixpoint: collecting an outer macro removes its body edits, which
+/// can orphan a macro that only the outer one called.
+pub(super) fn prune_unreferenced_created_macros(state: &mut PatcherInteractionState) -> bool {
+    if state.edit_state.created_macros.is_empty() {
+        return false;
+    }
+    let mut pruned = false;
+    loop {
+        let referenced = state
+            .edit_state
+            .nodes
+            .values()
+            .filter_map(|edit| {
+                parse_editor_node_text(edit.text.trim())
+                    .ok()
+                    .map(|(op, _)| op)
+            })
+            .collect::<HashSet<_>>();
+        let dead = state
+            .edit_state
+            .created_macros
+            .keys()
+            .filter(|name| !referenced.contains(name.as_str()))
+            // The macro whose view is open stays: its instance may not exist
+            // yet (encapsulation stages the definition first), and collecting
+            // the view the user is standing in would be jarring.
+            .filter(|name| state.active_macro.as_deref() != Some(name.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if dead.is_empty() {
+            return pruned;
+        }
+        for name in &dead {
+            state.edit_state.created_macros.remove(name);
+            discard_macro_view_edits(state, name);
+        }
+        pruned = true;
+    }
+}
+
+fn discard_macro_view_edits(state: &mut PatcherInteractionState, macro_name: &str) {
+    let view = format!("macro:{macro_name}");
+    let prefix = format!("{view}::");
+    state
+        .edit_state
+        .nodes
+        .retain(|_, edit| edit.view_key != view);
+    state
+        .edit_state
+        .connections
+        .retain(|_, edit| edit.view_key != view);
+    state
+        .edit_state
+        .input_presentations
+        .retain(|_, edit| edit.view_key != view);
+    state
+        .edit_state
+        .deleted_nodes
+        .retain(|key| !key.starts_with(&prefix));
+    state
+        .edit_state
+        .deleted_connections
+        .retain(|key| !key.starts_with(&prefix));
+    state.z_order.remove(&view);
+}
+
 pub(super) fn delete_selected_nodes(state: &mut PatcherInteractionState, view_key: &str) -> bool {
     if state.selected_nodes.is_empty() {
         return false;
@@ -1887,6 +2001,126 @@ fn created_macro_patch_from_source(name: &str, source: &str) -> Option<MacroPatc
 
 pub(super) fn default_created_macro_source(name: &str) -> String {
     format!("(defmacro {name} (input) (* input 1))")
+}
+
+/// Seed source for a macro whose whole body arrives as created-node edits
+/// (Cmd+E encapsulation). `project_defmacro` takes the body as `items[3..]`,
+/// so an empty body projects to a `MacroPatch` with no nodes and no params —
+/// a clean shell. The default seed's `(* input 1)` would show up inside the
+/// macro as junk the user has to delete.
+///
+/// The seed never reaches disk: `generate_patch_source` re-emits every local
+/// macro from its `Patch` model, which by then carries the created nodes.
+pub(super) fn empty_created_macro_source(name: &str) -> String {
+    format!("(defmacro {name} ())")
+}
+
+/// Rename a macro that exists only in the interaction state. Every edit-state
+/// key is `"{view_key}::{id}"`, so the macro's whole body has to be re-keyed
+/// from `macro:{old}` to `macro:{new}` alongside the registration itself.
+///
+/// Only created macros can be renamed — a source-backed macro's name is its
+/// identity on disk and may be referenced from elsewhere.
+pub(super) fn rename_created_macro(
+    state: &mut PatcherInteractionState,
+    old: &str,
+    new: &str,
+    taken_names: &HashSet<String>,
+) -> bool {
+    if old == new || taken_names.contains(new) {
+        return false;
+    }
+    let Some(mut macro_edit) = state.edit_state.created_macros.remove(old) else {
+        return false;
+    };
+    let instance_node_id = macro_edit.instance_node_id.clone();
+    macro_edit.name = new.to_string();
+    macro_edit.source = macro_edit.source.as_deref().map(|source| {
+        if source == empty_created_macro_source(old) {
+            empty_created_macro_source(new)
+        } else if source == default_created_macro_source(old) {
+            default_created_macro_source(new)
+        } else {
+            source.to_string()
+        }
+    });
+    state
+        .edit_state
+        .created_macros
+        .insert(new.to_string(), macro_edit);
+
+    let old_view = format!("macro:{old}");
+    let new_view = format!("macro:{new}");
+    let rekey = |key: &str| -> Option<String> {
+        key.strip_prefix(&format!("{old_view}::"))
+            .map(|rest| format!("{new_view}::{rest}"))
+    };
+
+    state.edit_state.nodes = state
+        .edit_state
+        .nodes
+        .drain()
+        .map(|(key, mut edit)| {
+            let key = rekey(&key).unwrap_or(key);
+            if edit.view_key == old_view {
+                edit.view_key = new_view.clone();
+            }
+            (key, edit)
+        })
+        .collect();
+    state.edit_state.connections = state
+        .edit_state
+        .connections
+        .drain()
+        .map(|(key, mut edit)| {
+            let key = rekey(&key).unwrap_or(key);
+            if edit.view_key == old_view {
+                edit.view_key = new_view.clone();
+            }
+            (key, edit)
+        })
+        .collect();
+    state.edit_state.input_presentations = state
+        .edit_state
+        .input_presentations
+        .drain()
+        .map(|(key, mut edit)| {
+            let key = rekey(&key).unwrap_or(key);
+            if edit.view_key == old_view {
+                edit.view_key = new_view.clone();
+            }
+            (key, edit)
+        })
+        .collect();
+    state.edit_state.deleted_nodes = state
+        .edit_state
+        .deleted_nodes
+        .drain()
+        .map(|key| rekey(&key).unwrap_or(key))
+        .collect();
+    state.edit_state.deleted_connections = state
+        .edit_state
+        .deleted_connections
+        .drain()
+        .map(|key| rekey(&key).unwrap_or(key))
+        .collect();
+
+    if let Some(stack) = state.z_order.remove(&old_view) {
+        state.z_order.insert(new_view.clone(), stack);
+    }
+    if state.active_macro.as_deref() == Some(old) {
+        state.active_macro = Some(new.to_string());
+    }
+    if let Some(edit) = state
+        .edit_state
+        .nodes
+        .values_mut()
+        .find(|edit| edit.id == instance_node_id && edit.view_key != new_view)
+    {
+        edit.text = new.to_string();
+    }
+    debug_log_edit_event(&format!("rename-created-macro {old} -> {new}"), state);
+    true
 }
 
 fn apply_node_text_override(

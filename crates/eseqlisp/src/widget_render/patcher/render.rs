@@ -28,9 +28,10 @@ use super::geometry::{
 };
 use super::load_patch_from_props;
 use super::metrics::{
-    CABLE_HANDLE_RADIUS_PX, NODE_BORDER_WIDTH_PX, NODE_CORNER_RADIUS_PX,
-    NODE_RESIZE_HANDLE_SIZE_CELLS, NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX,
-    PORT_OUTER_DIAMETER_PX, SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
+    AGENTIC_MORPH_COLOR_SECS, AGENTIC_MORPH_SHAPE_SECS, CABLE_HANDLE_RADIUS_PX,
+    NODE_BORDER_WIDTH_PX, NODE_CORNER_RADIUS_PX, NODE_RESIZE_HANDLE_SIZE_CELLS,
+    NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX, PORT_OUTER_DIAMETER_PX,
+    SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
 };
 use super::model::{
     ArgValue, BindingTarget, ConnectionKind, InputPortRef, InputPresentation, NodeKind,
@@ -41,9 +42,9 @@ use super::model::{
 use super::project::OperatorPortDocumentation;
 use super::project::dgenlisp_operator_documentation;
 use super::state::{
-    AgenticBubbleState, AgenticBubbleTarget, AlignmentGuide, AlignmentGuideKind,
-    PATCHER_Z_SLOTS_PER_NODE, PatcherDragState, PatcherInteractionState, PatcherPanState,
-    PatcherTextEdit, PatcherZSlot, active_patcher_patch, active_patcher_view_key,
+    AgenticBubblePose, AgenticBubbleState, AgenticBubbleTarget, AgenticMorph, AlignmentGuide,
+    AlignmentGuideKind, PATCHER_Z_SLOTS_PER_NODE, PatcherDragState, PatcherInteractionState,
+    PatcherPanState, PatcherTextEdit, PatcherZSlot, active_patcher_patch, active_patcher_view_key,
     get_patcher_interaction_state, get_patcher_pan_state, max_node_z_index, node_z_index,
     ordered_patch_nodes, patch_with_interaction_state, patcher_breadcrumb, patcher_state_key,
     set_patcher_pan_state, source_connection_id, sync_patcher_z_order,
@@ -317,6 +318,7 @@ fn draw_agentic_bubbles(
     let origin = super::geometry::patcher_origin(rect, pan_state);
     let zoom = patcher_zoom(pan_state);
     let node_rects = patch_node_rects(patch, rect, pan_state);
+    let mut poses = HashMap::new();
     for bubble in interaction_state.agentic_bubbles.values() {
         let (mut x, y) = match &bubble.target {
             AgenticBubbleTarget::EditMacro {
@@ -394,47 +396,37 @@ fn draw_agentic_bubbles(
                 "answer",
             ),
         };
-        prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
-            rect: Rect {
-                col: x,
-                row: y,
-                width,
-                height,
+        let bubble_rect = Rect {
+            col: x,
+            row: y,
+            width,
+            height,
+        };
+        // Drawn through the node shader at a square corner radius (rather than
+        // as flat quads) so that a completing bubble and its node are the same
+        // primitive, and the morph only has to interpolate uniforms.
+        push_node_chrome_with_corner(
+            prims,
+            bubble_rect,
+            fill,
+            border,
+            viewport,
+            zoom,
+            SQUARE_CORNER_RADIUS,
+        );
+        poses.insert(
+            bubble.id.clone(),
+            AgenticBubblePose {
+                model_rect: (
+                    (x - origin.0) / zoom,
+                    (y - origin.1) / zoom,
+                    width / zoom,
+                    height / zoom,
+                ),
+                fill: fill.to_rgba(),
+                border: border.to_rgba(),
             },
-            color: fill,
-        }));
-        let border_w = 0.12 * zoom;
-        for border_rect in [
-            Rect {
-                col: x,
-                row: y,
-                width,
-                height: border_w,
-            },
-            Rect {
-                col: x,
-                row: y + height - border_w,
-                width,
-                height: border_w,
-            },
-            Rect {
-                col: x,
-                row: y,
-                width: border_w,
-                height,
-            },
-            Rect {
-                col: x + width - border_w,
-                row: y,
-                width: border_w,
-                height,
-            },
-        ] {
-            prims.push(MetalPrimitive::ForegroundRect(MetalRectPrimitive {
-                rect: border_rect,
-                color: border,
-            }));
-        }
+        );
         let detail = match &bubble.state {
             AgenticBubbleState::Pending { .. } => bubble
                 .elapsed()
@@ -476,6 +468,8 @@ fn draw_agentic_bubbles(
             push_agentic_bubble_cursor(prims, bubble, x, y, inner_width, zoom);
         }
     }
+    // Rebuilt wholesale each frame, which also prunes bubbles that have gone.
+    super::state::set_agentic_bubble_poses(poses);
 }
 
 #[cfg(target_os = "macos")]
@@ -810,13 +804,11 @@ fn draw_patch_with_view_key(
             viewport,
             interaction_state.selected_nodes.contains(&node.id),
             interaction_state.hovered_node.as_deref() == Some(node.id.as_str()),
-            interaction_state
-                .agentic_morph_nodes
-                .get(&node.id)
-                .is_some_and(|started| started.elapsed().as_secs_f32() < 1.2),
+            interaction_state.agentic_morph_nodes.get(&node.id),
             active_edit,
             &highlighted_inputs,
             &highlighted_outputs,
+            origin,
             zoom,
             node_z_index(
                 interaction_state,
@@ -1460,10 +1452,11 @@ fn push_node(
     viewport: WidgetViewport,
     selected: bool,
     hovered: bool,
-    morphing: bool,
+    morph: Option<&AgenticMorph>,
     edit: Option<&PatcherTextEdit>,
     highlighted_inputs: &[usize],
     highlighted_outputs: &[usize],
+    origin: (f32, f32),
     zoom: f32,
     node_chrome_z: i32,
 ) {
@@ -1499,12 +1492,26 @@ fn push_node(
     if selected {
         border = theme::PATCHER_NODE_SELECTED_BORDER();
     }
-    if morphing {
-        border = theme::PATCHER_CABLE();
-    }
     let node_base_z = node_chrome_z - PatcherZSlot::NodeChrome as i32;
     let mut chrome_prims = Vec::new();
-    push_node_chrome(&mut chrome_prims, rect, bg, border, viewport, zoom);
+    // The chrome — and only the chrome — eases out of the agentic bubble's
+    // square box; ports, label and handles stay put at their final positions.
+    match morph
+        .and_then(|morph| agentic_morph_chrome(morph, rect, bg, border, viewport, origin, zoom))
+    {
+        Some((chrome_rect, corner_radius, chrome_bg, chrome_border)) => {
+            push_node_chrome_with_corner(
+                &mut chrome_prims,
+                chrome_rect,
+                chrome_bg,
+                chrome_border,
+                viewport,
+                zoom,
+                corner_radius,
+            );
+        }
+        None => push_node_chrome(&mut chrome_prims, rect, bg, border, viewport, zoom),
+    }
     push_z_layered(
         prims,
         node_base_z + PatcherZSlot::NodeChrome as i32,
@@ -1616,6 +1623,25 @@ fn push_node_chrome(
     viewport: WidgetViewport,
     zoom: f32,
 ) {
+    let corner_radius = normalized_corner_radius(rect, viewport, NODE_CORNER_RADIUS_PX * zoom);
+    push_node_chrome_with_corner(prims, rect, bg, border, viewport, zoom, corner_radius);
+}
+
+/// `push_node_chrome` with an explicit *normalized* corner radius. The agentic
+/// completion morph interpolates the normalized value rather than the pixel
+/// radius: a resting node's radius saturates `normalized_corner_radius`' 0.5
+/// clamp, so ramping the pixel radius would finish the visible rounding in the
+/// first third of the tween.
+#[cfg(target_os = "macos")]
+fn push_node_chrome_with_corner(
+    prims: &mut Vec<MetalPrimitive>,
+    rect: Rect,
+    bg: crate::backend::Color,
+    border: crate::backend::Color,
+    viewport: WidgetViewport,
+    zoom: f32,
+    corner_radius: f32,
+) {
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
@@ -1635,7 +1661,7 @@ fn push_node_chrome(
             color_b: bg.to_rgba(),
             color_c: [0.0; 4],
             color_d: [0.0; 4],
-            corner_radius: normalized_corner_radius(rect, viewport, NODE_CORNER_RADIUS_PX * zoom),
+            corner_radius,
             pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
         },
         is_background: false,
@@ -1913,6 +1939,108 @@ fn push_node_resize_handles(
         }));
     }
 }
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn ease_out_cubic(t: f32) -> f32 {
+    let u = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - u * u * u
+}
+
+/// Overshoots slightly past 1.0 before settling, so a materializing node reads
+/// as popping into place rather than merely arriving.
+fn ease_out_back(t: f32) -> f32 {
+    const C1: f32 = 1.70158;
+    const C3: f32 = C1 + 1.0;
+    let u = t.clamp(0.0, 1.0) - 1.0;
+    1.0 + C3 * u * u * u + C1 * u * u
+}
+
+fn lerp_rgba(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    [
+        lerp(a[0], b[0], t),
+        lerp(a[1], b[1], t),
+        lerp(a[2], b[2], t),
+        lerp(a[3], b[3], t),
+    ]
+}
+
+fn rgba_color(rgba: [f32; 4]) -> crate::backend::Color {
+    crate::backend::Color::rgba(rgba[0], rgba[1], rgba[2], rgba[3])
+}
+
+fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
+    Rect {
+        col: lerp(a.col, b.col, t),
+        row: lerp(a.row, b.row, t),
+        width: lerp(a.width, b.width, t),
+        height: lerp(a.height, b.height, t),
+    }
+}
+
+/// Chrome rect, normalized corner radius and colours for a node partway through
+/// its agentic completion morph. Returns `None` once the morph has finished, or
+/// when no start pose was recorded.
+#[cfg(target_os = "macos")]
+pub(super) fn agentic_morph_chrome(
+    morph: &AgenticMorph,
+    rect: Rect,
+    resting_bg: crate::backend::Color,
+    resting_border: crate::backend::Color,
+    viewport: WidgetViewport,
+    origin: (f32, f32),
+    zoom: f32,
+) -> Option<(Rect, f32, crate::backend::Color, crate::backend::Color)> {
+    let elapsed = morph.started_at.elapsed().as_secs_f32();
+    if elapsed >= AGENTIC_MORPH_COLOR_SECS {
+        return None;
+    }
+    let flash = theme::PATCHER_CABLE();
+    // The border flashes to the cable colour as the shape lands, then settles
+    // back to the node's resting border over the remainder of the window.
+    let border = if elapsed <= AGENTIC_MORPH_SHAPE_SECS {
+        flash
+    } else {
+        let settle = ease_out_cubic(
+            (elapsed - AGENTIC_MORPH_SHAPE_SECS)
+                / (AGENTIC_MORPH_COLOR_SECS - AGENTIC_MORPH_SHAPE_SECS),
+        );
+        rgba_color(lerp_rgba(flash.to_rgba(), resting_border.to_rgba(), settle))
+    };
+    let Some(from) = morph.from else {
+        return Some((
+            rect,
+            normalized_corner_radius(rect, viewport, NODE_CORNER_RADIUS_PX * zoom),
+            resting_bg,
+            border,
+        ));
+    };
+    let progress = (elapsed / AGENTIC_MORPH_SHAPE_SECS).clamp(0.0, 1.0);
+    let (model_x, model_y, model_w, model_h) = from.model_rect;
+    let from_rect = Rect {
+        col: origin.0 + model_x * zoom,
+        row: origin.1 + model_y * zoom,
+        width: model_w * zoom,
+        height: model_h * zoom,
+    };
+    let chrome_rect = lerp_rect(from_rect, rect, ease_out_back(progress));
+    let shape_t = ease_out_cubic(progress);
+    // Normalize against the rect actually being drawn so the radius tracks the
+    // chrome as it resizes.
+    let target_corner =
+        normalized_corner_radius(chrome_rect, viewport, NODE_CORNER_RADIUS_PX * zoom);
+    let corner_radius = lerp(SQUARE_CORNER_RADIUS, target_corner, shape_t);
+    let bg = rgba_color(lerp_rgba(from.fill, resting_bg.to_rgba(), shape_t));
+    let border = rgba_color(lerp_rgba(from.border, border.to_rgba(), shape_t));
+    Some((chrome_rect, corner_radius, bg, border))
+}
+
+/// `normalized_corner_radius`' floor — the squarest corner the node shader will
+/// draw, and the morph's starting radius.
+#[cfg(target_os = "macos")]
+pub(super) const SQUARE_CORNER_RADIUS: f32 = 0.001;
 
 #[cfg(target_os = "macos")]
 fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {

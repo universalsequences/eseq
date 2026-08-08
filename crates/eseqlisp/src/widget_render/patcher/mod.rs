@@ -1,6 +1,7 @@
 mod alignment;
 mod display;
 mod emit;
+mod encapsulate;
 mod generate;
 mod geometry;
 mod interaction;
@@ -115,10 +116,7 @@ pub fn promote_source_to_patch(
         if diagnostics.is_empty() {
             diagnostics.push("source contains code the patch editor cannot represent".to_string());
         }
-        return Err(format!(
-            "Cannot open as patch: {}",
-            diagnostics.join("; ")
-        ));
+        return Err(format!("Cannot open as patch: {}", diagnostics.join("; ")));
     }
     sidecar::apply_or_materialize(source_path, &mut patch)?;
     sidecar::write_authored_layout(source_path, &patch)
@@ -132,10 +130,7 @@ pub fn eject_patch_authored_sidecar(source_path: &Path) -> Result<(), String> {
     sidecar::set_sidecar_authored(source_path, false)
 }
 
-fn parse_source_with_default_library(
-    source: &str,
-    intent: PatcherIntent,
-) -> Result<Patch, String> {
+fn parse_source_with_default_library(source: &str, intent: PatcherIntent) -> Result<Patch, String> {
     match crate::defmacro_library::default_library_root() {
         Some(root) => {
             let (_, library) = cached_defmacro_library(&root);
@@ -307,10 +302,7 @@ pub fn active_macro_view_for_path(path: impl AsRef<std::path::Path>) -> Option<S
 /// Navigate the patcher for `path` to a macro view (or the root with None),
 /// preserving staged edits — unlike `reload_patcher_macro_view_for_path`,
 /// which resets the whole interaction state after a save.
-pub fn navigate_patcher_view_for_path(
-    path: impl AsRef<std::path::Path>,
-    macro_name: Option<&str>,
-) {
+pub fn navigate_patcher_view_for_path(path: impl AsRef<std::path::Path>, macro_name: Option<&str>) {
     for key in state::patcher_keys_for_path(path.as_ref()) {
         let mut state = state::get_patcher_interaction_state(key);
         state.active_macro = macro_name.map(str::to_string);
@@ -402,9 +394,13 @@ pub fn resolve_agentic_bubble(
                 .map_err(|error| format!("failed to write '{}': {error}", path.display()))?;
             wrote = true;
         }
-        interaction
-            .agentic_morph_nodes
-            .insert(materialized.instance_node_id.clone(), Instant::now());
+        interaction.agentic_morph_nodes.insert(
+            materialized.instance_node_id.clone(),
+            state::AgenticMorph {
+                started_at: Instant::now(),
+                from: state::agentic_bubble_pose(bubble_id),
+            },
+        );
         interaction.agentic_bubbles.remove(bubble_id);
         state::set_patcher_interaction_state(key, interaction);
     }
@@ -465,9 +461,13 @@ pub fn resolve_agentic_bubble_macro_edit(
             instance_node_id, ..
         } = bubble.target
         {
-            interaction
-                .agentic_morph_nodes
-                .insert(instance_node_id, Instant::now());
+            interaction.agentic_morph_nodes.insert(
+                instance_node_id,
+                state::AgenticMorph {
+                    started_at: Instant::now(),
+                    from: state::agentic_bubble_pose(bubble_id),
+                },
+            );
         }
         interaction.agentic_bubbles.remove(bubble_id);
         state::set_patcher_interaction_state(key, interaction);
@@ -839,23 +839,23 @@ pub fn emit_patch_writeback_with_created_phasor_multiply_before_first_output(
 
 use display::{node_display_label, preview};
 use emit::debug_log_patch_lisp;
+use encapsulate::encapsulate_patcher_selection;
 use interaction::{
     PatcherChangeKind, connect_last_touched_nodes, copy_selected_patcher_nodes,
     create_patcher_node_below_anchor, handle_patcher_double_click, handle_patcher_pointer_down,
     handle_patcher_pointer_drag, handle_patcher_pointer_moved, handle_patcher_pointer_up,
-    open_selected_macro_node, pan_patcher_by_delta, pan_patcher_by_wheel,
-    paste_patcher_clipboard, promote_created_macro_definition, reset_patcher_pan,
-    zoom_patcher_by_magnify,
+    open_selected_macro_node, pan_patcher_by_delta, pan_patcher_by_wheel, paste_patcher_clipboard,
+    promote_created_macro_definition, reset_patcher_pan, zoom_patcher_by_magnify,
 };
 use metrics::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL};
 use state::{
     AgenticBubbleState, AgenticBubbleTarget, active_patcher_patch, active_patcher_view_key,
     allocate_agentic_bubble, allocate_agentic_bubble_with_target, apply_patcher_history_step,
-    debug_log_edit_event,
-    debug_log_writeback_event, delete_connection_edit_or_mark_deleted, delete_selected_nodes,
-    editing_agentic_bubble_id, get_patcher_interaction_state, patch_with_interaction_state,
-    patcher_state_key, patcher_state_key_from_parts, set_connection_segment_edit,
-    set_patcher_interaction_state, set_patcher_interaction_state_without_history,
+    debug_log_edit_event, debug_log_writeback_event, delete_connection_edit_or_mark_deleted,
+    delete_selected_nodes, editing_agentic_bubble_id, get_patcher_interaction_state,
+    patch_with_interaction_state, patcher_state_key, patcher_state_key_from_parts,
+    prune_unreferenced_created_macros, set_connection_segment_edit, set_patcher_interaction_state,
+    set_patcher_interaction_state_without_history,
 };
 use text::{
     apply_patcher_autocomplete, cancel_patcher_text_edit,
@@ -864,7 +864,6 @@ use text::{
 };
 
 use super::text_input::{TextEditOutcome, apply_text_entry_key};
-use text_metrics::cache_text_widths;
 use super::{CellBuffer, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent};
 #[cfg(target_os = "macos")]
 use super::{MetalPrimitive, WidgetViewport};
@@ -874,6 +873,7 @@ use crate::layout::{
 use crate::parser::{ASTParser, Expression, Parser, format_expression};
 use crate::vm::Value;
 use std::time::Instant;
+use text_metrics::cache_text_widths;
 
 pub struct PatcherWidget;
 
@@ -1094,6 +1094,24 @@ impl WidgetDefinition for PatcherWidget {
                         None
                     }
                 }
+                // Cmd+E: encapsulate the selection into a new local defmacro.
+                KeyCode::Char('e') | KeyCode::Char('E')
+                    if key_event
+                        .modifiers
+                        .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL)
+                        && !key_event.modifiers.contains(KeyModifiers::ALT)
+                        && !state.selected_nodes.is_empty()
+                        && state.drag.is_none() =>
+                {
+                    let changed = encapsulate_patcher_selection(node, &mut state, &view_key);
+                    if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                        debug_log_patch_lisp(&view_key, &patch);
+                    }
+                    if changed {
+                        set_patcher_interaction_state(key, state);
+                    }
+                    Some(patcher_semantic_event(changed))
+                }
                 KeyCode::Char('v') | KeyCode::Char('V')
                     if key_event
                         .modifiers
@@ -1201,6 +1219,9 @@ impl WidgetDefinition for PatcherWidget {
                 }
                 KeyCode::Backspace | KeyCode::Delete if !state.selected_nodes.is_empty() => {
                     let changed = delete_selected_nodes(&mut state, &view_key);
+                    if changed {
+                        prune_unreferenced_created_macros(&mut state);
+                    }
                     if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
                         debug_log_patch_lisp(&view_key, &patch);
                     }
@@ -1271,6 +1292,9 @@ impl WidgetDefinition for PatcherWidget {
                 if state.text_edit.is_none() && !state.selected_nodes.is_empty() =>
             {
                 let changed = delete_selected_nodes(&mut state, &view_key);
+                if changed {
+                    prune_unreferenced_created_macros(&mut state);
+                }
                 if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
                     debug_log_patch_lisp(&view_key, &patch);
                 }
@@ -1327,10 +1351,9 @@ impl WidgetDefinition for PatcherWidget {
             .agentic_bubbles
             .values()
             .any(|bubble| matches!(bubble.state, AgenticBubbleState::Pending { .. }))
-            || state
-                .agentic_morph_nodes
-                .values()
-                .any(|started| started.elapsed().as_secs_f32() < 1.2)
+            || state.agentic_morph_nodes.values().any(|morph| {
+                morph.started_at.elapsed().as_secs_f32() < metrics::AGENTIC_MORPH_COLOR_SECS
+            })
     }
 
     fn animation_frame_policy(&self) -> super::AnimationFramePolicy {
@@ -1359,7 +1382,11 @@ fn commit_active_patcher_text_edit(
     state: &mut state::PatcherInteractionState,
     view_key: &str,
 ) -> bool {
-    let Some(committed_node_id) = state.text_edit.as_ref().map(|edit| edit.node_id.clone()) else {
+    let Some((committed_node_id, previous_text)) = state
+        .text_edit
+        .as_ref()
+        .map(|edit| (edit.node_id.clone(), edit.original_text.clone()))
+    else {
         return false;
     };
     let changed = commit_patcher_text_edit(state, view_key);
@@ -1368,7 +1395,17 @@ fn commit_active_patcher_text_edit(
         .is_some_and(|(_, root_patch)| {
             promote_created_macro_definition(&root_patch, state, view_key, &committed_node_id)
         });
-    changed || promoted_macro
+    // Retyping the header of a created macro's instance renames the macro
+    // (that is how an encapsulated `sub1` gets a real name) rather than
+    // leaving a call to an operator that does not exist.
+    let renamed_macro = encapsulate::rename_created_macro_from_instance_text(
+        node,
+        state,
+        view_key,
+        &committed_node_id,
+        &previous_text,
+    );
+    changed || promoted_macro || renamed_macro
 }
 
 fn handle_agentic_bubble_edit_key(
@@ -1737,7 +1774,13 @@ fn defmacro_library_fingerprint(root: &Path) -> u64 {
 /// Library macro entries for the macro sidebar:
 /// (name, params, outputs, summary, imports). `imports` are the package's own
 /// `use-defmacro` dependencies, so the sidebar can nest library call chains.
-pub type MacroLibrarySidebarEntry = (String, Vec<String>, Vec<String>, Option<String>, Vec<String>);
+pub type MacroLibrarySidebarEntry = (
+    String,
+    Vec<String>,
+    Vec<String>,
+    Option<String>,
+    Vec<String>,
+);
 
 pub fn macro_library_sidebar_entries() -> Vec<MacroLibrarySidebarEntry> {
     let Some(root) = crate::defmacro_library::default_library_root() else {
@@ -2832,9 +2875,7 @@ fn patcher_writeback_payload(node: &LayoutNode) -> Value {
                         ("path", Value::String(path_str)),
                         (
                             "diagnostic",
-                            Value::String(format!(
-                                "failed to stage library macro edits: {error}"
-                            )),
+                            Value::String(format!("failed to stage library macro edits: {error}")),
                         ),
                     ]);
                 }
