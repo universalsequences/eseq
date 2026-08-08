@@ -2,6 +2,9 @@ use crate::*;
 
 pub(super) const COMMANDS: &[&str] = &[
     "enter-new-instrument-editor",
+    "enter-fork-instrument-editor",
+    "enter-fork-effect-editor",
+    "fork-editor-session",
     "set-draft-instrument-run-mode",
     "save-active-editor-macro",
     "save-new-instrument",
@@ -179,6 +182,192 @@ pub(super) fn handle(
             editor.handle_host_event(HostEvent::Status(format!(
                 "Created draft instrument track {}",
                 draft_track + 1
+            )));
+        }
+
+        // Fork = the draft flow with a different seed. Everything downstream
+        // (live preview, error gating, name collision refusal, finalize) is the
+        // create flow, so this mirrors `enter-new-instrument-editor` and only
+        // swaps step 2: copy an existing instrument into the draft dir instead
+        // of writing the starter template. See docs/instrument-fork-spec.md.
+        "enter-fork-instrument-editor" => {
+            if ctx.sessions.editor_mode.is_some() || ctx.sessions.instrument_edit_session.is_some()
+            {
+                editor.handle_host_event(HostEvent::Error(
+                    "Close the current editor before forking an instrument".to_string(),
+                ));
+                return;
+            }
+            let Some(source_name) = extract_string_from_payload(&payload, "source") else {
+                editor.handle_host_event(HostEvent::Error(
+                    "Fork request is missing a source instrument".to_string(),
+                ));
+                return;
+            };
+            let source_path = match sequencer::lisp_host::instrument_source_path(&source_name) {
+                Ok(path) => path,
+                Err(error) => {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Instrument '{source_name}' not found: {error}"
+                    )));
+                    return;
+                }
+            };
+            let original_track = current_track.load(Ordering::Relaxed);
+            let temp_dir = match create_new_instrument_draft_dir() {
+                Ok(dir) => dir,
+                Err(error) => {
+                    editor.handle_host_event(HostEvent::Error(error));
+                    return;
+                }
+            };
+            if let Err(error) = sequencer::patch_fork::fork_patch_source(&source_path, &temp_dir) {
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                editor.handle_host_event(HostEvent::Error(format!(
+                    "Failed to fork '{source_name}': {error}"
+                )));
+                return;
+            }
+            let file_path = temp_dir.join("dsp.lisp");
+            let starter_source = match std::fs::read_to_string(&file_path) {
+                Ok(source) => source,
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&temp_dir);
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to read forked instrument source: {error}"
+                    )));
+                    return;
+                }
+            };
+            let run_mode = sequencer::lisp_host::load_instrument_run_mode(&source_name)
+                .unwrap_or(CustomInstrumentRunMode::Instrument);
+
+            let draft_track = match app.add_transient_instrument_track_sync(
+                NEW_INSTRUMENT_DRAFT_NAME,
+                &starter_source,
+                Some(&temp_dir),
+            ) {
+                Ok(track) => track,
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&temp_dir);
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to create forked instrument track: {error}"
+                    )));
+                    return;
+                }
+            };
+            let _ = app.force_instrument_enabled(draft_track);
+            if run_mode != CustomInstrumentRunMode::Instrument {
+                if let Err(error) = app
+                    .graph_controller()
+                    .set_track_instrument_run_mode(draft_track, run_mode)
+                {
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to apply forked instrument mode: {error}"
+                    )));
+                }
+            }
+            sync_after_instrument_track_apply(
+                &mut app,
+                &mut editor,
+                &state,
+                draft_track,
+                &current_track,
+                &mut *ctx.track_names,
+                &track_pan_ids,
+                &record_armed,
+                &selected_steps,
+                &accumulator_names,
+                &ctx.meters.cached_track_peak_levels,
+                &ctx.meters.cached_bus_peak_levels,
+                &ui_epoch,
+                lg_raw,
+            );
+
+            let Some(engine_id) = app
+                .graph
+                .track_engine_ids
+                .get(draft_track)
+                .and_then(|id| *id)
+            else {
+                let _ = app.graph_controller().delete_track(draft_track);
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                editor.handle_host_event(HostEvent::Error(
+                    "Forked instrument track has no engine binding".to_string(),
+                ));
+                return;
+            };
+
+            let buf_name = "*instrument-patcher:new-instrument*".to_string();
+            editor.remove_buffer_by_name(&buf_name);
+            editor.create_scratch_buffer(&buf_name, "", BufferMode::ESeqLisp);
+            let patcher_source = instrument_patcher_buffer_source(&buf_name, &file_path);
+            if let Err(error) = editor.runtime_mut().eval_str(&patcher_source) {
+                let _ = app.graph_controller().delete_track(draft_track);
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                editor.handle_host_event(HostEvent::Error(format!(
+                    "Failed to build patch editor: {error:?}"
+                )));
+                editor.remove_buffer_by_name(&buf_name);
+                return;
+            }
+            reset_instrument_patcher_state(&file_path);
+            let layout_source = show_instrument_patcher_layout_source(&buf_name);
+            if let Err(error) = editor.runtime_mut().eval_str(&layout_source) {
+                let _ = app.graph_controller().delete_track(draft_track);
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                editor.handle_host_event(HostEvent::Error(format!(
+                    "Failed to show patch editor: {error:?}"
+                )));
+                editor.remove_buffer_by_name(&buf_name);
+                return;
+            }
+            ctx.sessions.editor_buffer_name = Some(buf_name.clone());
+            ctx.sessions.editor_mode = Some("new-instrument".to_string());
+            let mut session = InstrumentEditSession::begin_create_draft(
+                NEW_INSTRUMENT_DRAFT_NAME.to_string(),
+                file_path,
+                buf_name.clone(),
+                engine_id,
+                starter_source,
+                temp_dir,
+                draft_track,
+                original_track,
+            );
+            session.run_mode = run_mode;
+            ctx.sessions.instrument_edit_session = Some(session);
+            let rt = editor.runtime_mut();
+            // The name field starts empty on purpose (spec 3.4): a prefilled
+            // `<source>-2` is a default you Enter through, and naming the fork
+            // is the moment you decide what it is.
+            let _ = rt.eval_str("(set! sbrowser-editor-name \"\")");
+            rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
+            rt.set_reactive(
+                "SEQ",
+                "editor-mode",
+                Value::String("new-instrument".to_string()),
+            );
+            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+            rt.set_reactive(
+                "SEQ",
+                "editor-buffer-name",
+                Value::String(buf_name.clone()),
+            );
+            rt.set_reactive(
+                "SEQ",
+                "editor-instrument-run-mode",
+                Value::String(instrument_run_mode_label(run_mode).to_string()),
+            );
+            rt.set_reactive(
+                "SEQ",
+                "editor-surface",
+                Value::String("patch".to_string()),
+            );
+            rt.run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            editor.handle_host_event(HostEvent::Status(format!(
+                "Forked '{}' — name it to finalize",
+                display_instrument_name(&source_name)
             )));
         }
 
@@ -421,10 +610,12 @@ pub(super) fn handle(
                         }
 
                         let source = session.last_valid_source.clone();
-                        let draft_track = match &session.mode {
-                            InstrumentEditMode::CreateDraft { draft_track, .. } => {
-                                *draft_track
-                            }
+                        let (draft_track, draft_temp_dir) = match &session.mode {
+                            InstrumentEditMode::CreateDraft {
+                                draft_track,
+                                temp_dir,
+                                ..
+                            } => (*draft_track, temp_dir.clone()),
                             InstrumentEditMode::EditExisting { .. } => unreachable!(),
                         };
                         if let Err(error) =
@@ -502,12 +693,40 @@ pub(super) fn handle(
                                 return;
                             }
                         }
+                        // Assets a fork carried (ui.lisp, waves/, instrument.json,
+                        // the staged preset bank) live only in the draft dir;
+                        // save_instrument writes dsp.lisp and nothing else. They
+                        // must land before the compile below, which resolves
+                        // `@file "waves/..."` relative to the instrument folder.
+                        if let Err(error) = sequencer::patch_fork::materialize_forked_assets(
+                            &draft_temp_dir,
+                            &final_dir,
+                            &final_name,
+                        ) {
+                            let _ = std::fs::remove_dir_all(&final_dir);
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive(
+                                "SEQ",
+                                "editor-error",
+                                Value::String(format!(
+                                    "Failed to save finalized instrument assets: {error}"
+                                )),
+                            );
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            return;
+                        }
                         if let Err(error) = app.replace_custom_instrument_track_sync(
                             draft_track,
                             &final_name,
                             &source,
                         ) {
                             let _ = std::fs::remove_dir_all(&final_dir);
+                            if let Some(bank) =
+                                sequencer::patch_fork::preset_bank_sibling_path(&final_dir)
+                            {
+                                let _ = std::fs::remove_file(bank);
+                            }
                             let rt = editor.runtime_mut();
                             rt.set_reactive(
                                 "SEQ",
@@ -2059,6 +2278,161 @@ pub(super) fn handle(
             )));
         }
 
+        // Effect parity for `enter-fork-instrument-editor`: mirrors
+        // `enter-new-effect-editor` with the draft dir seeded from effects/<name>.
+        "enter-fork-effect-editor" => {
+            if ctx.sessions.editor_mode.is_some()
+                || ctx.sessions.instrument_edit_session.is_some()
+                || ctx.sessions.effect_edit_session.is_some()
+            {
+                editor.handle_host_event(HostEvent::Error(
+                    "Close the current editor before forking an effect".to_string(),
+                ));
+                return;
+            }
+            let Some(source_name) = extract_string_from_payload(&payload, "source") else {
+                editor.handle_host_event(HostEvent::Error(
+                    "Fork request is missing a source effect".to_string(),
+                ));
+                return;
+            };
+            if app.tracks.is_empty() {
+                editor.handle_host_event(HostEvent::Error(
+                    "No current track is available for a forked effect".to_string(),
+                ));
+                return;
+            }
+            let source_path = sequencer::lisp_host::effect_source_path(&source_name);
+            if !source_path.exists() {
+                editor.handle_host_event(HostEvent::Error(format!(
+                    "Effect '{source_name}' not found at {}",
+                    source_path.display()
+                )));
+                return;
+            }
+            let track = current_track.load(Ordering::Relaxed);
+            app.ui.cursor_track = track;
+            let Some(slot) = app.next_free_custom_slot() else {
+                editor.handle_host_event(HostEvent::Error(
+                    "No free effect slots available".to_string(),
+                ));
+                return;
+            };
+            let temp_dir = match create_new_effect_draft_dir() {
+                Ok(dir) => dir,
+                Err(error) => {
+                    editor.handle_host_event(HostEvent::Error(error));
+                    return;
+                }
+            };
+            if let Err(error) = sequencer::patch_fork::fork_patch_source(&source_path, &temp_dir) {
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                editor.handle_host_event(HostEvent::Error(format!(
+                    "Failed to fork '{source_name}': {error}"
+                )));
+                return;
+            }
+            let file_path = temp_dir.join("dsp.lisp");
+            let starter_source = match std::fs::read_to_string(&file_path) {
+                Ok(source) => source,
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&temp_dir);
+                    editor.handle_host_event(HostEvent::Error(format!(
+                        "Failed to read forked effect source: {error}"
+                    )));
+                    return;
+                }
+            };
+            if let Err(error) = sequencer::lisp_host::compile_and_load_with_origin(
+                &starter_source,
+                app.graph.sample_rate,
+                file_path.parent(),
+                sequencer::lisp_host::DGenSourceOrigin::Draft,
+            )
+            .and_then(|result| {
+                app.apply_compiled_effect_to_slot_sync(
+                    result,
+                    NEW_EFFECT_DRAFT_NAME,
+                    slot,
+                    track,
+                )
+            }) {
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                editor.handle_host_event(HostEvent::Error(format!(
+                    "Failed to create forked effect: {error}"
+                )));
+                return;
+            }
+
+            let buf_name = "*effect-patcher:new-effect*".to_string();
+            editor.remove_buffer_by_name(&buf_name);
+            editor.create_scratch_buffer(&buf_name, "", BufferMode::ESeqLisp);
+            let patcher_source = effect_patcher_buffer_source(&buf_name, &file_path);
+            if let Err(error) = editor.runtime_mut().eval_str(&patcher_source) {
+                let _ = app
+                    .graph_controller()
+                    .delete_custom_effect_slot(track, slot);
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                editor.handle_host_event(HostEvent::Error(format!(
+                    "Failed to build patch editor: {error:?}"
+                )));
+                editor.remove_buffer_by_name(&buf_name);
+                return;
+            }
+            reset_effect_patcher_state(&file_path);
+            let layout_source = show_instrument_patcher_layout_source(&buf_name);
+            if let Err(error) = editor.runtime_mut().eval_str(&layout_source) {
+                let _ = app
+                    .graph_controller()
+                    .delete_custom_effect_slot(track, slot);
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                editor.handle_host_event(HostEvent::Error(format!(
+                    "Failed to show patch editor: {error:?}"
+                )));
+                editor.remove_buffer_by_name(&buf_name);
+                return;
+            }
+            ctx.sessions.editor_buffer_name = Some(buf_name.clone());
+            ctx.sessions.editor_mode = Some("new-effect".to_string());
+            ctx.sessions.effect_edit_session = Some(EffectEditSession::begin_create_draft(
+                NEW_EFFECT_DRAFT_NAME.to_string(),
+                file_path,
+                buf_name.clone(),
+                EffectEditTarget::Track { track, slot },
+                starter_source,
+                temp_dir,
+            ));
+            let rt = editor.runtime_mut();
+            let _ = rt.eval_str("(set! sbrowser-editor-name \"\")");
+            rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
+            rt.set_reactive("SEQ", "editor-mode", Value::String("new-effect".to_string()));
+            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+            rt.set_reactive(
+                "SEQ",
+                "editor-buffer-name",
+                Value::String(buf_name.clone()),
+            );
+            rt.set_reactive("SEQ", "editor-surface", Value::String("patch".to_string()));
+            rt.set_reactive(
+                "SEQ",
+                "effects",
+                build_effects_value(
+                    &state,
+                    track,
+                    &app.graph.effect_descriptors,
+                    &selected_steps,
+                ),
+            );
+            rt.run_reactive_cycle();
+            let _ = rt.eval_str("(sbrowser-refresh-buffer)");
+            editor.refresh_runtime_side_effects();
+            editor.refresh_visible_layouts_for_buffer_named("*samples*");
+            editor.handle_host_event(HostEvent::Status(format!(
+                "Forked effect '{}' — name it to finalize",
+                display_instrument_name(&source_name)
+            )));
+        }
+
         "save-new-effect" => {
             if let Value::Map(ref map) = payload {
                 if let Some(cell) = map.get("name") {
@@ -2205,6 +2579,26 @@ pub(super) fn handle(
                                     "editor-error",
                                     Value::String(format!(
                                         "Failed to save layout: {e}"
+                                    )),
+                                );
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                return;
+                            }
+                        }
+                        if let EffectEditMode::CreateDraft { temp_dir } = &session.mode {
+                            // Forked effects carry ui.lisp and asset dirs that
+                            // save_effect does not write.
+                            if let Err(error) = sequencer::patch_fork::materialize_forked_assets(
+                                temp_dir, &final_dir, &final_name,
+                            ) {
+                                let _ = std::fs::remove_dir_all(&final_dir);
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "editor-error",
+                                    Value::String(format!(
+                                        "Failed to save finalized effect assets: {error}"
                                     )),
                                 );
                                 rt.run_reactive_cycle();
@@ -2612,6 +3006,338 @@ pub(super) fn handle(
             }));
         }
 
+        // In-editor Fork (spec §3.5): you started editing in place and now want
+        // out without discarding your work. Copies the *in-editor* source — not
+        // the on-disk source — into a fresh draft dir, converts the session from
+        // EditExisting to CreateDraft, and flips SEQ.editor-mode so the create
+        // flow's (empty) name field appears and the primary button becomes
+        // Finalize. The original on disk is never written.
+        "fork-editor-session" => {
+            enum ForkKind {
+                Instrument,
+                Effect,
+            }
+            let kind = if let Some(session) = ctx.sessions.instrument_edit_session.as_ref() {
+                if !matches!(session.mode, InstrumentEditMode::EditExisting { .. }) {
+                    editor.handle_host_event(HostEvent::Status(
+                        "This editor is already a draft — name it and Finalize".to_string(),
+                    ));
+                    return;
+                }
+                ForkKind::Instrument
+            } else if let Some(session) = ctx.sessions.effect_edit_session.as_ref() {
+                if !matches!(session.mode, EffectEditMode::EditExisting { .. }) {
+                    editor.handle_host_event(HostEvent::Status(
+                        "This editor is already a draft — name it and Finalize".to_string(),
+                    ));
+                    return;
+                }
+                ForkKind::Effect
+            } else {
+                editor.handle_host_event(HostEvent::Error(
+                    "No patch editor session is active".to_string(),
+                ));
+                return;
+            };
+
+            match kind {
+                ForkKind::Instrument => {
+                    let session = ctx
+                        .sessions
+                        .instrument_edit_session
+                        .as_ref()
+                        .expect("checked above");
+                    let origin_path = session.path.clone();
+                    let origin_buffer = session.buffer_name.clone();
+                    let surface = session.surface;
+                    let layout = session.last_valid_layout.clone();
+                    let persisted_source = match &session.mode {
+                        InstrumentEditMode::EditExisting { persisted_source } => {
+                            persisted_source.clone()
+                        }
+                        InstrumentEditMode::CreateDraft { .. } => unreachable!(),
+                    };
+                    let in_editor_source = if surface == EditorSurface::Code {
+                        match editor.read_buffer_text(&origin_buffer) {
+                            Some(text) => text,
+                            None => {
+                                editor.handle_host_event(HostEvent::Error(format!(
+                                    "Code buffer '{origin_buffer}' is missing"
+                                )));
+                                return;
+                            }
+                        }
+                    } else {
+                        session.last_valid_source.clone()
+                    };
+                    let track = session.track;
+
+                    let temp_dir = match create_new_instrument_draft_dir() {
+                        Ok(dir) => dir,
+                        Err(error) => {
+                            editor.handle_host_event(HostEvent::Error(error));
+                            return;
+                        }
+                    };
+                    if let Err(error) =
+                        sequencer::patch_fork::fork_patch_source(&origin_path, &temp_dir)
+                    {
+                        let _ = std::fs::remove_dir_all(&temp_dir);
+                        editor.handle_host_event(HostEvent::Error(format!(
+                            "Failed to fork editor session: {error}"
+                        )));
+                        return;
+                    }
+                    let file_path = temp_dir.join("dsp.lisp");
+                    if let Err(error) = std::fs::write(&file_path, &in_editor_source) {
+                        let _ = std::fs::remove_dir_all(&temp_dir);
+                        editor.handle_host_event(HostEvent::Error(format!(
+                            "Failed to seed forked draft: {error}"
+                        )));
+                        return;
+                    }
+                    if let Some(layout) = layout.as_deref() {
+                        if let Err(error) = write_patcher_layout_sidecar(&file_path, layout) {
+                            let _ = std::fs::remove_dir_all(&temp_dir);
+                            editor.handle_host_event(HostEvent::Error(format!(
+                                "Failed to seed forked layout: {error}"
+                            )));
+                            return;
+                        }
+                    }
+
+                    // Rebind the editor surface onto the draft path so every
+                    // subsequent patcher write lands in the temp dir, never on
+                    // the original.
+                    reset_instrument_patcher_state(&origin_path);
+                    let buf_name = match surface {
+                        EditorSurface::Patch => "*instrument-patcher:new-instrument*".to_string(),
+                        EditorSurface::Code => {
+                            instrument_code_buffer_name(NEW_INSTRUMENT_DRAFT_NAME)
+                        }
+                    };
+                    editor.remove_buffer_by_name(&buf_name);
+                    match surface {
+                        EditorSurface::Patch => {
+                            editor.create_scratch_buffer(&buf_name, "", BufferMode::ESeqLisp);
+                            let patcher_source =
+                                instrument_patcher_buffer_source(&buf_name, &file_path);
+                            if let Err(error) = editor.runtime_mut().eval_str(&patcher_source) {
+                                let _ = std::fs::remove_dir_all(&temp_dir);
+                                editor.remove_buffer_by_name(&buf_name);
+                                editor.handle_host_event(HostEvent::Error(format!(
+                                    "Failed to rebuild patch editor for the fork: {error:?}"
+                                )));
+                                return;
+                            }
+                            reset_instrument_patcher_state(&file_path);
+                        }
+                        EditorSurface::Code => {
+                            editor.create_scratch_buffer(
+                                &buf_name,
+                                &in_editor_source,
+                                BufferMode::DGenLisp,
+                            );
+                        }
+                    }
+                    let layout_source = show_instrument_patcher_layout_source(&buf_name);
+                    if let Err(error) = editor.runtime_mut().eval_str(&layout_source) {
+                        let _ = std::fs::remove_dir_all(&temp_dir);
+                        editor.remove_buffer_by_name(&buf_name);
+                        editor.handle_host_event(HostEvent::Error(format!(
+                            "Failed to show forked patch editor: {error:?}"
+                        )));
+                        return;
+                    }
+                    if origin_buffer != buf_name {
+                        editor.remove_buffer_by_name(&origin_buffer);
+                    }
+
+                    let session = ctx
+                        .sessions
+                        .instrument_edit_session
+                        .as_mut()
+                        .expect("checked above");
+                    session.path = file_path;
+                    session.buffer_name = buf_name.clone();
+                    session.last_valid_source = in_editor_source;
+                    session.last_valid_layout = layout;
+                    session.visible_revision_valid = true;
+                    session.mode = InstrumentEditMode::CreateDraft {
+                        temp_dir,
+                        draft_track: track,
+                        original_track: track,
+                    };
+                    session.fork_restore = Some(ForkRestore {
+                        origin_path,
+                        persisted_source,
+                    });
+                    let origin_display = display_instrument_name(&session.name);
+
+                    ctx.sessions.editor_buffer_name = Some(buf_name.clone());
+                    ctx.sessions.editor_mode = Some("new-instrument".to_string());
+                    let rt = editor.runtime_mut();
+                    // Empty on purpose — see spec §3.4.
+                    let _ = rt.eval_str("(set! sbrowser-editor-name \"\")");
+                    rt.set_reactive(
+                        "SEQ",
+                        "editor-mode",
+                        Value::String("new-instrument".to_string()),
+                    );
+                    rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                    rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
+                    rt.run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "Forked '{origin_display}' — name it to finalize; the original is untouched"
+                    )));
+                }
+                ForkKind::Effect => {
+                    let session = ctx
+                        .sessions
+                        .effect_edit_session
+                        .as_ref()
+                        .expect("checked above");
+                    if matches!(session.target, EffectEditTarget::Bus { .. }) {
+                        editor.handle_host_event(HostEvent::Error(
+                            "Bus effects cannot be forked yet — finalize only targets track slots"
+                                .to_string(),
+                        ));
+                        return;
+                    }
+                    let origin_path = session.path.clone();
+                    let origin_buffer = session.buffer_name.clone();
+                    let surface = session.surface;
+                    let layout = session.last_valid_layout.clone();
+                    let persisted_source = match &session.mode {
+                        EffectEditMode::EditExisting { persisted_source } => {
+                            persisted_source.clone()
+                        }
+                        EffectEditMode::CreateDraft { .. } => unreachable!(),
+                    };
+                    let in_editor_source = if surface == EditorSurface::Code {
+                        match editor.read_buffer_text(&origin_buffer) {
+                            Some(text) => text,
+                            None => {
+                                editor.handle_host_event(HostEvent::Error(format!(
+                                    "Code buffer '{origin_buffer}' is missing"
+                                )));
+                                return;
+                            }
+                        }
+                    } else {
+                        session.last_valid_source.clone()
+                    };
+
+                    let temp_dir = match create_new_effect_draft_dir() {
+                        Ok(dir) => dir,
+                        Err(error) => {
+                            editor.handle_host_event(HostEvent::Error(error));
+                            return;
+                        }
+                    };
+                    if let Err(error) =
+                        sequencer::patch_fork::fork_patch_source(&origin_path, &temp_dir)
+                    {
+                        let _ = std::fs::remove_dir_all(&temp_dir);
+                        editor.handle_host_event(HostEvent::Error(format!(
+                            "Failed to fork editor session: {error}"
+                        )));
+                        return;
+                    }
+                    let file_path = temp_dir.join("dsp.lisp");
+                    if let Err(error) = std::fs::write(&file_path, &in_editor_source) {
+                        let _ = std::fs::remove_dir_all(&temp_dir);
+                        editor.handle_host_event(HostEvent::Error(format!(
+                            "Failed to seed forked draft: {error}"
+                        )));
+                        return;
+                    }
+                    if let Some(layout) = layout.as_deref() {
+                        if let Err(error) = write_patcher_layout_sidecar(&file_path, layout) {
+                            let _ = std::fs::remove_dir_all(&temp_dir);
+                            editor.handle_host_event(HostEvent::Error(format!(
+                                "Failed to seed forked layout: {error}"
+                            )));
+                            return;
+                        }
+                    }
+
+                    reset_effect_patcher_state(&origin_path);
+                    let buf_name = match surface {
+                        EditorSurface::Patch => "*effect-patcher:new-effect*".to_string(),
+                        EditorSurface::Code => effect_code_buffer_name(NEW_EFFECT_DRAFT_NAME),
+                    };
+                    editor.remove_buffer_by_name(&buf_name);
+                    match surface {
+                        EditorSurface::Patch => {
+                            editor.create_scratch_buffer(&buf_name, "", BufferMode::ESeqLisp);
+                            let patcher_source =
+                                effect_patcher_buffer_source(&buf_name, &file_path);
+                            if let Err(error) = editor.runtime_mut().eval_str(&patcher_source) {
+                                let _ = std::fs::remove_dir_all(&temp_dir);
+                                editor.remove_buffer_by_name(&buf_name);
+                                editor.handle_host_event(HostEvent::Error(format!(
+                                    "Failed to rebuild patch editor for the fork: {error:?}"
+                                )));
+                                return;
+                            }
+                            reset_effect_patcher_state(&file_path);
+                        }
+                        EditorSurface::Code => {
+                            editor.create_scratch_buffer(
+                                &buf_name,
+                                &in_editor_source,
+                                BufferMode::DGenLisp,
+                            );
+                        }
+                    }
+                    let layout_source = show_instrument_patcher_layout_source(&buf_name);
+                    if let Err(error) = editor.runtime_mut().eval_str(&layout_source) {
+                        let _ = std::fs::remove_dir_all(&temp_dir);
+                        editor.remove_buffer_by_name(&buf_name);
+                        editor.handle_host_event(HostEvent::Error(format!(
+                            "Failed to show forked patch editor: {error:?}"
+                        )));
+                        return;
+                    }
+                    if origin_buffer != buf_name {
+                        editor.remove_buffer_by_name(&origin_buffer);
+                    }
+
+                    let session = ctx
+                        .sessions
+                        .effect_edit_session
+                        .as_mut()
+                        .expect("checked above");
+                    session.path = file_path;
+                    session.buffer_name = buf_name.clone();
+                    session.last_valid_source = in_editor_source;
+                    session.last_valid_layout = layout;
+                    session.visible_revision_valid = true;
+                    session.mode = EffectEditMode::CreateDraft { temp_dir };
+                    session.fork_restore = Some(ForkRestore {
+                        origin_path,
+                        persisted_source,
+                    });
+                    let origin_display = display_instrument_name(&session.name);
+
+                    ctx.sessions.editor_buffer_name = Some(buf_name.clone());
+                    ctx.sessions.editor_mode = Some("new-effect".to_string());
+                    let rt = editor.runtime_mut();
+                    let _ = rt.eval_str("(set! sbrowser-editor-name \"\")");
+                    rt.set_reactive("SEQ", "editor-mode", Value::String("new-effect".to_string()));
+                    rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                    rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
+                    rt.run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "Forked '{origin_display}' — name it to finalize; the original is untouched"
+                    )));
+                }
+            }
+        }
+
         "cancel-editor" => {
             if ctx.sessions.pending_instrument_cancel_restore.is_some()
                 || ctx.sessions.pending_effect_cancel_restore.is_some()
@@ -2661,6 +3387,46 @@ pub(super) fn handle(
                         draft_track,
                         original_track,
                     } => {
+                        // A draft produced by forking a live edit session sits on
+                        // a REAL track. Deleting it would take the user's track
+                        // with it; restore the original instrument instead.
+                        if let Some(restore) = session.fork_restore.clone() {
+                            let _ = std::fs::remove_dir_all(&temp_dir);
+                            let source = restore.persisted_source.clone();
+                            let sample_rate = app.graph.sample_rate;
+                            let asset_base = restore
+                                .origin_path
+                                .parent()
+                                .map(|parent| parent.to_path_buf());
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            std::thread::spawn(move || {
+                                let result = sequencer::lisp_host::compile_and_load_instrument_with_asset_base(
+                                    &source,
+                                    sample_rate,
+                                    asset_base.as_deref(),
+                                );
+                                let _ = tx.send(result);
+                            });
+                            let mut session = session;
+                            session.path = restore.origin_path;
+                            ctx.sessions.pending_instrument_cancel_restore =
+                                Some(PendingInstrumentCancelRestore {
+                                    session,
+                                    persisted_source: restore.persisted_source,
+                                    receiver: rx,
+                                });
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive("SEQ", "editor-canceling", Value::Bool(true));
+                            rt.set_reactive(
+                                "SEQ",
+                                "editor-error",
+                                Value::String(String::new()),
+                            );
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            editor.mark_needs_redraw();
+                            return;
+                        }
                         let delete_result = if app.tracks.len() > 1 {
                             app.graph_controller().delete_track(draft_track)
                         } else {
@@ -2755,6 +3521,46 @@ pub(super) fn handle(
                         return;
                     }
                     EffectEditMode::CreateDraft { temp_dir } => {
+                        // Same asymmetry as instruments: a forked draft occupies
+                        // the slot the original effect was in, so cancel restores
+                        // the original rather than deleting the slot.
+                        if let Some(restore) = session.fork_restore.clone() {
+                            let _ = std::fs::remove_dir_all(&temp_dir);
+                            let source = restore.persisted_source.clone();
+                            let sample_rate = app.graph.sample_rate;
+                            let asset_base = restore
+                                .origin_path
+                                .parent()
+                                .map(|parent| parent.to_path_buf());
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            std::thread::spawn(move || {
+                                let result =
+                                    sequencer::lisp_host::compile_and_load_with_asset_base(
+                                        &source,
+                                        sample_rate,
+                                        asset_base.as_deref(),
+                                    );
+                                let _ = tx.send(result);
+                            });
+                            let mut session = session;
+                            session.path = restore.origin_path;
+                            ctx.sessions.pending_effect_cancel_restore =
+                                Some(PendingEffectCancelRestore {
+                                    session,
+                                    receiver: rx,
+                                });
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive("SEQ", "editor-canceling", Value::Bool(true));
+                            rt.set_reactive(
+                                "SEQ",
+                                "editor-error",
+                                Value::String(String::new()),
+                            );
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            editor.mark_needs_redraw();
+                            return;
+                        }
                         if let EffectEditTarget::Track { track, slot } = session.target
                         {
                             match app

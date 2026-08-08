@@ -66,6 +66,19 @@ pub(super) fn editor_surface_label(surface: EditorSurface) -> &'static str {
     }
 }
 
+/// What an in-editor Fork (`fork-editor-session`) has to be able to undo.
+///
+/// Forking mid-edit converts an `EditExisting` session into a `CreateDraft`
+/// one *on the live track*, so the usual "cancel a draft = delete the draft
+/// track / effect slot" is wrong: the track is real and was playing the
+/// original before the fork. Cancel restores that original instead.
+#[derive(Debug, Clone)]
+pub(super) struct ForkRestore {
+    /// The source the editor was opened over, used as the compile asset base.
+    pub(super) origin_path: PathBuf,
+    pub(super) persisted_source: String,
+}
+
 #[derive(Debug, Clone)]
 pub(super) enum InstrumentEditMode {
     EditExisting {
@@ -92,6 +105,8 @@ pub(super) struct InstrumentEditSession {
     pub(super) run_mode: CustomInstrumentRunMode,
     pub(super) surface: EditorSurface,
     pub(super) mode: InstrumentEditMode,
+    /// `Some` only for drafts produced by forking a live edit session.
+    pub(super) fork_restore: Option<ForkRestore>,
 }
 
 impl InstrumentEditSession {
@@ -118,6 +133,7 @@ impl InstrumentEditSession {
             run_mode,
             surface,
             mode: InstrumentEditMode::EditExisting { persisted_source },
+            fork_restore: None,
         }
     }
 
@@ -148,6 +164,7 @@ impl InstrumentEditSession {
                 draft_track,
                 original_track,
             },
+            fork_restore: None,
         }
     }
 }
@@ -357,6 +374,8 @@ pub(super) struct EffectEditSession {
     pub(super) preview_generation: u64,
     pub(super) surface: EditorSurface,
     pub(super) mode: EffectEditMode,
+    /// `Some` only for drafts produced by forking a live edit session.
+    pub(super) fork_restore: Option<ForkRestore>,
 }
 
 impl EffectEditSession {
@@ -379,6 +398,7 @@ impl EffectEditSession {
             preview_generation: 0,
             surface,
             mode: EffectEditMode::EditExisting { persisted_source },
+            fork_restore: None,
         }
     }
 
@@ -401,6 +421,7 @@ impl EffectEditSession {
             preview_generation: 0,
             surface: EditorSurface::Patch,
             mode: EffectEditMode::CreateDraft { temp_dir },
+            fork_restore: None,
         }
     }
 }

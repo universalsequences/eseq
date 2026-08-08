@@ -2944,6 +2944,173 @@
         }
     }
 
+    /// Fork belongs next to the finalize button exactly when the primary
+    /// button overwrites a shared definition (docs/instrument-fork-spec.md
+    /// §3.5), and nowhere else.
+    #[test]
+    fn metal_seq_browser_edit_modes_offer_fork_next_to_save() {
+        for mode in ["edit-instrument", "edit-effect"] {
+            let mut editor = browser_editor_on_instrument_tab();
+            editor
+                .runtime_mut()
+                .set_reactive("SEQ", "editor-active", Value::Bool(true));
+            editor
+                .runtime_mut()
+                .set_reactive("SEQ", "editor-mode", Value::String(mode.to_string()));
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let tree = editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == "*samples*")
+                .expect("browser lisp should create the *samples* buffer")
+                .widget_tree
+                .as_ref()
+                .expect("browser widget tree")
+                .clone();
+            assert!(
+                value_contains_string(&tree, "Fork"),
+                "{mode} should offer Fork beside the clobbering Save button"
+            );
+            assert!(value_contains_string(&tree, "Save"));
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_new_instrument_editor_has_nothing_to_fork() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "editor-active", Value::Bool(true));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "editor-mode",
+            Value::String("new-instrument".to_string()),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let tree = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer")
+            .widget_tree
+            .as_ref()
+            .expect("browser widget tree")
+            .clone();
+        assert!(
+            !value_contains_string(&tree, "Fork"),
+            "a draft has no source to fork from"
+        );
+        assert!(value_contains_string(&tree, "Finalize"));
+    }
+
+    #[test]
+    fn metal_seq_browser_fork_selected_instrument_queues_host_command() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-selected-instrument-name \"core/triton\")")
+            .expect("seed selected instrument");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-editor-name \"leftover\")")
+            .expect("seed stale editor name");
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-fork-selected-instrument)")
+            .expect("invoke fork action");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "enter-fork-instrument-editor");
+                match payload {
+                    Value::Map(map) => {
+                        let source = map.get("source").expect("source key");
+                        assert_eq!(
+                            &*source.borrow(),
+                            &Value::String("core/triton".to_string())
+                        );
+                    }
+                    other => panic!("expected a map payload, got {other:?}"),
+                }
+            }
+            other => panic!("expected enter-fork-instrument-editor, got {other:?}"),
+        }
+        // Spec §3.4: the name field starts empty; no `<source>-2` prefill.
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-editor-name")
+                .expect("read editor name"),
+            Some(Value::String(String::new()))
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_fork_effect_requires_a_custom_effect_selection() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-fork-selected-audio-effect)")
+            .expect("invoke fork action with nothing selected");
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "forking with no selection must not enter an editor"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-selected-audio-effect-name \"lexilush\")")
+            .expect("seed selected effect");
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-fork-selected-audio-effect)")
+            .expect("invoke fork action");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, .. } => {
+                assert_eq!(name, "enter-fork-effect-editor");
+            }
+            other => panic!("expected enter-fork-effect-editor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_effect_selection_only_tracks_custom_effects() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(sbrowser-select-audio-effect (dict :kind \"custom-audio-effect\" :name \"lexilush\" :label \"lexilush\"))",
+            )
+            .expect("select a custom effect");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-selected-audio-effect-name")
+                .expect("read selection"),
+            Some(Value::String("lexilush".to_string()))
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(sbrowser-select-audio-effect (dict :kind \"builtin-audio-effect\" :name \"reverb\" :label \"Reverb\"))",
+            )
+            .expect("select a builtin effect");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-selected-audio-effect-name")
+                .expect("read selection"),
+            Some(Value::String(String::new())),
+            "builtins are Rust and have no dsp.lisp to fork"
+        );
+    }
+
     #[test]
     fn metal_seq_browser_editor_macro_action_replaces_finalize_controls() {
         let mut editor = browser_editor_on_instrument_tab();

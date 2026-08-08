@@ -56,6 +56,7 @@ pub mod lisp_host;
 pub mod macro_engine;
 pub mod mixer_volume;
 pub mod neural;
+pub mod patch_fork;
 pub mod paths;
 pub mod plock_variants;
 pub mod project;

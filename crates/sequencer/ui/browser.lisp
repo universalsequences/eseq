@@ -16,6 +16,11 @@
 (defstate sbrowser-selected-tags (list))
 (defstate sbrowser-auditioned-sample "")
 (defstate sbrowser-loading-instrument-name "")
+;; Last instrument / custom effect highlighted in the browser tree. Fork acts on
+;; it — the tree widget has no context menu, so the action lives in the panel
+;; toolbar instead (docs/instrument-fork-spec.md §3.5).
+(defstate sbrowser-selected-instrument-name "")
+(defstate sbrowser-selected-audio-effect-name "")
 
 ;; Editor state for inline instrument/effect creation
 (def sbrowser-editor-name (state ""))
@@ -457,11 +462,23 @@
 
 (def sbrowser-select-audio-effect (item)
   (let ((kind (get item :kind)) (label (get item :label)))
-    (if (= kind "header")
-      false
-      (if (or (= kind "builtin-audio-effect") (= kind "custom-audio-effect"))
-        (status (str label))
-        (status "Choose an effect")))))
+    (do
+      ;; Only custom (dsp.lisp-backed) effects can be forked; builtins are Rust.
+      (set! sbrowser-selected-audio-effect-name
+        (if (= kind "custom-audio-effect") (get item :name) ""))
+      (if (= kind "header")
+        false
+        (if (or (= kind "builtin-audio-effect") (= kind "custom-audio-effect"))
+          (status (str label))
+          (status "Choose an effect"))))))
+
+(def sbrowser-fork-selected-audio-effect ()
+  (if (= sbrowser-selected-audio-effect-name "")
+    (status "Select a custom effect to fork")
+    (do
+      (set! sbrowser-editor-name "")
+      (host-command "enter-fork-effect-editor"
+        (dict :source sbrowser-selected-audio-effect-name)))))
 
 (def sbrowser-enter-new-effect-editor ()
   (set! sbrowser-editor-name "")
@@ -707,13 +724,24 @@
 
 (def sbrowser-focus-create-item (item)
   (let ((kind (get item :kind)))
-    (if (= kind "header")
-      false
-      (if (or (= kind "instrument") (= kind "builtin-instrument"))
-        (status (str (get item :label)))
-        (if (= kind "folder")
-          (status (str "Folder: " (get item :label)))
-          (status "Choose an instrument"))))))
+    (do
+      (set! sbrowser-selected-instrument-name
+        (if (= kind "instrument") (get item :name) ""))
+      (if (= kind "header")
+        false
+        (if (or (= kind "instrument") (= kind "builtin-instrument"))
+          (status (str (get item :label)))
+          (if (= kind "folder")
+            (status (str "Folder: " (get item :label)))
+            (status "Choose an instrument")))))))
+
+(def sbrowser-fork-selected-instrument ()
+  (if (= sbrowser-selected-instrument-name "")
+    (status "Select a saved instrument to fork")
+    (do
+      (set! sbrowser-editor-name "")
+      (host-command "enter-fork-instrument-editor"
+        (dict :source sbrowser-selected-instrument-name)))))
 
 (def sbrowser-drop-instrument-on-folder (event)
   (let ((payload (get event :payload))
@@ -874,8 +902,23 @@
                 :on-activate (lambda (item) (sbrowser-activate-sample item))
                 :on-modified-activate (lambda (item) (sbrowser-modified-activate-sample item))))))))))
 
+(def sbrowser-instruments-toolbar ()
+  (box :width :fill :padding 0.25
+    (h-stack :width :fill :gap 0.5 :align :center
+      (button
+        (if (= sbrowser-selected-instrument-name "")
+          "Fork…"
+          (str "Fork " sbrowser-selected-instrument-name))
+        :variant :secondary
+        :flex 1
+        :height 1.3
+        :font-size 10.5
+        :on-click |x y r| (sbrowser-fork-selected-instrument)
+        :color :white))))
+
 (def sbrowser-instruments-panel ()
   (v-stack :key "instrument-tab-panel" :width :fill :gap 0.5 :flex 1
+    (sbrowser-instruments-toolbar)
     (sbrowser-instrument-loading-row)
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (scroll :key "instruments-tab-scroll" :width :fill :flex 1
@@ -902,6 +945,16 @@
         :height 1.3
         :font-size 10.5
         :on-click |x y r| (sbrowser-enter-new-effect-editor)
+        :color :white)
+      (button
+        (if (= sbrowser-selected-audio-effect-name "")
+          "Fork…"
+          (str "Fork " sbrowser-selected-audio-effect-name))
+        :variant :secondary
+        :flex 1
+        :height 1.3
+        :font-size 10.5
+        :on-click |x y r| (sbrowser-fork-selected-audio-effect)
         :color :white))))
 
 (def sbrowser-audio-fx-panel ()
@@ -1189,6 +1242,15 @@
     "Fork Macro"
     "Save Macro to Library"))
 
+;; Fork is offered exactly when the primary button means "overwrite the shared
+;; definition" — i.e. edit-instrument / edit-effect. It has nothing to fork from
+;; in the new-* draft modes, and hides behind the macro action like everything
+;; else in that stack.
+(def sbrowser-editor-fork-available? ()
+  (and (not (sbrowser-editor-macro-action?))
+       (or (= SEQ.editor-mode "edit-instrument")
+           (= SEQ.editor-mode "edit-effect"))))
+
 (def sbrowser-editor-header ()
   (box :width :fill :padding 0.25
     (v-stack :width :fill :gap 0.4
@@ -1357,6 +1419,18 @@
                     (host-command "save-new-effect" (dict :name sbrowser-editor-name))
                     (host-command "update-effect" (dict))))))
             :color :white)
+          ;; Fork sits next to the clobbering path on purpose: in edit modes the
+          ;; primary button overwrites an instrument every project shares, and
+          ;; the safe alternative should not require leaving the buffer.
+          (if (sbrowser-editor-fork-available?)
+            (button "Fork"
+              :variant :secondary
+              :width 6
+              :height 1.2
+              :font-size 11
+              :on-click |x y r| (host-command "fork-editor-session" (dict))
+              :color :white)
+            (box))
           (box :bg :dark-gray :width 6 :height 1.5 :align :center
             :on-click |x y r|
             (if SEQ.editor-canceling nil (host-command "cancel-editor" (dict)))
