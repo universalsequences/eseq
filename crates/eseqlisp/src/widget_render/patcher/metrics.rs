@@ -22,6 +22,23 @@ pub(super) const NODE_FONT_SIZE: f32 = 16.0;
 /// node's rounded chrome over the shape window, then the "just materialized"
 /// border tint settles back to the resting border over the colour window.
 pub(super) const AGENTIC_MORPH_SHAPE_SECS: f32 = 0.28;
+/// Grow-in for a freshly opened cmd+k bubble: it scales up from
+/// `AGENTIC_APPEAR_START_SCALE`, fades in, and squares off from a rounded start
+/// — the mirror of the rounding it does on completion.
+pub(super) const AGENTIC_APPEAR_SECS: f32 = 0.18;
+pub(super) const AGENTIC_APPEAR_START_SCALE: f32 = 0.72;
+pub(super) const AGENTIC_APPEAR_START_RADIUS_PX: f32 = 14.0;
+/// Prompt text and cursor are held back until the box has essentially formed.
+/// Fading them instead would rekey the proportional-text vertex cache on every
+/// animation frame, since the run's colour is part of that cache key.
+pub(super) const AGENTIC_APPEAR_TEXT_AT: f32 = 0.55;
+/// Escape plays the grow-in backwards, a little quicker than it opened.
+pub(super) const AGENTIC_CLOSE_SECS: f32 = 0.14;
+/// An answer arrives in a much wider, taller box than the pending spinner it
+/// replaces, so the box eases between the two layouts instead of jumping. The
+/// answer text waits for the box to be mostly grown or it would overflow it.
+pub(super) const AGENTIC_ANSWER_RESIZE_SECS: f32 = 0.28;
+pub(super) const AGENTIC_ANSWER_TEXT_AT: f32 = 0.6;
 pub(super) const AGENTIC_MORPH_COLOR_SECS: f32 = 0.6;
 pub(super) const CODE_NODE_FONT_SIZE: f32 = 11.0;
 pub(super) const NODE_TEXT_COL_OFFSET: f32 = 0.92;
@@ -33,6 +50,9 @@ pub(super) const PORT_EDGE_PADDING_CELLS: f32 = 2.15;
 pub(super) const CABLE_TARGET_RADIUS_CELLS: f32 = 2.25;
 pub(super) const CABLE_HIT_RADIUS_CELLS: f32 = 0.4;
 pub(super) const CABLE_HANDLE_DISTANCE_CELLS: f32 = 1.15;
+/// Upper bound on the handle inset as a fraction of the cable's span, so both
+/// handles stay on their own half of a short cable.
+pub(super) const CABLE_HANDLE_MAX_SPAN_FRACTION: f32 = 0.35;
 pub(super) const CABLE_HANDLE_HIT_RADIUS_CELLS: f32 = 0.9;
 pub(super) const CABLE_HANDLE_RADIUS_PX: f32 = 13.0;
 pub(super) const SEGMENTED_CABLE_CORNER_RADIUS_CELLS: f32 = 0.72;

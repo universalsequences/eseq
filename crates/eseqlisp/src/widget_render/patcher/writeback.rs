@@ -5,8 +5,9 @@ use crate::parser::{ASTParser, Expression, Parser, format_expression};
 
 use super::display::{node_display_input_slots, node_display_label};
 use super::lisp::{
-    node_kind_for_op, parse_patch_source, parse_patch_source_with_library, positional_args,
-    symbol_at,
+    attribute_item_mask, attribute_span_len, is_attribute_key, node_kind_for_op,
+    normalize_editor_node_text, parse_patch_source, parse_patch_source_with_library,
+    positional_args, symbol_at,
 };
 use super::model::{
     ArgValue, BindingId, BindingKind, BindingTarget, ExprPathSegment, InputPortRef, NodeKind,
@@ -2152,10 +2153,9 @@ fn collect_generated_symbol_dependencies(
             }
         }
         Expression::List(items) | Expression::QuoteList(items) => {
+            let attribute_items = attribute_item_mask(items);
             for (idx, item) in items.iter().enumerate() {
-                if matches!(item, Expression::Symbol(symbol) if symbol.starts_with('@'))
-                    || matches!(items.get(idx.saturating_sub(1)), Some(Expression::Symbol(symbol)) if symbol.starts_with('@'))
-                {
+                if attribute_items[idx] {
                     continue;
                 }
                 collect_generated_symbol_dependencies(item, generated_name_to_order, out);
@@ -2812,12 +2812,10 @@ fn normalize_created_node_inline_args(
     let mut attributes = Vec::new();
     let mut idx = 1usize;
     while idx < items.len() {
-        if matches!(&items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
-            attributes.push(items[idx].clone());
-            if let Some(value) = items.get(idx + 1) {
-                attributes.push(value.clone());
-            }
-            idx += 2;
+        if is_attribute_key(&items[idx]) {
+            let span = attribute_span_len(items, idx);
+            attributes.extend_from_slice(&items[idx..items.len().min(idx + span)]);
+            idx += span;
         } else {
             idx += 1;
         }
@@ -3503,17 +3501,16 @@ fn expression_source_dependency_index(
 ) -> usize {
     match expr {
         Expression::Symbol(symbol) => source_bindings.get(symbol.as_str()).copied().unwrap_or(0),
-        Expression::List(items) => items
-            .iter()
-            .enumerate()
-            .filter(|(idx, item)| {
-                *idx != 0
-                    && !matches!(item, Expression::Symbol(symbol) if symbol.starts_with('@'))
-                    && !matches!(items.get(idx.saturating_sub(1)), Some(Expression::Symbol(symbol)) if symbol.starts_with('@'))
-            })
-            .map(|(_, item)| expression_source_dependency_index(item, source_bindings))
-            .max()
-            .unwrap_or(0),
+        Expression::List(items) => {
+            let attribute_items = attribute_item_mask(items);
+            items
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| *idx != 0 && !attribute_items[*idx])
+                .map(|(_, item)| expression_source_dependency_index(item, source_bindings))
+                .max()
+                .unwrap_or(0)
+        }
         _ => 0,
     }
 }
@@ -5448,12 +5445,10 @@ fn required_input_count_for_existing_node_edit(
 fn append_original_attributes(original_items: &[Expression], merged: &mut Vec<Expression>) {
     let mut idx = 1usize;
     while idx < original_items.len() {
-        if matches!(&original_items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
-            merged.push(original_items[idx].clone());
-            if let Some(value) = original_items.get(idx + 1) {
-                merged.push(value.clone());
-            }
-            idx += 2;
+        if is_attribute_key(&original_items[idx]) {
+            let span = attribute_span_len(original_items, idx);
+            merged.extend_from_slice(&original_items[idx..original_items.len().min(idx + span)]);
+            idx += span;
         } else {
             idx += 1;
         }
@@ -5464,16 +5459,15 @@ fn append_missing_original_attributes(original_items: &[Expression], merged: &mu
     let existing = attribute_keys(merged);
     let mut idx = 1usize;
     while idx < original_items.len() {
-        if matches!(&original_items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
+        if is_attribute_key(&original_items[idx]) {
+            let span = attribute_span_len(original_items, idx);
             if let Expression::Symbol(symbol) = &original_items[idx]
                 && !existing.contains(symbol)
             {
-                merged.push(original_items[idx].clone());
-                if let Some(value) = original_items.get(idx + 1) {
-                    merged.push(value.clone());
-                }
+                merged
+                    .extend_from_slice(&original_items[idx..original_items.len().min(idx + span)]);
             }
-            idx += 2;
+            idx += span;
         } else {
             idx += 1;
         }
@@ -5488,7 +5482,7 @@ fn attribute_keys(items: &[Expression]) -> HashSet<String> {
             && symbol.starts_with('@')
         {
             keys.insert(symbol.clone());
-            idx += 2;
+            idx += attribute_span_len(items, idx);
             continue;
         }
         idx += 1;
@@ -5593,7 +5587,7 @@ fn node_display_omits_first_input(node: &PatchNode) -> bool {
 }
 
 fn parse_single_expression(source: &str) -> Result<Expression, String> {
-    let tokens = Parser::new(source.to_string())
+    let tokens = Parser::new(normalize_editor_node_text(source))
         .parse()
         .map_err(|error| format!("failed to tokenize edited node text: {error:?}"))?;
     let exprs = ASTParser::new(tokens)
@@ -7429,8 +7423,8 @@ fn positional_item_index(items: &[Expression], semantic_index: usize) -> Option<
     let mut current = 0;
     let mut idx = 1;
     while idx < items.len() {
-        if matches!(&items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
-            idx += 2;
+        if is_attribute_key(&items[idx]) {
+            idx += attribute_span_len(items, idx);
             continue;
         }
         if current == semantic_index {
@@ -7493,8 +7487,8 @@ fn positional_arg_count(items: &[Expression]) -> usize {
     let mut count = 0;
     let mut idx = 1;
     while idx < items.len() {
-        if matches!(&items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
-            idx += 2;
+        if is_attribute_key(&items[idx]) {
+            idx += attribute_span_len(items, idx);
             continue;
         }
         count += 1;
@@ -7506,7 +7500,7 @@ fn positional_arg_count(items: &[Expression]) -> usize {
 fn positional_insert_index(items: &[Expression]) -> usize {
     let mut idx = 1;
     while idx < items.len() {
-        if matches!(&items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
+        if is_attribute_key(&items[idx]) {
             return idx;
         }
         idx += 1;
@@ -7678,10 +7672,10 @@ fn collect_scope_value_references(expr: &Expression, references: &mut HashSet<St
         }
         Expression::List(items) | Expression::QuoteList(items) => {
             let head = symbol_at(items, 0);
+            let attribute_items = attribute_item_mask(items);
             for (idx, item) in items.iter().enumerate() {
                 if idx == 0
-                    || matches!(item, Expression::Symbol(symbol) if symbol.starts_with('@'))
-                    || matches!(items.get(idx.saturating_sub(1)), Some(Expression::Symbol(symbol)) if symbol.starts_with('@'))
+                    || attribute_items[idx]
                     || (idx == 1 && matches!(head, Some("def" | "param" | "make-history")))
                 {
                     continue;

@@ -261,9 +261,7 @@ impl TimeViewport {
         let cells_per_time = content.width as f64 / self.view_duration.max(0.0001);
         let mut step = self.grid_step_candidate(ruler);
         if cells_per_time.is_finite() && cells_per_time > 0.0 {
-            while step.is_finite()
-                && step * cells_per_time < MIN_VISIBLE_GRID_SPACING_CELLS
-            {
+            while step.is_finite() && step * cells_per_time < MIN_VISIBLE_GRID_SPACING_CELLS {
                 step *= 2.0;
             }
         }

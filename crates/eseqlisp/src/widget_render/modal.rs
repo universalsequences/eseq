@@ -161,7 +161,11 @@ pub(crate) fn emit_modal_scrim(
     frame_rect: Rect,
     _viewport: WidgetViewport,
 ) {
-    let scrim = resolve_named_color(props, "scrim-color", Color::rgba(0.0, 0.0, 0.0, SCRIM_ALPHA));
+    let scrim = resolve_named_color(
+        props,
+        "scrim-color",
+        Color::rgba(0.0, 0.0, 0.0, SCRIM_ALPHA),
+    );
     push_overlay_primitive(MetalPrimitive::Rect(MetalRectPrimitive {
         rect: frame_rect,
         color: scrim,
@@ -184,11 +188,8 @@ pub(crate) fn emit_modal_panel_chrome(
         width: modal_rect.width + border_col * 2.0,
         height: modal_rect.height + border_row * 2.0,
     };
-    let border_color = resolve_named_color(
-        props,
-        "border-color",
-        crate::theme::DROPDOWN_MENU_BORDER(),
-    );
+    let border_color =
+        resolve_named_color(props, "border-color", crate::theme::DROPDOWN_MENU_BORDER());
     emit_rounded_rect_overlay(
         border_rect,
         border_color,

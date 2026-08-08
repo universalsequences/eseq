@@ -1124,6 +1124,15 @@ fn agentic_bubble_body_sizes(
         .collect()
 }
 
+/// Backdate every bubble past its grow-in, so tests about a bubble's settled
+/// layout or state aren't reading a frame mid-animation.
+fn settle_agentic_bubbles(state: &mut PatcherInteractionState) {
+    let settled = Instant::now() - Duration::from_secs_f32(AGENTIC_APPEAR_SECS + 0.01);
+    for bubble in state.agentic_bubbles.values_mut() {
+        bubble.created_at = settled;
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn effective_z(prim: &MetalPrimitive) -> i32 {
     crate::widget_render::effective_z_index(prim)
@@ -2735,6 +2744,64 @@ fn agentic_bubble_cmd_k_creates_ephemeral_prompt_without_source_write() {
 }
 
 #[test]
+fn escape_dismisses_agentic_bubble_through_a_shrink_out_before_dropping_it() {
+    let path = temp_patcher_source_path("agentic-bubble-escape-close");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = PatcherInteractionState::default();
+    let bubble_id = allocate_agentic_bubble(&mut state, (2.0, 3.0));
+    let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    bubble.state = AgenticBubbleState::Answer {
+        text: "an answer".to_string(),
+        answered_at: Instant::now(),
+    };
+    settle_agentic_bubbles(&mut state);
+    set_patcher_interaction_state(key, state);
+
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+
+    let state = get_patcher_interaction_state(key);
+    let bubble = state.agentic_bubbles.get(&bubble_id).expect(
+        "the bubble outlives Escape so it can shrink out; dropping it here would make it vanish",
+    );
+    assert!(bubble.is_dismissed());
+    assert!(
+        !bubble.close_finished(),
+        "the shrink-out has only just started"
+    );
+    assert!(
+        PATCHER_WIDGET.wants_animation_frames(&node),
+        "a dismissed bubble keeps frames coming until it has shrunk away"
+    );
+    assert!(
+        !patcher_has_text_edit(&node),
+        "a dismissed bubble must release text capture immediately, not when it finishes animating"
+    );
+
+    // Once the shrink-out has played out, the next state write drops it.
+    let mut state = get_patcher_interaction_state(key);
+    let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    bubble.closing_at = Some(Instant::now() - Duration::from_secs_f32(AGENTIC_CLOSE_SECS + 0.01));
+    set_patcher_interaction_state(key, state);
+
+    assert!(
+        !get_patcher_interaction_state(key)
+            .agentic_bubbles
+            .contains_key(&bubble_id),
+        "a finished shrink-out is pruned on the next state write"
+    );
+    assert!(!PATCHER_WIDGET.wants_animation_frames(&node));
+}
+
+#[test]
 fn agentic_bubble_cmd_k_uses_last_pointer_model_position() {
     let path = temp_patcher_source_path("agentic-bubble-pointer-position");
     fs::write(&path, "(out 0)").expect("write source");
@@ -2826,6 +2893,7 @@ fn pending_agentic_bubble_requests_animation_frames() {
     bubble.state = AgenticBubbleState::Pending {
         started_at: Instant::now(),
     };
+    settle_agentic_bubbles(&mut state);
     set_patcher_interaction_state(key, state);
 
     assert!(PATCHER_WIDGET.wants_animation_frames(&node));
@@ -2840,6 +2908,30 @@ fn pending_agentic_bubble_requests_animation_frames() {
     set_patcher_interaction_state(key, state);
 
     assert!(!PATCHER_WIDGET.wants_animation_frames(&node));
+}
+
+#[test]
+fn freshly_opened_agentic_bubble_requests_animation_frames_for_its_grow_in() {
+    let path = temp_patcher_source_path("agentic-bubble-appear-animation");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = PatcherInteractionState::default();
+    allocate_agentic_bubble(&mut state, (2.0, 3.0));
+    set_patcher_interaction_state(key, state);
+    assert!(
+        PATCHER_WIDGET.wants_animation_frames(&node),
+        "a just-opened bubble animates even though it is only Editing"
+    );
+
+    let mut state = get_patcher_interaction_state(key);
+    settle_agentic_bubbles(&mut state);
+    set_patcher_interaction_state(key, state);
+    assert!(
+        !PATCHER_WIDGET.wants_animation_frames(&node),
+        "an idle Editing bubble stops requesting frames once it has grown in"
+    );
 }
 
 #[test]
@@ -3035,6 +3127,81 @@ fn agentic_bubble_cmd_k_on_selected_macro_creates_edit_target() {
     }
 }
 
+/// A bubble opened on a selected macro is scoped to it, so it says so.
+#[cfg(target_os = "macos")]
+#[test]
+fn agentic_bubble_bound_to_a_macro_names_it_in_the_header() {
+    let path = temp_patcher_source_path("agentic-bubble-bound-label");
+    fs::write(
+        &path,
+        "(defmacro smooth (sig amt) (mix sig amt 0.5))\n(def input (in 1))\n(def shaped (smooth input 0.25))\n(out shaped)",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut pan = PatcherPanState::default();
+    pan.zoom = 1.0;
+    pan.content_width = 100.0;
+    pan.content_height = 100.0;
+    set_patcher_pan_state(key, pan);
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert("shaped".to_string());
+    set_patcher_interaction_state(key, state);
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    let mut state = get_patcher_interaction_state(key);
+    let bubble = state.agentic_bubbles.values().next().expect("edit bubble");
+    assert_eq!(bubble.bound_macro_name(), Some("smooth"));
+    assert!(
+        bubble.prompt_text().contains("macro"),
+        "a bound bubble's placeholder says what it is for, got {:?}",
+        bubble.prompt_text()
+    );
+    let measurer = VariableWidthTextMeasurer;
+    cache_agentic_bubble_text_widths(
+        bubble,
+        &MeasureCtx {
+            text_measurer: Some(&measurer),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            inherited_font_size: 13.0,
+        },
+    );
+    settle_agentic_bubbles(&mut state);
+    set_patcher_interaction_state(key, state);
+
+    let prims = build_metal_primitives_for_patcher(
+        &node,
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 40.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+    );
+
+    assert!(
+        prims.iter().any(|prim| matches!(
+            inner_prim(prim),
+            MetalPrimitive::ProportionalText(text)
+                if text.text.contains("smooth") && text.h_align > 0.5
+        )),
+        "a macro-bound bubble names the macro on its header line"
+    );
+}
+
 #[test]
 fn agentic_bubble_edit_submit_payload_includes_macro_context() {
     let path = temp_patcher_source_path("agentic-bubble-edit-submit");
@@ -3186,6 +3353,144 @@ fn agentic_bubble_macro_edit_resolution_replaces_macro_and_keeps_instance() {
     let state = get_patcher_interaction_state(key);
     assert!(!state.agentic_bubbles.contains_key(&bubble_id));
     assert!(state.agentic_morph_nodes.contains_key("shaped"));
+}
+
+/// A freshly opened bubble grows into its box: it scales up, fades in, squares
+/// off, and holds its prompt text back until the box has formed.
+#[cfg(target_os = "macos")]
+#[test]
+fn agentic_bubble_grows_into_its_box_on_open() {
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let rect = Rect {
+        col: 5.0,
+        row: 8.0,
+        width: 18.0,
+        height: 5.8,
+    };
+    let fill = crate::backend::Color::rgba(0.1, 0.15, 0.2, 0.94);
+    let border = crate::backend::Color::rgba(0.3, 0.8, 0.9, 1.0);
+    let appear_at = |ago: Duration| {
+        agentic_appear_chrome(Instant::now() - ago, rect, fill, border, viewport, 1.0)
+    };
+
+    let (grown, corner, faded, _, text_visible) =
+        appear_at(Duration::ZERO).expect("grow-in in flight at t=0");
+    assert!(
+        grown.width < rect.width && grown.height < rect.height,
+        "grow-in starts smaller than the settled box, got {grown:?}"
+    );
+    assert!(
+        (grown.col + grown.width * 0.5 - (rect.col + rect.width * 0.5)).abs() < 1e-3,
+        "grow-in scales about the box's centre"
+    );
+    assert!(
+        corner > SQUARE_CORNER_RADIUS * 10.0,
+        "grow-in starts rounded before squaring off, got {corner}"
+    );
+    assert!(faded.a < fill.a, "grow-in fades in, got alpha {}", faded.a);
+    assert!(
+        !text_visible,
+        "prompt text is held back while the box forms"
+    );
+
+    let (grown, corner, faded, _, text_visible) =
+        appear_at(Duration::from_secs_f32(AGENTIC_APPEAR_SECS * 0.9))
+            .expect("grow-in still in flight near the end");
+    assert!(
+        (grown.width - rect.width).abs() < 0.5,
+        "grow-in lands on the settled box, got {grown:?}"
+    );
+    assert!(
+        (corner - SQUARE_CORNER_RADIUS).abs() < 0.01,
+        "grow-in ends square, got {corner}"
+    );
+    assert!((faded.a - fill.a).abs() < 1e-3, "fade completes early");
+    assert!(text_visible, "prompt text is shown once the box has formed");
+
+    assert!(
+        appear_at(Duration::from_secs_f32(AGENTIC_APPEAR_SECS + 0.01)).is_none(),
+        "a settled bubble draws with no grow-in adjustment"
+    );
+}
+
+/// Escape plays the grow-in backwards: the box shrinks, fades, and re-rounds,
+/// and its text goes at once so it never overflows the shrinking box.
+#[cfg(target_os = "macos")]
+#[test]
+fn agentic_bubble_shrinks_out_when_dismissed() {
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let rect = Rect {
+        col: 5.0,
+        row: 8.0,
+        width: 18.0,
+        height: 5.8,
+    };
+    let fill = crate::backend::Color::rgba(0.1, 0.15, 0.2, 0.94);
+    let border = crate::backend::Color::rgba(0.3, 0.8, 0.9, 1.0);
+    let close_at = |ago: Duration| {
+        agentic_close_chrome(Instant::now() - ago, rect, fill, border, viewport, 1.0)
+    };
+
+    let (start, _, start_fill, _, text_visible) =
+        close_at(Duration::ZERO).expect("shrink-out in flight at t=0");
+    assert!(
+        (start.width - rect.width).abs() < 0.2,
+        "shrink-out starts at the settled box, got {start:?}"
+    );
+    assert!(
+        (start_fill.a - fill.a).abs() < 1e-3,
+        "shrink-out starts fully opaque"
+    );
+    assert!(!text_visible, "text goes as soon as the box starts closing");
+
+    let (late, corner, late_fill, _, _) =
+        close_at(Duration::from_secs_f32(AGENTIC_CLOSE_SECS * 0.9))
+            .expect("shrink-out still in flight near the end");
+    assert!(
+        late.width < start.width && late.height < start.height,
+        "shrink-out shrinks the box, got {late:?}"
+    );
+    assert!(
+        (late.col + late.width * 0.5 - (rect.col + rect.width * 0.5)).abs() < 1e-3,
+        "shrink-out collapses toward the box's centre"
+    );
+    assert!(
+        corner > SQUARE_CORNER_RADIUS * 10.0,
+        "shrink-out re-rounds on the way out, got {corner}"
+    );
+    assert!(
+        late_fill.a < start_fill.a,
+        "shrink-out fades as it collapses"
+    );
+
+    assert!(
+        close_at(Duration::from_secs_f32(AGENTIC_CLOSE_SECS + 0.01)).is_none(),
+        "a finished shrink-out draws nothing"
+    );
 }
 
 /// The completion morph eases the node's chrome out of the bubble's square box
@@ -16909,6 +17214,7 @@ fn metal_render_emits_agentic_bubble_body_as_foreground_overlay() {
     set_patcher_pan_state(key, pan);
     let mut state = PatcherInteractionState::default();
     allocate_agentic_bubble(&mut state, (2.0, 3.0));
+    settle_agentic_bubbles(&mut state);
     set_patcher_interaction_state(key, state);
     let measurer = VariableWidthTextMeasurer;
     cache_text_widths(
@@ -16975,6 +17281,84 @@ fn metal_render_emits_agentic_bubble_body_as_foreground_overlay() {
     );
 }
 
+/// An answer arrives in a much bigger box than the pending spinner it replaces.
+/// The box eases between the two layouts instead of snapping.
+#[cfg(target_os = "macos")]
+#[test]
+fn agentic_answer_eases_the_bubble_from_the_pending_box_to_the_answer_box() {
+    let path = temp_patcher_source_path("agentic-bubble-answer-resize");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut pan = PatcherPanState::default();
+    pan.zoom = 1.0;
+    pan.content_width = 100.0;
+    pan.content_height = 100.0;
+    set_patcher_pan_state(key, pan);
+
+    let prompt = "what does this macro do".to_string();
+    let answer = "It shapes the incoming signal with a one-pole lowpass and mixes the result back against the dry input.".to_string();
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let measurer = VariableWidthTextMeasurer;
+    let ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: 13.0,
+    };
+    let width_after = |elapsed: Duration| {
+        let mut state = PatcherInteractionState::default();
+        let bubble_id = allocate_agentic_bubble(&mut state, (2.0, 3.0));
+        let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+        bubble.prompt = prompt.clone();
+        bubble.state = AgenticBubbleState::Answer {
+            text: answer.clone(),
+            answered_at: Instant::now() - elapsed,
+        };
+        // Measure exactly what a real measure pass would, so this test fails if
+        // the pending layout stops being measured once an answer lands — the
+        // resize silently degrades to a snap when its start layout can't wrap.
+        cache_agentic_bubble_text_widths(bubble, &ctx);
+        settle_agentic_bubbles(&mut state);
+        set_patcher_interaction_state(key, state);
+        let prims = build_metal_primitives_for_patcher(&node, viewport);
+        agentic_bubble_body_sizes(&prims, viewport)
+            .into_iter()
+            .next()
+            .expect("answer bubble body")
+            .0
+    };
+
+    let settled = width_after(Duration::from_secs_f32(AGENTIC_ANSWER_RESIZE_SECS + 0.01));
+    let arriving = width_after(Duration::ZERO);
+    let midway = width_after(Duration::from_secs_f32(AGENTIC_ANSWER_RESIZE_SECS * 0.5));
+
+    assert!(
+        settled > 30.0,
+        "a settled answer uses the wide answer layout, got {settled}"
+    );
+    assert!(
+        arriving < settled - 5.0,
+        "the box starts near the pending layout rather than jumping to the answer size, got {arriving} vs settled {settled}"
+    );
+    assert!(
+        arriving < midway && midway < settled,
+        "the box eases between the two layouts, got {arriving} -> {midway} -> {settled}"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn metal_render_uses_wide_wrapped_answer_agentic_bubble() {
@@ -16996,6 +17380,7 @@ fn metal_render_uses_wide_wrapped_answer_agentic_bubble() {
         text: answer.clone(),
         answered_at: Instant::now(),
     };
+    settle_agentic_bubbles(&mut state);
     set_patcher_interaction_state(key, state);
     let measurer = VariableWidthTextMeasurer;
     cache_text_widths(
@@ -20393,4 +20778,175 @@ fn collecting_an_orphaned_macro_cascades_to_the_macros_only_it_called() {
         "both go: {:?}",
         state.edit_state.created_macros
     );
+}
+
+#[test]
+fn editor_node_text_keeps_bracketed_attribute_arrays_out_of_positional_args() {
+    // `[` / `]` are not lexer delimiters, so `@data [1 4 5 6]` arrives as the token run
+    // `@data`, `[1`, 4, 5, `6]`. The array tail must not leak into the positional slots.
+    assert_eq!(
+        super::lisp::parse_editor_node_text("tensor 4 4 @data [1 4 5 6]").unwrap(),
+        ("tensor".to_string(), vec!["4".to_string(), "4".to_string()])
+    );
+    assert_eq!(
+        super::lisp::parse_editor_node_text("tensor @shape [3 3] @data [1 4 5 6]").unwrap(),
+        ("tensor".to_string(), Vec::<String>::new())
+    );
+    // Nested arrays and a single-token array both close correctly.
+    assert_eq!(
+        super::lisp::parse_editor_node_text("tensor @shape [4] @data [[1 2] [3 4]] 7").unwrap(),
+        ("tensor".to_string(), vec!["7".to_string()])
+    );
+}
+
+#[test]
+fn editor_node_text_normalizes_commas_inside_arrays() {
+    // A comma is the unquote token, so `[1,4,5,6]` would otherwise lex into Unquote nodes.
+    assert_eq!(
+        super::lisp::parse_editor_node_text("tensor 4 4 @data [1,4,5,6]").unwrap(),
+        super::lisp::parse_editor_node_text("tensor 4 4 @data [1 4 5 6]").unwrap()
+    );
+}
+
+#[test]
+fn patch_source_with_tensor_data_attribute_projects_no_extra_inputs() {
+    let patch = parse("(def t (tensor @shape [3 3] @data [0 1 0  1 -4 1  0 1 0]))\n");
+    let node = patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "tensor")
+        .expect("tensor node");
+    assert!(
+        node.args.is_empty(),
+        "attribute array elements must not become inputs, got {:?}",
+        node.args
+    );
+}
+
+#[test]
+fn tensor_data_attribute_survives_writeback_round_trip() {
+    let source = "(def t (tensor @shape [3 3] @data [0 1 0  1 -4 1  0 1 0]))\n";
+    let patch = parse(source);
+    let generated = super::generate::generate_patch_source(&patch, PatcherIntent::Instrument)
+        .expect("generate")
+        .source;
+    assert!(
+        generated.contains("@shape [3 3]") && generated.contains("@data [0 1 0 1 -4 1 0 1 0]"),
+        "generated source lost the attribute arrays:\n{generated}"
+    );
+}
+
+#[test]
+fn editor_created_tensor_node_shows_and_emits_its_attributes() {
+    let node = node_from_editor_text(
+        "t",
+        "tensor 4 4 @data [1,4,5,6]",
+        (0.0, 0.0),
+        &HashMap::new(),
+        false,
+    );
+    assert_eq!(
+        node_display_label(&node),
+        "tensor 4 4 @data [1 4 5 6]",
+        "the node body must keep showing its attribute array"
+    );
+    // The positional slots stop at the two shape arguments: the array elements must not
+    // have claimed inlets of their own.
+    assert_eq!(node_display_input_slots(&node).len(), 2);
+}
+
+#[test]
+fn auto_layout_keeps_generated_cable_lanes_clear_of_nodes() {
+    let sources = [
+        r#"
+        (def freq (in 1 @name freq))
+        (def idx (in 2 @name mod_index))
+        (def fb (in 3 @name feedback))
+        (def warp (in 4 @name warp))
+        (def base (phasor freq))
+        (def carrier (phasor (* freq 1.4142)))
+        (def fbh (history))
+        (def phase (* (+ base (* fbh fb)) twopi))
+        (def m (sin phase))
+        (def mixed (+ carrier (* (* m (+ warp idx)) idx)))
+        (def h2 (history))
+        (out 1 (sin (+ (* mixed twopi) (* h2 fb))))
+        (out 2 (cos (+ (* mixed twopi) h2)))
+        "#,
+        r#"
+        (def a (in 1 @name a))
+        (def b (in 2 @name b))
+        (def c (in 3 @name c))
+        (def d (in 4 @name d))
+        (def e (in 5 @name e))
+        (def hub (+ a b c d e))
+        (out 1 (* (+ hub a) (+ hub b)))
+        (out 2 (* (+ hub c) (+ hub d)))
+        "#,
+    ];
+
+    for source in sources {
+        let patch = parse(source);
+        let input_indices = patch_input_indices(&patch);
+        let input_slot_counts = patch_input_slot_counts(&patch, &input_indices);
+        let output_counts = patch_output_counts(&patch);
+        let node_box = |node: &PatchNode| {
+            let inputs = input_slot_counts.get(&node.id).copied().unwrap_or(0);
+            let outputs = output_counts.get(&node.id).copied().unwrap_or(0);
+            node_size_for_ports(node, inputs, outputs)
+        };
+        let find = |id: &str| patch.nodes.iter().find(|node| node.id == id);
+
+        for connection in &patch.connections {
+            let Some(segment) = connection.segment else {
+                continue;
+            };
+            let (Some(from), Some(to)) = (find(&connection.from_node), find(&connection.to_node))
+            else {
+                continue;
+            };
+            let row = segment.segment_row;
+
+            // The horizontal run spans outlet x to inlet x, at the segment row.
+            let outlet_x = from.position.0
+                + port_x_offset(
+                    connection.from_output,
+                    output_counts.get(&from.id).copied().unwrap_or(1),
+                    node_box(from).0,
+                );
+            let inlet_slot = input_indices
+                .get(&to.id)
+                .and_then(|indices| {
+                    indices
+                        .iter()
+                        .position(|input| *input == connection.to_input)
+                })
+                .unwrap_or(0);
+            let inlet_x = to.position.0
+                + port_x_offset(
+                    inlet_slot,
+                    input_slot_counts.get(&to.id).copied().unwrap_or(1),
+                    node_box(to).0,
+                );
+            let lane_left = outlet_x.min(inlet_x);
+            let lane_right = outlet_x.max(inlet_x);
+
+            for node in &patch.nodes {
+                if node.id == from.id || node.id == to.id {
+                    continue;
+                }
+                let (width, height) = node_box(node);
+                let (left, top) = node.position;
+                let crosses_rows = row > top && row < top + height;
+                let crosses_columns = lane_right > left && lane_left < left + width;
+                assert!(
+                    !(crosses_rows && crosses_columns),
+                    "cable {}->{} lane at row {row} is drawn through node {} at ({left}, {top})",
+                    connection.from_node,
+                    connection.to_node,
+                    node.id,
+                );
+            }
+        }
+    }
 }

@@ -6,9 +6,9 @@ use crate::parser::{Expression, format_expression};
 use super::display::preview;
 use super::layout;
 use super::lisp::{
-    attribute_symbol_value, attribute_value, connection_kind_for_op, default_outputs,
-    format_patch_literal, is_numeric_literal, is_unsupported_call_head, node_kind_for_op,
-    node_label, symbol_at,
+    attribute_span_len, attribute_symbol_value, attribute_value, connection_kind_for_op,
+    default_outputs, format_patch_literal, is_attribute_key, is_numeric_literal,
+    is_unsupported_call_head, node_kind_for_op, node_label, symbol_at,
 };
 use super::model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CallSourceShape,
@@ -1014,8 +1014,8 @@ impl Projector {
         let mut args = Vec::new();
         let mut item_index = start;
         while item_index < items.len() {
-            if matches!(&items[item_index], Expression::Symbol(symbol) if symbol.starts_with('@')) {
-                item_index += 2;
+            if is_attribute_key(&items[item_index]) {
+                item_index += attribute_span_len(items, item_index);
                 continue;
             }
             args.push(ArgSource {
@@ -1035,13 +1035,15 @@ impl Projector {
             if let Expression::Symbol(symbol) = &items[item_index]
                 && symbol.starts_with('@')
             {
+                let span = attribute_span_len(items, item_index);
                 attributes.push(AttributeSource {
                     key_item_index: item_index,
                     value_item_index: item_index + 1,
+                    value_item_count: span - 1,
                     key: symbol.clone(),
                     value: self.child_expr(call, item_index + 1),
                 });
-                item_index += 2;
+                item_index += span;
                 continue;
             }
             item_index += 1;

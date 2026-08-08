@@ -235,6 +235,15 @@ pub(crate) fn patcher_has_selected_cable(node: &crate::layout::LayoutNode) -> bo
     interaction.text_edit.is_none() && interaction.selected_cable.is_some()
 }
 
+pub(crate) fn patcher_agentic_bubble_count(node: &crate::layout::LayoutNode) -> usize {
+    if node.widget_type != "patcher" {
+        return 0;
+    }
+    state::get_patcher_interaction_state(state::patcher_state_key(node))
+        .agentic_bubbles
+        .len()
+}
+
 #[cfg(test)]
 pub(crate) fn select_first_patcher_cable_for_test(
     node: &crate::layout::LayoutNode,
@@ -1142,15 +1151,18 @@ impl WidgetDefinition for PatcherWidget {
                     }
                 }
                 KeyCode::Char('r') | KeyCode::Char('R')
-                    if state
-                        .agentic_bubbles
-                        .values()
-                        .any(|bubble| matches!(bubble.state, AgenticBubbleState::Error { .. })) =>
+                    if state.agentic_bubbles.values().any(|bubble| {
+                        !bubble.is_dismissed()
+                            && matches!(bubble.state, AgenticBubbleState::Error { .. })
+                    }) =>
                 {
                     let bubble_id = state
                         .agentic_bubbles
                         .values()
-                        .find(|bubble| matches!(bubble.state, AgenticBubbleState::Error { .. }))
+                        .find(|bubble| {
+                            !bubble.is_dismissed()
+                                && matches!(bubble.state, AgenticBubbleState::Error { .. })
+                        })
                         .map(|bubble| bubble.id.clone())?;
                     let payload = {
                         let bubble = state.agentic_bubbles.get_mut(&bubble_id)?;
@@ -1163,27 +1175,13 @@ impl WidgetDefinition for PatcherWidget {
                     set_patcher_interaction_state(key, state);
                     Some(WidgetEvent::Custom(payload))
                 }
-                KeyCode::Esc
-                    if state.agentic_bubbles.values().any(|bubble| {
-                        matches!(
-                            bubble.state,
-                            AgenticBubbleState::Error { .. } | AgenticBubbleState::Answer { .. }
-                        )
-                    }) =>
-                {
-                    if let Some(bubble_id) = state
-                        .agentic_bubbles
-                        .values()
-                        .find(|bubble| {
-                            matches!(
-                                bubble.state,
-                                AgenticBubbleState::Error { .. }
-                                    | AgenticBubbleState::Answer { .. }
-                            )
-                        })
-                        .map(|bubble| bubble.id.clone())
+                KeyCode::Esc if dismissable_agentic_bubble_id(&state).is_some() => {
+                    // Kept in the map so it can shrink out; `is_dismissed`
+                    // makes it invisible to everything else from here.
+                    if let Some(bubble_id) = dismissable_agentic_bubble_id(&state)
+                        && let Some(bubble) = state.agentic_bubbles.get_mut(&bubble_id)
                     {
-                        state.agentic_bubbles.remove(&bubble_id);
+                        bubble.closing_at = Some(Instant::now());
                     }
                     set_patcher_interaction_state(key, state);
                     Some(WidgetEvent::Custom(Value::Nil))
@@ -1347,13 +1345,24 @@ impl WidgetDefinition for PatcherWidget {
 
     fn wants_animation_frames(&self, node: &LayoutNode) -> bool {
         let state = get_patcher_interaction_state(patcher_state_key(node));
-        state
-            .agentic_bubbles
-            .values()
-            .any(|bubble| matches!(bubble.state, AgenticBubbleState::Pending { .. }))
-            || state.agentic_morph_nodes.values().any(|morph| {
-                morph.started_at.elapsed().as_secs_f32() < metrics::AGENTIC_MORPH_COLOR_SECS
-            })
+        state.agentic_bubbles.values().any(|bubble| {
+            // Shrinking out wins: a dismissed bubble animates regardless of the
+            // state it was dismissed from.
+            if bubble.is_dismissed() {
+                return !bubble.close_finished();
+            }
+            let state_animating = match bubble.state {
+                AgenticBubbleState::Pending { .. } => true,
+                AgenticBubbleState::Answer { answered_at, .. } => {
+                    answered_at.elapsed().as_secs_f32() < metrics::AGENTIC_ANSWER_RESIZE_SECS
+                }
+                _ => false,
+            };
+            state_animating
+                || bubble.created_at.elapsed().as_secs_f32() < metrics::AGENTIC_APPEAR_SECS
+        }) || state.agentic_morph_nodes.values().any(|morph| {
+            morph.started_at.elapsed().as_secs_f32() < metrics::AGENTIC_MORPH_COLOR_SECS
+        })
     }
 
     fn animation_frame_policy(&self) -> super::AnimationFramePolicy {
@@ -1434,7 +1443,11 @@ fn handle_agentic_bubble_edit_key(
             Some(WidgetEvent::Custom(payload))
         }
         KeyCode::Esc => {
-            state.agentic_bubbles.remove(&bubble_id);
+            // Kept in the map so it can shrink out; `is_dismissed` makes it
+            // invisible to everything else from here.
+            if let Some(bubble) = state.agentic_bubbles.get_mut(&bubble_id) {
+                bubble.closing_at = Some(Instant::now());
+            }
             set_patcher_interaction_state(key, state);
             Some(WidgetEvent::Custom(Value::Nil))
         }
@@ -1459,6 +1472,23 @@ fn handle_agentic_bubble_edit_key(
             }
         }
     }
+}
+
+/// The settled bubble Escape would dismiss: one showing an answer or an error.
+/// A bubble already shrinking out is not a candidate, so a second Escape falls
+/// through to the patcher's other Escape handling instead of restarting it.
+fn dismissable_agentic_bubble_id(state: &state::PatcherInteractionState) -> Option<String> {
+    state
+        .agentic_bubbles
+        .values()
+        .find(|bubble| {
+            !bubble.is_dismissed()
+                && matches!(
+                    bubble.state,
+                    AgenticBubbleState::Error { .. } | AgenticBubbleState::Answer { .. }
+                )
+        })
+        .map(|bubble| bubble.id.clone())
 }
 
 fn agentic_submit_payload(node: &LayoutNode, bubble: &state::AgenticBubble) -> Value {
@@ -3112,6 +3142,19 @@ pub(in crate::widget_render::patcher) fn persist_patcher_layout(
     sidecar::save_current_layout(&path, &root_patch, state)
 }
 
+/// Measure every string a bubble might render, so the render pass can wrap them
+/// (it can only wrap text whose glyph widths are already cached on this thread).
+fn cache_agentic_bubble_text_widths(bubble: &state::AgenticBubble, ctx: &MeasureCtx<'_>) {
+    cache_text_widths(bubble.body_text(), 13.0, ctx);
+    // The prompt is measured even once an answer has replaced it: the answer's
+    // arrival eases the box out of the prompt's layout, so that layout has to
+    // stay wrappable for the length of the transition.
+    cache_text_widths(bubble.prompt_text(), 13.0, ctx);
+    if matches!(bubble.state, state::AgenticBubbleState::Editing) {
+        cache_text_widths(bubble.prompt.clone(), 13.0, ctx);
+    }
+}
+
 fn cache_patcher_text_widths(node: &Value, ctx: &MeasureCtx<'_>) {
     if ctx.text_measurer.is_none() {
         return;
@@ -3150,15 +3193,7 @@ fn cache_patcher_text_widths(node: &Value, ctx: &MeasureCtx<'_>) {
         }
     }
     for bubble in interaction_state.agentic_bubbles.values() {
-        let visible_text = match &bubble.state {
-            state::AgenticBubbleState::Answer { text, .. } => text.clone(),
-            _ if bubble.prompt.trim().is_empty() => "cmd+k prompt".to_string(),
-            _ => bubble.prompt.clone(),
-        };
-        cache_text_widths(visible_text, 13.0, ctx);
-        if matches!(bubble.state, state::AgenticBubbleState::Editing) {
-            cache_text_widths(bubble.prompt.clone(), 13.0, ctx);
-        }
+        cache_agentic_bubble_text_widths(bubble, ctx);
     }
 }
 

@@ -469,10 +469,7 @@ pub fn freeze_widget_tree(tree: &Value) {
 }
 
 #[cfg(debug_assertions)]
-fn freeze_value_cells(
-    value: &Value,
-    cells: &mut HashMap<usize, std::rc::Weak<RefCell<Value>>>,
-) {
+fn freeze_value_cells(value: &Value, cells: &mut HashMap<usize, std::rc::Weak<RefCell<Value>>>) {
     match value {
         Value::List(items) => {
             for cell in items {
@@ -6355,7 +6352,10 @@ mod tests {
         vm.mark_source_dependents_dirty(source, new_value);
 
         let after = stored_source_list(&vm, source);
-        assert_eq!(stored_source_value(&vm, source), number_list(&[1.0, 9.0, 3.0]));
+        assert_eq!(
+            stored_source_value(&vm, source),
+            number_list(&[1.0, 9.0, 3.0])
+        );
         // Unchanged elements keep their existing Rcs; only index 1 is replaced.
         assert!(Rc::ptr_eq(&before[0], &after[0]));
         assert!(!Rc::ptr_eq(&before[1], &after[1]));
@@ -6372,7 +6372,8 @@ mod tests {
         let mut vm = VM::new(Vec::new());
         let source = add_source(&mut vm, number_list(&[1.0, 2.0]));
         let reads_len = add_effect_dependent(&mut vm);
-        vm.dag.add_edge_indexed(source, reads_len, LEN_READ_SENTINEL);
+        vm.dag
+            .add_edge_indexed(source, reads_len, LEN_READ_SENTINEL);
 
         let before = stored_source_list(&vm, source);
         let grown = number_list(&[1.0, 2.0, 3.0, 4.0]);

@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 
 #[cfg(target_os = "macos")]
 use super::super::text_input::selection_range as text_selection_range;
@@ -28,7 +30,9 @@ use super::geometry::{
 };
 use super::load_patch_from_props;
 use super::metrics::{
-    AGENTIC_MORPH_COLOR_SECS, AGENTIC_MORPH_SHAPE_SECS, CABLE_HANDLE_RADIUS_PX,
+    AGENTIC_ANSWER_RESIZE_SECS, AGENTIC_ANSWER_TEXT_AT, AGENTIC_APPEAR_SECS,
+    AGENTIC_APPEAR_START_RADIUS_PX, AGENTIC_APPEAR_START_SCALE, AGENTIC_APPEAR_TEXT_AT,
+    AGENTIC_CLOSE_SECS, AGENTIC_MORPH_COLOR_SECS, AGENTIC_MORPH_SHAPE_SECS, CABLE_HANDLE_RADIUS_PX,
     NODE_BORDER_WIDTH_PX, NODE_CORNER_RADIUS_PX, NODE_RESIZE_HANDLE_SIZE_CELLS,
     NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX, PORT_OUTER_DIAMETER_PX,
     SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
@@ -337,24 +341,63 @@ fn draw_agentic_bubbles(
                 origin.1 + bubble.position.1 * zoom,
             ),
         };
-        let width_cells = match &bubble.state {
-            AgenticBubbleState::Answer { .. } => 34.0,
-            _ => 18.0,
-        };
+        if bubble.close_finished() {
+            continue;
+        }
         let max_visible_width = (rect.width - 1.0).max(8.0);
-        let width = (width_cells * zoom).min(max_visible_width);
         let right_edge = rect.col + rect.width - 0.5;
+        // Box size for a given layout, in cells. Returns `None` only when the
+        // text has not been measured on this thread yet.
+        let sized = |width_cells: f32, text: &str| -> Option<(f32, f32, Vec<_>)> {
+            let width = (width_cells * zoom).min(max_visible_width);
+            let inner_width = (width - 1.3 * zoom).max(1.0);
+            let lines = wrap_agentic_prompt_lines(text, inner_width / zoom)?;
+            let height = ((4.0 + lines.len() as f32 * 1.18).max(5.8)) * zoom;
+            Some((width, height, lines))
+        };
+        let pending_text = bubble.prompt_text();
+        // An arriving answer eases from the pending spinner's box into the
+        // wider answer box rather than snapping between the two layouts.
+        let answer_resize = match &bubble.state {
+            AgenticBubbleState::Answer { text, answered_at } => {
+                let progress = (answered_at.elapsed().as_secs_f32() / AGENTIC_ANSWER_RESIZE_SECS)
+                    .clamp(0.0, 1.0);
+                Some((text.clone(), progress))
+            }
+            _ => None,
+        };
+        let (width, height, prompt_lines) = match &answer_resize {
+            Some((answer, progress)) => {
+                // The answer text can reach us before the measure pass that
+                // caches its glyph widths. Hold the pending box for that frame
+                // rather than blinking the whole bubble out of existence.
+                match (sized(34.0, answer), sized(18.0, &pending_text)) {
+                    (Some((to_w, to_h, to_lines)), Some((from_w, from_h, from_lines))) => {
+                        let t = ease_out_cubic(*progress);
+                        (
+                            lerp(from_w, to_w, t),
+                            lerp(from_h, to_h, t),
+                            // The prompt stays up while the box grows; the
+                            // answer swaps in once there is room for it.
+                            if *progress >= AGENTIC_ANSWER_TEXT_AT {
+                                to_lines
+                            } else {
+                                from_lines
+                            },
+                        )
+                    }
+                    (Some(answer_layout), None) => answer_layout,
+                    (None, Some(pending_layout)) => pending_layout,
+                    (None, None) => continue,
+                }
+            }
+            None => match sized(18.0, &pending_text) {
+                Some(layout) => layout,
+                None => continue,
+            },
+        };
         x = x.min(right_edge - width).max(rect.col + 0.5);
         let inner_width = (width - 1.3 * zoom).max(1.0);
-        let prompt = match &bubble.state {
-            AgenticBubbleState::Answer { text, .. } => text.clone(),
-            _ if bubble.prompt.trim().is_empty() => "cmd+k prompt".to_string(),
-            _ => bubble.prompt.clone(),
-        };
-        let Some(prompt_lines) = wrap_agentic_prompt_lines(&prompt, inner_width / zoom) else {
-            continue;
-        };
-        let height = ((4.0 + prompt_lines.len() as f32 * 1.18).max(5.8)) * zoom;
         let pending_pulse = match &bubble.state {
             AgenticBubbleState::Pending { .. } => {
                 Some(0.5 + 0.5 * (viewport.time_seconds * 4.4).sin())
@@ -405,15 +448,31 @@ fn draw_agentic_bubbles(
         // Drawn through the node shader at a square corner radius (rather than
         // as flat quads) so that a completing bubble and its node are the same
         // primitive, and the morph only has to interpolate uniforms.
+        let scaled = match bubble.closing_at {
+            Some(closing_at) => {
+                match agentic_close_chrome(closing_at, bubble_rect, fill, border, viewport, zoom) {
+                    Some(closing) => closing,
+                    // Guarded by `close_finished` above; nothing left to draw.
+                    None => continue,
+                }
+            }
+            None => {
+                agentic_appear_chrome(bubble.created_at, bubble_rect, fill, border, viewport, zoom)
+                    .unwrap_or((bubble_rect, SQUARE_CORNER_RADIUS, fill, border, true))
+            }
+        };
+        let (appear_rect, appear_corner, appear_fill, appear_border, text_visible) = scaled;
         push_node_chrome_with_corner(
             prims,
-            bubble_rect,
-            fill,
-            border,
+            appear_rect,
+            appear_fill,
+            appear_border,
             viewport,
             zoom,
-            SQUARE_CORNER_RADIUS,
+            appear_corner,
         );
+        // Recorded at the settled rect, so a completion morph starting mid
+        // grow-in would still hand off from the bubble's real geometry.
         poses.insert(
             bubble.id.clone(),
             AgenticBubblePose {
@@ -436,6 +495,9 @@ fn draw_agentic_bubbles(
             AgenticBubbleState::Answer { .. } => status.to_string(),
             AgenticBubbleState::Editing => status.to_string(),
         };
+        if !text_visible {
+            continue;
+        }
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
                 row: y + 0.65 * zoom,
@@ -449,6 +511,24 @@ fn draw_agentic_bubbles(
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
             },
         ));
+        // A bubble opened on a selected macro is scoped to it. Name that macro
+        // on the header line, in the selection accent, so it is obvious the
+        // prompt is about that node and not the patch at large.
+        if let Some(macro_name) = bubble.bound_macro_name() {
+            prims.push(MetalPrimitive::ProportionalText(
+                MetalProportionalTextPrimitive {
+                    row: y + 0.65 * zoom,
+                    col: x + 0.65 * zoom,
+                    align_width: inner_width,
+                    h_align: 1.0,
+                    text: format!("↳ {macro_name}"),
+                    font_size: 11.5,
+                    scale: zoom,
+                    fg: theme::PATCHER_NODE_SELECTED_BORDER(),
+                    bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                },
+            ));
+        }
         for (line_index, prompt_line) in prompt_lines.into_iter().enumerate() {
             prims.push(MetalPrimitive::ProportionalText(
                 MetalProportionalTextPrimitive {
@@ -1978,6 +2058,129 @@ fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
         width: lerp(a.width, b.width, t),
         height: lerp(a.height, b.height, t),
     }
+}
+
+fn scale_rect_about_center(rect: Rect, scale: f32) -> Rect {
+    let width = rect.width * scale;
+    let height = rect.height * scale;
+    Rect {
+        col: rect.col + (rect.width - width) * 0.5,
+        row: rect.row + (rect.height - height) * 0.5,
+        width,
+        height,
+    }
+}
+
+fn with_alpha_scale(color: crate::backend::Color, scale: f32) -> crate::backend::Color {
+    crate::backend::Color::rgba(color.r, color.g, color.b, color.a * scale)
+}
+
+/// Chrome rect, normalized corner radius, colours, and whether the prompt text
+/// is yet visible, for a bubble partway through its grow-in. Returns `None`
+/// once the bubble has settled.
+#[cfg(target_os = "macos")]
+pub(super) fn agentic_appear_chrome(
+    created_at: Instant,
+    rect: Rect,
+    fill: crate::backend::Color,
+    border: crate::backend::Color,
+    viewport: WidgetViewport,
+    zoom: f32,
+) -> Option<(
+    Rect,
+    f32,
+    crate::backend::Color,
+    crate::backend::Color,
+    bool,
+)> {
+    let elapsed = created_at.elapsed().as_secs_f32();
+    if elapsed >= AGENTIC_APPEAR_SECS {
+        return None;
+    }
+    let progress = (elapsed / AGENTIC_APPEAR_SECS).clamp(0.0, 1.0);
+    // Fade completes early so the box is solid for most of the grow.
+    let (grown, corner_radius, fill, border) = agentic_scaled_chrome(
+        rect,
+        ease_out_back(progress).min(1.0),
+        ease_out_cubic((progress / 0.6).min(1.0)),
+        fill,
+        border,
+        viewport,
+        zoom,
+    );
+    Some((
+        grown,
+        corner_radius,
+        fill,
+        border,
+        progress >= AGENTIC_APPEAR_TEXT_AT,
+    ))
+}
+
+/// Chrome for a bubble that is partway in or out of existence. `expansion` runs
+/// 0 (smallest, most rounded) to 1 (the settled square box); `alpha` scales the
+/// colours independently so a grow-in can fade faster than it scales.
+#[cfg(target_os = "macos")]
+fn agentic_scaled_chrome(
+    rect: Rect,
+    expansion: f32,
+    alpha: f32,
+    fill: crate::backend::Color,
+    border: crate::backend::Color,
+    viewport: WidgetViewport,
+    zoom: f32,
+) -> (Rect, f32, crate::backend::Color, crate::backend::Color) {
+    let scaled = scale_rect_about_center(rect, lerp(AGENTIC_APPEAR_START_SCALE, 1.0, expansion));
+    let start_radius =
+        normalized_corner_radius(scaled, viewport, AGENTIC_APPEAR_START_RADIUS_PX * zoom);
+    (
+        scaled,
+        lerp(
+            start_radius,
+            SQUARE_CORNER_RADIUS,
+            expansion.clamp(0.0, 1.0),
+        ),
+        with_alpha_scale(fill, alpha),
+        with_alpha_scale(border, alpha),
+    )
+}
+
+/// The grow-in played backwards, for a bubble dismissed with Escape. Returns
+/// `None` once the shrink-out has played to the end — the caller stops drawing
+/// the bubble at that point.
+#[cfg(target_os = "macos")]
+pub(super) fn agentic_close_chrome(
+    closing_at: Instant,
+    rect: Rect,
+    fill: crate::backend::Color,
+    border: crate::backend::Color,
+    viewport: WidgetViewport,
+    zoom: f32,
+) -> Option<(
+    Rect,
+    f32,
+    crate::backend::Color,
+    crate::backend::Color,
+    bool,
+)> {
+    let elapsed = closing_at.elapsed().as_secs_f32();
+    if elapsed >= AGENTIC_CLOSE_SECS {
+        return None;
+    }
+    let progress = (elapsed / AGENTIC_CLOSE_SECS).clamp(0.0, 1.0);
+    // No overshoot on the way out — a dismissal that bulges first reads as a
+    // glitch rather than a flourish.
+    let (shrunk, corner_radius, fill, border) = agentic_scaled_chrome(
+        rect,
+        1.0 - ease_out_cubic(progress),
+        1.0 - progress,
+        fill,
+        border,
+        viewport,
+        zoom,
+    );
+    // Text goes immediately, so it never renders wider than the shrinking box.
+    Some((shrunk, corner_radius, fill, border, false))
 }
 
 /// Chrome rect, normalized corner radius and colours for a node partway through

@@ -55,7 +55,10 @@ fn collect_gate_led_requests_into(layout: &LayoutNode, requests: &mut Vec<GateLe
 /// (gate lit?, envelope magnitude 0..1) from the published frame, if any.
 fn read_gate_env(data_key: &str) -> (bool, f32) {
     match crate::live_audio::band_meter_frame(data_key) {
-        Some(frame) => (frame.gain_db[1] > 0.5, frame.gain_db[0].abs().clamp(0.0, 1.0)),
+        Some(frame) => (
+            frame.gain_db[1] > 0.5,
+            frame.gain_db[0].abs().clamp(0.0, 1.0),
+        ),
         None => (false, 0.0),
     }
 }

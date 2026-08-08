@@ -26,14 +26,15 @@ pub mod multiband_meter;
 pub mod number_label;
 pub mod number_picker;
 pub mod patcher;
-pub mod piano_keyboard;
 pub mod phaser_notch;
+pub mod piano_keyboard;
 pub mod response_curve_editor;
 pub mod roar_filter;
 pub mod roar_shaper;
 pub mod scope;
 pub mod scroll;
 pub mod sdf_widget;
+pub mod sound_glyph;
 pub mod spectrogram;
 pub mod tabs;
 pub mod text_input;
@@ -45,7 +46,6 @@ pub mod tree;
 pub mod virtual_vstack;
 pub mod vslider;
 pub mod vstack;
-pub mod sound_glyph;
 pub mod waveform;
 pub mod wavetable_viewer;
 pub mod wrap;
@@ -1919,7 +1919,12 @@ fn suppresses_default_focus(node: &LayoutNode) -> bool {
 /// runs — overlay content is excluded from scene caching, and caches are
 /// bypassed while any overlay is active.
 #[cfg(target_os = "macos")]
-fn collect_modal_overlay(node: &LayoutNode, viewport: WidgetViewport, scroll_top: f32, max_rows: u16) {
+fn collect_modal_overlay(
+    node: &LayoutNode,
+    viewport: WidgetViewport,
+    scroll_top: f32,
+    max_rows: u16,
+) {
     if node.children.is_empty() {
         // Closed this frame: drop any stale overlay entry we own.
         remove_overlay(node.widget_id);
@@ -3890,13 +3895,7 @@ mod tests {
         let (mut runs, _) = collect_metal_primitive_runs(&root, viewport, 0.0, 24);
         let run_index = build_metal_primitive_run_index(&runs);
         let (_overlay, stats) = refresh_metal_primitive_runs_retained_in_place(
-            &root,
-            viewport,
-            0.0,
-            24,
-            &mut runs,
-            &run_index,
-            &active,
+            &root, viewport, 0.0, 24, &mut runs, &run_index, &active,
         );
         assert!(stats.rebuilt_runs > 0);
         assert!(stats.reused_runs > 0);

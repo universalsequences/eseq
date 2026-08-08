@@ -12,6 +12,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::parser::{ASTParser, Expression, Parser, format_expression};
 
+use super::lisp::{
+    attribute_span_len, attribute_value_items, is_attribute_key, label_attributes_suffix,
+    normalize_editor_node_text,
+};
 use super::model::{
     ArgValue, ConnectionKind, HostModulatorInput, MacroOrigin, NodeKind, Patch, PatchConnection,
     PatchNode, PatcherIntent, hidden_inline_node_ids, orphaned_inline_mod_node_ids,
@@ -709,7 +713,11 @@ impl<'a> ScopeEmitter<'a> {
                 }
             }
         }
-        Ok(format!("({})", parts.join(" ")))
+        Ok(format!(
+            "({}{})",
+            parts.join(" "),
+            label_attributes_suffix(&node.label)
+        ))
     }
 
     /// The last argument slot that must be written out: trailing unfilled
@@ -1129,7 +1137,7 @@ fn out_modulator_attr(node: &PatchNode) -> Option<usize> {
 }
 
 fn label_items(label: &str) -> Option<Vec<Expression>> {
-    let source = format!("({})", label.trim());
+    let source = format!("({})", normalize_editor_node_text(label.trim()));
     let tokens = Parser::new(source).parse().ok()?;
     let exprs = ASTParser::new(tokens).parse().ok()?;
     match exprs.into_iter().next() {
@@ -1140,17 +1148,19 @@ fn label_items(label: &str) -> Option<Vec<Expression>> {
 
 fn label_attribute(label: &str, attribute: &str) -> Option<String> {
     let items = label_items(label)?;
-    items
-        .windows(2)
-        .find_map(|pair| match (&pair[0], &pair[1]) {
-            (Expression::Symbol(key), value) if key == attribute => Some(match value {
+    let values = attribute_value_items(&items, attribute)?;
+    Some(
+        values
+            .iter()
+            .map(|value| match value {
                 Expression::Number(number) if *number == number.trunc() && number.abs() < 1e15 => {
                     format!("{number:.0}")
                 }
                 other => format_expression(other),
-            }),
-            _ => None,
-        })
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 fn label_positional_numbers(label: &str) -> Vec<usize> {
@@ -1160,8 +1170,8 @@ fn label_positional_numbers(label: &str) -> Vec<usize> {
     let mut numbers = Vec::new();
     let mut idx = 1;
     while idx < items.len() {
-        if matches!(&items[idx], Expression::Symbol(symbol) if symbol.starts_with('@')) {
-            idx += 2;
+        if is_attribute_key(&items[idx]) {
+            idx += attribute_span_len(&items, idx);
             continue;
         }
         if let Expression::Number(number) = &items[idx] {

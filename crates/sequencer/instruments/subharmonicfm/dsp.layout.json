@@ -1,0 +1,819 @@
+{
+  "version": 2,
+  "authored": true,
+  "root": {
+    "nodes": {
+      "attack": {
+        "x": 4.0,
+        "y": 8.0
+      },
+      "audio": {
+        "x": 97.205666,
+        "y": 40.834694
+      },
+      "audio-2": {
+        "x": 110.05957,
+        "y": 39.67485
+      },
+      "clock": {
+        "x": 182.31639,
+        "y": 8.0
+      },
+      "decay": {
+        "x": 4.0,
+        "y": 10.68
+      },
+      "env": {
+        "x": 117.7209,
+        "y": 27.4
+      },
+      "gain": {
+        "x": 4.0,
+        "y": 13.360001
+      },
+      "gate": {
+        "x": 140.61992,
+        "y": 8.0
+      },
+      "mul": {
+        "x": 52.25834,
+        "y": 32.323406
+      },
+      "mul-0": {
+        "x": 97.205666,
+        "y": 31.74
+      },
+      "mul-2": {
+        "x": 111.31786,
+        "y": 32.323406
+      },
+      "out-2_out2_out3_out4": {
+        "x": 60.01381,
+        "y": 26.567987
+      },
+      "out-3_out2-2": {
+        "x": 60.265602,
+        "y": 33.903408
+      },
+      "phase": {
+        "x": 97.205666,
+        "y": 27.4
+      },
+      "pitch": {
+        "x": 97.205666,
+        "y": 8.0
+      },
+      "release": {
+        "x": 4.0,
+        "y": 16.04
+      },
+      "sustain": {
+        "x": 4.0,
+        "y": 18.720001
+      },
+      "trigger": {
+        "x": 160.3998,
+        "y": 8.0
+      },
+      "value": {
+        "x": 79.23022,
+        "y": 29.30609
+      },
+      "value-2": {
+        "x": 86.80405,
+        "y": 32.323406
+      },
+      "value-3": {
+        "x": 88.40566,
+        "y": 27.72609
+      },
+      "velocity": {
+        "x": 117.7209,
+        "y": 8.0
+      }
+    },
+    "cables": {
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 9.93
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "env:0->mul-0:1": {
+        "segmented": true,
+        "y": 30.36
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 19.11
+      },
+      "mul-0:0->audio:0": {
+        "segmented": true,
+        "y": 34.39
+      },
+      "pitch:0->phase:0": {
+        "segmented": true,
+        "y": 17.25
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 17.970001
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 20.650002
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 16.63
+      },
+      "velocity:0->mul-0:2": {
+        "segmented": true,
+        "y": 19.815
+      }
+    },
+    "inputPresentation": {
+      "audio-2:0": "cable",
+      "mul-0:0": "cable",
+      "mul-0:3": "inline-mod-param",
+      "mul-2:0": "cable",
+      "mul-2:1": "cable",
+      "mul-2:2": "cable",
+      "mul-2:3": "inline-mod-param",
+      "mul:0": "cable",
+      "out-2_out2_out3_out4:0": "cable",
+      "out-3_out2-2:0": "cable",
+      "out-3_out2-2:1": "cable",
+      "out-3_out2-2:2": "cable",
+      "out-3_out2-2:3": "cable",
+      "out-3_out2-2:4": "cable",
+      "out-3_out2-2:5": "cable",
+      "out-3_out2-2:6": "cable"
+    }
+  },
+  "macros": {
+    "spatial-quad-filter": {
+      "nodes": {
+        "cutoff": {
+          "x": 70.319534,
+          "y": 4.0
+        },
+        "d2": {
+          "x": 123.17622,
+          "y": 21.98
+        },
+        "d3": {
+          "x": 138.96858,
+          "y": 21.98
+        },
+        "d4": {
+          "x": 164.67622,
+          "y": 21.98
+        },
+        "f1": {
+          "x": 119.57618,
+          "y": 9.58
+        },
+        "f2": {
+          "x": 129.67618,
+          "y": 15.16
+        },
+        "f3": {
+          "x": 145.37617,
+          "y": 15.16
+        },
+        "f4": {
+          "x": 171.17618,
+          "y": 15.16
+        },
+        "in1": {
+          "x": 136.6914,
+          "y": 4.0
+        },
+        "in2": {
+          "x": 155.06992,
+          "y": 4.0
+        },
+        "in3": {
+          "x": 173.93866,
+          "y": 4.0
+        },
+        "in4": {
+          "x": 192.91092,
+          "y": 4.0
+        },
+        "mul-0": {
+          "x": 70.319534,
+          "y": 9.58
+        },
+        "mul-1": {
+          "x": 135.27618,
+          "y": 9.58
+        },
+        "mul-10": {
+          "x": 119.57618,
+          "y": 15.16
+        },
+        "mul-11": {
+          "x": 129.67618,
+          "y": 26.94
+        },
+        "mul-12": {
+          "x": 146.47168,
+          "y": 26.94
+        },
+        "mul-13": {
+          "x": 171.17618,
+          "y": 26.94
+        },
+        "mul-2": {
+          "x": 155.9461,
+          "y": 9.58
+        },
+        "mul-3": {
+          "x": 109.05997,
+          "y": 9.58
+        },
+        "mul-4": {
+          "x": 145.37619,
+          "y": 9.58
+        },
+        "mul-5": {
+          "x": 166.04611,
+          "y": 9.58
+        },
+        "mul-6": {
+          "x": 161.07617,
+          "y": 15.16
+        },
+        "mul-7": {
+          "x": 181.27618,
+          "y": 26.94
+        },
+        "mul-8": {
+          "x": 191.37619,
+          "y": 26.94
+        },
+        "mul-9": {
+          "x": 201.4762,
+          "y": 26.94
+        },
+        "out": {
+          "x": 161.07617,
+          "y": 36.24
+        },
+        "out2": {
+          "x": 119.57618,
+          "y": 36.24
+        },
+        "out_l": {
+          "x": 178.47617,
+          "y": 32.52,
+          "width": 44.700012
+        },
+        "out_r": {
+          "x": 119.57618,
+          "y": 32.52,
+          "width": 55.899986
+        },
+        "q": {
+          "x": 91.63946,
+          "y": 4.0
+        },
+        "spatial_width": {
+          "x": 109.05997,
+          "y": 4.0
+        }
+      },
+      "cables": {
+        "cutoff:0->f1:1": {
+          "segmented": true,
+          "y": 7.58
+        },
+        "cutoff:0->mul-0:0": {
+          "segmented": true,
+          "y": 7.58
+        },
+        "cutoff:0->mul-1:0": {
+          "segmented": true,
+          "y": 7.58
+        },
+        "cutoff:0->mul-2:0": {
+          "segmented": true,
+          "y": 7.58
+        },
+        "d2:0->mul-11:0": {
+          "segmented": true,
+          "y": 25.560001
+        },
+        "d2:0->mul-7:0": {
+          "segmented": true,
+          "y": 25.560001
+        },
+        "d3:0->mul-12:0": {
+          "segmented": true,
+          "y": 23.7
+        },
+        "d3:0->mul-8:0": {
+          "segmented": true,
+          "y": 23.7
+        },
+        "d4:0->mul-13:0": {
+          "segmented": true,
+          "y": 26.59
+        },
+        "d4:0->mul-9:0": {
+          "segmented": true,
+          "y": 26.59
+        },
+        "f1:0->mul-10:0": {
+          "segmented": true,
+          "y": 13.16
+        },
+        "f1:0->mul-6:0": {
+          "segmented": true,
+          "y": 13.16
+        },
+        "f2:0->d2:0": {
+          "segmented": true,
+          "y": 19.05
+        },
+        "f3:0->d3:0": {
+          "segmented": true,
+          "y": 18.429998
+        },
+        "f4:0->d4:0": {
+          "segmented": true,
+          "y": 19.67
+        },
+        "in1:0->f1:0": {
+          "segmented": true,
+          "y": 7.58
+        },
+        "in2:0->f2:0": {
+          "segmented": true,
+          "y": 8.285
+        },
+        "in3:0->f3:0": {
+          "segmented": true,
+          "y": 6.425
+        },
+        "in4:0->f4:0": {
+          "segmented": true,
+          "y": 9.525
+        },
+        "mul-0:0->f2:1": {
+          "segmented": true,
+          "y": 11.92
+        },
+        "mul-10:0->out_r:0": {
+          "segmented": true,
+          "y": 24.630001
+        },
+        "mul-11:0->out_r:1": {
+          "segmented": true,
+          "y": 30.52
+        },
+        "mul-12:0->out_r:2": {
+          "segmented": true,
+          "y": 29.9
+        },
+        "mul-13:0->out_r:3": {
+          "segmented": true,
+          "y": 31.140001
+        },
+        "mul-1:0->f3:1": {
+          "segmented": true,
+          "y": 14.4
+        },
+        "mul-2:0->f4:1": {
+          "segmented": true,
+          "y": 13.16
+        },
+        "mul-3:0->d2:1": {
+          "segmented": true,
+          "y": 17.725
+        },
+        "mul-4:0->d3:1": {
+          "segmented": true,
+          "y": 17.105
+        },
+        "mul-5:0->d4:1": {
+          "segmented": true,
+          "y": 20.825
+        },
+        "mul-6:0->out_l:0": {
+          "segmented": true,
+          "y": 23.08
+        },
+        "mul-7:0->out_l:1": {
+          "segmented": true,
+          "y": 28.87
+        },
+        "mul-8:0->out_l:2": {
+          "segmented": true,
+          "y": 32.170002
+        },
+        "mul-9:0->out_l:3": {
+          "segmented": true,
+          "y": 30.52
+        },
+        "out_l:0->out:0": {
+          "segmented": true,
+          "y": 35.170002
+        },
+        "out_r:0->out2:0": {
+          "segmented": true,
+          "y": 34.45
+        },
+        "q:0->f1:2": {
+          "segmented": true,
+          "y": 8.285
+        },
+        "q:0->f2:2": {
+          "segmented": true,
+          "y": 8.285
+        },
+        "q:0->f3:2": {
+          "segmented": true,
+          "y": 8.285
+        },
+        "q:0->f4:2": {
+          "segmented": true,
+          "y": 8.285
+        },
+        "spatial_width:0->mul-3:0": {
+          "segmented": true,
+          "y": 6.34
+        },
+        "spatial_width:0->mul-4:0": {
+          "segmented": true,
+          "y": 6.34
+        },
+        "spatial_width:0->mul-5:0": {
+          "segmented": true,
+          "y": 6.34
+        }
+      }
+    },
+    "subharmonic-sines": {
+      "nodes": {
+        "add-0": {
+          "x": 59.2,
+          "y": 25.08
+        },
+        "add-1": {
+          "x": 18.8,
+          "y": 30.66,
+          "width": 15.7
+        },
+        "add-2": {
+          "x": 46.3,
+          "y": 30.66
+        },
+        "add-3": {
+          "x": 75.30001,
+          "y": 30.66
+        },
+        "div-0": {
+          "x": 24.2,
+          "y": 25.08
+        },
+        "div-1": {
+          "x": 34.300003,
+          "y": 25.08
+        },
+        "div-2": {
+          "x": 69.3,
+          "y": 25.08
+        },
+        "f2": {
+          "x": 4.0,
+          "y": 8.34
+        },
+        "f3": {
+          "x": 14.291407,
+          "y": 7.1
+        },
+        "f4": {
+          "x": 34.300003,
+          "y": 8.34
+        },
+        "fm_depth": {
+          "x": 72.40876,
+          "y": 1.7910731
+        },
+        "fm_ratio": {
+          "x": 27.000002,
+          "y": 4.0
+        },
+        "freq": {
+          "x": 4.0,
+          "y": 4.0
+        },
+        "max-0": {
+          "x": 56.4,
+          "y": 30.66,
+          "width": 7.1000023
+        },
+        "max-1": {
+          "x": 10.0,
+          "y": 36.239998
+        },
+        "max-2": {
+          "x": 28.900002,
+          "y": 36.239998,
+          "width": 7.1000023
+        },
+        "max-3": {
+          "x": 66.50001,
+          "y": 36.239998
+        },
+        "mod_sig": {
+          "x": 24.2,
+          "y": 21.98,
+          "width": 33.013603
+        },
+        "mul-0": {
+          "x": 24.2,
+          "y": 14.540001
+        },
+        "mul-1": {
+          "x": 24.2,
+          "y": 8.34
+        },
+        "mul-2": {
+          "x": 50.4,
+          "y": 41.199997
+        },
+        "mul-3": {
+          "x": 10.0,
+          "y": 46.159996
+        },
+        "mul-4": {
+          "x": 28.900002,
+          "y": 46.159996
+        },
+        "mul-5": {
+          "x": 66.50001,
+          "y": 46.159996
+        },
+        "n0-1": {
+          "x": 50.4,
+          "y": 25.08
+        },
+        "n0-1-1": {
+          "x": 10.0,
+          "y": 30.66
+        },
+        "n0-1-2": {
+          "x": 37.5,
+          "y": 30.66
+        },
+        "n0-1-3": {
+          "x": 66.50001,
+          "y": 30.66
+        },
+        "out": {
+          "x": 50.4,
+          "y": 54.839996
+        },
+        "out2": {
+          "x": 10.0,
+          "y": 54.839996
+        },
+        "out3": {
+          "x": 28.900002,
+          "y": 54.839996
+        },
+        "out4": {
+          "x": 66.50001,
+          "y": 54.839996
+        },
+        "phasor-0": {
+          "x": 24.2,
+          "y": 11.440001
+        },
+        "phasor-1": {
+          "x": 50.4,
+          "y": 36.239998
+        },
+        "phasor-2": {
+          "x": 10.0,
+          "y": 41.199997
+        },
+        "phasor-3": {
+          "x": 28.900002,
+          "y": 41.199997
+        },
+        "phasor-4": {
+          "x": 66.50001,
+          "y": 41.199997
+        },
+        "s1": {
+          "x": 50.4,
+          "y": 46.159996
+        },
+        "s2": {
+          "x": 10.0,
+          "y": 50.499996
+        },
+        "s3": {
+          "x": 28.900002,
+          "y": 50.499996
+        },
+        "s4": {
+          "x": 66.50001,
+          "y": 50.499996
+        },
+        "sin-0": {
+          "x": 24.2,
+          "y": 18.26
+        }
+      },
+      "cables": {
+        "add-0:0->max-0:1": {
+          "segmented": true,
+          "y": 28.039999
+        },
+        "add-1:0->max-1:1": {
+          "segmented": true,
+          "y": 34.239998
+        },
+        "add-2:0->max-2:1": {
+          "segmented": true,
+          "y": 32.999996
+        },
+        "add-3:0->max-3:1": {
+          "segmented": true,
+          "y": 35.48
+        },
+        "div-0:0->add-1:1": {
+          "segmented": true,
+          "y": 29.28
+        },
+        "div-1:0->add-2:1": {
+          "segmented": true,
+          "y": 27.01
+        },
+        "div-2:0->add-3:1": {
+          "segmented": true,
+          "y": 30.31
+        },
+        "f2:0->add-1:0": {
+          "segmented": true,
+          "y": 20.29
+        },
+        "f3:0->add-2:0": {
+          "segmented": true,
+          "y": 21.53
+        },
+        "f4:0->add-3:0": {
+          "segmented": true,
+          "y": 24.32
+        },
+        "fm_ratio:0->mul-1:1": {
+          "segmented": true,
+          "y": 7.79
+        },
+        "freq:0->add-0:0": {
+          "segmented": true,
+          "y": 6.96
+        },
+        "freq:0->f2:0": {
+          "segmented": true,
+          "y": 6.96
+        },
+        "freq:0->f3:0": {
+          "segmented": true,
+          "y": 6.96
+        },
+        "freq:0->f4:0": {
+          "segmented": true,
+          "y": 6.96
+        },
+        "freq:0->mul-1:0": {
+          "segmented": true,
+          "y": 6.96
+        },
+        "max-0:0->phasor-1:0": {
+          "segmented": true,
+          "y": 34.239998
+        },
+        "max-1:0->phasor-2:0": {
+          "segmented": true,
+          "y": 39.51
+        },
+        "max-2:0->phasor-3:0": {
+          "segmented": true,
+          "y": 38.269997
+        },
+        "max-3:0->phasor-4:0": {
+          "segmented": true,
+          "y": 40.75
+        },
+        "mod_sig:0->add-0:1": {
+          "segmented": true,
+          "y": 24.32
+        },
+        "mod_sig:0->div-0:0": {
+          "segmented": true,
+          "y": 24.32
+        },
+        "mod_sig:0->div-1:0": {
+          "segmented": true,
+          "y": 24.32
+        },
+        "mod_sig:0->div-2:0": {
+          "segmented": true,
+          "y": 24.32
+        },
+        "mul-0:0->sin-0:0": {
+          "segmented": true,
+          "y": 17.19
+        },
+        "mul-1:0->phasor-0:0": {
+          "segmented": true,
+          "y": 10.68
+        },
+        "mul-2:0->s1:0": {
+          "segmented": true,
+          "y": 44.469997
+        },
+        "mul-3:0->s2:0": {
+          "segmented": true,
+          "y": 49.119995
+        },
+        "mul-4:0->s3:0": {
+          "segmented": true,
+          "y": 48.089996
+        },
+        "mul-5:0->s4:0": {
+          "segmented": true,
+          "y": 50.149998
+        },
+        "n0-1-1:0->max-1:0": {
+          "segmented": true,
+          "y": 34.239998
+        },
+        "n0-1-2:0->max-2:0": {
+          "segmented": true,
+          "y": 32.999996
+        },
+        "n0-1-3:0->max-3:0": {
+          "segmented": true,
+          "y": 35.48
+        },
+        "n0-1:0->max-0:0": {
+          "segmented": true,
+          "y": 28.66
+        },
+        "phasor-0:0->mul-0:0": {
+          "segmented": true,
+          "y": 13.780001
+        },
+        "phasor-1:0->mul-2:0": {
+          "segmented": true,
+          "y": 39.51
+        },
+        "phasor-2:0->mul-3:0": {
+          "segmented": true,
+          "y": 43.229996
+        },
+        "phasor-3:0->mul-4:0": {
+          "segmented": true,
+          "y": 45.71
+        },
+        "phasor-4:0->mul-5:0": {
+          "segmented": true,
+          "y": 44.469997
+        },
+        "s1:0->out:0": {
+          "segmented": true,
+          "y": 51.289997
+        },
+        "s2:0->out2:0": {
+          "segmented": true,
+          "y": 53.46
+        },
+        "s3:0->out3:0": {
+          "segmented": true,
+          "y": 54.489998
+        },
+        "s4:0->out4:0": {
+          "segmented": true,
+          "y": 52.429996
+        },
+        "sin-0:0->mod_sig:0": {
+          "segmented": true,
+          "y": 20.91
+        }
+      },
+      "inputPresentation": {
+        "mod_sig:1": "cable"
+      }
+    }
+  }
+}

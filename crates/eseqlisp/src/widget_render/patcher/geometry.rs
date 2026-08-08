@@ -4,10 +4,11 @@ use crate::layout::Rect;
 
 use super::display::node_size_for_ports;
 use super::metrics::{
-    CABLE_HANDLE_DISTANCE_CELLS, CABLE_HANDLE_HIT_RADIUS_CELLS, CABLE_HIT_RADIUS_CELLS,
-    CABLE_TARGET_RADIUS_CELLS, MIN_ZOOM, NODE_HEIGHT, NODE_RESIZE_HANDLE_HIT_SIZE_CELLS,
-    PATCH_ORIGIN_COL_OFFSET, PATCH_ORIGIN_ROW_OFFSET, PORT_EDGE_PADDING_CELLS,
-    PORT_OUTER_DIAMETER_PX, SEGMENTED_CABLE_CORNER_RADIUS_CELLS, VIEW_PADDING_X, VIEW_PADDING_Y,
+    CABLE_HANDLE_DISTANCE_CELLS, CABLE_HANDLE_HIT_RADIUS_CELLS, CABLE_HANDLE_MAX_SPAN_FRACTION,
+    CABLE_HIT_RADIUS_CELLS, CABLE_TARGET_RADIUS_CELLS, MIN_ZOOM, NODE_HEIGHT,
+    NODE_RESIZE_HANDLE_HIT_SIZE_CELLS, PATCH_ORIGIN_COL_OFFSET, PATCH_ORIGIN_ROW_OFFSET,
+    PORT_EDGE_PADDING_CELLS, PORT_OUTER_DIAMETER_PX, SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
+    VIEW_PADDING_X, VIEW_PADDING_Y,
 };
 use super::model::{
     ArgValue, CableEndpoint, InputPortRef, InputPresentation, OutputPortRef, Patch,
@@ -545,7 +546,15 @@ pub(super) fn cable_edit_points(
     end: (f32, f32),
     zoom: f32,
 ) -> ((f32, f32), (f32, f32)) {
-    super::super::cable::cable_edit_points(start, end, CABLE_HANDLE_DISTANCE_CELLS * zoom)
+    super::super::cable::cable_edit_points(start, end, cable_handle_distance(start, end, zoom))
+}
+
+/// How far each endpoint handle sits in from its end of the cable. Short cables
+/// scale the distance down so the two handles never cross past each other and
+/// stay independently grabbable.
+fn cable_handle_distance(start: (f32, f32), end: (f32, f32), zoom: f32) -> f32 {
+    let span = ((end.0 - start.0).powi(2) + (end.1 - start.1).powi(2)).sqrt();
+    (CABLE_HANDLE_DISTANCE_CELLS * zoom).min(span * CABLE_HANDLE_MAX_SPAN_FRACTION)
 }
 
 pub(super) fn connection_cable_edit_points(
@@ -562,7 +571,7 @@ pub(super) fn connection_cable_edit_points(
         super::super::cable::segmented_cable_edit_points(
             start,
             end,
-            CABLE_HANDLE_DISTANCE_CELLS * zoom,
+            cable_handle_distance(start, end, zoom),
         )
     } else {
         cable_edit_points(start, end, zoom)
@@ -651,13 +660,20 @@ pub(super) fn hit_patcher_cable_handle(
             )?;
             let (from_handle, to_handle) =
                 connection_cable_edit_points(connection, start, end, zoom);
-            if distance_squared(from_handle, (local_col, local_row)) <= threshold {
-                Some((cable_id, CableEndpoint::From))
-            } else if distance_squared(to_handle, (local_col, local_row)) <= threshold {
-                Some((cable_id, CableEndpoint::To))
-            } else {
-                None
+            // Nearest handle wins: on a short cable both handles can sit inside
+            // one hit radius, and first-match would make the `To` end
+            // unreachable.
+            let from_distance = distance_squared(from_handle, (local_col, local_row));
+            let to_distance = distance_squared(to_handle, (local_col, local_row));
+            if from_distance > threshold && to_distance > threshold {
+                return None;
             }
+            let endpoint = if from_distance <= to_distance {
+                CableEndpoint::From
+            } else {
+                CableEndpoint::To
+            };
+            Some((cable_id, endpoint))
         })
 }
 

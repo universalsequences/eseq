@@ -3132,7 +3132,8 @@ impl Runtime {
     /// without clearing reactive effects.
     pub fn restore_widget_tree(&mut self, tree: Value) {
         freeze_widget_tree(&tree);
-        self.current_widget_tree = Some(probed_shallow_clone("w2:restore-widget-tree-store", &tree));
+        self.current_widget_tree =
+            Some(probed_shallow_clone("w2:restore-widget-tree-store", &tree));
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.commit_current_ui_snapshot(Some(CommittedBufferUiSnapshot::from_tree(
             probed_shallow_clone("w2:restore-widget-tree-commit", &tree),

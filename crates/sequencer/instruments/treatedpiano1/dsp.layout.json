@@ -1,0 +1,3015 @@
+{
+  "version": 2,
+  "authored": true,
+  "root": {
+    "nodes": {
+      "attack": {
+        "x": 4.0,
+        "y": 8.0
+      },
+      "audio": {
+        "x": 50.41513,
+        "y": 40.461056
+      },
+      "clock": {
+        "x": 182.31639,
+        "y": 8.0
+      },
+      "created-20": {
+        "x": 159.00494,
+        "y": 27.26466
+      },
+      "created-24": {
+        "x": 119.34937,
+        "y": 36.073456
+      },
+      "ctrltone": {
+        "x": 78.35835,
+        "y": 35.911255
+      },
+      "decay": {
+        "x": 4.0,
+        "y": 10.68
+      },
+      "env": {
+        "x": 124.94937,
+        "y": 21.07561
+      },
+      "gain": {
+        "x": 4.0,
+        "y": 13.360001
+      },
+      "gate": {
+        "x": 140.61992,
+        "y": 8.0
+      },
+      "hard": {
+        "x": 52.803406,
+        "y": 21.409794
+      },
+      "marimba-2": {
+        "x": 100.27493,
+        "y": 24.569794
+      },
+      "mix-2": {
+        "x": 42.253334,
+        "y": 30.107607
+      },
+      "n48000": {
+        "x": 109.26553,
+        "y": 40.125
+      },
+      "out-2_out2": {
+        "x": 43.97663,
+        "y": 36.194157
+      },
+      "piano-karplus-strong-2": {
+        "x": 36.568253,
+        "y": 26.50507
+      },
+      "piano-resonance-2": {
+        "x": 78.35835,
+        "y": 32.02976
+      },
+      "pitch": {
+        "x": 97.205666,
+        "y": 8.0
+      },
+      "pow-2": {
+        "x": 127.60216,
+        "y": 23.906755
+      },
+      "release": {
+        "x": 4.0,
+        "y": 16.04
+      },
+      "scale-2": {
+        "x": 120.66601,
+        "y": 28.23763
+      },
+      "scale-3": {
+        "x": 139.676,
+        "y": 26.65763
+      },
+      "sustain": {
+        "x": 4.0,
+        "y": 18.720001
+      },
+      "trigger": {
+        "x": 160.3998,
+        "y": 8.0
+      },
+      "value": {
+        "x": 73.75006,
+        "y": 26.50507
+      },
+      "value-2": {
+        "x": 82.68791,
+        "y": 26.50507
+      },
+      "value-3": {
+        "x": 88.487915,
+        "y": 28.787565
+      },
+      "value-4": {
+        "x": 53.011917,
+        "y": 32.800205
+      },
+      "value-5": {
+        "x": 71.08249,
+        "y": 33.862953
+      },
+      "value-6": {
+        "x": 76.88791,
+        "y": 21.97916
+      },
+      "velocity": {
+        "x": 117.7209,
+        "y": 8.0
+      }
+    },
+    "cables": {
+      "attack:0->env:2": {
+        "segmented": true,
+        "y": 9.93
+      },
+      "decay:0->env:3": {
+        "segmented": true,
+        "y": 12.610001
+      },
+      "gate:0->env:0": {
+        "segmented": true,
+        "y": 16.11
+      },
+      "n48000:0->piano-karplus-strong-2:2": {
+        "segmented": true,
+        "y": 43.016247
+      },
+      "release:0->env:5": {
+        "segmented": true,
+        "y": 17.970001
+      },
+      "sustain:0->env:4": {
+        "segmented": true,
+        "y": 20.650002
+      },
+      "trigger:0->env:1": {
+        "segmented": true,
+        "y": 19.21
+      }
+    },
+    "inputPresentation": {
+      "audio:0": "cable",
+      "env:2": "inline-raw-param",
+      "env:3": "inline-raw-param",
+      "env:4": "inline-raw-param",
+      "env:5": "inline-raw-param",
+      "marimba-2:0": "cable",
+      "marimba-2:1": "cable",
+      "marimba-2:2": "inline-mod-param",
+      "marimba-2:3": "cable",
+      "mix-2:0": "cable",
+      "mix-2:1": "cable",
+      "out-2_out2:0": "cable",
+      "out-2_out2:1": "cable",
+      "out-2_out2:2": "inline-mod-param",
+      "out-2_out2:3": "cable",
+      "piano-karplus-strong-2:0": "cable",
+      "piano-karplus-strong-2:1": "cable",
+      "piano-karplus-strong-2:3": "inline-mod-param",
+      "piano-karplus-strong-2:4": "cable",
+      "piano-resonance-2:0": "cable",
+      "piano-resonance-2:1": "cable",
+      "piano-resonance-2:2": "cable",
+      "piano-resonance-2:3": "cable",
+      "pow-2:0": "cable",
+      "scale-2:0": "cable",
+      "scale-3:0": "cable"
+    }
+  },
+  "macros": {
+    "cool-vibraphone": {
+      "nodes": {
+        "add-0": {
+          "x": 107.03153,
+          "y": 24.0475
+        },
+        "decay": {
+          "x": 41.210304,
+          "y": 4.0
+        },
+        "div-0": {
+          "x": 10.800001,
+          "y": 4.0
+        },
+        "dry_sound": {
+          "x": 130.59494,
+          "y": 44.094997,
+          "width": 51.39998
+        },
+        "excitation": {
+          "x": 130.59494,
+          "y": 24.0475,
+          "width": 14.559357
+        },
+        "freq": {
+          "x": 21.568117,
+          "y": 4.0
+        },
+        "lfo_l": {
+          "x": 194.46304,
+          "y": 37.4125
+        },
+        "lfo_phase": {
+          "x": 107.03153,
+          "y": 17.365
+        },
+        "lfo_r": {
+          "x": 80.66813,
+          "y": 44.094997
+        },
+        "mallet_click": {
+          "x": 140.85431,
+          "y": 10.6825
+        },
+        "mallet_noise": {
+          "x": 130.59494,
+          "y": 17.365
+        },
+        "mul-0": {
+          "x": 161.85866,
+          "y": 4.0
+        },
+        "mul-1": {
+          "x": 47.210304,
+          "y": 10.6825
+        },
+        "mul-10": {
+          "x": 203.26305,
+          "y": 30.73
+        },
+        "mul-11": {
+          "x": 89.46813,
+          "y": 37.4125,
+          "width": 27.86341
+        },
+        "mul-2": {
+          "x": 21.568117,
+          "y": 10.6825
+        },
+        "mul-3": {
+          "x": 117.13153,
+          "y": 24.0475
+        },
+        "mul-4": {
+          "x": 150.95432,
+          "y": 10.6825
+        },
+        "mul-5": {
+          "x": 148.1543,
+          "y": 24.0475
+        },
+        "mul-6": {
+          "x": 130.59494,
+          "y": 37.4125
+        },
+        "mul-7": {
+          "x": 146.29494,
+          "y": 37.4125
+        },
+        "mul-8": {
+          "x": 161.99493,
+          "y": 37.4125
+        },
+        "mul-9": {
+          "x": 177.69493,
+          "y": 30.73
+        },
+        "n1": {
+          "x": 194.46304,
+          "y": 30.73
+        },
+        "n1-1": {
+          "x": 80.66813,
+          "y": 37.4125
+        },
+        "n80": {
+          "x": 38.410305,
+          "y": 10.6825
+        },
+        "noise-0": {
+          "x": 130.59494,
+          "y": 4.0
+        },
+        "out": {
+          "x": 140.69495,
+          "y": 64.142494
+        },
+        "out2": {
+          "x": 130.59494,
+          "y": 64.142494
+        },
+        "out_l": {
+          "x": 140.69495,
+          "y": 50.777496,
+          "width": 58.068085
+        },
+        "out_r": {
+          "x": 130.59494,
+          "y": 50.777496
+        },
+        "phasor-0": {
+          "x": 107.03153,
+          "y": 10.6825
+        },
+        "q_base": {
+          "x": 38.410305,
+          "y": 17.365,
+          "width": 7.1000023
+        },
+        "res1": {
+          "x": 130.59494,
+          "y": 30.73
+        },
+        "res2": {
+          "x": 146.29494,
+          "y": 30.73
+        },
+        "res3": {
+          "x": 161.99493,
+          "y": 30.73
+        },
+        "return": {
+          "x": 140.69495,
+          "y": 57.459995
+        },
+        "return2": {
+          "x": 130.59494,
+          "y": 57.459995
+        },
+        "sin-0": {
+          "x": 158.2543,
+          "y": 24.0475
+        },
+        "sin-1": {
+          "x": 107.03153,
+          "y": 30.73
+        },
+        "strike_env": {
+          "x": 172.55588,
+          "y": 10.6825
+        },
+        "strike_h": {
+          "x": 161.05432,
+          "y": 10.6825
+        },
+        "trem_depth": {
+          "x": 83.468124,
+          "y": 4.0
+        },
+        "trem_speed": {
+          "x": 107.03153,
+          "y": 4.0
+        },
+        "trigger": {
+          "x": 140.85431,
+          "y": 4.0
+        }
+      },
+      "cables": {
+        "add-0:0->sin-1:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "decay:0->mul-1:0": {
+          "segmented": true,
+          "y": 9.37125
+        },
+        "div-0:0->add-0:1": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "dry_sound:0->out_l:0": {
+          "segmented": true,
+          "y": 46.986248
+        },
+        "dry_sound:0->out_r:0": {
+          "segmented": true,
+          "y": 46.986248
+        },
+        "excitation:0->mul-9:0": {
+          "segmented": true,
+          "y": 30.03875
+        },
+        "excitation:0->res1:0": {
+          "segmented": true,
+          "y": 30.03875
+        },
+        "excitation:0->res2:0": {
+          "segmented": true,
+          "y": 30.03875
+        },
+        "excitation:0->res3:0": {
+          "segmented": true,
+          "y": 30.03875
+        },
+        "freq:0->mul-2:0": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "freq:0->mul-4:0": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "freq:0->res1:1": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "lfo_l:0->out_l:1": {
+          "segmented": true,
+          "y": 44.885
+        },
+        "lfo_phase:0->add-0:0": {
+          "segmented": true,
+          "y": 22.116251
+        },
+        "lfo_phase:0->sin-0:0": {
+          "segmented": true,
+          "y": 22.116251
+        },
+        "lfo_r:0->out_r:1": {
+          "segmented": true,
+          "y": 48.22625
+        },
+        "mallet_click:0->excitation:1": {
+          "segmented": true,
+          "y": 18.155
+        },
+        "mallet_noise:0->excitation:0": {
+          "segmented": true,
+          "y": 23.35625
+        },
+        "mul-0:0->strike_env:0": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "mul-10:0->lfo_l:1": {
+          "segmented": true,
+          "y": 33.62125
+        },
+        "mul-11:0->lfo_r:1": {
+          "segmented": true,
+          "y": 40.303745
+        },
+        "mul-1:0->q_base:1": {
+          "segmented": true,
+          "y": 13.57375
+        },
+        "mul-2:0->res2:1": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "mul-3:0->res2:2": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "mul-4:0->res3:1": {
+          "segmented": true,
+          "y": 18.86
+        },
+        "mul-5:0->res3:2": {
+          "segmented": true,
+          "y": 28.79875
+        },
+        "mul-6:0->dry_sound:0": {
+          "segmented": true,
+          "y": 42.78375
+        },
+        "mul-7:0->dry_sound:1": {
+          "segmented": true,
+          "y": 39.3425
+        },
+        "mul-8:0->dry_sound:2": {
+          "segmented": true,
+          "y": 43.745
+        },
+        "mul-9:0->dry_sound:3": {
+          "segmented": true,
+          "y": 38.2025
+        },
+        "n1-1:0->lfo_r:0": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "n1:0->lfo_l:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "n80:0->q_base:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "noise-0:0->mallet_noise:0": {
+          "segmented": true,
+          "y": 11.4725
+        },
+        "out_l:0->return:0": {
+          "segmented": true,
+          "y": 54.908745
+        },
+        "out_r:0->return2:0": {
+          "segmented": true,
+          "y": 53.668743
+        },
+        "phasor-0:0->lfo_phase:0": {
+          "segmented": true,
+          "y": 16.67375
+        },
+        "q_base:0->mul-3:0": {
+          "segmented": true,
+          "y": 19.63625
+        },
+        "q_base:0->mul-5:0": {
+          "segmented": true,
+          "y": 19.63625
+        },
+        "q_base:0->res1:2": {
+          "segmented": true,
+          "y": 19.63625
+        },
+        "res1:0->mul-6:0": {
+          "segmented": true,
+          "y": 37.0625
+        },
+        "res2:0->mul-7:0": {
+          "segmented": true,
+          "y": 32.66
+        },
+        "res3:0->mul-8:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "return2:0->out2:0": {
+          "segmented": true,
+          "y": 60.351246
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 61.591248
+        },
+        "sin-0:0->mul-10:1": {
+          "segmented": true,
+          "y": 26.318748
+        },
+        "sin-1:0->mul-11:1": {
+          "segmented": true,
+          "y": 36.101254
+        },
+        "strike_env:0->mallet_noise:1": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "strike_env:0->strike_h:0": {
+          "segmented": true,
+          "y": 13.162499
+        },
+        "strike_h:0->mul-0:0": {
+          "segmented": true,
+          "y": 12.6125
+        },
+        "trem_depth:0->mul-10:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "trem_depth:0->mul-11:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "trem_speed:0->phasor-0:0": {
+          "segmented": true,
+          "y": 6.2712502
+        },
+        "trigger:0->mallet_click:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "trigger:0->strike_env:1": {
+          "segmented": true,
+          "y": 8.13125
+        }
+      }
+    },
+    "marimba": {
+      "nodes": {
+        "add-0": {
+          "x": 172.4856,
+          "y": 17.365
+        },
+        "add-1": {
+          "x": 133.078,
+          "y": 50.777496,
+          "width": 51.39998
+        },
+        "decay": {
+          "x": 118.044785,
+          "y": 4.0
+        },
+        "env_h": {
+          "x": 144.88403,
+          "y": 10.6825
+        },
+        "env_val": {
+          "x": 212.25372,
+          "y": 10.6825
+        },
+        "f1": {
+          "x": 128.14478,
+          "y": 10.6825
+        },
+        "f2": {
+          "x": 186.05371,
+          "y": 17.365
+        },
+        "f3": {
+          "x": 217.82619,
+          "y": 17.365
+        },
+        "freq": {
+          "x": 76.54523,
+          "y": 4.0
+        },
+        "hardness": {
+          "x": 175.2856,
+          "y": 4.0
+        },
+        "mallet": {
+          "x": 133.078,
+          "y": 30.73
+        },
+        "mallet_freq": {
+          "x": 172.4856,
+          "y": 24.0475
+        },
+        "mul-0": {
+          "x": 181.2856,
+          "y": 10.6825
+        },
+        "mul-1": {
+          "x": 64.92409,
+          "y": 4.0
+        },
+        "mul-10": {
+          "x": 148.778,
+          "y": 44.094997
+        },
+        "mul-11": {
+          "x": 164.478,
+          "y": 44.094997
+        },
+        "mul-12": {
+          "x": 180.178,
+          "y": 44.094997
+        },
+        "mul-2": {
+          "x": 133.078,
+          "y": 17.365
+        },
+        "mul-3": {
+          "x": 156.38559,
+          "y": 10.6825
+        },
+        "mul-4": {
+          "x": 192.05371,
+          "y": 10.6825
+        },
+        "mul-5": {
+          "x": 222.35373,
+          "y": 10.6825
+        },
+        "mul-6": {
+          "x": 118.044785,
+          "y": 10.6825
+        },
+        "mul-7": {
+          "x": 202.15372,
+          "y": 10.6825
+        },
+        "mul-8": {
+          "x": 232.45374,
+          "y": 10.6825
+        },
+        "mul-9": {
+          "x": 133.078,
+          "y": 44.094997
+        },
+        "n200": {
+          "x": 172.4856,
+          "y": 10.6825
+        },
+        "noise-0": {
+          "x": 27.033213,
+          "y": 4.0
+        },
+        "out": {
+          "x": 133.078,
+          "y": 64.142494
+        },
+        "q1": {
+          "x": 118.044785,
+          "y": 17.365
+        },
+        "q2": {
+          "x": 202.79297,
+          "y": 17.365
+        },
+        "q3": {
+          "x": 234.56544,
+          "y": 17.365
+        },
+        "r1": {
+          "x": 133.078,
+          "y": 37.4125
+        },
+        "r2": {
+          "x": 164.478,
+          "y": 37.4125
+        },
+        "r3": {
+          "x": 180.178,
+          "y": 37.4125
+        },
+        "r_body": {
+          "x": 148.778,
+          "y": 37.4125
+        },
+        "raw_strike": {
+          "x": 133.078,
+          "y": 24.0475,
+          "width": 27.607574
+        },
+        "return": {
+          "x": 133.078,
+          "y": 57.459995
+        },
+        "trig": {
+          "x": 137.3431,
+          "y": 4.0
+        }
+      },
+      "cables": {
+        "add-0:0->mallet_freq:0": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "add-1:0->return:0": {
+          "segmented": true,
+          "y": 54.908745
+        },
+        "decay:0->mul-6:0": {
+          "segmented": true,
+          "y": 6.2712502
+        },
+        "decay:0->mul-7:0": {
+          "segmented": true,
+          "y": 6.2712502
+        },
+        "decay:0->mul-8:0": {
+          "segmented": true,
+          "y": 6.2712502
+        },
+        "env_h:0->mul-1:0": {
+          "segmented": true,
+          "y": 12.6125
+        },
+        "env_val:0->env_h:0": {
+          "segmented": true,
+          "y": 13.162499
+        },
+        "env_val:0->mul-2:1": {
+          "segmented": true,
+          "y": 13.57375
+        },
+        "f1:0->r1:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "f1:0->r_body:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "f2:0->r2:1": {
+          "segmented": true,
+          "y": 31.435001
+        },
+        "f3:0->r3:1": {
+          "segmented": true,
+          "y": 30.815
+        },
+        "freq:0->f1:0": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "freq:0->mul-4:0": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "freq:0->mul-5:0": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "hardness:0->mul-0:0": {
+          "segmented": true,
+          "y": 9.37125
+        },
+        "mallet:0->r1:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "mallet:0->r2:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "mallet:0->r3:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "mallet:0->r_body:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "mallet_freq:0->mallet:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "mul-0:0->add-0:1": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "mul-10:0->add-1:1": {
+          "segmented": true,
+          "y": 50.427498
+        },
+        "mul-11:0->add-1:2": {
+          "segmented": true,
+          "y": 46.986248
+        },
+        "mul-12:0->add-1:3": {
+          "segmented": true,
+          "y": 49.46625
+        },
+        "mul-1:0->env_val:1": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "mul-2:0->raw_strike:0": {
+          "segmented": true,
+          "y": 22.116251
+        },
+        "mul-3:0->raw_strike:1": {
+          "segmented": true,
+          "y": 18.155
+        },
+        "mul-4:0->f2:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "mul-5:0->f3:0": {
+          "segmented": true,
+          "y": 16.67375
+        },
+        "mul-6:0->q1:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "mul-7:0->q2:0": {
+          "segmented": true,
+          "y": 13.57375
+        },
+        "mul-8:0->q3:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "mul-9:0->add-1:0": {
+          "segmented": true,
+          "y": 48.22625
+        },
+        "n200:0->add-0:0": {
+          "segmented": true,
+          "y": 16.67375
+        },
+        "noise-0:0->mul-2:0": {
+          "segmented": true,
+          "y": 11.31625
+        },
+        "q1:0->r1:2": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "q2:0->r2:2": {
+          "segmented": true,
+          "y": 32.675003
+        },
+        "q3:0->r3:2": {
+          "segmented": true,
+          "y": 28.79875
+        },
+        "r1:0->mul-9:0": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "r2:0->mul-11:0": {
+          "segmented": true,
+          "y": 40.303745
+        },
+        "r3:0->mul-12:0": {
+          "segmented": true,
+          "y": 42.78375
+        },
+        "r_body:0->mul-10:0": {
+          "segmented": true,
+          "y": 39.3425
+        },
+        "raw_strike:0->mallet:0": {
+          "segmented": true,
+          "y": 26.318748
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 61.591248
+        },
+        "trig:0->env_val:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "trig:0->mul-3:0": {
+          "segmented": true,
+          "y": 8.13125
+        }
+      }
+    },
+    "piano-body-resonator": {
+      "nodes": {
+        "add-0": {
+          "x": 75.03968,
+          "y": 44.094997,
+          "width": 53.762077
+        },
+        "add-1": {
+          "x": 37.20156,
+          "y": 57.459995
+        },
+        "body_l": {
+          "x": 4.0,
+          "y": 44.094997
+        },
+        "body_r": {
+          "x": 135.26987,
+          "y": 44.094997,
+          "width": 35.268112
+        },
+        "d1": {
+          "x": 4.0,
+          "y": 17.365
+        },
+        "d2": {
+          "x": 104.30176,
+          "y": 24.0475
+        },
+        "d3": {
+          "x": 114.40176,
+          "y": 30.73
+        },
+        "decay_amt": {
+          "x": 38.127174,
+          "y": 4.0
+        },
+        "fb_damp": {
+          "x": 75.03968,
+          "y": 50.777496
+        },
+        "fb_h": {
+          "x": 19.699999,
+          "y": 50.777496
+        },
+        "final_l": {
+          "x": 28.401562,
+          "y": 70.825,
+          "width": 33.674404
+        },
+        "final_r": {
+          "x": 65.075966,
+          "y": 70.825,
+          "width": 20.774406
+        },
+        "input": {
+          "x": 4.0,
+          "y": 4.0
+        },
+        "loop_in": {
+          "x": 4.0,
+          "y": 10.6825,
+          "width": 24.59746
+        },
+        "lp_freq": {
+          "x": 74.27428,
+          "y": 17.365
+        },
+        "mode1": {
+          "x": 4.0,
+          "y": 30.73
+        },
+        "mode2": {
+          "x": 128.58194,
+          "y": 30.73
+        },
+        "mode3": {
+          "x": 19.7,
+          "y": 30.73
+        },
+        "mode4": {
+          "x": 144.28194,
+          "y": 30.73
+        },
+        "mode5": {
+          "x": 35.4,
+          "y": 30.73
+        },
+        "mono_mix": {
+          "x": 28.401562,
+          "y": 64.142494,
+          "width": 7.1000023
+        },
+        "mul-0": {
+          "x": 24.29746,
+          "y": 4.0
+        },
+        "mul-1": {
+          "x": 75.30176,
+          "y": 24.0475
+        },
+        "mul-10": {
+          "x": 4.0,
+          "y": 37.4125
+        },
+        "mul-11": {
+          "x": 19.7,
+          "y": 37.4125
+        },
+        "mul-12": {
+          "x": 35.4,
+          "y": 37.4125
+        },
+        "mul-13": {
+          "x": 64.58926,
+          "y": 24.0475
+        },
+        "mul-14": {
+          "x": 114.40176,
+          "y": 37.4125
+        },
+        "mul-15": {
+          "x": 135.26987,
+          "y": 37.4125
+        },
+        "mul-16": {
+          "x": 146.03798,
+          "y": 37.4125
+        },
+        "mul-17": {
+          "x": 156.13799,
+          "y": 37.4125
+        },
+        "mul-18": {
+          "x": 159.98193,
+          "y": 30.73
+        },
+        "mul-19": {
+          "x": 166.23799,
+          "y": 37.4125
+        },
+        "mul-2": {
+          "x": 104.30176,
+          "y": 30.73
+        },
+        "mul-20": {
+          "x": 83.07428,
+          "y": 10.6825
+        },
+        "mul-3": {
+          "x": 124.501755,
+          "y": 37.4125
+        },
+        "mul-4": {
+          "x": 44.127174,
+          "y": 10.6825
+        },
+        "mul-5": {
+          "x": 35.327175,
+          "y": 24.0475
+        },
+        "mul-6": {
+          "x": 126.42893,
+          "y": 24.0475
+        },
+        "mul-7": {
+          "x": 54.489254,
+          "y": 24.0475
+        },
+        "mul-8": {
+          "x": 145.32893,
+          "y": 24.0475
+        },
+        "mul-9": {
+          "x": 94.20176,
+          "y": 24.0475
+        },
+        "n0-5": {
+          "x": 28.401562,
+          "y": 57.459995
+        },
+        "n1": {
+          "x": 35.327175,
+          "y": 10.6825
+        },
+        "n1180": {
+          "x": 45.427177,
+          "y": 24.0475
+        },
+        "n150": {
+          "x": 74.27428,
+          "y": 10.6825
+        },
+        "n215": {
+          "x": 136.52893,
+          "y": 24.0475
+        },
+        "n340": {
+          "x": 22.500002,
+          "y": 24.0475
+        },
+        "n610": {
+          "x": 155.42894,
+          "y": 24.0475
+        },
+        "n86": {
+          "x": 6.7999997,
+          "y": 24.0475
+        },
+        "out": {
+          "x": 28.401562,
+          "y": 77.5075
+        },
+        "out2": {
+          "x": 41.30156,
+          "y": 77.5075
+        },
+        "out_l_damp": {
+          "x": 31.201561,
+          "y": 50.777496
+        },
+        "out_r_damp": {
+          "x": 135.26987,
+          "y": 50.777496
+        },
+        "q_base": {
+          "x": 35.327175,
+          "y": 17.365,
+          "width": 7.1000023
+        },
+        "tone_ctrl": {
+          "x": 80.13587,
+          "y": 4.0
+        },
+        "width": {
+          "x": 60.837563,
+          "y": 4.0
+        }
+      },
+      "cables": {
+        "add-0:0->fb_damp:0": {
+          "segmented": true,
+          "y": 48.84625
+        },
+        "add-1:0->mono_mix:1": {
+          "segmented": true,
+          "y": 60.351246
+        },
+        "body_l:0->out_l_damp:0": {
+          "segmented": true,
+          "y": 46.986248
+        },
+        "body_r:0->out_r_damp:0": {
+          "segmented": true,
+          "y": 49.46625
+        },
+        "d1:0->d2:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "d1:0->mul-13:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "d1:0->mul-1:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "d2:0->d3:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "d2:0->mul-18:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "d2:0->mul-2:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "d3:0->mul-14:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "d3:0->mul-19:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "d3:0->mul-3:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "decay_amt:0->mul-4:0": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "fb_damp:0->fb_h:0": {
+          "segmented": true,
+          "y": 53.2575
+        },
+        "fb_h:0->mul-0:0": {
+          "segmented": true,
+          "y": 52.707497
+        },
+        "final_l:0->out:0": {
+          "segmented": true,
+          "y": 74.95625
+        },
+        "final_r:0->out2:0": {
+          "segmented": true,
+          "y": 74.33625
+        },
+        "input:0->loop_in:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "loop_in:0->d1:0": {
+          "segmented": true,
+          "y": 17.015
+        },
+        "loop_in:0->mode1:0": {
+          "segmented": true,
+          "y": 17.015
+        },
+        "loop_in:0->mode2:0": {
+          "segmented": true,
+          "y": 17.015
+        },
+        "loop_in:0->mode3:0": {
+          "segmented": true,
+          "y": 17.015
+        },
+        "loop_in:0->mode4:0": {
+          "segmented": true,
+          "y": 17.015
+        },
+        "loop_in:0->mode5:0": {
+          "segmented": true,
+          "y": 17.015
+        },
+        "lp_freq:0->out_l_damp:1": {
+          "segmented": true,
+          "y": 32.381252
+        },
+        "lp_freq:0->out_r_damp:1": {
+          "segmented": true,
+          "y": 32.381252
+        },
+        "mode1:0->mul-10:0": {
+          "segmented": true,
+          "y": 37.0625
+        },
+        "mode2:0->mul-15:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "mode3:0->mul-11:0": {
+          "segmented": true,
+          "y": 36.101254
+        },
+        "mode4:0->mul-16:0": {
+          "segmented": true,
+          "y": 37.0625
+        },
+        "mode5:0->mul-12:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "mode5:0->mul-17:0": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "mono_mix:0->final_l:0": {
+          "segmented": true,
+          "y": 68.27374
+        },
+        "mono_mix:0->final_r:0": {
+          "segmented": true,
+          "y": 68.27374
+        },
+        "mul-0:0->loop_in:1": {
+          "segmented": true,
+          "y": 6.2712502
+        },
+        "mul-10:0->body_l:0": {
+          "segmented": true,
+          "y": 39.3425
+        },
+        "mul-11:0->body_l:1": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "mul-12:0->body_l:2": {
+          "segmented": true,
+          "y": 42.78375
+        },
+        "mul-13:0->body_l:3": {
+          "segmented": true,
+          "y": 36.101254
+        },
+        "mul-14:0->body_l:4": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "mul-15:0->body_r:0": {
+          "segmented": true,
+          "y": 43.745
+        },
+        "mul-16:0->body_r:1": {
+          "segmented": true,
+          "y": 40.303745
+        },
+        "mul-17:0->body_r:2": {
+          "segmented": true,
+          "y": 39.3425
+        },
+        "mul-18:0->body_r:3": {
+          "segmented": true,
+          "y": 33.08625
+        },
+        "mul-19:0->body_r:4": {
+          "segmented": true,
+          "y": 40.303745
+        },
+        "mul-1:0->add-0:0": {
+          "segmented": true,
+          "y": 34.24125
+        },
+        "mul-20:0->lp_freq:1": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "mul-2:0->add-0:1": {
+          "segmented": true,
+          "y": 38.2025
+        },
+        "mul-3:0->add-0:2": {
+          "segmented": true,
+          "y": 42.78375
+        },
+        "mul-4:0->q_base:1": {
+          "segmented": true,
+          "y": 13.57375
+        },
+        "mul-5:0->mode1:2": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "mul-6:0->mode2:2": {
+          "segmented": true,
+          "y": 28.79875
+        },
+        "mul-7:0->mode3:2": {
+          "segmented": true,
+          "y": 26.318748
+        },
+        "mul-8:0->mode4:2": {
+          "segmented": true,
+          "y": 30.03875
+        },
+        "mul-9:0->mode5:2": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "n0-5:0->mono_mix:0": {
+          "segmented": true,
+          "y": 61.591248
+        },
+        "n1180:0->mode5:1": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "n150:0->lp_freq:0": {
+          "segmented": true,
+          "y": 12.6125
+        },
+        "n1:0->q_base:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "n215:0->mode2:1": {
+          "segmented": true,
+          "y": 28.79875
+        },
+        "n340:0->mode3:1": {
+          "segmented": true,
+          "y": 26.318748
+        },
+        "n610:0->mode4:1": {
+          "segmented": true,
+          "y": 30.03875
+        },
+        "n86:0->mode1:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "out_l_damp:0->add-1:0": {
+          "segmented": true,
+          "y": 57.109997
+        },
+        "out_l_damp:0->final_l:1": {
+          "segmented": true,
+          "y": 57.109997
+        },
+        "out_r_damp:0->add-1:1": {
+          "segmented": true,
+          "y": 55.869995
+        },
+        "out_r_damp:0->final_r:1": {
+          "segmented": true,
+          "y": 55.869995
+        },
+        "q_base:0->mul-5:0": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "q_base:0->mul-6:0": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "q_base:0->mul-7:0": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "q_base:0->mul-8:0": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "q_base:0->mul-9:0": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "tone_ctrl:0->mul-20:0": {
+          "segmented": true,
+          "y": 9.37125
+        },
+        "width:0->final_l:2": {
+          "segmented": true,
+          "y": 48.14125
+        },
+        "width:0->final_r:2": {
+          "segmented": true,
+          "y": 48.14125
+        }
+      }
+    },
+    "piano-karplus-strong": {
+      "nodes": {
+        "add-0": {
+          "x": 137.56387,
+          "y": 17.365
+        },
+        "add-1": {
+          "x": 285.6523,
+          "y": 70.825,
+          "width": 19.987823
+        },
+        "clip-0": {
+          "x": 254.56718,
+          "y": 30.73
+        },
+        "damping": {
+          "x": 245.96718,
+          "y": 24.0475
+        },
+        "decay_time": {
+          "x": 247.83609,
+          "y": 4.0
+        },
+        "del1": {
+          "x": 198.27313,
+          "y": 57.459995
+        },
+        "del2": {
+          "x": 213.87195,
+          "y": 57.459995
+        },
+        "delay_samples1": {
+          "x": 219.32285,
+          "y": 17.365
+        },
+        "delay_samples2": {
+          "x": 282.228,
+          "y": 24.0475
+        },
+        "div-0": {
+          "x": 219.32285,
+          "y": 10.6825
+        },
+        "div-1": {
+          "x": 278.90524,
+          "y": 17.365
+        },
+        "div-2": {
+          "x": 237.04237,
+          "y": 17.365
+        },
+        "env_h": {
+          "x": 225.66562,
+          "y": 24.0475
+        },
+        "env_val": {
+          "x": 272.128,
+          "y": 24.0475
+        },
+        "exp-0": {
+          "x": 263.328,
+          "y": 24.0475
+        },
+        "fb1_h": {
+          "x": 220.06561,
+          "y": 64.142494
+        },
+        "fb2_h": {
+          "x": 274.15076,
+          "y": 64.142494
+        },
+        "fb_gain": {
+          "x": 271.928,
+          "y": 30.73
+        },
+        "filt_fb1": {
+          "x": 231.56717,
+          "y": 44.094997,
+          "width": 17.199997
+        },
+        "filt_fb2": {
+          "x": 289.52798,
+          "y": 44.094997,
+          "width": 17.200012
+        },
+        "freq": {
+          "x": 173.38419,
+          "y": 4.0
+        },
+        "hammer_noise": {
+          "x": 241.66718,
+          "y": 37.4125
+        },
+        "hardness": {
+          "x": 140.36388,
+          "y": 4.0
+        },
+        "in1": {
+          "x": 253.16873,
+          "y": 57.459995,
+          "width": 15.012482
+        },
+        "in2": {
+          "x": 271.1812,
+          "y": 57.459995,
+          "width": 26.683563
+        },
+        "lp1_h": {
+          "x": 251.76717,
+          "y": 44.094997
+        },
+        "lp2_h": {
+          "x": 309.728,
+          "y": 44.094997
+        },
+        "mul-0": {
+          "x": 237.16718,
+          "y": 4.0
+        },
+        "mul-1": {
+          "x": 173.38419,
+          "y": 24.0475
+        },
+        "mul-10": {
+          "x": 298.55234,
+          "y": 30.73
+        },
+        "mul-11": {
+          "x": 285.6523,
+          "y": 50.777496
+        },
+        "mul-12": {
+          "x": 253.16873,
+          "y": 50.777496
+        },
+        "mul-13": {
+          "x": 285.6523,
+          "y": 77.5075
+        },
+        "mul-2": {
+          "x": 146.36388,
+          "y": 10.6825
+        },
+        "mul-3": {
+          "x": 258.74237,
+          "y": 10.6825
+        },
+        "mul-4": {
+          "x": 247.4619,
+          "y": 10.6825
+        },
+        "mul-5": {
+          "x": 156.46388,
+          "y": 17.365
+        },
+        "mul-6": {
+          "x": 231.56717,
+          "y": 37.4125
+        },
+        "mul-7": {
+          "x": 244.46718,
+          "y": 30.73
+        },
+        "mul-8": {
+          "x": 263.88123,
+          "y": 50.777496,
+          "width": 12.346771
+        },
+        "mul-9": {
+          "x": 285.6523,
+          "y": 37.4125,
+          "width": 7.100006
+        },
+        "n0": {
+          "x": 271.60526,
+          "y": 10.6825
+        },
+        "n0-5": {
+          "x": 156.46388,
+          "y": 10.6825
+        },
+        "n1": {
+          "x": 164.58418,
+          "y": 4.0
+        },
+        "n1-1": {
+          "x": 237.16718,
+          "y": 24.0475
+        },
+        "n1-2": {
+          "x": 297.07935,
+          "y": 24.0475
+        },
+        "n1-5": {
+          "x": 137.56387,
+          "y": 10.6825
+        },
+        "n6-91": {
+          "x": 237.04237,
+          "y": 10.6825
+        },
+        "noise-0": {
+          "x": 18.1,
+          "y": 4.0
+        },
+        "out": {
+          "x": 253.16873,
+          "y": 90.872505
+        },
+        "return": {
+          "x": 253.16873,
+          "y": 84.19,
+          "width": 36.78357
+        },
+        "sr": {
+          "x": 219.32285,
+          "y": 4.0
+        },
+        "strike": {
+          "x": 263.26874,
+          "y": 44.094997,
+          "width": 23.259247
+        },
+        "sub-0": {
+          "x": 280.40524,
+          "y": 10.6825
+        },
+        "sub-1": {
+          "x": 165.26389,
+          "y": 10.6825
+        },
+        "sub-2": {
+          "x": 234.36717,
+          "y": 30.73
+        },
+        "sub-3": {
+          "x": 288.45233,
+          "y": 30.73
+        },
+        "trig": {
+          "x": 274.13257,
+          "y": 4.0
+        },
+        "trig_diff": {
+          "x": 268.80524,
+          "y": 17.365,
+          "width": 7.100006
+        },
+        "trig_h": {
+          "x": 110.08243,
+          "y": 10.6825
+        }
+      },
+      "cables": {
+        "add-0:0->mul-1:1": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "add-1:0->mul-13:0": {
+          "segmented": true,
+          "y": 74.95625
+        },
+        "clip-0:0->hammer_noise:1": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "damping:0->mul-10:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "damping:0->mul-7:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "damping:0->sub-2:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "damping:0->sub-3:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "decay_time:0->mul-4:1": {
+          "segmented": true,
+          "y": 6.2712502
+        },
+        "del1:0->add-1:0": {
+          "segmented": true,
+          "y": 68.27374
+        },
+        "del1:0->fb1_h:0": {
+          "segmented": true,
+          "y": 66.6225
+        },
+        "del2:0->add-1:1": {
+          "segmented": true,
+          "y": 67.65374
+        },
+        "del2:0->fb2_h:0": {
+          "segmented": true,
+          "y": 66.6225
+        },
+        "delay_samples1:0->del1:1": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "delay_samples2:0->del2:1": {
+          "segmented": true,
+          "y": 40.303745
+        },
+        "div-0:0->delay_samples1:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "div-1:0->delay_samples2:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "div-2:0->exp-0:0": {
+          "segmented": true,
+          "y": 22.116251
+        },
+        "env_h:0->mul-0:0": {
+          "segmented": true,
+          "y": 25.9775
+        },
+        "env_val:0->env_h:0": {
+          "segmented": true,
+          "y": 26.5275
+        },
+        "env_val:0->strike:1": {
+          "segmented": true,
+          "y": 37.4975
+        },
+        "exp-0:0->fb_gain:0": {
+          "segmented": true,
+          "y": 30.03875
+        },
+        "fb1_h:0->mul-6:0": {
+          "segmented": true,
+          "y": 66.072495
+        },
+        "fb2_h:0->mul-9:0": {
+          "segmented": true,
+          "y": 66.6925
+        },
+        "fb_gain:0->mul-11:1": {
+          "segmented": true,
+          "y": 42.78375
+        },
+        "fb_gain:0->mul-8:1": {
+          "segmented": true,
+          "y": 42.78375
+        },
+        "filt_fb1:0->lp1_h:0": {
+          "segmented": true,
+          "y": 46.575
+        },
+        "filt_fb1:0->mul-8:0": {
+          "segmented": true,
+          "y": 48.22625
+        },
+        "filt_fb2:0->lp2_h:0": {
+          "segmented": true,
+          "y": 46.575
+        },
+        "filt_fb2:0->mul-11:0": {
+          "segmented": true,
+          "y": 49.46625
+        },
+        "freq:0->div-0:1": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "freq:0->mul-1:0": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "freq:0->mul-3:0": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "freq:0->mul-4:0": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "hammer_noise:0->strike:0": {
+          "segmented": true,
+          "y": 39.3425
+        },
+        "hardness:0->mul-2:0": {
+          "segmented": true,
+          "y": 9.99125
+        },
+        "hardness:0->sub-1:1": {
+          "segmented": true,
+          "y": 9.99125
+        },
+        "in1:0->del1:0": {
+          "segmented": true,
+          "y": 61.591248
+        },
+        "in2:0->del2:0": {
+          "segmented": true,
+          "y": 60.351246
+        },
+        "lp1_h:0->mul-7:0": {
+          "segmented": true,
+          "y": 46.024998
+        },
+        "lp2_h:0->mul-10:0": {
+          "segmented": true,
+          "y": 47.265
+        },
+        "mul-0:0->env_val:1": {
+          "segmented": true,
+          "y": 13.57375
+        },
+        "mul-10:0->filt_fb2:1": {
+          "segmented": true,
+          "y": 38.2025
+        },
+        "mul-11:0->in2:1": {
+          "segmented": true,
+          "y": 53.668743
+        },
+        "mul-12:0->return:0": {
+          "segmented": true,
+          "y": 71.53
+        },
+        "mul-13:0->return:1": {
+          "segmented": true,
+          "y": 81.63875
+        },
+        "mul-1:0->clip-0:0": {
+          "segmented": true,
+          "y": 28.79875
+        },
+        "mul-2:0->add-0:1": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "mul-3:0->div-1:1": {
+          "segmented": true,
+          "y": 16.67375
+        },
+        "mul-4:0->div-2:1": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "mul-5:0->damping:0": {
+          "segmented": true,
+          "y": 23.35625
+        },
+        "mul-6:0->filt_fb1:0": {
+          "segmented": true,
+          "y": 43.745
+        },
+        "mul-7:0->filt_fb1:1": {
+          "segmented": true,
+          "y": 35.56625
+        },
+        "mul-8:0->in1:1": {
+          "segmented": true,
+          "y": 54.908745
+        },
+        "mul-9:0->filt_fb2:0": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "n0-5:0->mul-5:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "n0:0->trig_diff:0": {
+          "segmented": true,
+          "y": 13.57375
+        },
+        "n1-1:0->sub-2:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "n1-2:0->sub-3:0": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "n1-5:0->add-0:0": {
+          "segmented": true,
+          "y": 16.67375
+        },
+        "n1:0->sub-1:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "n6-91:0->div-2:0": {
+          "segmented": true,
+          "y": 12.6125
+        },
+        "noise-0:0->hammer_noise:0": {
+          "segmented": true,
+          "y": 19.63625
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 88.32126
+        },
+        "sr:0->div-0:0": {
+          "segmented": true,
+          "y": 8.836249
+        },
+        "sr:0->div-1:0": {
+          "segmented": true,
+          "y": 8.836249
+        },
+        "strike:0->in1:0": {
+          "segmented": true,
+          "y": 50.17125
+        },
+        "strike:0->in2:0": {
+          "segmented": true,
+          "y": 50.17125
+        },
+        "strike:0->mul-12:0": {
+          "segmented": true,
+          "y": 50.17125
+        },
+        "sub-0:0->trig_diff:1": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "sub-1:0->mul-5:1": {
+          "segmented": true,
+          "y": 13.57375
+        },
+        "sub-2:0->mul-6:1": {
+          "segmented": true,
+          "y": 33.62125
+        },
+        "sub-3:0->mul-9:1": {
+          "segmented": true,
+          "y": 36.721252
+        },
+        "trig:0->sub-0:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "trig:0->trig_h:0": {
+          "segmented": true,
+          "y": 13.162499
+        },
+        "trig_diff:0->env_val:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "trig_h:0->sub-0:1": {
+          "segmented": true,
+          "y": 12.6125
+        }
+      }
+    },
+    "piano-resonance": {
+      "nodes": {
+        "base-freq": {
+          "x": 47.74056,
+          "y": 4.0
+        },
+        "dry-wet": {
+          "x": 27.033792,
+          "y": 4.0
+        },
+        "f1": {
+          "x": 27.033792,
+          "y": 10.6825
+        },
+        "f2": {
+          "x": 43.55812,
+          "y": 17.365
+        },
+        "f3": {
+          "x": 77.23786,
+          "y": 17.365
+        },
+        "f4": {
+          "x": 103.86219,
+          "y": 17.365
+        },
+        "f5": {
+          "x": 130.48651,
+          "y": 17.365
+        },
+        "f6": {
+          "x": 157.11084,
+          "y": 17.365
+        },
+        "input": {
+          "x": 7.9999995,
+          "y": 4.0
+        },
+        "mul-0": {
+          "x": 43.55812,
+          "y": 10.6825
+        },
+        "mul-1": {
+          "x": 55.06353,
+          "y": 10.6825
+        },
+        "mul-10": {
+          "x": 7.9999995,
+          "y": 24.0475
+        },
+        "mul-11": {
+          "x": 18.1,
+          "y": 30.73
+        },
+        "mul-12": {
+          "x": 33.8,
+          "y": 30.73
+        },
+        "mul-13": {
+          "x": 49.5,
+          "y": 30.73
+        },
+        "mul-14": {
+          "x": 65.2,
+          "y": 30.73
+        },
+        "mul-15": {
+          "x": 80.899994,
+          "y": 30.73
+        },
+        "mul-2": {
+          "x": 80.58381,
+          "y": 10.6825
+        },
+        "mul-3": {
+          "x": 92.08922,
+          "y": 10.6825
+        },
+        "mul-4": {
+          "x": 103.59463,
+          "y": 10.6825
+        },
+        "mul-5": {
+          "x": 66.56894,
+          "y": 17.365
+        },
+        "mul-6": {
+          "x": 93.76219,
+          "y": 17.365
+        },
+        "mul-7": {
+          "x": 120.38652,
+          "y": 17.365
+        },
+        "mul-8": {
+          "x": 147.01083,
+          "y": 17.365
+        },
+        "mul-9": {
+          "x": 173.63516,
+          "y": 17.365
+        },
+        "out": {
+          "x": 7.9999995,
+          "y": 50.777496
+        },
+        "q": {
+          "x": 66.56894,
+          "y": 10.6825
+        },
+        "r1": {
+          "x": 7.9999995,
+          "y": 17.365
+        },
+        "r2": {
+          "x": 18.1,
+          "y": 24.0475
+        },
+        "r3": {
+          "x": 33.8,
+          "y": 24.0475
+        },
+        "r4": {
+          "x": 49.5,
+          "y": 24.0475
+        },
+        "r5": {
+          "x": 65.2,
+          "y": 24.0475
+        },
+        "r6": {
+          "x": 80.899994,
+          "y": 24.0475
+        },
+        "resonance": {
+          "x": 70.1203,
+          "y": 4.0
+        },
+        "return": {
+          "x": 7.9999995,
+          "y": 44.094997
+        },
+        "wet": {
+          "x": 7.9999995,
+          "y": 37.4125,
+          "width": 77.2
+        }
+      },
+      "cables": {
+        "base-freq:0->f1:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "base-freq:0->mul-0:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "base-freq:0->mul-1:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "base-freq:0->mul-2:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "base-freq:0->mul-3:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "base-freq:0->mul-4:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "dry-wet:0->return:2": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "f1:0->r1:1": {
+          "segmented": true,
+          "y": 13.57375
+        },
+        "f2:0->r2:1": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "f3:0->r3:1": {
+          "segmented": true,
+          "y": 22.116251
+        },
+        "f4:0->r4:1": {
+          "segmented": true,
+          "y": 19.63625
+        },
+        "f5:0->r5:1": {
+          "segmented": true,
+          "y": 23.35625
+        },
+        "f6:0->r6:1": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "input:0->r1:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "input:0->r2:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "input:0->r3:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "input:0->r4:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "input:0->r5:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "input:0->r6:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "input:0->return:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "mul-0:0->f2:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "mul-10:0->wet:0": {
+          "segmented": true,
+          "y": 31.52
+        },
+        "mul-11:0->wet:1": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "mul-12:0->wet:2": {
+          "segmented": true,
+          "y": 33.62125
+        },
+        "mul-13:0->wet:3": {
+          "segmented": true,
+          "y": 36.101254
+        },
+        "mul-14:0->wet:4": {
+          "segmented": true,
+          "y": 37.0625
+        },
+        "mul-15:0->wet:5": {
+          "segmented": true,
+          "y": 32.66
+        },
+        "mul-1:0->f3:0": {
+          "segmented": true,
+          "y": 16.67375
+        },
+        "mul-2:0->f4:0": {
+          "segmented": true,
+          "y": 12.6125
+        },
+        "mul-3:0->f5:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "mul-4:0->f6:0": {
+          "segmented": true,
+          "y": 13.57375
+        },
+        "mul-5:0->r2:2": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "mul-6:0->r3:2": {
+          "segmented": true,
+          "y": 22.116251
+        },
+        "mul-7:0->r4:2": {
+          "segmented": true,
+          "y": 19.63625
+        },
+        "mul-8:0->r5:2": {
+          "segmented": true,
+          "y": 23.35625
+        },
+        "mul-9:0->r6:2": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "q:0->mul-5:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "q:0->mul-6:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "q:0->mul-7:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "q:0->mul-8:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "q:0->mul-9:0": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "q:0->r1:2": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "r1:0->mul-10:0": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "r2:0->mul-11:0": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "r3:0->mul-12:0": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "r4:0->mul-13:0": {
+          "segmented": true,
+          "y": 28.79875
+        },
+        "r5:0->mul-14:0": {
+          "segmented": true,
+          "y": 26.318748
+        },
+        "r6:0->mul-15:0": {
+          "segmented": true,
+          "y": 30.03875
+        },
+        "resonance:0->q:0": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 48.22625
+        },
+        "wet:0->return:1": {
+          "segmented": true,
+          "y": 41.543747
+        }
+      }
+    },
+    "treated-piano": {
+      "nodes": {
+        "add-0": {
+          "x": 178.1174,
+          "y": 44.094997
+        },
+        "add-1": {
+          "x": 188.2174,
+          "y": 44.094997
+        },
+        "body_l": {
+          "x": 178.1174,
+          "y": 90.872505
+        },
+        "body_r": {
+          "x": 216.82051,
+          "y": 90.872505
+        },
+        "buzz_l": {
+          "x": 178.1174,
+          "y": 77.5075
+        },
+        "buzz_r": {
+          "x": 216.82051,
+          "y": 77.5075
+        },
+        "damp_freq": {
+          "x": 224.3776,
+          "y": 10.6825
+        },
+        "damped_l": {
+          "x": 178.1174,
+          "y": 57.459995
+        },
+        "damped_r": {
+          "x": 216.82051,
+          "y": 57.459995
+        },
+        "decay": {
+          "x": 213.95186,
+          "y": 4.0
+        },
+        "decay_speed": {
+          "x": 57.02517,
+          "y": 10.6825,
+          "width": 9.900002
+        },
+        "delay_out_l": {
+          "x": 178.1174,
+          "y": 50.777496
+        },
+        "delay_out_r": {
+          "x": 194.00363,
+          "y": 50.777496
+        },
+        "delay_samps_l": {
+          "x": 147.8174,
+          "y": 17.365
+        },
+        "delay_samps_r": {
+          "x": 259.9289,
+          "y": 24.0475
+        },
+        "div-0": {
+          "x": 147.8174,
+          "y": 10.6825
+        },
+        "div-1": {
+          "x": 259.9289,
+          "y": 17.365,
+          "width": 7.100006
+        },
+        "env_h": {
+          "x": 15.0126705,
+          "y": 24.0475
+        },
+        "env_next": {
+          "x": 33.93019,
+          "y": 24.0475
+        },
+        "fb_l": {
+          "x": 193.8174,
+          "y": 57.459995
+        },
+        "fb_r": {
+          "x": 205.31895,
+          "y": 57.459995
+        },
+        "final_decay": {
+          "x": 170.8174,
+          "y": 24.0475,
+          "width": 38.10257
+        },
+        "freq": {
+          "x": 157.7325,
+          "y": 4.0
+        },
+        "freq_r": {
+          "x": 269.844,
+          "y": 10.6825
+        },
+        "hammer": {
+          "x": 178.1174,
+          "y": 37.4125
+        },
+        "hardness": {
+          "x": 78.540276,
+          "y": 4.0
+        },
+        "mix-0": {
+          "x": 157.9174,
+          "y": 10.6825
+        },
+        "mul-0": {
+          "x": 26.514233,
+          "y": 17.365,
+          "width": 34.81094
+        },
+        "mul-1": {
+          "x": 162.85062,
+          "y": 17.365
+        },
+        "mul-2": {
+          "x": 213.41998,
+          "y": 10.6825
+        },
+        "mul-3": {
+          "x": 168.0174,
+          "y": 30.73
+        },
+        "mul-4": {
+          "x": 188.2174,
+          "y": 30.73
+        },
+        "mul-5": {
+          "x": 178.1174,
+          "y": 70.825
+        },
+        "mul-6": {
+          "x": 216.82051,
+          "y": 70.825
+        },
+        "mul-7": {
+          "x": 178.1174,
+          "y": 97.55501
+        },
+        "mul-8": {
+          "x": 216.82051,
+          "y": 97.55501
+        },
+        "n0-94": {
+          "x": 194.97469,
+          "y": 4.0
+        },
+        "n0-982": {
+          "x": 58.710075,
+          "y": 4.0
+        },
+        "n0-996": {
+          "x": 68.625175,
+          "y": 4.0
+        },
+        "n0-996-1": {
+          "x": 204.03676,
+          "y": 4.0
+        },
+        "n1": {
+          "x": 31.130194,
+          "y": 4.0
+        },
+        "n1-1": {
+          "x": 204.61998,
+          "y": 10.6825
+        },
+        "n1-5": {
+          "x": 177.37468,
+          "y": 4.0
+        },
+        "n14000": {
+          "x": 264.76056,
+          "y": 4.0
+        },
+        "n44100": {
+          "x": 147.8174,
+          "y": 4.0
+        },
+        "n44100-1": {
+          "x": 259.9289,
+          "y": 10.6825
+        },
+        "n6": {
+          "x": 186.17468,
+          "y": 4.0
+        },
+        "n800": {
+          "x": 255.96056,
+          "y": 4.0
+        },
+        "noise-0": {
+          "x": 100.397644,
+          "y": 4.0
+        },
+        "out": {
+          "x": 178.1174,
+          "y": 110.92001
+        },
+        "out2": {
+          "x": 216.82051,
+          "y": 110.92001
+        },
+        "out_l": {
+          "x": 178.1174,
+          "y": 84.19,
+          "width": 33.60257
+        },
+        "out_r": {
+          "x": 216.82051,
+          "y": 84.19
+        },
+        "rattle_freq_l": {
+          "x": 237.27759,
+          "y": 10.6825
+        },
+        "rattle_freq_r": {
+          "x": 248.0457,
+          "y": 10.6825
+        },
+        "return": {
+          "x": 178.1174,
+          "y": 104.23751
+        },
+        "return2": {
+          "x": 216.82051,
+          "y": 104.23751
+        },
+        "strike_noise": {
+          "x": 178.1174,
+          "y": 30.73
+        },
+        "string_decay": {
+          "x": 170.8174,
+          "y": 10.6825
+        },
+        "sub-0": {
+          "x": 31.130192,
+          "y": 10.6825,
+          "width": 7.1000023
+        },
+        "sub-1": {
+          "x": 204.61998,
+          "y": 17.365
+        },
+        "svf-0": {
+          "x": 178.1174,
+          "y": 64.142494
+        },
+        "svf-1": {
+          "x": 216.82051,
+          "y": 64.142494
+        },
+        "tone": {
+          "x": 274.67566,
+          "y": 4.0
+        },
+        "treatment": {
+          "x": 233.25017,
+          "y": 4.0
+        },
+        "trig": {
+          "x": 39.930195,
+          "y": 4.0
+        }
+      },
+      "cables": {
+        "add-0:0->delay_out_l:0": {
+          "segmented": true,
+          "y": 48.22625
+        },
+        "add-1:0->delay_out_r:0": {
+          "segmented": true,
+          "y": 46.986248
+        },
+        "body_l:0->mul-7:0": {
+          "segmented": true,
+          "y": 95.00375
+        },
+        "body_r:0->mul-8:0": {
+          "segmented": true,
+          "y": 94.38375
+        },
+        "buzz_l:0->out_l:1": {
+          "segmented": true,
+          "y": 81.63875
+        },
+        "buzz_r:0->out_r:1": {
+          "segmented": true,
+          "y": 81.018745
+        },
+        "damp_freq:0->damped_l:1": {
+          "segmented": true,
+          "y": 33.62125
+        },
+        "damp_freq:0->damped_r:1": {
+          "segmented": true,
+          "y": 33.62125
+        },
+        "damped_l:0->fb_l:0": {
+          "segmented": true,
+          "y": 59.94
+        },
+        "damped_l:0->out_l:0": {
+          "segmented": true,
+          "y": 63.792496
+        },
+        "damped_l:0->svf-0:0": {
+          "segmented": true,
+          "y": 63.792496
+        },
+        "damped_r:0->fb_r:0": {
+          "segmented": true,
+          "y": 59.94
+        },
+        "damped_r:0->out_r:0": {
+          "segmented": true,
+          "y": 62.552494
+        },
+        "damped_r:0->svf-1:0": {
+          "segmented": true,
+          "y": 62.552494
+        },
+        "decay:0->string_decay:2": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "decay_speed:0->mul-0:2": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "delay_out_l:0->damped_l:0": {
+          "segmented": true,
+          "y": 54.908745
+        },
+        "delay_out_r:0->damped_r:0": {
+          "segmented": true,
+          "y": 53.668743
+        },
+        "delay_samps_l:0->delay_out_l:1": {
+          "segmented": true,
+          "y": 34.86125
+        },
+        "delay_samps_r:0->delay_out_r:1": {
+          "segmented": true,
+          "y": 38.2025
+        },
+        "div-0:0->delay_samps_l:0": {
+          "segmented": true,
+          "y": 12.6125
+        },
+        "div-1:0->delay_samps_r:0": {
+          "segmented": true,
+          "y": 21.49625
+        },
+        "env_h:0->mul-0:0": {
+          "segmented": true,
+          "y": 25.9775
+        },
+        "env_next:0->env_h:0": {
+          "segmented": true,
+          "y": 26.5275
+        },
+        "env_next:0->strike_noise:0": {
+          "segmented": true,
+          "y": 27.558748
+        },
+        "fb_l:0->mul-3:0": {
+          "segmented": true,
+          "y": 59.389996
+        },
+        "fb_r:0->mul-4:0": {
+          "segmented": true,
+          "y": 60.629997
+        },
+        "final_decay:0->mul-3:1": {
+          "segmented": true,
+          "y": 28.79875
+        },
+        "final_decay:0->mul-4:1": {
+          "segmented": true,
+          "y": 28.79875
+        },
+        "freq:0->div-0:1": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "freq:0->freq_r:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "freq:0->mul-1:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "freq:0->rattle_freq_l:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "freq:0->rattle_freq_r:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "freq_r:0->div-1:1": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "hammer:0->add-0:0": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "hammer:0->add-1:0": {
+          "segmented": true,
+          "y": 41.543747
+        },
+        "hardness:0->decay_speed:2": {
+          "segmented": true,
+          "y": 6.2712502
+        },
+        "hardness:0->mix-0:2": {
+          "segmented": true,
+          "y": 6.2712502
+        },
+        "mix-0:0->mul-1:1": {
+          "segmented": true,
+          "y": 13.57375
+        },
+        "mul-0:0->env_next:1": {
+          "segmented": true,
+          "y": 20.87625
+        },
+        "mul-1:0->hammer:1": {
+          "segmented": true,
+          "y": 28.17875
+        },
+        "mul-2:0->sub-1:1": {
+          "segmented": true,
+          "y": 13.57375
+        },
+        "mul-3:0->add-0:1": {
+          "segmented": true,
+          "y": 37.42625
+        },
+        "mul-4:0->add-1:1": {
+          "segmented": true,
+          "y": 39.28625
+        },
+        "mul-5:0->buzz_l:0": {
+          "segmented": true,
+          "y": 74.95625
+        },
+        "mul-6:0->buzz_r:0": {
+          "segmented": true,
+          "y": 74.33625
+        },
+        "mul-7:0->return:1": {
+          "segmented": true,
+          "y": 101.686264
+        },
+        "mul-8:0->return2:1": {
+          "segmented": true,
+          "y": 101.06626
+        },
+        "n0-94:0->string_decay:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "n0-982:0->decay_speed:0": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "n0-996-1:0->string_decay:1": {
+          "segmented": true,
+          "y": 6.2712502
+        },
+        "n0-996:0->decay_speed:1": {
+          "segmented": true,
+          "y": 9.37125
+        },
+        "n1-1:0->sub-1:0": {
+          "segmented": true,
+          "y": 16.67375
+        },
+        "n1-5:0->mix-0:0": {
+          "segmented": true,
+          "y": 6.8912506
+        },
+        "n14000:0->damp_freq:1": {
+          "segmented": true,
+          "y": 9.37125
+        },
+        "n1:0->sub-0:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "n44100-1:0->div-1:0": {
+          "segmented": true,
+          "y": 14.813749
+        },
+        "n44100:0->div-0:0": {
+          "segmented": true,
+          "y": 6.2712502
+        },
+        "n6:0->mix-0:1": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "n800:0->damp_freq:0": {
+          "segmented": true,
+          "y": 8.13125
+        },
+        "noise-0:0->strike_noise:1": {
+          "segmented": true,
+          "y": 11.713749
+        },
+        "out_l:0->body_l:0": {
+          "segmented": true,
+          "y": 90.52251
+        },
+        "out_l:0->return:0": {
+          "segmented": true,
+          "y": 90.52251
+        },
+        "out_r:0->body_r:0": {
+          "segmented": true,
+          "y": 89.902504
+        },
+        "out_r:0->return2:0": {
+          "segmented": true,
+          "y": 89.902504
+        },
+        "rattle_freq_l:0->svf-0:1": {
+          "segmented": true,
+          "y": 36.101254
+        },
+        "rattle_freq_r:0->svf-1:1": {
+          "segmented": true,
+          "y": 36.806248
+        },
+        "return2:0->out2:0": {
+          "segmented": true,
+          "y": 107.74876
+        },
+        "return:0->out:0": {
+          "segmented": true,
+          "y": 108.36876
+        },
+        "strike_noise:0->hammer:0": {
+          "segmented": true,
+          "y": 32.66
+        },
+        "string_decay:0->final_decay:0": {
+          "segmented": true,
+          "y": 18.155
+        },
+        "sub-0:0->mul-0:1": {
+          "segmented": true,
+          "y": 16.05375
+        },
+        "sub-1:0->final_decay:1": {
+          "segmented": true,
+          "y": 22.116251
+        },
+        "svf-0:0->mul-5:0": {
+          "segmented": true,
+          "y": 68.27374
+        },
+        "svf-1:0->mul-6:0": {
+          "segmented": true,
+          "y": 67.65374
+        },
+        "tone:0->damp_freq:2": {
+          "segmented": true,
+          "y": 9.37125
+        },
+        "treatment:0->mul-2:0": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "treatment:0->out_l:2": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "treatment:0->out_r:2": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "trig:0->env_next:0": {
+          "segmented": true,
+          "y": 10.3324995
+        },
+        "trig:0->sub-0:1": {
+          "segmented": true,
+          "y": 10.3324995
+        }
+      }
+    }
+  }
+}

@@ -1269,7 +1269,37 @@
     :muted-border-color :mixer-strip-border
     :padding 0.45
     (v-stack :gap 0.35 :align :right
-      (box :width :fill :height 3)
+      ;; poly/voices — the same track params the *track* buffer's parameter
+      ;; panel edits, surfaced here so a patch can be auditioned in mono
+      ;; without leaving the patch editor.
+      (subtree :key (str "patch-mixer-strip-poly-" i)
+        (box :width :fill :height 3
+          (h-stack :gap 0.7 :align :center
+            (v-stack :align :center :gap 0.34
+              (label "poly" :font-size 8 :color :dim :bg :transparent)
+              (button (if SEQ.tp-poly "ON" "OFF") :width 3.2 :height 1.3
+                :background-color (if SEQ.tp-poly (rgba 0.95 0.48 0.18 1.0) '(rgba 0.1 0.1 0.1 1))
+                :border-color :white
+                :font-size 11
+                :color (if SEQ.tp-poly :black :white)
+                ;; Rack tracks: playback polyphony is per-slot
+                ;; (RackSlotSnapshot::max_polyphony), never the track-level
+                ;; param — route there or this silently edits a dead value.
+                :on-click |x y r| (do (cool-off-follow)
+                  (if SEQ.tp-is-rack
+                    (host-command "set-rack-slot-max-polyphony"
+                      (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value (if SEQ.tp-poly 1 4)))
+                    (seq-set-track-param :poly (if SEQ.tp-poly 0 1))))))
+            (v-stack :align :center :gap 0.5
+              (label "voices" :font-size 8 :color :dim :bg :transparent)
+              (number-picker :value SEQ.tp-max-polyphony :min 1 :max 12 :decimals 0
+                :noui false :font-size 8 :text-color :white
+                :on-change (lambda (v) (do (cool-off-follow)
+                  (if SEQ.tp-is-rack
+                    (host-command "set-rack-slot-max-polyphony"
+                      (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value v))
+                    (seq-set-track-param :voices v))))
+                :width 3.4 :height 1.15)))))
       (h-stack
         (box :width 3.5)
         (mixer-v2-track-meter-control i)

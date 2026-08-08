@@ -1189,12 +1189,12 @@ impl WidgetDefinition for TreeWidget {
             // Row background — only draw the alternate stripe. The other rows
             // are left as the underlying panel background.
             let is_interactive = row_is_interactive(row);
-            let raw_selected = if state.cursor_view_active && !selection_follows_external(&node.props)
-            {
-                state.cursor_row == i
-            } else {
-                state.external_selected_row == Some(i)
-            };
+            let raw_selected =
+                if state.cursor_view_active && !selection_follows_external(&node.props) {
+                    state.cursor_row == i
+                } else {
+                    state.external_selected_row == Some(i)
+                };
             let is_selected = is_interactive && raw_selected;
             let show_bg = is_interactive && (is_selected || i % 2 == 1);
             if show_bg {

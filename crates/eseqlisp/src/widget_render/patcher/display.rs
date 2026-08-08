@@ -1,3 +1,4 @@
+use super::lisp::label_attributes_suffix;
 use super::metrics::{
     CODE_NODE_FONT_SIZE, CODE_NODE_HEIGHT, CODE_NODE_MIN_WIDTH, NODE_FONT_SIZE, NODE_HEIGHT,
     NODE_MIN_WIDTH, PORT_EDGE_PADDING_CELLS, PORT_MIN_CENTER_SPACING_CELLS,
@@ -21,13 +22,15 @@ pub(super) fn preview(text: &str, max_chars: usize) -> String {
 }
 
 pub(super) fn node_display_label(node: &PatchNode) -> String {
-    let base = match node.kind {
+    // `base` is either the bare op — in which case the label's attributes have to be
+    // reattached below — or a full label that already carries them (`param`, `in`, `out`).
+    let (base, base_carries_attributes) = match node.kind {
         NodeKind::Out if node.label.contains("@modulator") => return node.label.clone(),
         NodeKind::Builtin | NodeKind::MacroInstance | NodeKind::Out | NodeKind::Constant => {
-            node.op.as_str()
+            (node.op.as_str(), false)
         }
         NodeKind::In => return node.label.clone(),
-        _ => node.label.as_str(),
+        _ => (node.label.as_str(), true),
     };
     let mut label = base.to_string();
     for idx in node_display_input_slots(node) {
@@ -49,6 +52,10 @@ pub(super) fn node_display_label(node: &PatchNode) -> String {
             }
             _ => {}
         }
+    }
+    if !base_carries_attributes {
+        // Attributes trail the inputs, matching the source form the label was built from.
+        label.push_str(&label_attributes_suffix(&node.label));
     }
     label
 }

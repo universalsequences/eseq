@@ -2440,10 +2440,7 @@ fn undo_and_redo_preserve_viewport_when_restored_cursor_is_visible() {
     assert_eq!(editor.active_buffer().text(), source);
     assert_eq!(editor.active_buffer().scroll_top, 40);
 
-    editor.handle_key(KeyEvent::new(
-        KeyCode::Char('r'),
-        KeyModifiers::CONTROL,
-    ));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
 
     assert_eq!(editor.active_buffer().lines[45], "Xline 45");
     assert_eq!(editor.active_buffer().scroll_top, 40);
@@ -4183,6 +4180,57 @@ fn cmd_y_toggles_visible_patcher_selected_cable_without_widget_focus() {
 }
 
 #[test]
+fn cmd_k_opens_visible_patcher_agentic_bubble_without_widget_focus() {
+    let path = temp_file_path("patcher-visible-cmd-k");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 12);
+    editor
+        .runtime
+        .eval_str(&format!(
+            r#"
+                (effect
+                  (patcher
+                    :height 10
+                    :path "{}"))
+                "#,
+            path.display()
+        ))
+        .unwrap();
+    editor.set_layout_viewport(40, 12);
+    let patcher = first_patcher_layout_node(
+        editor
+            .runtime
+            .current_layout
+            .as_ref()
+            .expect("layout should contain patcher"),
+    )
+    .expect("patcher node");
+    editor.clear_focused_widget();
+    assert_eq!(
+        crate::widget_render::patcher::patcher_agentic_bubble_count(&patcher),
+        0
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::SUPER));
+
+    assert_eq!(
+        crate::widget_render::patcher::patcher_agentic_bubble_count(&patcher),
+        1,
+        "cmd+k should open a bubble on the visible patcher without clicking it first"
+    );
+    assert_eq!(
+        editor
+            .focused_widget_node()
+            .expect("cmd+k should focus the patcher it opened a bubble on")
+            .widget_type,
+        "patcher"
+    );
+}
+
+#[test]
 fn tree_sample_drag_drops_on_compatible_box_target() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -5859,8 +5907,8 @@ fn click_outside_focused_number_picker_blurs_it() {
     editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
     editor.set_layout_viewport(30, 8);
     let layout = editor.widget_layout().expect("number picker layout");
-    let picker = super::find_layout_node_by_stable_key(layout.as_ref(), "drag-picker")
-        .expect("picker node");
+    let picker =
+        super::find_layout_node_by_stable_key(layout.as_ref(), "drag-picker").expect("picker node");
     let (col, row) = (
         picker.rect.col + picker.rect.width * 0.5,
         picker.rect.row + picker.rect.height * 0.5,
@@ -10142,7 +10190,11 @@ fn focused_timeline_delete_dedups_selected_and_bound_channel_ids() {
     let Value::List(ids) = &*ids.borrow() else {
         panic!(":ids is a list");
     };
-    assert_eq!(ids.len(), 1, "the selected+bound clip is named exactly once");
+    assert_eq!(
+        ids.len(),
+        1,
+        "the selected+bound clip is named exactly once"
+    );
     assert!(
         matches!(&*ids[0].borrow(), Value::Number(n) if *n == 10.0),
         "the one id is the clip's"
@@ -11868,7 +11920,10 @@ fn modal_click_inside_hits_a_modal_child_not_the_tile_below() {
     let click_row = button.rect.row + button.rect.height * 0.5;
     // The click point visibly overlaps the sequencer tile below the 2-row
     // panel tile — without the modal intercept it would land there.
-    assert!(click_row > 2.0, "button row {click_row} must escape the panel tile");
+    assert!(
+        click_row > 2.0,
+        "button row {click_row} must escape the panel tile"
+    );
 
     for kind in [
         MouseEventKind::Down(MouseButton::Left),
@@ -11882,9 +11937,18 @@ fn modal_click_inside_hits_a_modal_child_not_the_tile_below() {
         );
     }
 
-    assert!(eval_bool(&mut editor, "modal-clicked"), "modal child must receive the click");
-    assert!(!eval_bool(&mut editor, "underlay-clicked"), "click must not reach the tile below");
-    assert!(eval_bool(&mut editor, "modal-open"), "inside click must not close the modal");
+    assert!(
+        eval_bool(&mut editor, "modal-clicked"),
+        "modal child must receive the click"
+    );
+    assert!(
+        !eval_bool(&mut editor, "underlay-clicked"),
+        "click must not reach the tile below"
+    );
+    assert!(
+        eval_bool(&mut editor, "modal-open"),
+        "inside click must not close the modal"
+    );
 }
 
 /// Regression: a relayout triggered by a click handler (e.g. the sound
@@ -11950,7 +12014,8 @@ fn modal_outside_click_fires_on_close_without_activating_underneath() {
     let click_col = (entry.rect.col - 2.0).max(0.5);
     let click_row = 18.5;
     assert!(
-        click_row < entry.rect.row || click_row >= entry.rect.row + entry.rect.height
+        click_row < entry.rect.row
+            || click_row >= entry.rect.row + entry.rect.height
             || click_col < entry.rect.col,
         "click point must be outside the panel rect {:?}",
         entry.rect
@@ -11968,7 +12033,10 @@ fn modal_outside_click_fires_on_close_without_activating_underneath() {
         );
     }
 
-    assert!(!eval_bool(&mut editor, "modal-open"), "scrim click must request close");
+    assert!(
+        !eval_bool(&mut editor, "modal-open"),
+        "scrim click must request close"
+    );
     assert!(
         !eval_bool(&mut editor, "underlay-clicked"),
         "the dismissing click must not activate the widget underneath"
@@ -12113,7 +12181,10 @@ fn inspect_mode_hits_palette_like_modal_children() {
         .clone();
     let hover_col = button.rect.col + button.rect.width * 0.5;
     let hover_row = button.rect.row + button.rect.height * 0.5;
-    assert!(hover_row > 2.0, "hover row {hover_row} must escape the panel tile");
+    assert!(
+        hover_row > 2.0,
+        "hover row {hover_row} must escape the panel tile"
+    );
 
     editor.inspect_mode = true;
     editor.handle_tiled_mouse_precise(
@@ -12184,7 +12255,10 @@ fn inspect_mode_resolves_a_modal_in_a_non_active_tile() {
         .find_leaf_by_buffer_idx(panel_idx)
         .expect("panel tile");
     let panel_tile = panel_leaf.id;
-    assert_ne!(editor.active_tile, panel_tile, "panel tile must be inactive");
+    assert_ne!(
+        editor.active_tile, panel_tile,
+        "panel tile must be inactive"
+    );
     let panel_layout = panel_leaf
         .cached_layout
         .as_deref()
@@ -12270,8 +12344,8 @@ fn inactive_modal_survives_frame_resize_and_escape_closes_it() {
         .find_leaf(panel_tile)
         .and_then(|leaf| leaf.cached_layout.clone())
         .expect("inactive modal layout after resize");
-    let modal = super::widget_focus::find_open_modal_node(&panel_layout)
-        .expect("open modal after resize");
+    let modal =
+        super::widget_focus::find_open_modal_node(&panel_layout).expect("open modal after resize");
     let prop = |key: &str| match modal.props.get(key) {
         Some(Value::Number(value)) => *value as f32,
         other => panic!("missing numeric modal prop {key}: {other:?}"),
@@ -12352,10 +12426,7 @@ fn inactive_modal_routes_focused_keys_and_blocks_global_bindings() {
 
     editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(
-        editor
-            .runtime_mut()
-            .eval_str("global-down-count")
-            .unwrap(),
+        editor.runtime_mut().eval_str("global-down-count").unwrap(),
         Some(Value::Number(0.0)),
         "an unhandled modal key must not reach a global binding"
     );
@@ -12542,10 +12613,16 @@ fn escape_closes_the_dropdown_first_then_the_modal() {
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     let top = crate::widget_render::topmost_overlay().expect("modal must survive first escape");
     assert_eq!(top.kind, crate::widget_render::OverlayKind::Modal);
-    assert!(eval_bool(&mut editor, "modal-open"), "first escape closes only the dropdown");
+    assert!(
+        eval_bool(&mut editor, "modal-open"),
+        "first escape closes only the dropdown"
+    );
 
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(!eval_bool(&mut editor, "modal-open"), "second escape reaches the modal");
+    assert!(
+        !eval_bool(&mut editor, "modal-open"),
+        "second escape reaches the modal"
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -12579,8 +12656,13 @@ fn modal_traps_focus_while_open_and_restores_it_after_close() {
 
     // Focus the underlay button with a click.
     let layout = editor.runtime.current_layout.clone().expect("layout");
-    let under = find_widget_of_type(&layout, "button").expect("under button").clone();
-    assert_eq!(under.props.get("text"), Some(&Value::String("under".to_string())));
+    let under = find_widget_of_type(&layout, "button")
+        .expect("under button")
+        .clone();
+    assert_eq!(
+        under.props.get("text"),
+        Some(&Value::String("under".to_string()))
+    );
     let col = under.rect.col + under.rect.width * 0.5;
     let row = under.rect.row + under.rect.height * 0.5;
     for kind in [
@@ -12601,7 +12683,10 @@ fn modal_traps_focus_while_open_and_restores_it_after_close() {
     );
 
     // Open the modal: focus jumps to its first focusable child.
-    editor.runtime_mut().eval_str("(set! modal-open true)").unwrap();
+    editor
+        .runtime_mut()
+        .eval_str("(set! modal-open true)")
+        .unwrap();
     editor.refresh_runtime_side_effects();
     let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
     let focused_in_modal = editor.focused_widget_node().expect("modal child focused");
@@ -12612,7 +12697,10 @@ fn modal_traps_focus_while_open_and_restores_it_after_close() {
     );
 
     // Close: the previously focused widget gets focus back.
-    editor.runtime_mut().eval_str("(set! modal-open false)").unwrap();
+    editor
+        .runtime_mut()
+        .eval_str("(set! modal-open false)")
+        .unwrap();
     editor.refresh_runtime_side_effects();
     let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
     let restored = editor.focused_widget_node().expect("focus restored");
@@ -12673,7 +12761,11 @@ fn save_prompt_keys_outrank_an_open_modal() {
     editor.open_save_prompt(false);
     editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
     assert_eq!(
-        editor.save_prompt.as_ref().expect("save prompt stays open").input,
+        editor
+            .save_prompt
+            .as_ref()
+            .expect("save prompt stays open")
+            .input,
         "x",
         "a keystroke must reach the save prompt, not the open modal"
     );
@@ -12684,7 +12776,10 @@ fn save_prompt_keys_outrank_an_open_modal() {
 
     // Esc answers the prompt (cancel) rather than closing the modal.
     editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(editor.save_prompt.is_none(), "Esc must cancel the prompt first");
+    assert!(
+        editor.save_prompt.is_none(),
+        "Esc must cancel the prompt first"
+    );
     assert!(
         eval_bool(&mut editor, "modal-open"),
         "the modal stays open until the next Esc"

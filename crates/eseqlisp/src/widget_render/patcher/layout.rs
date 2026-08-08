@@ -16,7 +16,16 @@ const CROSSING_MIN_ITERATIONS: usize = 6;
 const HISTORY_LOCALITY_WEIGHT: f32 = 3.0;
 const DUMMY_NODE_WIDTH: f32 = 1.0;
 const MAX_REPAIR_MULTIPLIER: usize = 4;
+/// Row pitch used for the first placement pass only. It is deliberately
+/// generous so cable routing has room to spread into lanes; the second pass
+/// shrinks every gap down to what its lanes actually occupy.
 const LAYOUT_LAYER_SPACING: f32 = LAYER_SPACING * 1.35;
+/// Vertical breathing room between two ranks with no cable lanes between them.
+const RANK_MIN_GAP: f32 = 1.5;
+/// Clearance kept above the first and below the last lane in a rank gap.
+const RANK_LANE_GAP_PADDING: f32 = 0.45;
+/// How many times row compaction may grow a gap and re-route before settling.
+const MAX_ROW_COMPACTION_PASSES: usize = 4;
 const SEGMENT_NODE_MARGIN: f32 = 0.18;
 const SEGMENT_RANGE_PADDING: f32 = 0.35;
 const SEGMENT_MIN_GAP: f32 = 0.55;
@@ -480,9 +489,74 @@ impl LayoutGraph {
             .iter()
             .map(|rank| rank_metrics(rank, &self.work_nodes, patch))
             .collect::<Vec<_>>();
+        let authored_segments = patch
+            .connections
+            .iter()
+            .map(|connection| connection.segment.is_some())
+            .collect::<Vec<_>>();
+
+        // Pass 1: lay the ranks out on a generous uniform pitch and finish every
+        // horizontal step. Column positions never depend on the row pitch, so
+        // pass 2 only has to move rows.
+        let provisional_pitches = rank_metrics
+            .iter()
+            .map(|metrics| metrics.height.max(LAYOUT_LAYER_SPACING))
+            .collect::<Vec<_>>();
+        let provisional_tops = self.place_ranks(patch, &provisional_pitches);
+
+        self.refine_horizontal_positions(patch);
+        self.place_local_sources_next_to_consumers(patch);
+        self.widen_nodes_for_straight_inlets(patch);
+        self.resolve_rank_overlaps_by_x(patch);
+        self.translate_to_positive_padding(patch);
+        self.assign_generated_cable_segments(patch);
+
+        // Pass 2: measure how many cable lanes actually landed in each rank gap,
+        // shrink every gap to fit exactly those lanes, then re-route against the
+        // compacted rows. Re-routing can crowd a lane that previously ran beside
+        // a rank's nodes into a gap, so keep the reservations growing until the
+        // routing stops asking for more room.
+        let first_top = provisional_tops.first().copied().unwrap_or(VIEW_PADDING_Y);
+        let mut tops = provisional_tops;
+        let mut reserved = vec![0usize; self.ranks.len()];
+        for _ in 0..MAX_ROW_COMPACTION_PASSES {
+            let measured = self.measure_gap_lanes(patch, &tops, &rank_metrics, &authored_segments);
+            let mut grew = false;
+            for (rank_idx, lanes) in measured.into_iter().enumerate() {
+                if lanes > reserved[rank_idx] {
+                    reserved[rank_idx] = lanes;
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+
+            let pitches = rank_metrics
+                .iter()
+                .enumerate()
+                .map(|(rank_idx, metrics)| metrics.height + rank_gap_for_lanes(reserved[rank_idx]))
+                .collect::<Vec<_>>();
+            let next_tops = rank_tops(first_top, &pitches);
+            self.shift_rank_rows(patch, &tops, &next_tops);
+            tops = next_tops;
+
+            for (idx, connection) in patch.connections.iter_mut().enumerate() {
+                if !authored_segments[idx] {
+                    connection.segment = None;
+                }
+            }
+            self.assign_generated_cable_segments(patch);
+        }
+    }
+
+    /// Places every rank at its pitch-derived row and lays out each rank's
+    /// columns left to right. Returns the top row of each rank.
+    fn place_ranks(&self, patch: &mut Patch, pitches: &[f32]) -> Vec<f32> {
+        let mut tops = Vec::with_capacity(self.ranks.len());
         let mut y = VIEW_PADDING_Y;
         for (rank_idx, rank) in self.ranks.iter().enumerate() {
-            let metrics = rank_metrics[rank_idx];
+            tops.push(y);
             let mut x = VIEW_PADDING_X;
 
             let stacked_params = stacked_param_nodes(rank, &self.work_nodes, patch);
@@ -514,15 +588,116 @@ impl LayoutGraph {
                     }
                 }
             }
-            y += metrics.height.max(LAYOUT_LAYER_SPACING);
+            y += pitches
+                .get(rank_idx)
+                .copied()
+                .unwrap_or(LAYOUT_LAYER_SPACING);
+        }
+        tops
+    }
+
+    /// Counts the distinct cable lanes each rank gap has to hold, where gap `i`
+    /// is the band between the bottom of rank `i` and the top of rank `i + 1`.
+    /// A lane routed level with a rank's nodes counts only when it also spans
+    /// them horizontally — a lane that runs clear of them needs no gap of its
+    /// own, but one drawn straight through a node has to be given room.
+    fn measure_gap_lanes(
+        &self,
+        patch: &Patch,
+        rank_tops: &[f32],
+        rank_metrics: &[RankMetrics],
+        authored_segments: &[bool],
+    ) -> Vec<usize> {
+        let mut id_to_idx = HashMap::new();
+        for (idx, node) in patch.nodes.iter().enumerate() {
+            id_to_idx.insert(node.id.as_str(), idx);
         }
 
-        self.refine_horizontal_positions(patch);
-        self.place_local_sources_next_to_consumers(patch);
-        self.widen_nodes_for_straight_inlets(patch);
-        self.resolve_rank_overlaps_by_x(patch);
-        self.translate_to_positive_padding(patch);
-        self.assign_generated_cable_segments(patch);
+        let mut gap_rows = vec![Vec::<f32>::new(); self.ranks.len()];
+        for (idx, connection) in patch.connections.iter().enumerate() {
+            if authored_segments.get(idx).copied().unwrap_or(true) {
+                continue;
+            }
+            let Some(segment) = connection.segment.as_ref() else {
+                continue;
+            };
+            let row = segment.segment_row;
+            let (Some(&from), Some(&to)) = (
+                id_to_idx.get(connection.from_node.as_str()),
+                id_to_idx.get(connection.to_node.as_str()),
+            ) else {
+                continue;
+            };
+            let Some(gap_idx) = self.lane_gap_index(patch, from, to, row, rank_tops, rank_metrics)
+            else {
+                continue;
+            };
+            let rows = &mut gap_rows[gap_idx];
+            if !rows
+                .iter()
+                .any(|existing| (existing - row).abs() < SEGMENT_LANE_SPACING)
+            {
+                rows.push(row);
+            }
+        }
+        gap_rows.into_iter().map(|rows| rows.len()).collect()
+    }
+
+    /// The rank gap that has to make room for a lane at `row`, if any. Lanes
+    /// inside a gap belong to it outright; a lane level with a rank's nodes
+    /// belongs to the adjacent gap only when it is drawn through one of them.
+    fn lane_gap_index(
+        &self,
+        patch: &Patch,
+        from: usize,
+        to: usize,
+        row: f32,
+        rank_tops: &[f32],
+        rank_metrics: &[RankMetrics],
+    ) -> Option<usize> {
+        let last_gap = rank_tops.len().saturating_sub(1);
+        for gap_idx in 0..last_gap {
+            let gap_top = rank_tops[gap_idx] + rank_metrics[gap_idx].height;
+            if row > gap_top && row < rank_tops[gap_idx + 1] {
+                return Some(gap_idx);
+            }
+        }
+
+        let rank_idx = (0..rank_tops.len()).find(|rank_idx| {
+            row >= rank_tops[*rank_idx]
+                && row <= rank_tops[*rank_idx] + rank_metrics[*rank_idx].height
+        })?;
+        let lane_left = patch.nodes[from].position.0.min(patch.nodes[to].position.0);
+        let lane_right = (patch.nodes[from].position.0 + self.real_nodes[from].width)
+            .max(patch.nodes[to].position.0 + self.real_nodes[to].width);
+        let crosses_node = self.ranks[rank_idx].iter().any(|work_idx| {
+            let WorkNodeKind::Real(real_idx) = self.work_nodes[*work_idx].kind else {
+                return false;
+            };
+            if real_idx == from || real_idx == to || self.real_nodes[real_idx].is_hidden {
+                return false;
+            }
+            let left = patch.nodes[real_idx].position.0;
+            let right = left + self.real_nodes[real_idx].width;
+            lane_right > left && lane_left < right
+        });
+        if !crosses_node {
+            return None;
+        }
+        // Push it into the gap below this rank, or the one above for the last.
+        Some(rank_idx.min(last_gap.saturating_sub(1)))
+    }
+
+    /// Moves every node from its pass-1 row to its compacted row. Shifting by a
+    /// per-rank delta preserves intra-rank offsets such as stacked params.
+    fn shift_rank_rows(&self, patch: &mut Patch, from_tops: &[f32], to_tops: &[f32]) {
+        for (idx, node) in patch.nodes.iter_mut().enumerate() {
+            let rank = self.real_nodes[idx].rank;
+            let (Some(from), Some(to)) = (from_tops.get(rank), to_tops.get(rank)) else {
+                continue;
+            };
+            node.position.1 += to - from;
+        }
     }
 
     fn refine_horizontal_positions(&self, patch: &mut Patch) {
@@ -1140,6 +1315,24 @@ struct AssignedLane {
     row: f32,
 }
 
+/// Vertical space to leave below a rank so its outgoing cable lanes fit.
+fn rank_gap_for_lanes(lanes: usize) -> f32 {
+    if lanes == 0 {
+        return RANK_MIN_GAP;
+    }
+    (RANK_LANE_GAP_PADDING * 2.0 + lanes as f32 * SEGMENT_LANE_SPACING).max(RANK_MIN_GAP)
+}
+
+fn rank_tops(first_top: f32, pitches: &[f32]) -> Vec<f32> {
+    let mut tops = Vec::with_capacity(pitches.len());
+    let mut y = first_top;
+    for pitch in pitches {
+        tops.push(y);
+        y += pitch;
+    }
+    tops
+}
+
 fn preferred_history_rank(writer_ranks: &[usize], consumer_ranks: &[usize]) -> Option<usize> {
     if writer_ranks.is_empty() && consumer_ranks.is_empty() {
         return None;
@@ -1304,9 +1497,9 @@ fn rank_metrics(rank: &[usize], nodes: &[WorkNode], patch: &Patch) -> RankMetric
             .iter()
             .map(|real_idx| nodes[*real_idx].height)
             .sum::<f32>()
-            // One gap per param: the stack's internal gaps plus a trailing one
-            // so the next rank does not start flush against the last param.
-            + PARAM_STACK_VERTICAL_GAP * stacked_params.len() as f32;
+            // Only the stack's internal gaps: the space before the next rank is
+            // the rank gap, sized from the cable lanes that have to fit there.
+            + PARAM_STACK_VERTICAL_GAP * stacked_params.len().saturating_sub(1) as f32;
         needs_gap = true;
     }
 

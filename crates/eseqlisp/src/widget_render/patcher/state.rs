@@ -13,10 +13,12 @@ use crate::parser::{ASTParser, Expression, Parser};
 use crate::vm::Value;
 
 use super::lisp::{
-    editor_node_port_shape, node_kind_for_op, parse_editor_node_text, parse_patch_source,
+    editor_node_port_shape, node_kind_for_op, normalize_editor_node_text, parse_editor_node_text,
+    parse_patch_source,
 };
 use super::metrics::{
-    DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM, PAN_OVERSCROLL_MIN_CELLS, PAN_OVERSCROLL_VIEWPORT_FACTOR,
+    AGENTIC_CLOSE_SECS, DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM, PAN_OVERSCROLL_MIN_CELLS,
+    PAN_OVERSCROLL_VIEWPORT_FACTOR,
 };
 use super::model::{
     ArgValue, BindingTarget, CableEndpoint, CableSegmentInfo, ConnectionKind, ExprPath,
@@ -204,6 +206,13 @@ pub(super) struct AgenticBubble {
     pub(super) state: AgenticBubbleState,
     pub(super) generation: u64,
     pub(super) macro_name: String,
+    /// When the bubble was opened, which drives its grow-in animation. Distinct
+    /// from `AgenticBubbleState::Pending::started_at`, which resets on submit.
+    pub(super) created_at: Instant,
+    /// Set by Escape. The bubble stays in the map, playing its shrink-out, and
+    /// is dropped by `set_patcher_interaction_state` once that finishes. It
+    /// counts as gone the moment this is set — see `is_dismissed`.
+    pub(super) closing_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -277,6 +286,52 @@ pub(super) fn agentic_bubble_pose(bubble_id: &str) -> Option<AgenticBubblePose> 
 }
 
 impl AgenticBubble {
+    /// The macro this bubble is bound to. A bound bubble's prompt is scoped to
+    /// that macro, so the name is shown in the bubble's header.
+    pub(super) fn bound_macro_name(&self) -> Option<&str> {
+        match &self.target {
+            AgenticBubbleTarget::EditMacro { macro_name, .. } => Some(macro_name.as_str()),
+            AgenticBubbleTarget::CreateMacro => None,
+        }
+    }
+
+    /// What the body shows before an answer arrives: the typed prompt, or a
+    /// placeholder that says what this bubble is for.
+    ///
+    /// Rendering can only wrap text whose glyph widths a measure pass has
+    /// already cached under the *exact* same string, so this and `body_text`
+    /// are the single source both passes go through — if they drift, the
+    /// renderer silently falls back or drops the bubble.
+    pub(super) fn prompt_text(&self) -> String {
+        if self.prompt.trim().is_empty() {
+            match self.target {
+                AgenticBubbleTarget::EditMacro { .. } => "ask about or edit this macro".to_string(),
+                AgenticBubbleTarget::CreateMacro => "cmd+k prompt".to_string(),
+            }
+        } else {
+            self.prompt.clone()
+        }
+    }
+
+    /// The text the body settles on for the bubble's current state.
+    pub(super) fn body_text(&self) -> String {
+        match &self.state {
+            AgenticBubbleState::Answer { text, .. } => text.clone(),
+            _ => self.prompt_text(),
+        }
+    }
+
+    /// Dismissed bubbles are still rendered while they shrink out, but are
+    /// invisible to every query that asks what the patcher is doing.
+    pub(super) fn is_dismissed(&self) -> bool {
+        self.closing_at.is_some()
+    }
+
+    pub(super) fn close_finished(&self) -> bool {
+        self.closing_at
+            .is_some_and(|at| at.elapsed().as_secs_f32() >= AGENTIC_CLOSE_SECS)
+    }
+
     pub(super) fn elapsed(&self) -> Option<Duration> {
         match self.state {
             AgenticBubbleState::Pending { started_at } => Some(started_at.elapsed()),
@@ -427,7 +482,8 @@ pub(super) fn get_patcher_interaction_state(key: u64) -> PatcherInteractionState
     PATCHER_INTERACTION_STATES.with(|states| states.borrow().get(&key).cloned().unwrap_or_default())
 }
 
-pub(super) fn set_patcher_interaction_state(key: u64, state: PatcherInteractionState) {
+pub(super) fn set_patcher_interaction_state(key: u64, mut state: PatcherInteractionState) {
+    prune_closed_agentic_bubbles(&mut state);
     let changed = PATCHER_INTERACTION_STATES.with(|states| {
         let mut states = states.borrow_mut();
         record_patcher_history_transition(key, states.get(&key), &state);
@@ -436,6 +492,21 @@ pub(super) fn set_patcher_interaction_state(key: u64, state: PatcherInteractionS
     });
     if changed {
         bump_widget_state_generation();
+    }
+}
+
+/// Drop bubbles whose shrink-out has played to the end. Rendering already skips
+/// them, so this is bookkeeping rather than a visual change; doing it on write
+/// gives a single choke point instead of mutating state from the render path.
+fn prune_closed_agentic_bubbles(state: &mut PatcherInteractionState) {
+    if state
+        .agentic_bubbles
+        .values()
+        .any(|bubble| bubble.close_finished())
+    {
+        state
+            .agentic_bubbles
+            .retain(|_, bubble| !bubble.close_finished());
     }
 }
 
@@ -1003,6 +1074,8 @@ pub(super) fn allocate_agentic_bubble_with_target(
             state: AgenticBubbleState::Editing,
             generation: 0,
             macro_name,
+            created_at: Instant::now(),
+            closing_at: None,
         },
     );
     state.selected_nodes.clear();
@@ -1016,7 +1089,9 @@ pub(super) fn editing_agentic_bubble_id(state: &PatcherInteractionState) -> Opti
     state
         .agentic_bubbles
         .values()
-        .find(|bubble| matches!(bubble.state, AgenticBubbleState::Editing))
+        .find(|bubble| {
+            !bubble.is_dismissed() && matches!(bubble.state, AgenticBubbleState::Editing)
+        })
         .map(|bubble| bubble.id.clone())
 }
 
@@ -2267,7 +2342,7 @@ fn editor_param_node_info(
 }
 
 fn parse_editor_node_items(text: &str) -> Result<Vec<Expression>, String> {
-    let source = format!("({text})");
+    let source = format!("({})", normalize_editor_node_text(text));
     let tokens = Parser::new(source)
         .parse()
         .map_err(|error| format!("failed to tokenize node text: {error:?}"))?;

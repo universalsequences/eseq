@@ -1985,7 +1985,12 @@ impl Editor {
         // check keeps its usual place further down the chain.
         if self.inspect_mode
             && crate::widget_render::overlay_widget_id().is_some()
-            && self.handle_tiled_inspect_mouse_precise(mouse, precise_col, precise_row, border_inset)
+            && self.handle_tiled_inspect_mouse_precise(
+                mouse,
+                precise_col,
+                precise_row,
+                border_inset,
+            )
         {
             return;
         }
@@ -2552,9 +2557,9 @@ impl Editor {
                 .and_then(|leaf| leaf.cached_layout.as_deref())
         };
         match entry.kind {
-            crate::widget_render::OverlayKind::Modal => {
-                layout.and_then(widget_focus::find_open_modal_node).is_some()
-            }
+            crate::widget_render::OverlayKind::Modal => layout
+                .and_then(widget_focus::find_open_modal_node)
+                .is_some(),
             crate::widget_render::OverlayKind::Dropdown => {
                 crate::widget_render::dropdown::is_dropdown_open(entry.widget_id)
                     && layout.is_some_and(|layout| {
@@ -2664,11 +2669,8 @@ impl Editor {
         else {
             return false;
         };
-        let consumed = self.route_event_to_tile(
-            tile_id,
-            border_inset,
-            modal_entry.is_none(),
-            |editor| {
+        let consumed =
+            self.route_event_to_tile(tile_id, border_inset, modal_entry.is_none(), |editor| {
                 if let Some(entry) = modal_entry {
                     crate::widget_render::push_overlay(entry);
                 }
@@ -2689,8 +2691,7 @@ impl Editor {
                     delta_x,
                     delta_y,
                 )
-            },
-        );
+            });
         if let Some(entry) = modal_entry
             && self.overlay_entry_is_open_in_tile(entry, tile_id)
         {
@@ -4884,11 +4885,10 @@ impl Editor {
             self.buffer_recency.retain(|id| *id != removed_id);
             self.patcher_emitted_source_origins
                 .retain(|_, buffer_id| *buffer_id != removed_id);
-            self.remembered_tab_selections.retain(
-                |tab_buffer_ids, selected_buffer_id| {
+            self.remembered_tab_selections
+                .retain(|tab_buffer_ids, selected_buffer_id| {
                     *selected_buffer_id != removed_id && !tab_buffer_ids.contains(&removed_id)
-                },
-            );
+                });
             // Fix up any tile leaf buffer indices that pointed past the removed slot
             Self::fix_leaf_indices(&mut self.tile_root, idx);
             true
@@ -5559,6 +5559,10 @@ impl Editor {
         }
 
         if self.handle_visible_patcher_selected_cable_shortcut(key) {
+            return;
+        }
+
+        if self.handle_visible_patcher_agentic_shortcut(key) {
             return;
         }
 
@@ -6722,11 +6726,10 @@ impl Editor {
         let viewport_width = viewport_width as usize;
         let leaf = self.active_leaf_mut();
         let scroll_left = leaf.widget_scroll_left.floor() as usize;
-        let scroll_margin = TEXT_HORIZONTAL_SCROLL_MARGIN
-            .min(viewport_width.saturating_sub(1) / 2);
+        let scroll_margin = TEXT_HORIZONTAL_SCROLL_MARGIN.min(viewport_width.saturating_sub(1) / 2);
         let left_margin_edge = scroll_left.saturating_add(scroll_margin);
-        let right_margin_edge = scroll_left
-            .saturating_add(viewport_width.saturating_sub(scroll_margin));
+        let right_margin_edge =
+            scroll_left.saturating_add(viewport_width.saturating_sub(scroll_margin));
 
         let next_scroll = if cursor_col < left_margin_edge {
             cursor_col.saturating_sub(scroll_margin)
@@ -7039,17 +7042,19 @@ impl Editor {
         let source = self.buffers[buffer_idx].text();
         let overlays = self.snapshot_file_backed_sources();
         let transaction_id = buffer_id as u64;
-        self.runtime.enqueue_host_command(HostCommand::AuthoringTransactionBegin {
-            id: transaction_id,
-            label: "Lisp authoring edit".to_string(),
-        });
+        self.runtime
+            .enqueue_host_command(HostCommand::AuthoringTransactionBegin {
+                id: transaction_id,
+                label: "Lisp authoring edit".to_string(),
+            });
         let report = self
             .runtime
             .eval_source_transactional(path, &source, overlays);
-        self.runtime.enqueue_host_command(HostCommand::AuthoringTransactionEnd {
-            id: transaction_id,
-            success: report.success,
-        });
+        self.runtime
+            .enqueue_host_command(HostCommand::AuthoringTransactionEnd {
+                id: transaction_id,
+                success: report.success,
+            });
         if std::env::var("ESEQ_INLINE_TRACE").is_ok_and(|value| value != "0") {
             eprintln!(
                 "[inline-widgets] evaluated buffer_id={buffer_id} name={:?} success={} requested_path={:?} evaluated_path={:?} diagnostics={:?}",
@@ -7415,13 +7420,10 @@ impl Editor {
             // update owns the only reference: the batched in-place reuse below
             // can then mutate the path nodes instead of rebuilding the tree.
             // Every exit from this iteration reassigns `leaf.cached_layout`.
-            let mut layout = self
-                .tile_root
-                .find_leaf_mut(tile_id)
-                .and_then(|leaf| {
-                    leaf.cached_inactive_frame = None;
-                    leaf.cached_layout.take()
-                });
+            let mut layout = self.tile_root.find_leaf_mut(tile_id).and_then(|leaf| {
+                leaf.cached_inactive_frame = None;
+                leaf.cached_layout.take()
+            });
             let mut dirty_widget_ids = Vec::new();
             let mut reuse_mode = "targeted";
             let mut miss_reason = None::<String>;
@@ -7437,8 +7439,7 @@ impl Editor {
             // preserves the targeted-relayout and full-relayout fallbacks (and
             // their diagnostics) unchanged.
             let mut batched_applied = false;
-            if let (Some(existing), Some(paths_by_root)) =
-                (layout.as_mut(), subtree_paths.as_ref())
+            if let (Some(existing), Some(paths_by_root)) = (layout.as_mut(), subtree_paths.as_ref())
             {
                 let batched_paths: Option<Vec<&[usize]>> = subtree_roots
                     .iter()

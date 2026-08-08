@@ -14,11 +14,11 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use super::{styled_cell, CellBuffer, WidgetDefinition};
+use super::{CellBuffer, WidgetDefinition, styled_cell};
 #[cfg(target_os = "macos")]
 use super::{MetalPrimitive, MetalRectPrimitive, WidgetViewport};
 use crate::backend::Color;
-use crate::layout::{f64_to_f32, get_prop_num, Constraints, LayoutNode, MeasureCtx, Rect, Size};
+use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
 use crate::vm::Value;
 

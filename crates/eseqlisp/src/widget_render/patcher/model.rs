@@ -91,6 +91,9 @@ pub struct ArgSource {
 pub struct AttributeSource {
     pub key_item_index: usize,
     pub value_item_index: usize,
+    /// Items the value spans. Always 1 except for bracketed arrays (`@shape [3 3]`), which
+    /// lex as a run of tokens because `[`/`]` are not lexer delimiters.
+    pub value_item_count: usize,
     pub key: String,
     pub value: SourceExprId,
 }

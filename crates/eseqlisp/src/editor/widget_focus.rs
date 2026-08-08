@@ -476,6 +476,59 @@ impl Editor {
         true
     }
 
+    /// Cmd+K opens a patcher's agentic bubble. Like the Cmd+Y cable shortcut
+    /// above, it addresses the patcher you can see rather than the one you last
+    /// clicked, so opening a patch and hitting Cmd+K works without first
+    /// clicking the canvas to focus it.
+    pub(super) fn handle_visible_patcher_agentic_shortcut(&mut self, key: KeyEvent) -> bool {
+        if !matches!(key.code, KeyCode::Char('k') | KeyCode::Char('K'))
+            || !key.modifiers.contains(KeyModifiers::SUPER)
+        {
+            return false;
+        }
+        // A focused text field keeps Cmd+K for itself.
+        if self.focused_widget_captures_text_input() {
+            return false;
+        }
+        let Some(layout) = self.runtime.current_layout.clone() else {
+            return false;
+        };
+        let mut patchers = Vec::new();
+        collect_patcher_nodes(&layout, &mut patchers);
+        let Some(node) = patchers.into_iter().next() else {
+            return false;
+        };
+        // Focus follows, so the bubble's own key handling (typing, Enter,
+        // Escape) lands on the patcher from here on.
+        self.set_focused_widget(node.clone());
+        self.clear_focus_on_other_tiles();
+        self.forward_key_to_widget(&node, key)
+    }
+
+    /// Dispatch `key` to `node` as if it were focused, applying whatever the
+    /// widget produced. Returns whether the widget consumed the key.
+    fn forward_key_to_widget(&mut self, node: &LayoutNode, key: KeyEvent) -> bool {
+        let gen_before = crate::widget_render::widget_state_generation();
+        let widget_event = map_key_event(
+            node,
+            WidgetKeyEvent {
+                code: key.code,
+                modifiers: key.modifiers,
+            },
+        );
+        let consumed = widget_event.is_some();
+        let output = widget_event.and_then(|event| handle_event(node, event));
+        if !consumed {
+            return false;
+        }
+        let _ = self.apply_widget_output(output);
+        if crate::widget_render::widget_state_generation() != gen_before {
+            self.runtime.invalidate_layout_deferred();
+            self.mark_needs_redraw();
+        }
+        true
+    }
+
     fn focused_widget_captures_text_input(&self) -> bool {
         self.focused_widget_node()
             .is_some_and(|node| node_captures_text_input(&node))
@@ -841,6 +894,15 @@ fn find_node_by_id_ref(node: &LayoutNode, id: u64) -> Option<&LayoutNode> {
 fn node_captures_text_input(node: &LayoutNode) -> bool {
     matches!(node.widget_type.as_str(), "text-input" | "textbox")
         || crate::widget_render::patcher::patcher_has_text_edit(node)
+}
+
+fn collect_patcher_nodes(node: &LayoutNode, out: &mut Vec<LayoutNode>) {
+    if node.widget_type == "patcher" {
+        out.push(node.clone());
+    }
+    for child in &node.children {
+        collect_patcher_nodes(child, out);
+    }
 }
 
 fn collect_patcher_nodes_with_selected_cable(node: &LayoutNode, out: &mut Vec<LayoutNode>) {

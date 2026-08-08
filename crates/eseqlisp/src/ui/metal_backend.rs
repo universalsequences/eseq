@@ -44,8 +44,9 @@ mod inner {
 
     use crate::audio::sample::get_registered_sample;
     use crate::backend::{
-        AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX, AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
-        AUTOCOMPLETE_ROW_CORNER_RADIUS_PX, Backend, BackendError, BackendEvent, Color, RenderFrame,
+        AUTOCOMPLETE_ANCHOR_GAP_PX, AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
+        AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX, AUTOCOMPLETE_ROW_CORNER_RADIUS_PX,
+        AUTOCOMPLETE_TEXT_CELL_SCALE, Backend, BackendError, BackendEvent, Color, RenderFrame,
         TiledRenderFrame,
     };
     use crate::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas, SizedFontCache};
@@ -2662,8 +2663,7 @@ fragment float4 live_spectrogram_frag(
                 self.stats.note_widget_primitives(primitives.len());
                 return (primitives, overlay);
             }
-            let active_animation_widget_ids =
-                widget_render::active_animation_widget_ids(layout);
+            let active_animation_widget_ids = widget_render::active_animation_widget_ids(layout);
             if !active_animation_widget_ids.is_empty() {
                 let mut refresh_widget_ids = dirty_widget_ids.to_vec();
                 refresh_widget_ids.extend(active_animation_widget_ids);
@@ -5919,13 +5919,35 @@ fragment float4 live_spectrogram_frag(
                     let col_off = tile.body_rect.col.round() as usize;
                     let row_off = tile.body_rect.row.round() as usize;
                     let sel_bg = theme::COMP_SELECTED_BG();
-                    let popup_col =
-                        col_off + (comp.anchor.1 as f32 * comp.text_cell_width_scale) as usize;
-                    let anchor_row =
-                        row_off + (comp.anchor.0 as f32 * comp.text_cell_height_scale) as usize;
-                    let popup_row = anchor_row + 1;
-                    let total_cols = (vp_w / cell_w).floor().max(1.0) as usize;
-                    let total_rows = (vp_h / cell_h).floor().max(1.0) as usize;
+                    // The popup lives on its own, smaller cell grid: buffer text
+                    // is already drawn at `text_cell_*_scale`, so chrome sized to
+                    // the raw terminal cell towers over the code it completes.
+                    let pop_cell_w = (cell_w
+                        * comp.text_cell_width_scale.max(0.001)
+                        * AUTOCOMPLETE_TEXT_CELL_SCALE)
+                        .max(1.0);
+                    let pop_cell_h = (cell_h
+                        * comp.text_cell_height_scale.max(0.001)
+                        * AUTOCOMPLETE_TEXT_CELL_SCALE)
+                        .max(1.0);
+                    // Anchor in pixels first — the cursor's text row is a
+                    // fractional number of layout cells, and truncating it to a
+                    // whole cell was what let the panel ride up over the cursor.
+                    let anchor_x_px = (col_off as f32
+                        + comp.anchor.1 as f32 * comp.text_cell_width_scale)
+                        * cell_w;
+                    let anchor_top_px = (row_off as f32
+                        + comp.anchor.0 as f32 * comp.text_cell_height_scale)
+                        * cell_h;
+                    let anchor_bottom_px =
+                        anchor_top_px + cell_h * comp.text_cell_height_scale.max(0.001);
+                    let popup_col = (anchor_x_px / pop_cell_w).floor().max(0.0) as usize;
+                    let anchor_row = (anchor_top_px / pop_cell_h).floor().max(0.0) as usize;
+                    let popup_row = ((anchor_bottom_px + AUTOCOMPLETE_ANCHOR_GAP_PX) / pop_cell_h)
+                        .ceil()
+                        .max(0.0) as usize;
+                    let total_cols = (vp_w / pop_cell_w).floor().max(1.0) as usize;
+                    let total_rows = (vp_h / pop_cell_h).floor().max(1.0) as usize;
                     let label_w = comp
                         .entries
                         .iter()
@@ -5996,8 +6018,8 @@ fragment float4 live_spectrogram_frag(
                         panel_h as f32,
                         panel_bg,
                         AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
-                        cell_w,
-                        cell_h,
+                        pop_cell_w,
+                        pop_cell_h,
                         vp_w,
                         vp_h,
                     );
@@ -6010,8 +6032,8 @@ fragment float4 live_spectrogram_frag(
                             panel_h as f32,
                             doc_bg,
                             AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
-                            cell_w,
-                            cell_h,
+                            pop_cell_w,
+                            pop_cell_h,
                             vp_w,
                             vp_h,
                         );
@@ -6028,10 +6050,10 @@ fragment float4 live_spectrogram_frag(
                     }
                     push_rounded_rect_border_px(
                         &mut popup_verts,
-                        popup_col as f32 * cell_w,
-                        panel_row as f32 * cell_h,
-                        pane_w as f32 * cell_w,
-                        panel_h as f32 * cell_h,
+                        popup_col as f32 * pop_cell_w,
+                        panel_row as f32 * pop_cell_h,
+                        pane_w as f32 * pop_cell_w,
+                        panel_h as f32 * pop_cell_h,
                         AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
                         AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
                         panel_border,
@@ -6041,10 +6063,10 @@ fragment float4 live_spectrogram_frag(
                     if show_doc {
                         push_rounded_rect_border_px(
                             &mut popup_verts,
-                            doc_col as f32 * cell_w,
-                            panel_row as f32 * cell_h,
-                            pane_w as f32 * cell_w,
-                            panel_h as f32 * cell_h,
+                            doc_col as f32 * pop_cell_w,
+                            panel_row as f32 * pop_cell_h,
+                            pane_w as f32 * pop_cell_w,
+                            panel_h as f32 * pop_cell_h,
                             AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
                             AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
                             doc_border,
@@ -6066,8 +6088,8 @@ fragment float4 live_spectrogram_frag(
                             1.18,
                             sel_bg,
                             AUTOCOMPLETE_ROW_CORNER_RADIUS_PX,
-                            cell_w,
-                            cell_h,
+                            pop_cell_w,
+                            pop_cell_h,
                             vp_w,
                             vp_h,
                         );
@@ -6103,8 +6125,8 @@ fragment float4 live_spectrogram_frag(
                             pane_w.saturating_sub(6),
                             entry_fg,
                             entry_bg,
-                            cell_w,
-                            cell_h,
+                            pop_cell_w,
+                            pop_cell_h,
                             vp_w,
                             vp_h,
                         );
@@ -6121,8 +6143,8 @@ fragment float4 live_spectrogram_frag(
                                     category_width,
                                     to_rgba(theme::COMP_CATEGORY_FG()),
                                     entry_bg,
-                                    cell_w,
-                                    cell_h,
+                                    pop_cell_w,
+                                    pop_cell_h,
                                     vp_w,
                                     vp_h,
                                 );
@@ -6144,16 +6166,16 @@ fragment float4 live_spectrogram_frag(
                                 doc_text_w,
                                 title_fg,
                                 doc_bg_rgba,
-                                cell_w,
-                                cell_h,
+                                pop_cell_w,
+                                pop_cell_h,
                                 vp_w,
                                 vp_h,
                             );
                             push_rect_px(
                                 &mut popup_verts,
-                                (doc_col + doc_pad_x) as f32 * cell_w,
-                                (panel_row + doc_pad_top + 2) as f32 * cell_h - 2.0,
-                                doc_text_w as f32 * cell_w,
+                                (doc_col + doc_pad_x) as f32 * pop_cell_w,
+                                (panel_row + doc_pad_top + 2) as f32 * pop_cell_h - 2.0,
+                                doc_text_w as f32 * pop_cell_w,
                                 1.0,
                                 doc_border,
                                 vp_w,
@@ -6174,8 +6196,8 @@ fragment float4 live_spectrogram_frag(
                                         doc_text_w,
                                         doc_fg,
                                         doc_bg_rgba,
-                                        cell_w,
-                                        cell_h,
+                                        pop_cell_w,
+                                        pop_cell_h,
                                         vp_w,
                                         vp_h,
                                     );
@@ -6191,8 +6213,8 @@ fragment float4 live_spectrogram_frag(
                                     doc_text_w,
                                     muted_fg,
                                     doc_bg_rgba,
-                                    cell_w,
-                                    cell_h,
+                                    pop_cell_w,
+                                    pop_cell_h,
                                     vp_w,
                                     vp_h,
                                 );
@@ -10231,11 +10253,8 @@ fragment float4 live_spectrogram_frag(
         #[test]
         fn release_queues_final_coalesced_drag_before_mouse_up() {
             let mut pending = VecDeque::new();
-            let mut pending_drag = Some(mouse_event(
-                MouseEventKind::Drag(MouseButton::Left),
-                17,
-                4,
-            ));
+            let mut pending_drag =
+                Some(mouse_event(MouseEventKind::Drag(MouseButton::Left), 17, 4));
             let release = mouse_event(MouseEventKind::Up(MouseButton::Left), 17, 4);
 
             enqueue_mouse_release(&mut pending, &mut pending_drag, release);

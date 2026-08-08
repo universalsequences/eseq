@@ -813,8 +813,7 @@ impl Editor {
                         self.mark_needs_redraw();
                         return false;
                     };
-                    if let Some(node) = super::widget_focus::find_node_by_id(&layout, overlay_id)
-                    {
+                    if let Some(node) = super::widget_focus::find_node_by_id(&layout, overlay_id) {
                         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
                         let widget_event = map_mouse_event(
                             &node,
