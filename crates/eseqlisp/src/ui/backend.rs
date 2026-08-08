@@ -104,9 +104,15 @@ impl Cell {
 
 // ── Completion popup ──────────────────────────────────────────────────────────
 
+/// Shared geometry for the patcher and code-editor completion overlays.
+pub const AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX: f32 = 14.0;
+pub const AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX: f32 = 1.0;
+pub const AUTOCOMPLETE_ROW_CORNER_RADIUS_PX: f32 = 8.0;
+
 #[derive(Clone, Debug)]
 pub struct CompletionEntry {
     pub label: String,
+    pub category: Option<String>,
     pub selected: bool,
 }
 

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use crate::buffer::Buffer;
 use crate::runtime::SymbolMetadata;
@@ -54,6 +55,7 @@ pub struct CompletionMatch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionItem {
     pub label: String,
+    pub category: Option<String>,
     pub signature: Option<String>,
     pub docs: Option<String>,
 }
@@ -242,87 +244,6 @@ const DGENLISP_SPECIALS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-const DGENLISP_BUILTINS: &[(&str, &str, &str)] = &[
-    ("abs", "(abs x)", "Absolute value."),
-    (
-        "accum",
-        "(accum inc [reset min max])",
-        "Stateful accumulator.",
-    ),
-    (
-        "biquad",
-        "(biquad signal cutoff q gain mode)",
-        "IIR filter.",
-    ),
-    ("ceil", "(ceil x)", "Round upward."),
-    ("click", "(click)", "Impulse generator."),
-    ("clip", "(clip sig min max)", "Clamp to range."),
-    (
-        "compressor",
-        "(compressor signal ratio threshold knee attack release)",
-        "Dynamics processor.",
-    ),
-    ("cos", "(cos x)", "Cosine."),
-    ("atan", "(atan x)", "One-argument arctangent."),
-    ("atan2", "(atan2 y x)", "Two-argument arctangent."),
-    ("delay", "(delay signal time-in-samples)", "Delay line."),
-    ("eq", "(eq a b)", "Equality comparison."),
-    ("exp", "(exp x)", "Exponential."),
-    ("floor", "(floor x)", "Round downward."),
-    (
-        "gswitch",
-        "(gswitch cond a b)",
-        "Conditional signal switch.",
-    ),
-    ("gte", "(gte a b)", "Greater-than-or-equal comparison."),
-    ("gt", "(gt a b)", "Greater-than comparison."),
-    ("latch", "(latch value trigger)", "Sample and hold."),
-    ("log", "(log x)", "Natural logarithm."),
-    ("lte", "(lte a b)", "Less-than-or-equal comparison."),
-    ("lt", "(lt a b)", "Less-than comparison."),
-    ("max", "(max a b ...)", "Maximum value."),
-    ("min", "(min a b ...)", "Minimum value."),
-    ("mix", "(mix a b t)", "Linear interpolation."),
-    (
-        "mod",
-        "(mod param-name)",
-        "Read the modulated value for a modulatable param.",
-    ),
-    ("mse", "(mse prediction target)", "Mean squared error."),
-    ("noise", "(noise)", "White noise source."),
-    ("phasor", "(phasor freq [reset])", "Ramp oscillator."),
-    ("pow", "(pow base exponent)", "Exponentiation."),
-    ("relu", "(relu x)", "Rectified linear unit."),
-    ("round", "(round x)", "Round to nearest integer."),
-    (
-        "scale",
-        "(scale sig in-min in-max out-min out-max)",
-        "Linear remap.",
-    ),
-    (
-        "selector",
-        "(selector mode option1 option2 ...)",
-        "1-based selector.",
-    ),
-    ("sigmoid", "(sigmoid x)", "Sigmoid curve."),
-    ("sign", "(sign x)", "Sign function."),
-    ("sin", "(sin x)", "Sine."),
-    ("sqrt", "(sqrt x)", "Square root."),
-    (
-        "stateful-phasor",
-        "(stateful-phasor freq)",
-        "Forced-state phasor.",
-    ),
-    ("tan", "(tan x)", "Tangent."),
-    ("tanh", "(tanh x)", "Hyperbolic tangent."),
-    (
-        "triangle",
-        "(triangle phase)",
-        "Triangle waveform from phasor phase.",
-    ),
-    ("wrap", "(wrap sig min max)", "Wrap into range."),
-];
-
 pub fn completion_match(
     mode: &BufferMode,
     buffer: &Buffer,
@@ -494,20 +415,119 @@ fn completion_candidates(
     runtime_symbols: &[String],
     buffer: &Buffer,
 ) -> Vec<CompletionItem> {
-    let mut items = static_items(special_forms(mode));
+    let mut items = match mode {
+        BufferMode::ESeqLisp | BufferMode::Named(_) => {
+            static_items(special_forms(mode), Some("special form"))
+        }
+        BufferMode::DGenLisp => Vec::new(),
+    };
     items.extend(buffer_defined_symbols(buffer));
     match mode {
         BufferMode::ESeqLisp | BufferMode::Named(_) => {
-            items.extend(static_items(ESEQLISP_BUILTINS));
+            items.extend(static_items(ESEQLISP_BUILTINS, Some("builtin")));
             items.extend(runtime_symbols.iter().cloned().map(|label| CompletionItem {
                 label,
+                category: None,
                 signature: None,
                 docs: None,
             }));
         }
-        BufferMode::DGenLisp => items.extend(static_items(DGENLISP_BUILTINS)),
+        BufferMode::DGenLisp => items.extend(dgenlisp_manifest_items().iter().cloned()),
     }
     items
+}
+
+fn dgenlisp_manifest_items() -> &'static [CompletionItem] {
+    static ITEMS: OnceLock<Vec<CompletionItem>> = OnceLock::new();
+    ITEMS.get_or_init(|| {
+        let manifest = crate::dgenlisp::manifest();
+        let mut items = Vec::new();
+        for (key, fallback_category) in [
+            ("operators", "operator"),
+            ("special_forms", "special form"),
+            ("constants", "constant"),
+            ("attributes", "attribute"),
+        ] {
+            let entries = manifest
+                .get(key)
+                .and_then(serde_json::Value::as_array)
+                .unwrap_or_else(|| panic!("bundled dgenlisp-operators.json must contain {key}"));
+            for entry in entries {
+                let Some(name) = entry.get("name").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                let category = entry
+                    .get("category")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|category| !matches!(*category, "uncategorized" | "internal"))
+                    .map(|category| match category {
+                        "preamble" => "macro".to_string(),
+                        other => other.replace('_', " "),
+                    })
+                    .unwrap_or_else(|| fallback_category.to_string());
+                let signatures = entry
+                    .get("signatures")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                let mut docs = entry
+                    .get("summary")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                docs.extend(signatures.iter().skip(1).cloned());
+                if let Some(inputs) = manifest_port_summary(entry, "inputs") {
+                    docs.push(format!("inlets: {inputs}"));
+                }
+                if let Some(outputs) = manifest_port_summary(entry, "outputs") {
+                    docs.push(format!("outlets: {outputs}"));
+                }
+                let item = CompletionItem {
+                    label: name.to_string(),
+                    category: Some(category),
+                    signature: signatures.first().cloned(),
+                    docs: (!docs.is_empty()).then(|| docs.join("\n")),
+                };
+                items.push(item.clone());
+                if let Some(aliases) = entry.get("aliases").and_then(serde_json::Value::as_array) {
+                    for alias in aliases.iter().filter_map(serde_json::Value::as_str) {
+                        let mut alias_item = item.clone();
+                        alias_item.label = alias.to_string();
+                        items.push(alias_item);
+                    }
+                }
+            }
+        }
+        items
+    })
+}
+
+fn manifest_port_summary(entry: &serde_json::Value, key: &str) -> Option<String> {
+    let ports = entry.get(key)?.as_array()?;
+    if ports.is_empty() {
+        return None;
+    }
+    Some(
+        ports
+            .iter()
+            .map(|port| {
+                let name = port
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("value");
+                let kind = port.get("kind").and_then(serde_json::Value::as_str);
+                match kind {
+                    Some(kind) => format!("{name}: {kind}"),
+                    None => name.to_string(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
 }
 
 fn buffer_defined_symbols(buffer: &Buffer) -> Vec<CompletionItem> {
@@ -527,6 +547,7 @@ fn buffer_defined_symbols(buffer: &Buffer) -> Vec<CompletionItem> {
             if !name.is_empty() {
                 items.push(CompletionItem {
                     label: name.to_string(),
+                    category: Some("local".to_string()),
                     signature: Some(format!("({name} ...)")),
                     docs: Some("User-defined symbol from the current buffer.".to_string()),
                 });
@@ -543,11 +564,12 @@ fn special_forms(mode: &BufferMode) -> &'static [(&'static str, &'static str, &'
     }
 }
 
-fn static_items(entries: &[(&str, &str, &str)]) -> Vec<CompletionItem> {
+fn static_items(entries: &[(&str, &str, &str)], category: Option<&str>) -> Vec<CompletionItem> {
     entries
         .iter()
         .map(|(label, signature, docs)| CompletionItem {
             label: (*label).to_string(),
+            category: category.map(str::to_string),
             signature: Some((*signature).to_string()),
             docs: Some((*docs).to_string()),
         })
@@ -617,6 +639,51 @@ mod tests {
             spans
                 .iter()
                 .any(|span| span.class == super::TokenClass::Special)
+        );
+    }
+
+    #[test]
+    fn dgenlisp_completion_uses_generated_operator_manifest() {
+        let mut buffer = Buffer::from_text(0, "*dsp*", "(polyb");
+        buffer.cursor = (0, 6);
+        let result = completion_match(
+            &BufferMode::DGenLisp,
+            &buffer,
+            &[String::from("polybook-from-eseqlisp-runtime")],
+            &HashMap::new(),
+        )
+        .expect("DGenLisp manifest should provide polyblep completions");
+        let polyblep = result
+            .items
+            .iter()
+            .find(|item| item.label == "polyblep")
+            .expect("polyblep completion");
+
+        assert_eq!(polyblep.category.as_deref(), Some("macro"));
+        assert_eq!(polyblep.signature.as_deref(), Some("(polyblep phase freq)"));
+        assert!(
+            polyblep
+                .docs
+                .as_deref()
+                .is_some_and(|docs| !docs.is_empty())
+        );
+        assert!(
+            !result
+                .items
+                .iter()
+                .any(|item| item.label == "polybook-from-eseqlisp-runtime"),
+            "ESeqLisp runtime symbols must not leak into DGenLisp buffers"
+        );
+    }
+
+    #[test]
+    fn eseqlisp_completion_does_not_include_dgenlisp_manifest_symbols() {
+        let mut buffer = Buffer::from_text(0, "*ui*", "(polyb");
+        buffer.cursor = (0, 6);
+
+        assert!(
+            completion_match(&BufferMode::ESeqLisp, &buffer, &[], &HashMap::new()).is_none(),
+            "ESeqLisp buffers should complete from ESeqLisp symbols, not DGenLisp"
         );
     }
 

@@ -1656,6 +1656,7 @@ fn build_completion(
             .take(visible_count)
             .map(|(idx, item)| CompletionEntry {
                 label: item.label.clone(),
+                category: item.category.clone(),
                 selected: idx == comp.selected,
             })
             .collect();

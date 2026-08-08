@@ -12,6 +12,11 @@ use super::super::{
 #[cfg(target_os = "macos")]
 use crate::layout::LayoutNode;
 use crate::layout::{Rect, f64_to_f32};
+#[cfg(target_os = "macos")]
+use crate::backend::{
+    AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX, AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
+    AUTOCOMPLETE_ROW_CORNER_RADIUS_PX,
+};
 use crate::theme;
 use crate::vm::Value;
 
@@ -48,15 +53,6 @@ use super::state::{
 #[cfg(target_os = "macos")]
 use super::text::patcher_autocomplete_suggestions;
 
-/// Flat completion-menu chrome (Zed-style): moderate panel radius, a slightly
-/// tighter radius on the selected row, and a crisp hairline border that stays
-/// 1px regardless of patcher zoom.
-#[cfg(target_os = "macos")]
-const AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX: f32 = 14.0;
-#[cfg(target_os = "macos")]
-const AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX: f32 = 1.0;
-#[cfg(target_os = "macos")]
-const AUTOCOMPLETE_ROW_CORNER_RADIUS_PX: f32 = 8.0;
 /// Horizontal inset of the selected-row bar from the panel edge, in cells.
 #[cfg(target_os = "macos")]
 const AUTOCOMPLETE_ROW_INSET_CELLS: f32 = 0.22;

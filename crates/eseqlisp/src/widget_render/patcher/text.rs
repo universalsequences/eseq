@@ -107,6 +107,9 @@ pub(super) fn patcher_autocomplete_suggestions(
         .filter(|name| name.to_lowercase().starts_with(&prefix))
         .map(|name| (name.clone(), docs.get(name).cloned()))
         .collect();
+    if "history".starts_with(&prefix) {
+        candidates.insert("history".to_string(), Some(patcher_history_documentation()));
+    }
     for macro_patch in local_macros {
         if macro_patch.name.to_lowercase().starts_with(&prefix) {
             candidates.insert(
@@ -130,6 +133,31 @@ pub(super) fn patcher_autocomplete_suggestions(
     });
     matches.truncate(PATCHER_AUTOCOMPLETE_MAX_ITEMS);
     matches
+}
+
+fn patcher_history_documentation() -> OperatorDocumentation {
+    OperatorDocumentation {
+        category: Some("patcher".to_string()),
+        summary: Some(
+            "One-sample feedback cell. The outlet reads the previous frame and the inlet writes the current frame."
+                .to_string(),
+        ),
+        signatures: vec!["(history)".to_string()],
+        inputs: vec![OperatorPortDocumentation {
+            name: Some("write".to_string()),
+            kind: Some("signal".to_string()),
+            required: Some(false),
+            index: Some(0),
+            summary: Some("Value stored for the next frame.".to_string()),
+        }],
+        outputs: vec![OperatorPortDocumentation {
+            name: Some("previous".to_string()),
+            kind: Some("signal".to_string()),
+            required: Some(true),
+            index: Some(0),
+            summary: Some("Value stored by the preceding frame.".to_string()),
+        }],
+    }
 }
 
 fn local_macro_documentation(macro_patch: &MacroPatch) -> OperatorDocumentation {

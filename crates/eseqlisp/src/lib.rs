@@ -66,6 +66,7 @@ pub use ui::tui;
 pub mod audio;
 pub mod buffer;
 pub mod defmacro_library;
+mod dgenlisp;
 pub mod editor;
 pub mod host;
 pub mod hot_reload;

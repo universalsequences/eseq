@@ -44,7 +44,9 @@ mod inner {
 
     use crate::audio::sample::get_registered_sample;
     use crate::backend::{
-        Backend, BackendError, BackendEvent, Color, RenderFrame, TiledRenderFrame,
+        AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX, AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
+        AUTOCOMPLETE_ROW_CORNER_RADIUS_PX, Backend, BackendError, BackendEvent, Color,
+        RenderFrame, TiledRenderFrame,
     };
     use crate::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas, SizedFontCache};
     use crate::layout::{LayoutNode, Rect, TextMeasurer};
@@ -5916,9 +5918,7 @@ fragment float4 live_spectrogram_frag(
                 if let Some(tile) = tiled.tiles.iter().find(|t| t.is_active) {
                     let col_off = tile.body_rect.col.round() as usize;
                     let row_off = tile.body_rect.row.round() as usize;
-                    let sel_bg = to_rgba(theme::COMP_SELECTED_BG());
-                    let unsel_bg = to_rgba(theme::COMP_UNSELECTED_BG());
-                    let pop_fg = to_rgba(theme::COMP_FG());
+                    let sel_bg = theme::PATCHER_AUTOCOMPLETE_SELECTED_BG();
                     let popup_col =
                         col_off + (comp.anchor.1 as f32 * comp.text_cell_width_scale) as usize;
                     let anchor_row =
@@ -5982,25 +5982,12 @@ fragment float4 live_spectrogram_frag(
                         popup_row
                     };
                     let mut popup_verts = Vec::new();
-                    let panel_bg = Color::rgba(0.105, 0.115, 0.135, 0.96);
-                    let panel_border = Color::rgba(0.24, 0.26, 0.30, 1.0);
-                    let shadow = Color::rgba(0.0, 0.0, 0.0, 0.38);
-                    let muted_fg = to_rgba(Color::rgba(0.58, 0.59, 0.62, 1.0));
-                    let doc_bg = Color::rgba(0.085, 0.09, 0.105, 0.98);
+                    let panel_bg = theme::PATCHER_AUTOCOMPLETE_BG();
+                    let panel_border = theme::PATCHER_AUTOCOMPLETE_BORDER();
+                    let muted_fg = to_rgba(theme::PATCHER_AUTOCOMPLETE_CATEGORY_TEXT());
+                    let doc_bg = theme::PATCHER_AUTOCOMPLETE_DOC_BG();
+                    let doc_border = theme::PATCHER_AUTOCOMPLETE_DOC_BORDER();
                     let mut rounded = Vec::new();
-                    push_rounded_instance_cells(
-                        &mut rounded,
-                        popup_col as f32 + 0.18,
-                        panel_row as f32 + 0.20,
-                        pane_w as f32,
-                        panel_h as f32,
-                        shadow,
-                        10.0,
-                        cell_w,
-                        cell_h,
-                        vp_w,
-                        vp_h,
-                    );
                     push_rounded_instance_cells(
                         &mut rounded,
                         popup_col as f32,
@@ -6008,7 +5995,7 @@ fragment float4 live_spectrogram_frag(
                         pane_w as f32,
                         panel_h as f32,
                         panel_bg,
-                        8.0,
+                        AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
                         cell_w,
                         cell_h,
                         vp_w,
@@ -6017,25 +6004,12 @@ fragment float4 live_spectrogram_frag(
                     if show_doc {
                         push_rounded_instance_cells(
                             &mut rounded,
-                            doc_col as f32 + 0.18,
-                            panel_row as f32 + 0.20,
-                            pane_w as f32,
-                            panel_h as f32,
-                            shadow,
-                            10.0,
-                            cell_w,
-                            cell_h,
-                            vp_w,
-                            vp_h,
-                        );
-                        push_rounded_instance_cells(
-                            &mut rounded,
                             doc_col as f32,
                             panel_row as f32,
                             pane_w as f32,
                             panel_h as f32,
                             doc_bg,
-                            8.0,
+                            AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
                             cell_w,
                             cell_h,
                             vp_w,
@@ -6052,20 +6026,46 @@ fragment float4 live_spectrogram_frag(
                             rounded.as_slice(),
                         );
                     }
+                    push_rounded_rect_border_px(
+                        &mut popup_verts,
+                        popup_col as f32 * cell_w,
+                        panel_row as f32 * cell_h,
+                        pane_w as f32 * cell_w,
+                        panel_h as f32 * cell_h,
+                        AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
+                        AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
+                        panel_border,
+                        vp_w,
+                        vp_h,
+                    );
+                    if show_doc {
+                        push_rounded_rect_border_px(
+                            &mut popup_verts,
+                            doc_col as f32 * cell_w,
+                            panel_row as f32 * cell_h,
+                            pane_w as f32 * cell_w,
+                            panel_h as f32 * cell_h,
+                            AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
+                            AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
+                            doc_border,
+                            vp_w,
+                            vp_h,
+                        );
+                    }
                     for (i, entry) in comp.entries.iter().enumerate() {
                         let row = panel_row + list_pad_top + i * row_step;
                         if row >= panel_row + panel_h {
                             break;
                         }
-                        let bg = if entry.selected { sel_bg } else { unsel_bg };
                         let mut selected = Vec::new();
-                        push_rounded_instance_cells_rgba(
+                        push_rounded_instance_cells(
                             &mut selected,
                             popup_col as f32 + 1.0,
                             row as f32 - 0.15,
                             pane_w.saturating_sub(2) as f32,
                             1.18,
-                            bg,
+                            sel_bg,
+                            AUTOCOMPLETE_ROW_CORNER_RADIUS_PX,
                             cell_w,
                             cell_h,
                             vp_w,
@@ -6084,6 +6084,16 @@ fragment float4 live_spectrogram_frag(
                             );
                         }
                         let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
+                        let entry_fg = if entry.selected {
+                            to_rgba(theme::PATCHER_AUTOCOMPLETE_SELECTED_TEXT())
+                        } else {
+                            to_rgba(theme::PATCHER_AUTOCOMPLETE_TEXT())
+                        };
+                        let entry_bg = if entry.selected {
+                            to_rgba(sel_bg)
+                        } else {
+                            to_rgba(panel_bg)
+                        };
                         push_text_cells(
                             &mut popup_verts,
                             atlas,
@@ -6091,18 +6101,38 @@ fragment float4 live_spectrogram_frag(
                             popup_col + 3,
                             row,
                             pane_w.saturating_sub(6),
-                            pop_fg,
-                            to_rgba(panel_bg),
+                            entry_fg,
+                            entry_bg,
                             cell_w,
                             cell_h,
                             vp_w,
                             vp_h,
                         );
+                        if let Some(category) = &entry.category {
+                            let category_width = category.chars().count();
+                            let content_width = pane_w.saturating_sub(6);
+                            if entry.label.chars().count() + category_width + 2 <= content_width {
+                                push_text_cells(
+                                    &mut popup_verts,
+                                    atlas,
+                                    category,
+                                    popup_col + pane_w - 3 - category_width,
+                                    row,
+                                    category_width,
+                                    to_rgba(theme::PATCHER_AUTOCOMPLETE_CATEGORY_TEXT()),
+                                    entry_bg,
+                                    cell_w,
+                                    cell_h,
+                                    vp_w,
+                                    vp_h,
+                                );
+                            }
+                        }
                     }
                     if show_doc {
                         if let Some((title, _)) = &comp.doc {
-                            let title_fg = to_rgba(theme::COMP_DOC_TITLE_FG());
-                            let doc_fg = to_rgba(theme::COMP_DOC_FG());
+                            let title_fg = to_rgba(theme::PATCHER_AUTOCOMPLETE_DOC_TEXT());
+                            let doc_fg = to_rgba(theme::PATCHER_AUTOCOMPLETE_DOC_TEXT());
                             let doc_bg_rgba = to_rgba(doc_bg);
                             let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
                             push_text_cells(
@@ -6125,7 +6155,7 @@ fragment float4 live_spectrogram_frag(
                                 (panel_row + doc_pad_top + 2) as f32 * cell_h - 2.0,
                                 doc_text_w as f32 * cell_w,
                                 1.0,
-                                panel_border,
+                                doc_border,
                                 vp_w,
                                 vp_h,
                             );
@@ -7814,9 +7844,8 @@ fragment float4 live_spectrogram_frag(
             let popup_col = comp.anchor.1;
             let popup_row = comp.anchor.0 + 1; // one row below the cursor
 
-            let sel_bg = to_rgba(theme::COMP_SELECTED_BG());
-            let unsel_bg = to_rgba(theme::COMP_UNSELECTED_BG());
-            let pop_fg = to_rgba(theme::COMP_FG());
+            let sel_bg = to_rgba(theme::PATCHER_AUTOCOMPLETE_SELECTED_BG());
+            let unsel_bg = to_rgba(theme::PATCHER_AUTOCOMPLETE_BG());
 
             let x0 = ndc_x(popup_col as f32 * cell_w);
             let x1 = ndc_x((popup_col + label_w) as f32 * cell_w);
@@ -7828,6 +7857,11 @@ fragment float4 live_spectrogram_frag(
                 let y0 = ndc_y(row as f32 * cell_h); // top (larger NDC Y)
                 let y1 = ndc_y((row + 1) as f32 * cell_h); // bottom
                 let bg = if entry.selected { sel_bg } else { unsel_bg };
+                let pop_fg = if entry.selected {
+                    to_rgba(theme::PATCHER_AUTOCOMPLETE_SELECTED_TEXT())
+                } else {
+                    to_rgba(theme::PATCHER_AUTOCOMPLETE_TEXT())
+                };
                 let gv = |px, py, u, v| Vertex {
                     position: [px, py],
                     uv: [u, v],
@@ -7870,9 +7904,9 @@ fragment float4 live_spectrogram_frag(
                 let doc_col = popup_col + label_w + 1;
                 let doc_w: usize = 44;
                 let doc_h = comp.entries.len().max(4);
-                let doc_bg = to_rgba(theme::COMP_DOC_BG());
-                let doc_fg = to_rgba(theme::COMP_DOC_FG());
-                let title_fg = to_rgba(theme::COMP_DOC_TITLE_FG());
+                let doc_bg = to_rgba(theme::PATCHER_AUTOCOMPLETE_DOC_BG());
+                let doc_fg = to_rgba(theme::PATCHER_AUTOCOMPLETE_DOC_TEXT());
+                let title_fg = to_rgba(theme::PATCHER_AUTOCOMPLETE_DOC_TEXT());
 
                 // Background for the whole panel.
                 let dx0 = ndc_x(doc_col as f32 * cell_w);

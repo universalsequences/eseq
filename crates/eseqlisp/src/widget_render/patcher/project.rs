@@ -1292,10 +1292,7 @@ pub(super) fn assign_layout(patch: &mut Patch) {
 pub(super) fn dgenlisp_constant_names() -> &'static HashSet<String> {
     static CONSTANT_NAMES: OnceLock<HashSet<String>> = OnceLock::new();
     CONSTANT_NAMES.get_or_init(|| {
-        let metadata: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../sequencer/tools/dgenlisp-operators.json"
-        ))
-        .expect("bundled dgenlisp-operators.json must be valid JSON");
+        let metadata = crate::dgenlisp::manifest();
         let constants = metadata
             .get("constants")
             .and_then(serde_json::Value::as_array)
@@ -1312,10 +1309,7 @@ pub(super) fn dgenlisp_constant_names() -> &'static HashSet<String> {
 pub(super) fn dgenlisp_operator_names() -> &'static HashSet<String> {
     static OPERATOR_NAMES: OnceLock<HashSet<String>> = OnceLock::new();
     OPERATOR_NAMES.get_or_init(|| {
-        let metadata: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../sequencer/tools/dgenlisp-operators.json"
-        ))
-        .expect("bundled dgenlisp-operators.json must be valid JSON");
+        let metadata = crate::dgenlisp::manifest();
         let operators = metadata
             .get("operators")
             .and_then(serde_json::Value::as_array)
@@ -1338,7 +1332,7 @@ pub(super) fn dgenlisp_operator_names() -> &'static HashSet<String> {
                 }
             }
         }
-        for special_form in expression_special_forms(&metadata) {
+        for special_form in expression_special_forms(metadata) {
             if let Some(name) = special_form.get("name").and_then(serde_json::Value::as_str) {
                 names.insert(name.to_string());
             }
@@ -1371,10 +1365,7 @@ pub(super) fn dgenlisp_operator_documentation() -> &'static HashMap<String, Oper
     static OPERATOR_DOCUMENTATION: OnceLock<HashMap<String, OperatorDocumentation>> =
         OnceLock::new();
     OPERATOR_DOCUMENTATION.get_or_init(|| {
-        let metadata: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../sequencer/tools/dgenlisp-operators.json"
-        ))
-        .expect("bundled dgenlisp-operators.json must be valid JSON");
+        let metadata = crate::dgenlisp::manifest();
         let operators = metadata
             .get("operators")
             .and_then(serde_json::Value::as_array)
@@ -1470,10 +1461,7 @@ fn operator_port_documentation(
 pub(super) fn dgenlisp_operator_port_shapes() -> &'static HashMap<String, OperatorPortShape> {
     static OPERATOR_PORT_SHAPES: OnceLock<HashMap<String, OperatorPortShape>> = OnceLock::new();
     OPERATOR_PORT_SHAPES.get_or_init(|| {
-        let metadata: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../sequencer/tools/dgenlisp-operators.json"
-        ))
-        .expect("bundled dgenlisp-operators.json must be valid JSON");
+        let metadata = crate::dgenlisp::manifest();
         let operators = metadata
             .get("operators")
             .and_then(serde_json::Value::as_array)
@@ -1499,7 +1487,7 @@ pub(super) fn dgenlisp_operator_port_shapes() -> &'static HashMap<String, Operat
                 }
             }
         }
-        for special_form in expression_special_forms(&metadata) {
+        for special_form in expression_special_forms(metadata) {
             let Some(name) = special_form.get("name").and_then(serde_json::Value::as_str) else {
                 continue;
             };
@@ -1525,10 +1513,7 @@ pub(super) fn dgenlisp_operator_port_shapes() -> &'static HashMap<String, Operat
 pub(super) fn dgenlisp_preamble_macro_arities() -> &'static HashMap<String, usize> {
     static PREAMBLE_MACRO_ARITIES: OnceLock<HashMap<String, usize>> = OnceLock::new();
     PREAMBLE_MACRO_ARITIES.get_or_init(|| {
-        let metadata: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../sequencer/tools/dgenlisp-operators.json"
-        ))
-        .expect("bundled dgenlisp-operators.json must be valid JSON");
+        let metadata = crate::dgenlisp::manifest();
         let operators = metadata
             .get("operators")
             .and_then(serde_json::Value::as_array)
@@ -1562,10 +1547,7 @@ pub(super) fn dgenlisp_preamble_macro_arities() -> &'static HashMap<String, usiz
 pub(super) fn dgenlisp_operator_required_input_counts() -> &'static HashMap<String, usize> {
     static OPERATOR_REQUIRED_INPUT_COUNTS: OnceLock<HashMap<String, usize>> = OnceLock::new();
     OPERATOR_REQUIRED_INPUT_COUNTS.get_or_init(|| {
-        let metadata: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../sequencer/tools/dgenlisp-operators.json"
-        ))
-        .expect("bundled dgenlisp-operators.json must be valid JSON");
+        let metadata = crate::dgenlisp::manifest();
         let operators = metadata
             .get("operators")
             .and_then(serde_json::Value::as_array)
@@ -1588,7 +1570,7 @@ pub(super) fn dgenlisp_operator_required_input_counts() -> &'static HashMap<Stri
                 }
             }
         }
-        for special_form in expression_special_forms(&metadata) {
+        for special_form in expression_special_forms(metadata) {
             let Some(name) = special_form.get("name").and_then(serde_json::Value::as_str) else {
                 continue;
             };

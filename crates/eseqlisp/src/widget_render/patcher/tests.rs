@@ -14,6 +14,7 @@ use super::model::{
 use super::project::{dgenlisp_operator_documentation, dgenlisp_operator_names};
 use super::render::*;
 use super::state::*;
+use super::text::{apply_patcher_autocomplete, patcher_autocomplete_suggestions};
 use super::text_metrics::{cache_text_widths, measured_text_width};
 use super::writeback::{
     WriteBackError, emit_patch_writeback, emit_patch_writeback_result,
@@ -13805,6 +13806,41 @@ fn patcher_reports_text_capture_only_while_node_text_edit_is_active() {
     });
     set_patcher_interaction_state(key, state);
     assert!(patcher_has_text_edit(&node));
+}
+
+#[test]
+fn patcher_autocomplete_documents_patcher_only_history_node() {
+    let mut edit = PatcherTextEdit {
+        node_id: "draft".to_string(),
+        text: "hist".to_string(),
+        original_text: String::new(),
+        state: TextInputState {
+            cursor_pos: 4,
+            selection_anchor: None,
+            selecting: false,
+        },
+        autocomplete_selected: 0,
+    };
+    let suggestions = patcher_autocomplete_suggestions(&edit, &[]);
+    let history = suggestions
+        .iter()
+        .find(|suggestion| suggestion.name == "history")
+        .expect("patcher history completion");
+    let docs = history
+        .documentation
+        .as_ref()
+        .expect("patcher history documentation");
+
+    assert_eq!(docs.category.as_deref(), Some("patcher"));
+    assert_eq!(docs.signatures, vec!["(history)"]);
+    assert_eq!(docs.inputs.len(), 1);
+    assert_eq!(docs.outputs.len(), 1);
+    assert!(
+        !dgenlisp_operator_names().contains("history"),
+        "history is a patcher graph convenience, not a DGenLisp operator"
+    );
+    assert!(apply_patcher_autocomplete(&mut edit, &[]));
+    assert_eq!(edit.text, "history ");
 }
 
 #[test]
