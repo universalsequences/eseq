@@ -13,8 +13,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::parser::{ASTParser, Expression, Parser, format_expression};
 
 use super::model::{
-    ArgValue, ConnectionKind, MacroOrigin, NodeKind, Patch, PatchConnection, PatchNode,
-    PatcherIntent, hidden_inline_node_ids, orphaned_inline_mod_node_ids,
+    ArgValue, ConnectionKind, HostModulatorInput, MacroOrigin, NodeKind, Patch, PatchConnection,
+    PatchNode, PatcherIntent, hidden_inline_node_ids, orphaned_inline_mod_node_ids,
 };
 use super::project::{
     dgenlisp_constant_names, dgenlisp_operator_names, dgenlisp_preamble_macro_arities,
@@ -48,6 +48,27 @@ pub(super) fn generate_patch_source(
             library_imports
                 .iter()
                 .map(|name| format!("(use-defmacro {name})"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+
+    // Ahead of the macro sections: the effect compiler hoists a defmacro's
+    // internal `param` forms to just above the defmacro, and every `@mod` param
+    // must land after the `@modulator` inputs it reads.
+    let host_modulators = host_modulator_inputs(patch, intent);
+    if !host_modulators.is_empty() {
+        sections.push(
+            host_modulators
+                .iter()
+                .map(|input| {
+                    format!(
+                        "(def {name} (in {channel} @name {name} @modulator {slot}))",
+                        name = input.name,
+                        channel = input.channel,
+                        slot = input.slot
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
@@ -92,24 +113,6 @@ pub(super) fn generate_patch_source(
 
     let scope = ScopeEmitter::new(patch, "root".to_string(), intent, false)?;
     let emitted = scope.emit(&mut renames)?;
-    if !patch.host_modulators.is_empty() {
-        let mut host_modulators = patch.host_modulators.clone();
-        host_modulators.sort_by_key(|input| (input.slot, input.channel));
-        sections.push(
-            host_modulators
-                .iter()
-                .map(|input| {
-                    format!(
-                        "(def {name} (in {channel} @name {name} @modulator {slot}))",
-                        name = input.name,
-                        channel = input.channel,
-                        slot = input.slot
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
-    }
     for group in emitted.root_groups {
         if !group.is_empty() {
             sections.push(group.join("\n"));
@@ -122,6 +125,71 @@ pub(super) fn generate_patch_source(
     })
 }
 
+/// The `@modulator` inputs the emitted source declares.
+///
+/// A modulatable param is inert without them — the compiler has nothing to feed
+/// `(mod name)` and `dsp_validate` rejects the file — so when the patch carries
+/// no host modulator defs of its own (a hand-built patch, or any effect: only
+/// `INSTRUMENT_TEMPLATE` ships them) the four configurable slots are
+/// materialized as soon as anything in the patch is modulatable. Channels sit
+/// past the fixed host inputs: 1-5 for an instrument, 1-2 (L/R) for an effect.
+fn host_modulator_inputs(patch: &Patch, intent: PatcherIntent) -> Vec<HostModulatorInput> {
+    if !patch.host_modulators.is_empty() {
+        let mut declared = patch.host_modulators.clone();
+        declared.sort_by_key(|input| (input.slot, input.channel));
+        return declared;
+    }
+    if !patch_has_modulatable_param(patch) {
+        return Vec::new();
+    }
+    let first_channel = match intent {
+        PatcherIntent::Instrument => 6,
+        PatcherIntent::Effect => 3,
+    };
+    (1..=4)
+        .map(|slot| HostModulatorInput {
+            name: format!("mod{slot}"),
+            channel: first_channel + slot - 1,
+            slot,
+        })
+        .collect()
+}
+
+/// Root scope or any macro body — a defmacro-internal `@mod` param needs the
+/// modulator inputs just as much as a top-level one.
+fn patch_has_modulatable_param(patch: &Patch) -> bool {
+    let scope_is_modulatable = |scope: &Patch| {
+        scope
+            .nodes
+            .iter()
+            .any(|node| node.param.as_ref().is_some_and(|param| param.modulatable))
+    };
+    scope_is_modulatable(patch)
+        || patch
+            .macros
+            .iter()
+            .any(|macro_patch| scope_is_modulatable(&macro_patch.patch))
+}
+
+/// Modulation is inferred from graph use (`infer_modulatable_params` in
+/// state.rs), so the `param` form the patch was authored with usually says
+/// nothing about it. Fill in what the compiler needs, leaving anything the user
+/// wrote alone: an authored `@mod-mode` survives, and additive is the default
+/// only because it is what nearly every patch wants.
+fn augment_param_label_with_mod(label: String, modulatable: bool) -> String {
+    if !modulatable {
+        return label;
+    }
+    let mut label = label;
+    if label_attribute(&label, "@mod").is_none() {
+        label.push_str(" @mod true");
+    }
+    if label_attribute(&label, "@mod-mode").is_none() {
+        label.push_str(" @mod-mode additive");
+    }
+    label
+}
+
 fn used_library_macro_names(patch: &Patch) -> Vec<String> {
     let library_names = patch
         .macros
@@ -129,13 +197,29 @@ fn used_library_macro_names(patch: &Patch) -> Vec<String> {
         .filter(|macro_patch| matches!(macro_patch.origin, MacroOrigin::Library { .. }))
         .map(|macro_patch| macro_patch.name.as_str())
         .collect::<HashSet<_>>();
-    if library_names.is_empty() {
+    // Imports the source declared that the model could not resolve to a
+    // library macro (see `Patch::imports`): a call to one of these projects as
+    // an unknown-operator `Builtin`, so it is matched by op name alone.
+    let unresolved_imports = patch
+        .imports
+        .iter()
+        .filter(|import| {
+            !patch
+                .macros
+                .iter()
+                .any(|macro_patch| &&macro_patch.name == import)
+        })
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    if library_names.is_empty() && unresolved_imports.is_empty() {
         return Vec::new();
     }
     let mut used = std::collections::BTreeSet::new();
     let mut scan = |scope: &Patch| {
         for node in &scope.nodes {
-            if node.kind == NodeKind::MacroInstance && library_names.contains(node.op.as_str()) {
+            let is_library_instance =
+                node.kind == NodeKind::MacroInstance && library_names.contains(node.op.as_str());
+            if is_library_instance || unresolved_imports.contains(node.op.as_str()) {
                 used.insert(node.op.clone());
             }
         }
@@ -380,7 +464,10 @@ impl<'a> ScopeEmitter<'a> {
         }
     }
 
-    fn emit(mut self, renames: &mut HashMap<(String, String), String>) -> Result<EmittedScope, String> {
+    fn emit(
+        mut self,
+        renames: &mut HashMap<(String, String), String>,
+    ) -> Result<EmittedScope, String> {
         let params = self.emit_role_lines(NodeRole::Param)?;
         let inputs = self.emit_role_lines(NodeRole::Input)?;
         let ordered_values = self.topological_value_order();
@@ -433,6 +520,10 @@ impl<'a> ScopeEmitter<'a> {
                             param_name.clone().unwrap_or_else(|| binding.clone())
                         )
                     };
+                    let label = augment_param_label_with_mod(
+                        label,
+                        node.param.as_ref().is_some_and(|param| param.modulatable),
+                    );
                     // `(mod name)` only resolves against top-level `param`
                     // forms, so params whose identity matches the param name
                     // are emitted bare; def-wrapping is kept only for params
@@ -719,7 +810,10 @@ impl<'a> ScopeEmitter<'a> {
         writes
     }
 
-    fn reference_expr_for_write(&mut self, connection: &'a PatchConnection) -> Result<String, String> {
+    fn reference_expr_for_write(
+        &mut self,
+        connection: &'a PatchConnection,
+    ) -> Result<String, String> {
         self.reference_expr(connection)
     }
 
@@ -1046,15 +1140,17 @@ fn label_items(label: &str) -> Option<Vec<Expression>> {
 
 fn label_attribute(label: &str, attribute: &str) -> Option<String> {
     let items = label_items(label)?;
-    items.windows(2).find_map(|pair| match (&pair[0], &pair[1]) {
-        (Expression::Symbol(key), value) if key == attribute => Some(match value {
-            Expression::Number(number) if *number == number.trunc() && number.abs() < 1e15 => {
-                format!("{number:.0}")
-            }
-            other => format_expression(other),
-        }),
-        _ => None,
-    })
+    items
+        .windows(2)
+        .find_map(|pair| match (&pair[0], &pair[1]) {
+            (Expression::Symbol(key), value) if key == attribute => Some(match value {
+                Expression::Number(number) if *number == number.trunc() && number.abs() < 1e15 => {
+                    format!("{number:.0}")
+                }
+                other => format_expression(other),
+            }),
+            _ => None,
+        })
 }
 
 fn label_positional_numbers(label: &str) -> Vec<usize> {

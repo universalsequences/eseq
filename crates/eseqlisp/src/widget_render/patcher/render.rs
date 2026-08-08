@@ -10,19 +10,17 @@ use super::super::{
     WidgetViewport, ndc_bounds, z_layer,
 };
 #[cfg(target_os = "macos")]
-use crate::layout::LayoutNode;
-use crate::layout::{Rect, f64_to_f32};
-#[cfg(target_os = "macos")]
 use crate::backend::{
     AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX, AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
     AUTOCOMPLETE_ROW_CORNER_RADIUS_PX,
 };
+#[cfg(target_os = "macos")]
+use crate::layout::LayoutNode;
+use crate::layout::{Rect, f64_to_f32};
 use crate::theme;
 use crate::vm::Value;
 
 use super::display::{node_display_label, node_font_size, preview};
-#[cfg(target_os = "macos")]
-use super::text_metrics::{measured_cursor_offset, measured_text_width, wrap_measured_text};
 use super::geometry::{
     connection_cable_edit_points, connection_endpoints, node_resize_handle_centers,
     patch_content_size, patch_input_indices, patch_input_slot_counts, patch_node_rects,
@@ -52,6 +50,8 @@ use super::state::{
 };
 #[cfg(target_os = "macos")]
 use super::text::patcher_autocomplete_suggestions;
+#[cfg(target_os = "macos")]
+use super::text_metrics::{measured_cursor_offset, measured_text_width, wrap_measured_text};
 
 /// Horizontal inset of the selected-row bar from the panel edge, in cells.
 #[cfg(target_os = "macos")]
@@ -502,13 +502,10 @@ fn push_agentic_bubble_cursor(
         .get(cursor_line_index)
         .map(|line| line.start)
         .unwrap_or(0);
-    let Some(cursor_before_line) =
-        measured_cursor_offset(&bubble.prompt, 13.0, line_start)
-    else {
+    let Some(cursor_before_line) = measured_cursor_offset(&bubble.prompt, 13.0, line_start) else {
         return;
     };
-    let Some(cursor_before_prompt) =
-        measured_cursor_offset(&bubble.prompt, 13.0, cursor_pos)
+    let Some(cursor_before_prompt) = measured_cursor_offset(&bubble.prompt, 13.0, cursor_pos)
     else {
         return;
     };
@@ -1698,8 +1695,7 @@ fn push_node_edit_selection(
     let Some(start_x) = measured_cursor_offset(&edit.text, font_size, start) else {
         return;
     };
-    let Some(selection_end_x) = measured_cursor_offset(&edit.text, font_size, end)
-    else {
+    let Some(selection_end_x) = measured_cursor_offset(&edit.text, font_size, end) else {
         return;
     };
     let x = rect.col + NODE_TEXT_COL_OFFSET * zoom + start_x * zoom;
@@ -1795,8 +1791,7 @@ fn push_node_label(
         },
     ));
     if !tail.is_empty() {
-        let Some(tail_offset) = measured_cursor_offset(&label, font_size, tail_start)
-        else {
+        let Some(tail_offset) = measured_cursor_offset(&label, font_size, tail_start) else {
             return;
         };
         let tail_col = text_col + tail_offset * zoom;

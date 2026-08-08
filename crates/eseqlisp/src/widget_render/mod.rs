@@ -4171,18 +4171,21 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float cornerRadius = min(in.corner_radius * 1.5, min(aspect, 1.0));
 
     float nodeDist = sdf_rounded_rect(localPos, sdfSize, cornerRadius);
-    float nodeDerivative = max(fwidth(nodeDist), 0.001);
-    float outerAlpha = smoothstep(nodeDerivative, -nodeDerivative, nodeDist);
+    // Isotropic pixel size in local units. fwidth(nodeDist) would grow with the
+    // gradient direction (up to ~1.41x on the 45 degree stretch of a corner),
+    // which fattens the stroke around the curves; fwidth(localPos) does not.
+    float pixel = max(max(fwidth(localPos.x), fwidth(localPos.y)), 0.0001);
+    float outerAlpha = smoothstep(pixel, -pixel, nodeDist);
     if (outerAlpha <= 0.001) {
         discard_fragment();
     }
 
-    float borderThickness = max(in.uniform_a.x, 0.0) * nodeDerivative;
-    float2 innerSize = max(sdfSize - float2(borderThickness), float2(0.001));
-    float innerDist = sdf_rounded_rect(localPos, innerSize, max(cornerRadius - borderThickness, 0.0));
-    float innerDerivative = max(fwidth(innerDist), 0.001);
-    float innerAlpha = smoothstep(innerDerivative, -innerDerivative, innerDist);
-    float borderMask = outerAlpha * (1.0 - innerAlpha);
+    // sdf_rounded_rect is a true euclidean distance, so the inner contour is
+    // just the outer one offset inward - uniform thickness by construction.
+    float borderThickness = max(in.uniform_a.x, 0.0) * pixel;
+    float innerDist = nodeDist + borderThickness;
+    float innerAlpha = smoothstep(pixel, -pixel, innerDist);
+    float borderMask = clamp(outerAlpha - innerAlpha, 0.0, 1.0);
 
     float3 normal = patcher_node_normal(
         localPos,
@@ -4195,7 +4198,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float diffuse = max(0.0, dot(normal, lightDir));
     float3 halfVector = normalize(lightDir + viewDir);
     float specularRaw = pow(max(0.0, dot(normal, halfVector)), 48.0);
-    float specularFadeDistance = clamp(nodeDerivative * 2.5, 0.01, 0.06);
+    float specularFadeDistance = clamp(pixel * 2.5, 0.01, 0.06);
     float specular = specularRaw * smoothstep(0.0, -specularFadeDistance, nodeDist);
 
     float3 bg = in.color_b.rgb;

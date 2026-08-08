@@ -115,7 +115,13 @@ impl Projector {
             "def" => self.project_def(items, expr, source_expr),
             "defmacro" => self.project_defmacro(items, expr, source_expr),
             "param" => self.project_param(items, expr, source_expr),
-            "use-defmacro" => {}
+            "use-defmacro" => {
+                if let Some(name) = symbol_at(items, 1)
+                    && !self.patch.imports.iter().any(|import| import == name)
+                {
+                    self.patch.imports.push(name.to_string());
+                }
+            }
             "make-history" => self.project_make_history(items, expr, source_expr),
             "write-history" => {
                 let _ = self.project_write_history(items, expr, source_expr);
@@ -1381,8 +1387,7 @@ pub(super) fn dgenlisp_operator_documentation() -> &'static HashMap<String, Oper
                     .get("category")
                     .and_then(serde_json::Value::as_str)
                     .filter(|category| {
-                        !category.is_empty()
-                            && !matches!(*category, "uncategorized" | "internal")
+                        !category.is_empty() && !matches!(*category, "uncategorized" | "internal")
                     })
                     .map(|category| match category {
                         // Preamble ops are stdlib defmacros; label them like

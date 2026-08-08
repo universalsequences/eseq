@@ -523,8 +523,16 @@ pub(super) fn root_patch_with_interaction(
         .into_iter()
         .map(|macro_patch| {
             let view_key = format!("macro:{}", macro_patch.name);
-            let mut patch =
-                patch_with_interaction_state(macro_patch.patch, interaction_state, &view_key);
+            // Seed the macro scope with the enclosing patch's macro table
+            // *before* staged edits are applied: `patch_with_interaction_state`
+            // classifies created-node text against `patch.macros`, so without
+            // this a node calling a local/library macro from inside a defmacro
+            // would be typed `Builtin` and the generator would skip its
+            // `(use-defmacro …)` import (the render path already seeds this in
+            // `active_patcher_patch`).
+            let mut scope = macro_patch.patch;
+            scope.macros = root.macros.clone();
+            let mut patch = patch_with_interaction_state(scope, interaction_state, &view_key);
             patch.macros = root.macros.clone();
             super::model::MacroPatch {
                 name: macro_patch.name,

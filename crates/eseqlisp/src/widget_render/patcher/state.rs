@@ -542,13 +542,7 @@ pub(super) fn apply_patcher_history_step(
 
 #[cfg(test)]
 pub(super) fn patcher_history_for_key(key: u64) -> PatcherHistory {
-    PATCHER_HISTORIES.with(|histories| {
-        histories
-            .borrow()
-            .get(&key)
-            .cloned()
-            .unwrap_or_default()
-    })
+    PATCHER_HISTORIES.with(|histories| histories.borrow().get(&key).cloned().unwrap_or_default())
 }
 
 /// One copied node: its editable header text plus geometry. Paste re-creates
@@ -1146,7 +1140,9 @@ pub(super) fn delete_selected_nodes(state: &mut PatcherInteractionState, view_ke
     });
 
     state.selected_nodes.clear();
-    state.touched_nodes.retain(|id| !selected_nodes.contains(id));
+    state
+        .touched_nodes
+        .retain(|id| !selected_nodes.contains(id));
     state.selected_cable = None;
     state.drag = None;
     state.text_edit = None;
@@ -1365,10 +1361,111 @@ pub(super) fn patch_with_interaction_state(
                 source: None,
             }),
     );
+    infer_modulatable_params(&mut patch);
     desugar_editor_mod_suffix_args(&mut patch);
     drop_orphaned_inline_mod_nodes(&mut patch);
     refresh_patch_inline_inputs(&mut patch);
     patch
+}
+
+/// Modulation demand is inferred from the graph rather than declared twice.
+///
+/// Reaching a param through a `mod` accessor — the user dropping a `mod` node
+/// in front of it, or typing the `gain~` shorthand — *is* the statement "this
+/// is a host modulation target", so `@mod true @mod-mode additive` is derived
+/// from that use instead of hand-written on the param. The generator writes the
+/// inferred attributes into the emitted `param` form
+/// (`augment_param_label_with_mod` in generate.rs); nothing else reads the
+/// inference, so the emitted dsp.lisp stays self-contained.
+///
+/// Explicit attributes always win: an authored `@mod-mode` is preserved, and
+/// `@mod false` opts out entirely — a `gain~` against such a param keeps the
+/// diagnostic below.
+///
+/// Runs before `desugar_editor_mod_suffix_args`, which refuses to expand
+/// `gain~` against a param that is not modulatable.
+fn infer_modulatable_params(patch: &mut Patch) {
+    let demanded = modulation_demanded_param_names(patch);
+    if demanded.is_empty() {
+        return;
+    }
+    for node in &mut patch.nodes {
+        let label = node.label.clone();
+        let Some(param) = node.param.as_mut() else {
+            continue;
+        };
+        if param.modulatable || !demanded.contains(&param.name) || param_opts_out_of_mod(&label) {
+            continue;
+        }
+        param.modulatable = true;
+    }
+}
+
+/// An authored `@mod false` on the param form: the one way to say "reaching
+/// this through `mod` is a mistake, don't infer it".
+fn param_opts_out_of_mod(label: &str) -> bool {
+    let Ok(items) = parse_editor_node_items(label) else {
+        return false;
+    };
+    items.windows(2).any(|pair| {
+        matches!(
+            (&pair[0], &pair[1]),
+            (Expression::Symbol(key), Expression::Symbol(value))
+                if key == "@mod" && value == "false"
+        )
+    })
+}
+
+/// Params read through a `mod` accessor: a `gain~` literal awaiting desugaring,
+/// or a `mod` node fed by the param — by cable, or by a name typed straight
+/// into the accessor's own text.
+fn modulation_demanded_param_names(patch: &Patch) -> HashSet<String> {
+    let param_name_by_node = patch
+        .nodes
+        .iter()
+        .filter_map(|node| Some((node.id.as_str(), node.param.as_ref()?.name.as_str())))
+        .collect::<HashMap<_, _>>();
+    if param_name_by_node.is_empty() {
+        return HashSet::new();
+    }
+    let param_names = param_name_by_node.values().copied().collect::<HashSet<_>>();
+    let mod_accessor_ids = patch
+        .nodes
+        .iter()
+        .filter(|node| node.op == "mod" && node.param.is_none())
+        .map(|node| node.id.as_str())
+        .collect::<HashSet<_>>();
+
+    let mut demanded = HashSet::new();
+    for node in &patch.nodes {
+        if matches!(node.kind, NodeKind::Param | NodeKind::Constant) {
+            continue;
+        }
+        let is_accessor = mod_accessor_ids.contains(node.id.as_str());
+        for arg in &node.args {
+            let (ArgValue::Literal(value) | ArgValue::SymbolRef(value)) = arg else {
+                continue;
+            };
+            match mod_suffix_base(value) {
+                Some(base) if param_names.contains(base.as_str()) => {
+                    demanded.insert(base);
+                }
+                // `mod gain` typed into the accessor's text, before any cable.
+                _ if is_accessor && param_names.contains(value.as_str()) => {
+                    demanded.insert(value.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    for connection in &patch.connections {
+        if mod_accessor_ids.contains(connection.to_node.as_str())
+            && let Some(name) = param_name_by_node.get(connection.from_node.as_str())
+        {
+            demanded.insert((*name).to_string());
+        }
+    }
+    demanded
 }
 
 /// `gain~` typed into a node's text is UI-level sugar, not DGenLisp: the real
@@ -1383,7 +1480,9 @@ pub(super) fn patch_with_interaction_state(
 ///
 /// A `name~` whose base is not a modulatable param is left alone and flagged
 /// with a node diagnostic — silently emitting it would produce source the
-/// DGenLisp compiler rejects.
+/// DGenLisp compiler rejects. After `infer_modulatable_params` that means one
+/// of two things: `name` is not a param at all, or it opts out with an authored
+/// `@mod false`.
 ///
 /// The common flow is a *retype*: `(* x gain)` already projects a `gain -> node`
 /// edge, so typing `* gain~` must replace that plain reference with the
@@ -1444,7 +1543,7 @@ fn desugar_editor_mod_suffix_args(patch: &mut Patch) {
             let Some((param_node_id, true)) = param_node else {
                 if node.diagnostic.is_none() {
                     node.diagnostic = Some(format!(
-                        "`{name}~` requires `{name}` to be declared as a modulatable param (@mod true)"
+                        "`{name}~` requires `{name}` to be a param that allows modulation (it is not a param, or declares @mod false)"
                     ));
                 }
                 continue;

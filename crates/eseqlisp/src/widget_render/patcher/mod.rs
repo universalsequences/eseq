@@ -2435,6 +2435,52 @@ fn apply_macro_library_action(
     }
 }
 
+/// Prefix `macro_source` with a `(use-defmacro …)` line for every library
+/// package it calls, so a saved package carries its own dependencies. Already
+/// present imports are kept as-is and the macro's own name is never imported.
+fn with_library_imports(macro_source: &str, macro_name: &str, library: &DefmacroLibrary) -> String {
+    let Ok(tokens) = Parser::new(macro_source.to_string()).parse() else {
+        return macro_source.to_string();
+    };
+    let Ok(exprs) = ASTParser::new(tokens).parse() else {
+        return macro_source.to_string();
+    };
+    let mut declared = exprs
+        .iter()
+        .filter_map(|expr| match expr {
+            Expression::List(items) if lisp::symbol_at(items, 0) == Some("use-defmacro") => {
+                lisp::symbol_at(items, 1).map(str::to_string)
+            }
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    declared.insert(macro_name.to_string());
+
+    let mut missing = std::collections::BTreeSet::new();
+    let mut stack = exprs.iter().collect::<Vec<_>>();
+    while let Some(expr) = stack.pop() {
+        let (Expression::List(items) | Expression::QuoteList(items)) = expr else {
+            continue;
+        };
+        if let Some(op) = lisp::symbol_at(items, 0)
+            && !declared.contains(op)
+            && library.packages().contains_key(op)
+        {
+            missing.insert(op.to_string());
+        }
+        stack.extend(items.iter());
+    }
+    if missing.is_empty() {
+        return macro_source.to_string();
+    }
+    let imports = missing
+        .iter()
+        .map(|name| format!("(use-defmacro {name})"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{imports}\n{macro_source}")
+}
+
 fn save_local_macro_to_library(
     source: String,
     layout: String,
@@ -2478,6 +2524,11 @@ fn save_local_macro_to_library(
     }
     let macro_source = writeback::extract_macro_source(&source, macro_name)
         .map_err(|error| format!("{error:?}"))?;
+    // The extracted form is the `defmacro` alone. Any library macro it calls
+    // must be re-declared as the package's own `use-defmacro` dependency, or
+    // materializing the package into another patch resolves the call against
+    // nothing and the compiler reports "Unknown operator".
+    let macro_source = with_library_imports(&macro_source, macro_name, library);
     let package = DefmacroPackage::from_source(&package_dir, macro_name, &macro_source)
         .map_err(|error| error.to_string())?;
     let package_layout = layout_json_for_single_macro_scope(&layout, macro_name)?;

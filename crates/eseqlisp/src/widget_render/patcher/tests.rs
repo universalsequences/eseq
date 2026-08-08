@@ -108,6 +108,50 @@ fn writeback_with_library_adds_import_for_used_library_macro() {
 }
 
 #[test]
+fn library_macro_used_inside_local_macro_emits_import() {
+    let library = temp_defmacro_library(
+        "nested-import",
+        &[("shape", "(defmacro shape (x) (* x 2))")],
+    );
+    let source = "(defmacro wrap (x)\n  (* x 1))\n\
+         (def input (in 1))\n(def out1 (wrap input))\n(out out1 1)";
+    let root_patch =
+        parse_patch_source_with_library(source, PatcherIntent::Instrument, &library).unwrap();
+    let mut state = PatcherInteractionState {
+        active_macro: Some("wrap".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    let created = allocate_created_node(&mut state, "macro:wrap", (1.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("macro:wrap", &created))
+        .unwrap()
+        .text = "shape".to_string();
+
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let wrap = visible
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "wrap")
+        .expect("local macro scope");
+    assert!(
+        wrap.patch
+            .nodes
+            .iter()
+            .any(|node| node.op == "shape" && node.kind == NodeKind::MacroInstance),
+        "a library macro call staged inside a local macro must project as a macro instance"
+    );
+
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(use-defmacro shape)"),
+        "library macros referenced from inside a local defmacro must still be imported:\n{}",
+        generated.source
+    );
+}
+
+#[test]
 fn dropping_macro_item_creates_macro_node_and_emits_writeback() {
     let library = temp_defmacro_library("drop", &[("shape", "(defmacro shape (x) (* x 2))")]);
     let source = "(def input (in 1))\n(out input 1)";
@@ -765,6 +809,80 @@ fn save_local_macro_to_library_replaces_local_def_with_import() {
         23.0
     );
     assert!(package_dir.join("manifest.json").exists());
+}
+
+#[test]
+fn save_local_macro_to_library_declares_its_library_dependencies() {
+    let library = temp_defmacro_library(
+        "save-action-deps",
+        &[("simp8", "(defmacro simp8 (x) (* x 8))")],
+    );
+    let path = temp_patcher_dsp_path("patcher-save-macro-deps");
+    fs::write(
+        &path,
+        "(use-defmacro simp8)\n(defmacro shape (x) (simp8 x))\n\
+         (def input (in 1))\n(def out1 (shape input))\n(out out1 1)",
+    )
+    .unwrap();
+    let mut node = patcher_test_node(&path);
+    node.props.insert(
+        "defmacro-library-root".to_string(),
+        Value::String(library.root().display().to_string()),
+    );
+    let state = PatcherInteractionState {
+        active_macro: Some("shape".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    let root_patch = load_patch_from_props(&node.props).unwrap().1;
+    let source = fs::read_to_string(&path).unwrap();
+    let result = emit_patch_writeback_result_with_library(
+        &source,
+        PatcherIntent::Instrument,
+        &state,
+        &library,
+    )
+    .unwrap();
+    let layout = writeback_layout_for_source(
+        &result.source,
+        PatcherIntent::Instrument,
+        &node.props,
+        &root_patch,
+        &state,
+        &result.generated_node_ids,
+    )
+    .unwrap();
+    apply_macro_library_action(
+        result.source,
+        layout,
+        &PatcherMacroLibraryAction {
+            kind: PatcherMacroLibraryActionKind::SaveToLibrary,
+            macro_name: "shape".to_string(),
+        },
+        &root_patch,
+        PatcherIntent::Instrument,
+        &node.props,
+        &library,
+        &state,
+        &result.generated_node_ids,
+    )
+    .unwrap();
+
+    let saved = fs::read_to_string(library.root().join("shape").join("macro.lisp")).unwrap();
+    assert!(
+        saved.contains("(use-defmacro simp8)"),
+        "a saved package must declare the library macros its body calls:\n{saved}"
+    );
+    // The reloaded package resolves its own dependency when materialized.
+    let reloaded = DefmacroLibrary::load(library.root()).unwrap();
+    assert_eq!(reloaded.package("shape").unwrap().imports, vec!["simp8"]);
+    let materialized = reloaded
+        .materialize_source("(use-defmacro shape)\n(def y (shape 1))")
+        .unwrap();
+    assert!(
+        materialized.source.contains("(defmacro simp8"),
+        "materializing the saved package must pull its dependency in:\n{}",
+        materialized.source
+    );
 }
 
 #[test]
@@ -13518,6 +13636,7 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
         macros: Vec::new(),
         diagnostics: Vec::new(),
         host_modulators: Vec::new(),
+        imports: Vec::new(),
     };
     let input_indices = patch_input_indices(&patch);
     assert_eq!(
@@ -13533,6 +13652,7 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
         macros: Vec::new(),
         diagnostics: Vec::new(),
         host_modulators: Vec::new(),
+        imports: Vec::new(),
     };
     let input_indices = patch_input_indices(&patch);
     assert_eq!(input_indices.get("mul").map(Vec::as_slice), Some(&[0][..]));
@@ -13565,6 +13685,7 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
         macros: Vec::new(),
         diagnostics: Vec::new(),
         host_modulators: Vec::new(),
+        imports: Vec::new(),
     };
     let input_indices = patch_input_indices(&patch);
     assert_eq!(input_indices.get("hist").map(Vec::as_slice), Some(&[0][..]));
@@ -17165,6 +17286,7 @@ fn metal_render_places_committed_node_tail_after_measured_space_width() {
         macros: Vec::new(),
         diagnostics: Vec::new(),
         host_modulators: Vec::new(),
+        imports: Vec::new(),
     };
     let mut prims = Vec::new();
     draw_patch(
@@ -18309,10 +18431,11 @@ fn making_param_modulatable_then_typing_mod_suffix_regenerates_valid_source() {
     );
 }
 
-/// `name~` where `name` is not a modulatable param is a user error: flag it on
-/// the node rather than silently synthesizing an accessor.
+/// `cutoff~` against a plain `(param cutoff …)` is the whole declaration:
+/// the accessor is synthesized and the emitted source gains the attributes and
+/// the modulator inputs that make it real.
 #[test]
-fn mod_suffix_on_non_modulatable_param_is_flagged_not_desugared() {
+fn mod_suffix_infers_modulatable_param() {
     let root_patch = parse(
         r#"
 (def signal (in 1))
@@ -18336,9 +18459,87 @@ fn mod_suffix_on_non_modulatable_param_is_flagged_not_desugared() {
         .text = "* cutoff~".to_string();
 
     let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    assert_eq!(
+        visible.nodes.iter().filter(|node| node.op == "mod").count(),
+        1,
+        "`cutoff~` must synthesize the accessor without a hand-written @mod true"
+    );
+    let filtered = visible
+        .nodes
+        .iter()
+        .find(|node| node.id == "filtered")
+        .expect("filtered node");
+    assert_eq!(filtered.diagnostic, None);
+
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated
+            .source
+            .contains("(param cutoff @default 1000 @mod true @mod-mode additive)"),
+        "inferred attributes must reach the emitted param form:\n{}",
+        generated.source
+    );
+    assert!(
+        generated.source.contains("(mod cutoff)"),
+        "the accessor must emit:\n{}",
+        generated.source
+    );
+    for slot in 1..=4 {
+        assert!(
+            generated.source.contains(&format!(
+                "(def mod{slot} (in {channel} @name mod{slot} @modulator {slot}))",
+                channel = slot + 5
+            )),
+            "a modulatable param needs its modulator inputs:\n{}",
+            generated.source
+        );
+    }
+    let reparsed = parse(&generated.source);
+    assert!(
+        reparsed.diagnostics.is_empty(),
+        "regenerated source must reparse cleanly: {:?}\n{}",
+        reparsed.diagnostics,
+        generated.source
+    );
+    assert!(
+        reparsed
+            .nodes
+            .iter()
+            .any(|node| node.param.as_ref().is_some_and(|param| param.modulatable)),
+        "the inferred attribute must survive the round trip"
+    );
+}
+
+/// An authored `@mod false` is the opt-out: `cutoff~` against it stays a user
+/// error, flagged on the node rather than silently desugared.
+#[test]
+fn mod_suffix_on_opted_out_param_is_flagged_not_desugared() {
+    let root_patch = parse(
+        r#"
+(def signal (in 1))
+(param cutoff @default 1000 @mod false)
+(def filtered (* signal cutoff))
+(out filtered 1)
+"#,
+    );
+    let filtered = root_patch
+        .nodes
+        .iter()
+        .find(|node| node.id == "filtered")
+        .expect("filtered node");
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", filtered, node_display_label(filtered));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "filtered"))
+        .unwrap()
+        .text = "* cutoff~".to_string();
+
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
     assert!(
         !visible.nodes.iter().any(|node| node.op == "mod"),
-        "a non-modulatable param must not get a synthesized mod accessor"
+        "an opted-out param must not get a synthesized mod accessor"
     );
     let filtered = visible
         .nodes
@@ -18349,10 +18550,129 @@ fn mod_suffix_on_non_modulatable_param_is_flagged_not_desugared() {
         filtered
             .diagnostic
             .as_deref()
-            .is_some_and(|diagnostic| diagnostic.contains("modulatable param")),
-        "expected a modulatable-param diagnostic, got {:?}",
+            .is_some_and(|diagnostic| diagnostic.contains("@mod false")),
+        "expected an opt-out diagnostic, got {:?}",
         filtered.diagnostic
     );
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        !generated.source.contains("@mod true"),
+        "opt-out must not be overridden:\n{}",
+        generated.source
+    );
+    assert!(
+        !generated.source.contains("@modulator"),
+        "nothing is modulatable, so no modulator inputs:\n{}",
+        generated.source
+    );
+}
+
+/// A `mod` node the user dropped in front of a param declares it just as well
+/// as the `~` shorthand does.
+#[test]
+fn mod_node_fed_by_param_infers_modulatable() {
+    let root_patch = parse(
+        r#"
+(def signal (in 1))
+(param depth @default 0.5)
+(def m (mod depth))
+(def filtered (* signal m))
+(out filtered 1)
+"#,
+    );
+    let visible =
+        sidecar::root_patch_with_interaction(&root_patch, &PatcherInteractionState::default());
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated
+            .source
+            .contains("(param depth @default 0.5 @mod true @mod-mode additive)"),
+        "a `mod` accessor is a declaration:\n{}",
+        generated.source
+    );
+}
+
+/// Inference fills gaps; it never overrides. An authored `@mod-mode` survives
+/// even though additive is what the inference would have picked.
+#[test]
+fn authored_mod_mode_survives_inference() {
+    let root_patch = parse(
+        r#"
+(def signal (in 1))
+(param depth @default 0.5 @mod true @mod-mode multiply)
+(def m (mod depth))
+(def filtered (* signal m))
+(out filtered 1)
+"#,
+    );
+    let visible =
+        sidecar::root_patch_with_interaction(&root_patch, &PatcherInteractionState::default());
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("@mod-mode multiply"),
+        "authored mod-mode must win:\n{}",
+        generated.source
+    );
+    assert!(
+        !generated.source.contains("additive"),
+        "inference must not append a second mode:\n{}",
+        generated.source
+    );
+}
+
+/// A patch with nothing modulatable stays exactly as lean as it was — no
+/// stray attributes, no modulator inputs nobody asked for.
+#[test]
+fn params_without_modulation_demand_stay_bare() {
+    let root_patch = parse(
+        r#"
+(def signal (in 1))
+(param cutoff @default 1000)
+(def filtered (* signal cutoff))
+(out filtered 1)
+"#,
+    );
+    let visible =
+        sidecar::root_patch_with_interaction(&root_patch, &PatcherInteractionState::default());
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(param cutoff @default 1000)"),
+        "an unmodulated param must stay bare:\n{}",
+        generated.source
+    );
+    assert!(
+        !generated.source.contains("@modulator"),
+        "no modulator inputs without demand:\n{}",
+        generated.source
+    );
+}
+
+/// Effects get their modulator inputs too — `EFFECT_TEMPLATE` ships none, so
+/// inference is the only thing that can put them there. Channels 3-6, past the
+/// stereo input pair.
+#[test]
+fn effect_intent_materializes_modulator_inputs_after_the_stereo_pair() {
+    let root_patch = parse(
+        r#"
+(def input_l (in 1 @name Left))
+(param drive @default 0.5)
+(def processed (* input_l (mod drive)))
+(out processed 1 @name Left)
+"#,
+    );
+    let visible =
+        sidecar::root_patch_with_interaction(&root_patch, &PatcherInteractionState::default());
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Effect).unwrap();
+    for slot in 1..=4 {
+        assert!(
+            generated.source.contains(&format!(
+                "(def mod{slot} (in {channel} @name mod{slot} @modulator {slot}))",
+                channel = slot + 2
+            )),
+            "effect modulator inputs start at channel 3:\n{}",
+            generated.source
+        );
+    }
 }
 
 #[test]
@@ -18979,4 +19299,37 @@ fn patcher_paste_rejects_macro_self_reference() {
         "a macro view must not gain a node calling the macro it defines"
     );
     assert!(state.edit_state.nodes.is_empty());
+}
+
+#[test]
+fn regeneration_without_a_library_keeps_use_defmacro_headers() {
+    // The compiler materializes library defmacros from `(use-defmacro …)`
+    // alone. Parsed without a library the call degrades to an unknown-operator
+    // builtin, and dropping the header here would leave a file that can never
+    // compile again — no cable edit can bring the import back.
+    let source = "(use-defmacro pitch-transpose)\n(def pitch (in 2 @name pitch))\n\
+                  (def pt (pitch-transpose pitch 1))\n(out pt 1 @name audio)\n";
+    let patch = parse_patch_source(source, PatcherIntent::Instrument).unwrap();
+    assert_eq!(patch.imports, vec!["pitch-transpose".to_string()]);
+    let generated = super::generate::generate_patch_source(&patch, PatcherIntent::Instrument)
+        .unwrap()
+        .source;
+    assert!(
+        generated.contains("(use-defmacro pitch-transpose)"),
+        "regeneration must keep the import:\n{generated}"
+    );
+}
+
+#[test]
+fn regeneration_without_a_library_drops_an_unused_import() {
+    let source = "(use-defmacro pitch-transpose)\n(def pitch (in 2 @name pitch))\n\
+                  (out pitch 1 @name audio)\n";
+    let patch = parse_patch_source(source, PatcherIntent::Instrument).unwrap();
+    let generated = super::generate::generate_patch_source(&patch, PatcherIntent::Instrument)
+        .unwrap()
+        .source;
+    assert!(
+        !generated.contains("use-defmacro"),
+        "an import nothing calls is still garbage-collected:\n{generated}"
+    );
 }

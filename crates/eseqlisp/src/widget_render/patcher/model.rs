@@ -297,6 +297,17 @@ pub struct Patch {
     pub macros: Vec<MacroPatch>,
     pub diagnostics: Vec<String>,
     pub host_modulators: Vec<HostModulatorInput>,
+    /// `(use-defmacro name)` headers the source declared, in source order.
+    ///
+    /// The generator normally rebuilds the import block from the `Library`
+    /// entries in `macros`, but those only exist when the patch was parsed with
+    /// a defmacro library in hand. Parsed without one (no library root on disk,
+    /// or one of the library-less parse paths), every imported macro call
+    /// degrades to an unknown-operator `Builtin` and regeneration would drop
+    /// the header — silently breaking the file for the compiler, which
+    /// materializes library defmacros from these headers alone. Keeping the
+    /// raw names in the model makes the round-trip lossless either way.
+    pub imports: Vec<String>,
 }
 
 pub fn refresh_patch_inline_inputs(patch: &mut Patch) {

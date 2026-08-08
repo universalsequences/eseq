@@ -1,10 +1,10 @@
-#[cfg(target_os = "macos")]
-use super::text_metrics::measured_text_width;
 use super::metrics::{
     CODE_NODE_FONT_SIZE, CODE_NODE_HEIGHT, CODE_NODE_MIN_WIDTH, NODE_FONT_SIZE, NODE_HEIGHT,
     NODE_MIN_WIDTH, PORT_EDGE_PADDING_CELLS, PORT_MIN_CENTER_SPACING_CELLS,
 };
 use super::model::{ArgValue, NodeKind, PatchNode};
+#[cfg(target_os = "macos")]
+use super::text_metrics::measured_text_width;
 
 const MISSING_INPUT_SENTINEL: &str = "__patcher_missing_input__";
 

@@ -1,8 +1,6 @@
 use crate::layout::Rect;
 use std::collections::HashMap;
 
-#[cfg(target_os = "macos")]
-use super::text_metrics::measured_closest_char_index;
 use super::super::text_input::{TextInputState, selection_range as text_selection_range};
 use super::metrics::{MIN_ZOOM, NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET};
 use super::model::MacroPatch;
@@ -14,6 +12,8 @@ use super::state::{
     PatcherInteractionState, PatcherNodeOrigin, PatcherTextEdit, debug_log_edit_event,
     node_edit_key, note_touched_node,
 };
+#[cfg(target_os = "macos")]
+use super::text_metrics::measured_closest_char_index;
 
 pub(super) const PATCHER_AUTOCOMPLETE_MAX_ITEMS: usize = 8;
 

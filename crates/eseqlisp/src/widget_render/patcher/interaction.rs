@@ -31,10 +31,9 @@ use super::state::{
     PatcherClipboardNode, PatcherDragState, PatcherInteractionState, PatcherMacroEdit,
     PatcherPanState, active_patcher_patch, active_patcher_view_key, allocate_created_connection,
     allocate_created_node_avoiding, bring_nodes_to_front, connection_id_from_ports,
-    debug_log_edit_event,
-    delete_connection_edit_or_mark_deleted, ensure_source_node_edit, get_patcher_interaction_state,
-    next_patcher_clipboard_paste, note_touched_node,
-    get_patcher_pan_state, node_edit_key, ordered_patch_nodes, patch_with_created_macros,
+    debug_log_edit_event, delete_connection_edit_or_mark_deleted, ensure_source_node_edit,
+    get_patcher_interaction_state, get_patcher_pan_state, next_patcher_clipboard_paste,
+    node_edit_key, note_touched_node, ordered_patch_nodes, patch_with_created_macros,
     patch_with_interaction_state, patcher_state_key, set_connection_segment_edit,
     set_node_edit_position, set_node_edit_width, set_patcher_clipboard,
     set_patcher_interaction_state, set_patcher_pan_state, source_connection_id,
@@ -1317,9 +1316,10 @@ pub(super) fn paste_patcher_clipboard(
     // A macro view must not gain a node calling the macro it defines (same
     // guard as the sidebar drop path).
     if let Some(active_macro) = state.active_macro.as_deref()
-        && clipboard.nodes.iter().any(|clip_node| {
-            clip_node.text.split_whitespace().next() == Some(active_macro)
-        })
+        && clipboard
+            .nodes
+            .iter()
+            .any(|clip_node| clip_node.text.split_whitespace().next() == Some(active_macro))
     {
         return false;
     }
@@ -1336,12 +1336,8 @@ pub(super) fn paste_patcher_clipboard(
     let offset = PASTE_OFFSET_CELLS * clipboard.paste_serial as f32;
     let mut new_ids = Vec::with_capacity(clipboard.nodes.len());
     for clip_node in &clipboard.nodes {
-        let position = (
-            clip_node.position.0 + offset,
-            clip_node.position.1 + offset,
-        );
-        let created_id =
-            allocate_created_node_avoiding(state, view_key, position, &taken_node_ids);
+        let position = (clip_node.position.0 + offset, clip_node.position.1 + offset);
+        let created_id = allocate_created_node_avoiding(state, view_key, position, &taken_node_ids);
         if let Some(edit) = state
             .edit_state
             .nodes

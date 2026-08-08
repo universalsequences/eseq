@@ -32,11 +32,7 @@ pub(super) fn cache_text_widths(text: String, font_size: f32, ctx: &MeasureCtx<'
     });
 }
 
-pub(super) fn measured_cursor_offset(
-    text: &str,
-    font_size: f32,
-    cursor_pos: usize,
-) -> Option<f32> {
+pub(super) fn measured_cursor_offset(text: &str, font_size: f32, cursor_pos: usize) -> Option<f32> {
     GLYPH_ADVANCES.with(|cache| {
         cache
             .borrow()
