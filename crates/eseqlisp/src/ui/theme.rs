@@ -61,8 +61,12 @@ pub struct Theme {
     pub status_accent: Color,
     pub comp_selected_bg: Color,
     pub comp_unselected_bg: Color,
+    pub comp_border: Color,
     pub comp_fg: Color,
+    pub comp_selected_fg: Color,
+    pub comp_category_fg: Color,
     pub comp_doc_bg: Color,
+    pub comp_doc_border: Color,
     pub comp_doc_fg: Color,
     pub comp_doc_title_fg: Color,
     pub tree_row_alt_bg: Color,
@@ -152,15 +156,6 @@ pub struct Theme {
     pub patcher_edit_selection: Color,
     pub patcher_edit_cursor: Color,
     pub patcher_alignment_guide: Color,
-    pub patcher_autocomplete_bg: Color,
-    pub patcher_autocomplete_border: Color,
-    pub patcher_autocomplete_selected_bg: Color,
-    pub patcher_autocomplete_text: Color,
-    pub patcher_autocomplete_selected_text: Color,
-    pub patcher_autocomplete_category_text: Color,
-    pub patcher_autocomplete_doc_bg: Color,
-    pub patcher_autocomplete_doc_border: Color,
-    pub patcher_autocomplete_doc_text: Color,
     pub patcher_tooltip_bg: Color,
     pub patcher_tooltip_border: Color,
     pub patcher_tooltip_text: Color,
@@ -388,23 +383,42 @@ theme_slots!(
         STATUS_ACCENT,
         Color::from_hex(0x61, 0xff, 0xca)
     ),
+    // Completion popup, shared by the code editor and the patcher node editor.
+    // Both surfaces are the same widget in two hosts, so they read one palette;
+    // `comp_unselected_bg` doubles as the panel background behind the rows.
     (
         comp_selected_bg,
         COMP_SELECTED_BG,
-        Color::from_hex(0x2a, 0x2e, 0x10)
+        Color::from_hex(0x32, 0x35, 0x3d)
     ),
     (
         comp_unselected_bg,
         COMP_UNSELECTED_BG,
-        Color::from_hex(0x14, 0x14, 0x14)
+        Color::from_hex(0x17, 0x18, 0x1b)
     ),
-    (comp_fg, COMP_FG, Color::from_hex(0xe0, 0xe0, 0xe0)),
-    (comp_doc_bg, COMP_DOC_BG, Color::from_hex(0x0d, 0x0d, 0x0d)),
-    (comp_doc_fg, COMP_DOC_FG, Color::from_hex(0xe0, 0xe0, 0xe0)),
+    (comp_border, COMP_BORDER, Color::from_hex(0x2e, 0x30, 0x36)),
+    (comp_fg, COMP_FG, Color::from_hex(0x4c, 0xe0, 0x72)),
+    (
+        comp_selected_fg,
+        COMP_SELECTED_FG,
+        Color::from_hex(0x6a, 0xf0, 0x8d)
+    ),
+    (
+        comp_category_fg,
+        COMP_CATEGORY_FG,
+        Color::from_hex(0x74, 0x78, 0x82)
+    ),
+    (comp_doc_bg, COMP_DOC_BG, Color::from_hex(0x15, 0x16, 0x19)),
+    (
+        comp_doc_border,
+        COMP_DOC_BORDER,
+        Color::from_hex(0x2b, 0x2d, 0x33)
+    ),
+    (comp_doc_fg, COMP_DOC_FG, Color::from_hex(0xa8, 0xac, 0xb8)),
     (
         comp_doc_title_fg,
         COMP_DOC_TITLE_FG,
-        Color::from_hex(0xc8, 0xff, 0x00)
+        Color::from_hex(0xd8, 0xdc, 0xe8)
     ),
     (
         tree_row_alt_bg,
@@ -824,51 +838,6 @@ theme_slots!(
         patcher_alignment_guide,
         PATCHER_ALIGNMENT_GUIDE,
         Color::rgba(0.38, 0.62, 1.0, 0.86)
-    ),
-    (
-        patcher_autocomplete_bg,
-        PATCHER_AUTOCOMPLETE_BG,
-        Color::from_hex(0x17, 0x18, 0x1b)
-    ),
-    (
-        patcher_autocomplete_border,
-        PATCHER_AUTOCOMPLETE_BORDER,
-        Color::from_hex(0x2e, 0x30, 0x36)
-    ),
-    (
-        patcher_autocomplete_selected_bg,
-        PATCHER_AUTOCOMPLETE_SELECTED_BG,
-        Color::from_hex(0x32, 0x35, 0x3d)
-    ),
-    (
-        patcher_autocomplete_text,
-        PATCHER_AUTOCOMPLETE_TEXT,
-        Color::from_hex(0x4c, 0xe0, 0x72)
-    ),
-    (
-        patcher_autocomplete_selected_text,
-        PATCHER_AUTOCOMPLETE_SELECTED_TEXT,
-        Color::from_hex(0x6a, 0xf0, 0x8d)
-    ),
-    (
-        patcher_autocomplete_category_text,
-        PATCHER_AUTOCOMPLETE_CATEGORY_TEXT,
-        Color::from_hex(0x74, 0x78, 0x82)
-    ),
-    (
-        patcher_autocomplete_doc_bg,
-        PATCHER_AUTOCOMPLETE_DOC_BG,
-        Color::from_hex(0x15, 0x16, 0x19)
-    ),
-    (
-        patcher_autocomplete_doc_border,
-        PATCHER_AUTOCOMPLETE_DOC_BORDER,
-        Color::from_hex(0x2b, 0x2d, 0x33)
-    ),
-    (
-        patcher_autocomplete_doc_text,
-        PATCHER_AUTOCOMPLETE_DOC_TEXT,
-        Color::from_hex(0xa8, 0xac, 0xb8)
     ),
     (
         patcher_tooltip_bg,

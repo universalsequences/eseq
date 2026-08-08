@@ -16930,8 +16930,8 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
                 inner_prim(prim),
                 MetalPrimitive::WidgetInstance { widget_type, instance, .. }
                     if widget_type == "patcher-panel"
-                        && instance.color_a == theme::PATCHER_AUTOCOMPLETE_BORDER().to_rgba()
-                        && instance.color_b == theme::PATCHER_AUTOCOMPLETE_BG().to_rgba()
+                        && instance.color_a == theme::COMP_BORDER().to_rgba()
+                        && instance.color_b == theme::COMP_UNSELECTED_BG().to_rgba()
             )
         }),
         "autocomplete list should render flat panel chrome, not node chrome"
@@ -16942,8 +16942,8 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
                 inner_prim(prim),
                 MetalPrimitive::WidgetInstance { widget_type, instance, .. }
                     if widget_type == "patcher-panel"
-                        && instance.color_a == theme::PATCHER_AUTOCOMPLETE_DOC_BORDER().to_rgba()
-                        && instance.color_b == theme::PATCHER_AUTOCOMPLETE_DOC_BG().to_rgba()
+                        && instance.color_a == theme::COMP_DOC_BORDER().to_rgba()
+                        && instance.color_b == theme::COMP_DOC_BG().to_rgba()
             )
         }),
         "documentation panel should render flat panel chrome with its own themed colors"
@@ -16954,7 +16954,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
                 inner_prim(prim),
                 MetalPrimitive::WidgetInstance { widget_type, instance, .. }
                     if widget_type == "patcher-node"
-                        && instance.color_b == theme::PATCHER_AUTOCOMPLETE_BG().to_rgba()
+                        && instance.color_b == theme::COMP_UNSELECTED_BG().to_rgba()
             )
         }),
         "autocomplete chrome must not reuse the node shader"
@@ -16965,7 +16965,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
                 inner_prim(prim),
                 MetalPrimitive::WidgetInstance { widget_type, instance, .. }
                     if widget_type == "box"
-                        && instance.color_a == theme::PATCHER_AUTOCOMPLETE_SELECTED_BG().to_rgba()
+                        && instance.color_a == theme::COMP_SELECTED_BG().to_rgba()
                         && instance.corner_radius > 0.0
             )
         }),
@@ -16977,7 +16977,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
                 inner_prim(prim),
                 MetalPrimitive::ProportionalText(text)
                     if text.text == "biquad"
-                        && text.fg == theme::PATCHER_AUTOCOMPLETE_SELECTED_TEXT()
+                        && text.fg == theme::COMP_SELECTED_FG()
             )
         }),
         "selected suggestion name should use the themed accent text color"
@@ -16987,7 +16987,7 @@ fn metal_render_emits_autocomplete_panel_for_active_operator_prefix() {
             matches!(
                 inner_prim(prim),
                 MetalPrimitive::ProportionalText(text)
-                    if text.fg == theme::PATCHER_AUTOCOMPLETE_CATEGORY_TEXT()
+                    if text.fg == theme::COMP_CATEGORY_FG()
             )
         }),
         "suggestion rows should render the operator category in the dimmed category color"

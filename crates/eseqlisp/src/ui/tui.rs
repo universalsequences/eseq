@@ -219,7 +219,7 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
                 let doc_lines: Vec<Line> = std::iter::once(Line::from(Span::styled(
                     title.clone(),
                     Style::default()
-                        .fg(to_rcolor(crate::theme::PATCHER_AUTOCOMPLETE_DOC_TEXT()))
+                        .fg(to_rcolor(crate::theme::COMP_DOC_TITLE_FG()))
                         .add_modifier(Modifier::BOLD),
                 )))
                 .chain(std::iter::once(Line::from("")))
@@ -232,8 +232,8 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
                     Paragraph::new(doc_lines)
                         .style(
                             Style::default()
-                                .bg(to_rcolor(crate::theme::PATCHER_AUTOCOMPLETE_DOC_BG()))
-                                .fg(to_rcolor(crate::theme::PATCHER_AUTOCOMPLETE_DOC_TEXT())),
+                                .bg(to_rcolor(crate::theme::COMP_DOC_BG()))
+                                .fg(to_rcolor(crate::theme::COMP_DOC_FG())),
                         )
                         .wrap(Wrap { trim: false }),
                     doc_area,
@@ -297,14 +297,14 @@ fn pad_right(text: &str, width: usize) -> String {
 
 fn completion_entry_line(entry: &crate::backend::CompletionEntry, width: usize) -> Line<'static> {
     let bg = if entry.selected {
-        crate::theme::PATCHER_AUTOCOMPLETE_SELECTED_BG()
+        crate::theme::COMP_SELECTED_BG()
     } else {
-        crate::theme::PATCHER_AUTOCOMPLETE_BG()
+        crate::theme::COMP_UNSELECTED_BG()
     };
     let text = if entry.selected {
-        crate::theme::PATCHER_AUTOCOMPLETE_SELECTED_TEXT()
+        crate::theme::COMP_SELECTED_FG()
     } else {
-        crate::theme::PATCHER_AUTOCOMPLETE_TEXT()
+        crate::theme::COMP_FG()
     };
     let label_style = Style::default().bg(to_rcolor(bg)).fg(to_rcolor(text));
     let Some(category) = entry
@@ -322,7 +322,7 @@ fn completion_entry_line(entry: &crate::backend::CompletionEntry, width: usize) 
             category.clone(),
             Style::default()
                 .bg(to_rcolor(bg))
-                .fg(to_rcolor(crate::theme::PATCHER_AUTOCOMPLETE_CATEGORY_TEXT())),
+                .fg(to_rcolor(crate::theme::COMP_CATEGORY_FG())),
         ),
     ])
 }
@@ -720,7 +720,7 @@ fn render_completion_popup(
             let doc_lines: Vec<Line> = std::iter::once(Line::from(Span::styled(
                 title.clone(),
                 Style::default()
-                    .fg(to_rcolor(crate::theme::PATCHER_AUTOCOMPLETE_DOC_TEXT()))
+                    .fg(to_rcolor(crate::theme::COMP_DOC_TITLE_FG()))
                     .add_modifier(Modifier::BOLD),
             )))
             .chain(std::iter::once(Line::from("")))
@@ -733,8 +733,8 @@ fn render_completion_popup(
                 Paragraph::new(doc_lines)
                     .style(
                         Style::default()
-                            .bg(to_rcolor(crate::theme::PATCHER_AUTOCOMPLETE_DOC_BG()))
-                            .fg(to_rcolor(crate::theme::PATCHER_AUTOCOMPLETE_DOC_TEXT())),
+                            .bg(to_rcolor(crate::theme::COMP_DOC_BG()))
+                            .fg(to_rcolor(crate::theme::COMP_DOC_FG())),
                     )
                     .wrap(Wrap { trim: false }),
                 doc_area,

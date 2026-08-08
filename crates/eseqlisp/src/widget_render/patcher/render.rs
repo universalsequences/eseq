@@ -1102,8 +1102,8 @@ fn push_autocomplete_panel(
     push_flat_panel_chrome(
         prims,
         panel,
-        theme::PATCHER_AUTOCOMPLETE_BG(),
-        theme::PATCHER_AUTOCOMPLETE_BORDER(),
+        theme::COMP_UNSELECTED_BG(),
+        theme::COMP_BORDER(),
         viewport,
         zoom,
         AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
@@ -1125,7 +1125,7 @@ fn push_autocomplete_panel(
                     width: panel.width - AUTOCOMPLETE_ROW_INSET_CELLS * 2.0 * zoom,
                     height: (row_height - 0.1 * zoom).max(0.1),
                 },
-                theme::PATCHER_AUTOCOMPLETE_SELECTED_BG(),
+                theme::COMP_SELECTED_BG(),
                 viewport,
                 AUTOCOMPLETE_ROW_CORNER_RADIUS_PX * zoom,
                 false,
@@ -1141,9 +1141,9 @@ fn push_autocomplete_panel(
                 font_size: name_font_size,
                 scale: zoom,
                 fg: if selected {
-                    theme::PATCHER_AUTOCOMPLETE_SELECTED_TEXT()
+                    theme::COMP_SELECTED_FG()
                 } else {
-                    theme::PATCHER_AUTOCOMPLETE_TEXT()
+                    theme::COMP_FG()
                 },
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
             },
@@ -1172,7 +1172,7 @@ fn push_autocomplete_panel(
                 text: category,
                 font_size: category_font_size,
                 scale: zoom,
-                fg: theme::PATCHER_AUTOCOMPLETE_CATEGORY_TEXT(),
+                fg: theme::COMP_CATEGORY_FG(),
                 bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
             },
         ));
@@ -1222,8 +1222,8 @@ fn push_autocomplete_documentation_panel(
     push_flat_panel_chrome(
         prims,
         panel,
-        theme::PATCHER_AUTOCOMPLETE_DOC_BG(),
-        theme::PATCHER_AUTOCOMPLETE_DOC_BORDER(),
+        theme::COMP_DOC_BG(),
+        theme::COMP_DOC_BORDER(),
         viewport,
         zoom,
         AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
@@ -1241,7 +1241,7 @@ fn push_autocomplete_documentation_panel(
                     text: wrapped,
                     font_size: 10.0,
                     scale: zoom,
-                    fg: theme::PATCHER_AUTOCOMPLETE_DOC_TEXT(),
+                    fg: theme::COMP_DOC_FG(),
                     bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
                 },
             ));

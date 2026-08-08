@@ -45,8 +45,8 @@ mod inner {
     use crate::audio::sample::get_registered_sample;
     use crate::backend::{
         AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX, AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX,
-        AUTOCOMPLETE_ROW_CORNER_RADIUS_PX, Backend, BackendError, BackendEvent, Color,
-        RenderFrame, TiledRenderFrame,
+        AUTOCOMPLETE_ROW_CORNER_RADIUS_PX, Backend, BackendError, BackendEvent, Color, RenderFrame,
+        TiledRenderFrame,
     };
     use crate::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas, SizedFontCache};
     use crate::layout::{LayoutNode, Rect, TextMeasurer};
@@ -5918,7 +5918,7 @@ fragment float4 live_spectrogram_frag(
                 if let Some(tile) = tiled.tiles.iter().find(|t| t.is_active) {
                     let col_off = tile.body_rect.col.round() as usize;
                     let row_off = tile.body_rect.row.round() as usize;
-                    let sel_bg = theme::PATCHER_AUTOCOMPLETE_SELECTED_BG();
+                    let sel_bg = theme::COMP_SELECTED_BG();
                     let popup_col =
                         col_off + (comp.anchor.1 as f32 * comp.text_cell_width_scale) as usize;
                     let anchor_row =
@@ -5982,11 +5982,11 @@ fragment float4 live_spectrogram_frag(
                         popup_row
                     };
                     let mut popup_verts = Vec::new();
-                    let panel_bg = theme::PATCHER_AUTOCOMPLETE_BG();
-                    let panel_border = theme::PATCHER_AUTOCOMPLETE_BORDER();
-                    let muted_fg = to_rgba(theme::PATCHER_AUTOCOMPLETE_CATEGORY_TEXT());
-                    let doc_bg = theme::PATCHER_AUTOCOMPLETE_DOC_BG();
-                    let doc_border = theme::PATCHER_AUTOCOMPLETE_DOC_BORDER();
+                    let panel_bg = theme::COMP_UNSELECTED_BG();
+                    let panel_border = theme::COMP_BORDER();
+                    let muted_fg = to_rgba(theme::COMP_CATEGORY_FG());
+                    let doc_bg = theme::COMP_DOC_BG();
+                    let doc_border = theme::COMP_DOC_BORDER();
                     let mut rounded = Vec::new();
                     push_rounded_instance_cells(
                         &mut rounded,
@@ -6085,9 +6085,9 @@ fragment float4 live_spectrogram_frag(
                         }
                         let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
                         let entry_fg = if entry.selected {
-                            to_rgba(theme::PATCHER_AUTOCOMPLETE_SELECTED_TEXT())
+                            to_rgba(theme::COMP_SELECTED_FG())
                         } else {
-                            to_rgba(theme::PATCHER_AUTOCOMPLETE_TEXT())
+                            to_rgba(theme::COMP_FG())
                         };
                         let entry_bg = if entry.selected {
                             to_rgba(sel_bg)
@@ -6119,7 +6119,7 @@ fragment float4 live_spectrogram_frag(
                                     popup_col + pane_w - 3 - category_width,
                                     row,
                                     category_width,
-                                    to_rgba(theme::PATCHER_AUTOCOMPLETE_CATEGORY_TEXT()),
+                                    to_rgba(theme::COMP_CATEGORY_FG()),
                                     entry_bg,
                                     cell_w,
                                     cell_h,
@@ -6131,8 +6131,8 @@ fragment float4 live_spectrogram_frag(
                     }
                     if show_doc {
                         if let Some((title, _)) = &comp.doc {
-                            let title_fg = to_rgba(theme::PATCHER_AUTOCOMPLETE_DOC_TEXT());
-                            let doc_fg = to_rgba(theme::PATCHER_AUTOCOMPLETE_DOC_TEXT());
+                            let title_fg = to_rgba(theme::COMP_DOC_TITLE_FG());
+                            let doc_fg = to_rgba(theme::COMP_DOC_FG());
                             let doc_bg_rgba = to_rgba(doc_bg);
                             let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
                             push_text_cells(
@@ -7837,15 +7837,22 @@ fragment float4 live_spectrogram_frag(
             let label_w = comp
                 .entries
                 .iter()
-                .map(|e| e.label.len())
+                .map(|entry| {
+                    entry.label.chars().count()
+                        + entry
+                            .category
+                            .as_ref()
+                            .map(|category| category.chars().count() + 2)
+                            .unwrap_or(0)
+                })
                 .max()
                 .unwrap_or(0)
                 .max(12);
             let popup_col = comp.anchor.1;
             let popup_row = comp.anchor.0 + 1; // one row below the cursor
 
-            let sel_bg = to_rgba(theme::PATCHER_AUTOCOMPLETE_SELECTED_BG());
-            let unsel_bg = to_rgba(theme::PATCHER_AUTOCOMPLETE_BG());
+            let sel_bg = to_rgba(theme::COMP_SELECTED_BG());
+            let unsel_bg = to_rgba(theme::COMP_UNSELECTED_BG());
 
             let x0 = ndc_x(popup_col as f32 * cell_w);
             let x1 = ndc_x((popup_col + label_w) as f32 * cell_w);
@@ -7858,9 +7865,9 @@ fragment float4 live_spectrogram_frag(
                 let y1 = ndc_y((row + 1) as f32 * cell_h); // bottom
                 let bg = if entry.selected { sel_bg } else { unsel_bg };
                 let pop_fg = if entry.selected {
-                    to_rgba(theme::PATCHER_AUTOCOMPLETE_SELECTED_TEXT())
+                    to_rgba(theme::COMP_SELECTED_FG())
                 } else {
-                    to_rgba(theme::PATCHER_AUTOCOMPLETE_TEXT())
+                    to_rgba(theme::COMP_FG())
                 };
                 let gv = |px, py, u, v| Vertex {
                     position: [px, py],
@@ -7897,6 +7904,31 @@ fragment float4 live_spectrogram_frag(
                         &mut verts,
                     );
                 }
+
+                // Category, right-aligned in the same row (skipped when the
+                // label already fills the panel).
+                let category_fg = to_rgba(theme::COMP_CATEGORY_FG());
+                if let Some(category) = entry.category.as_ref().filter(|category| {
+                    entry.label.chars().count() + category.chars().count() + 2 <= label_w
+                }) {
+                    let category_col = popup_col + label_w - category.chars().count();
+                    for (j, ch) in category.chars().enumerate() {
+                        rasterize_char(
+                            atlas,
+                            ch,
+                            ((category_col + j) as f32, row as f32),
+                            &CharCtx {
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
+                                fg: category_fg,
+                                bg,
+                            },
+                            &mut verts,
+                        );
+                    }
+                }
             }
 
             // ── Doc panel (right of the list) ────────────────────────────────
@@ -7904,9 +7936,9 @@ fragment float4 live_spectrogram_frag(
                 let doc_col = popup_col + label_w + 1;
                 let doc_w: usize = 44;
                 let doc_h = comp.entries.len().max(4);
-                let doc_bg = to_rgba(theme::PATCHER_AUTOCOMPLETE_DOC_BG());
-                let doc_fg = to_rgba(theme::PATCHER_AUTOCOMPLETE_DOC_TEXT());
-                let title_fg = to_rgba(theme::PATCHER_AUTOCOMPLETE_DOC_TEXT());
+                let doc_bg = to_rgba(theme::COMP_DOC_BG());
+                let doc_fg = to_rgba(theme::COMP_DOC_FG());
+                let title_fg = to_rgba(theme::COMP_DOC_TITLE_FG());
 
                 // Background for the whole panel.
                 let dx0 = ndc_x(doc_col as f32 * cell_w);

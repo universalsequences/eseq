@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
@@ -205,43 +206,21 @@ const ESEQLISP_BUILTINS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-const DGENLISP_SPECIALS: &[(&str, &str, &str)] = &[
-    ("def", "(def name expr)", "Bind a DSP symbol."),
-    (
-        "defmacro",
-        "(defmacro name (args...) body...)",
-        "Define a reusable macro.",
-    ),
-    (
-        "param",
-        "(param name @default v @min v @max v @group g @env e @role r ...)",
-        "Declare a host-controllable parameter.",
-    ),
-    (
-        "in",
-        "(in channel @name label ...)",
-        "Read an input channel.",
-    ),
-    (
-        "out",
-        "(out expr channel @name label)",
-        "Write an output channel.",
-    ),
-    (
-        "make-history",
-        "(make-history name)",
-        "Create a feedback cell.",
-    ),
-    (
-        "read-history",
-        "(read-history name)",
-        "Read a feedback cell from the previous frame.",
-    ),
-    (
-        "write-history",
-        "(write-history name expr)",
-        "Write a feedback cell for the current frame.",
-    ),
+/// Tokens highlighted as special forms in DGenLisp buffers.
+///
+/// Signatures and docs for these names come from the generated manifest (see
+/// [`dgenlisp_manifest_items`]), so this list decides syntax emphasis only and
+/// deliberately carries names alone — a second doc catalog is exactly what the
+/// manifest exists to prevent.
+const DGENLISP_HIGHLIGHT_SPECIALS: &[&str] = &[
+    "def",
+    "defmacro",
+    "param",
+    "in",
+    "out",
+    "make-history",
+    "read-history",
+    "write-history",
 ];
 
 pub fn completion_match(
@@ -296,10 +275,7 @@ pub fn highlight_line(
     runtime_symbols: &[String],
     buffer: &Buffer,
 ) -> Vec<TokenSpan> {
-    let known = completion_candidates(mode, runtime_symbols, buffer)
-        .into_iter()
-        .map(|item| item.label)
-        .collect::<HashSet<_>>();
+    let known = completion_labels(mode, runtime_symbols, buffer);
     highlight_line_with_known(mode, line, &known)
 }
 
@@ -309,10 +285,7 @@ pub fn highlight_lines<'a>(
     runtime_symbols: &[String],
     buffer: &Buffer,
 ) -> Vec<Vec<TokenSpan>> {
-    let known = completion_candidates(mode, runtime_symbols, buffer)
-        .into_iter()
-        .map(|item| item.label)
-        .collect::<HashSet<_>>();
+    let known = completion_labels(mode, runtime_symbols, buffer);
     lines
         .into_iter()
         .map(|line| highlight_line_with_known(mode, line, &known))
@@ -322,7 +295,7 @@ pub fn highlight_lines<'a>(
 fn highlight_line_with_known(
     mode: &BufferMode,
     line: &str,
-    known: &HashSet<String>,
+    known: &HashSet<Cow<'_, str>>,
 ) -> Vec<TokenSpan> {
     let mut spans = Vec::new();
     let bytes = line.as_bytes();
@@ -388,7 +361,11 @@ fn highlight_line_with_known(
     spans
 }
 
-fn classify_token(mode: &BufferMode, token: &str, known: &HashSet<String>) -> Option<TokenClass> {
+fn classify_token(
+    mode: &BufferMode,
+    token: &str,
+    known: &HashSet<Cow<'_, str>>,
+) -> Option<TokenClass> {
     if token.is_empty() {
         return None;
     }
@@ -398,10 +375,7 @@ fn classify_token(mode: &BufferMode, token: &str, known: &HashSet<String>) -> Op
     if token.parse::<f64>().is_ok() {
         return Some(TokenClass::Number);
     }
-    if special_forms(mode)
-        .iter()
-        .any(|(label, _, _)| *label == token)
-    {
+    if is_special_form(mode, token) {
         return Some(TokenClass::Special);
     }
     if known.contains(token) {
@@ -417,7 +391,7 @@ fn completion_candidates(
 ) -> Vec<CompletionItem> {
     let mut items = match mode {
         BufferMode::ESeqLisp | BufferMode::Named(_) => {
-            static_items(special_forms(mode), Some("special form"))
+            static_items(ESEQLISP_SPECIALS, Some("special form"))
         }
         BufferMode::DGenLisp => Vec::new(),
     };
@@ -435,6 +409,53 @@ fn completion_candidates(
         BufferMode::DGenLisp => items.extend(dgenlisp_manifest_items().iter().cloned()),
     }
     items
+}
+
+/// Label-only view of [`completion_candidates`] for syntax highlighting.
+///
+/// Highlighting runs over the visible lines on every frame and only ever asks
+/// whether a token is a known name, so it must not clone the signatures and
+/// docs that ride along on a [`CompletionItem`] — the DGenLisp manifest alone
+/// is ~200 entries with multi-line docs. Static and manifest labels are
+/// borrowed; only buffer-local definitions allocate.
+fn completion_labels<'a>(
+    mode: &BufferMode,
+    runtime_symbols: &'a [String],
+    buffer: &Buffer,
+) -> HashSet<Cow<'a, str>> {
+    let mut labels = HashSet::new();
+    labels.extend(
+        buffer_defined_symbols(buffer)
+            .into_iter()
+            .map(|item| Cow::Owned(item.label)),
+    );
+    match mode {
+        BufferMode::ESeqLisp | BufferMode::Named(_) => {
+            labels.extend(
+                ESEQLISP_SPECIALS
+                    .iter()
+                    .chain(ESEQLISP_BUILTINS)
+                    .map(|(label, _, _)| Cow::Borrowed(*label)),
+            );
+            labels.extend(runtime_symbols.iter().map(|label| Cow::Borrowed(&**label)));
+        }
+        BufferMode::DGenLisp => labels.extend(
+            dgenlisp_manifest_labels()
+                .iter()
+                .map(|label| Cow::Borrowed(&**label)),
+        ),
+    }
+    labels
+}
+
+fn dgenlisp_manifest_labels() -> &'static HashSet<String> {
+    static LABELS: OnceLock<HashSet<String>> = OnceLock::new();
+    LABELS.get_or_init(|| {
+        dgenlisp_manifest_items()
+            .iter()
+            .map(|item| item.label.clone())
+            .collect()
+    })
 }
 
 fn dgenlisp_manifest_items() -> &'static [CompletionItem] {
@@ -557,10 +578,12 @@ fn buffer_defined_symbols(buffer: &Buffer) -> Vec<CompletionItem> {
     items
 }
 
-fn special_forms(mode: &BufferMode) -> &'static [(&'static str, &'static str, &'static str)] {
+fn is_special_form(mode: &BufferMode, token: &str) -> bool {
     match mode {
-        BufferMode::ESeqLisp | BufferMode::Named(_) => ESEQLISP_SPECIALS,
-        BufferMode::DGenLisp => DGENLISP_SPECIALS,
+        BufferMode::ESeqLisp | BufferMode::Named(_) => ESEQLISP_SPECIALS
+            .iter()
+            .any(|(label, _, _)| *label == token),
+        BufferMode::DGenLisp => DGENLISP_HIGHLIGHT_SPECIALS.contains(&token),
     }
 }
 
@@ -606,10 +629,14 @@ fn is_symbol_byte(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{BufferMode, completion_match, highlight_line, highlight_lines};
+    use super::{
+        BufferMode, completion_candidates, completion_labels, completion_match, highlight_line,
+        highlight_lines,
+    };
     use crate::buffer::Buffer;
     use crate::runtime::SymbolMetadata;
-    use std::collections::HashMap;
+    use std::borrow::Cow;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn eseqlisp_completion_uses_runtime_symbols() {
@@ -685,6 +712,30 @@ mod tests {
             completion_match(&BufferMode::ESeqLisp, &buffer, &[], &HashMap::new()).is_none(),
             "ESeqLisp buffers should complete from ESeqLisp symbols, not DGenLisp"
         );
+    }
+
+    #[test]
+    fn completion_labels_match_completion_candidate_labels() {
+        let buffer = Buffer::from_text(0, "*dsp*", "(def local 1)");
+        let runtime = vec![String::from("seq-step")];
+        for mode in [
+            BufferMode::DGenLisp,
+            BufferMode::ESeqLisp,
+            BufferMode::Named("custom".to_string()),
+        ] {
+            let expected = completion_candidates(&mode, &runtime, &buffer)
+                .into_iter()
+                .map(|item| item.label)
+                .collect::<HashSet<_>>();
+            let actual = completion_labels(&mode, &runtime, &buffer)
+                .into_iter()
+                .map(Cow::into_owned)
+                .collect::<HashSet<_>>();
+            assert_eq!(
+                actual, expected,
+                "highlighting must see the same names as completion in {mode:?}"
+            );
+        }
     }
 
     #[test]
