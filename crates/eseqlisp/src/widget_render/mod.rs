@@ -4209,6 +4209,16 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     litBg *= mix(0.94, 1.04, edgeShade);
     litBorder *= mix(0.88, 1.12, edgeShade);
 
+    // Flatness dials the whole fake-3d treatment out: the bevel's diffuse, the
+    // specular, and the vertical edge shade all land in litBg/litBorder, so
+    // mixing back to the raw colours at 1.0 leaves a flat card with a clean SDF
+    // edge. A node wants the shading - at pill size it is most of what gives
+    // the node its physicality - but on a surface as large as an agentic
+    // bubble the same treatment reads as a smudge near the border.
+    float flatness = clamp(in.uniform_a.y, 0.0, 1.0);
+    litBg = mix(litBg, bg, flatness);
+    litBorder = mix(litBorder, border, flatness);
+
     float3 color = mix(litBg, litBorder, borderMask);
     return float4(color, outerAlpha * max(in.color_a.a, in.color_b.a));
 }

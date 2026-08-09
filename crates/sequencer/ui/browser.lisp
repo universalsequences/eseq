@@ -1405,7 +1405,7 @@
                   "Save & Add"
                   "Save")))
             :variant :primary
-            :width (if (sbrowser-editor-macro-action?) 13.5 10)
+            :width (if (sbrowser-editor-macro-action?) 14.5 10)
             :height 1.2
             :font-size 11
             :on-click |x y r|

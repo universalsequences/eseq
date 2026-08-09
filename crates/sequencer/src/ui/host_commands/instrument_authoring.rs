@@ -1386,6 +1386,7 @@ pub(super) fn handle(
                 };
                 let request = sequencer::agent::agentic_bubble::AgenticBubbleRequest {
                     prompt,
+                    history: agentic_bubble_history(&payload),
                     suggested_macro_name: macro_name.clone(),
                     follow_up,
                     connect,
@@ -1559,6 +1560,7 @@ pub(super) fn handle(
                 };
                 let request = sequencer::agent::agentic_bubble::AgenticBubbleRequest {
                     prompt,
+                    history: agentic_bubble_history(&payload),
                     suggested_macro_name: macro_name,
                     follow_up,
                     connect,
@@ -3670,4 +3672,28 @@ pub(super) fn handle(
 
         _ => {}
     }
+}
+
+/// The bubble conversation carried on an `agentic-submit` payload: a flat list
+/// of alternating question/answer strings (patcher `agentic_submit_payload`),
+/// rebuilt into turns. A trailing unpaired entry is dropped.
+fn agentic_bubble_history(payload: &Value) -> Vec<(String, String)> {
+    let Value::Map(map) = payload else {
+        return Vec::new();
+    };
+    let Some(cell) = map.get("history") else {
+        return Vec::new();
+    };
+    let Value::List(items) = &*cell.borrow() else {
+        return Vec::new();
+    };
+    items
+        .chunks_exact(2)
+        .filter_map(|pair| match (&*pair[0].borrow(), &*pair[1].borrow()) {
+            (Value::String(question), Value::String(answer)) => {
+                Some((question.clone(), answer.clone()))
+            }
+            _ => None,
+        })
+        .collect()
 }

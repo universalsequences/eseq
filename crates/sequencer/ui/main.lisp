@@ -77,6 +77,8 @@
 (load "@/ui/effects.lisp")
 (load "@/ui/macros.lisp")
 (load "@/ui/piano-roll.lisp")
+;; Must precede the patcher buffers, which mount choose-model-panel.
+(load "@/ui/choose-model.lisp")
 (load "@/ui/transport.lisp")
 (load "@/ui/agent.lisp")
 

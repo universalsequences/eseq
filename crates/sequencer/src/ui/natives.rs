@@ -6497,6 +6497,39 @@ fn register_agent_mode_natives(
         Ok(Value::Number(state.generation as f64))
     });
 
+    // The patcher's agentic bubbles are one-shot turns, not conversations, so
+    // their model is a process-global choice rather than a per-conversation
+    // one (see agent::model_choice). `M-x choose-model` drives these two.
+    runtime.register_native_with_docs(
+        "agent/patch-model",
+        "(agent/patch-model)",
+        "The model patcher agentic bubbles (cmd+k) run on, or \"\" when unset.",
+        move |_args, _ctx| {
+            Ok(Value::String(
+                sequencer::agent::model_choice::agentic_model().unwrap_or_default(),
+            ))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "agent/set-patch-model",
+        "(agent/set-patch-model model)",
+        "Choose the model patcher agentic bubbles run on. Pass \"\" to reset.",
+        move |args, _ctx| {
+            let model = match args.first() {
+                Some(Value::String(value)) => value.clone(),
+                _ => return Err("agent/set-patch-model: expected a model string".to_string()),
+            };
+            if model.trim().is_empty() {
+                sequencer::agent::model_choice::clear_agentic_model();
+            } else {
+                sequencer::agent::model_choice::set_agentic_model(&model)
+                    .map_err(|error| format!("agent/set-patch-model: {error}"))?;
+            }
+            Ok(Value::Bool(true))
+        },
+    );
+
     runtime.register_native("agent/models", move |_args, _ctx| {
         Ok(Value::List(
             sequencer::agent::providers::default_model_presets()

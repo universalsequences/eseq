@@ -433,6 +433,72 @@ pub(super) struct PendingEffectPreview {
     pub(super) receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
 }
 
+/// Kick the preview compile pipeline for a source the host produced itself,
+/// rather than one the patcher handed over in a `preview-*-patch` payload.
+///
+/// The agentic macro edit rewrites `dsp.lisp` directly and touches no
+/// interaction state, so the patcher never emits a writeback payload and the
+/// usual compile never fires: the new macro showed up on the canvas but stayed
+/// inaudible until some unrelated edit forced a recompile.
+pub(super) fn queue_instrument_preview_compile(
+    session: &mut InstrumentEditSession,
+    pending: &mut Option<PendingInstrumentPreview>,
+    source: String,
+    sample_rate: u32,
+) {
+    session.preview_generation = session.preview_generation.wrapping_add(1);
+    session.visible_revision_valid = false;
+    let generation = session.preview_generation;
+    let asset_base = session.path.parent().map(std::path::Path::to_path_buf);
+    let compile_source = source.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = sequencer::lisp_host::compile_and_load_instrument_with_origin(
+            &compile_source,
+            sample_rate,
+            asset_base.as_deref(),
+            sequencer::lisp_host::DGenSourceOrigin::Draft,
+        );
+        let _ = tx.send(result);
+    });
+    *pending = Some(PendingInstrumentPreview {
+        generation,
+        source,
+        layout: None,
+        receiver: rx,
+    });
+}
+
+/// Effect counterpart of `queue_instrument_preview_compile`.
+pub(super) fn queue_effect_preview_compile(
+    session: &mut EffectEditSession,
+    pending: &mut Option<PendingEffectPreview>,
+    source: String,
+    sample_rate: u32,
+) {
+    session.preview_generation = session.preview_generation.wrapping_add(1);
+    session.visible_revision_valid = false;
+    let generation = session.preview_generation;
+    let asset_base = session.path.parent().map(std::path::Path::to_path_buf);
+    let compile_source = source.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = sequencer::lisp_host::compile_and_load_with_origin(
+            &compile_source,
+            sample_rate,
+            asset_base.as_deref(),
+            sequencer::lisp_host::DGenSourceOrigin::Draft,
+        );
+        let _ = tx.send(result);
+    });
+    *pending = Some(PendingEffectPreview {
+        generation,
+        source,
+        layout: None,
+        receiver: rx,
+    });
+}
+
 pub(super) fn editor_macro_action_strings(
     action: Option<&eseqlisp::widget_render::patcher::ActiveMacroLibraryAction>,
 ) -> (String, String) {
@@ -733,7 +799,11 @@ pub(super) fn instrument_patcher_buffer_source(buffer_name: &str, path: &Path) -
     let buffer_name = escape_lisp_string(buffer_name);
     let path = escape_lisp_string(&path.to_string_lossy());
     format!(
-        "(effect-buffer \"{buffer_name}\"\n  (patcher\n    :intent :instrument\n    :width :fill\n    :height :fill\n    :path \"{path}\"\n    :on-change (lambda (event)\n      (host-command \"preview-instrument-patch\" event))))\n"
+        // The `M-x choose-model` picker is mounted in the patcher's own
+        // buffer rather than a sibling tile: a modal only receives pointer
+        // input through the *active* tile's layout, and the patch editor's
+        // canvas is the active tile. Closed, it has zero layout footprint.
+        "(effect-buffer \"{buffer_name}\"\n  (v-stack :width :fill :height :fill\n    (choose-model-panel)\n    (patcher\n      :intent :instrument\n      :width :fill\n      :height :fill\n      :path \"{path}\"\n      :agent-model (choose-model-current-label)\n      :on-change (lambda (event)\n        (if (= (get event :status) :agentic-choose-model)\n          (choose-model-open)\n          (host-command \"preview-instrument-patch\" event))))))\n"
     )
 }
 
@@ -749,7 +819,9 @@ pub(super) fn effect_patcher_buffer_source(buffer_name: &str, path: &Path) -> St
     let buffer_name = escape_lisp_string(buffer_name);
     let path = escape_lisp_string(&path.to_string_lossy());
     format!(
-        "(effect-buffer \"{buffer_name}\"\n  (patcher\n    :intent :effect\n    :width :fill\n    :height :fill\n    :path \"{path}\"\n    :on-change (lambda (event)\n      (host-command \"preview-effect-patch\" event))))\n"
+        // Mounted alongside the patcher for the same reason as the
+        // instrument variant above.
+        "(effect-buffer \"{buffer_name}\"\n  (v-stack :width :fill :height :fill\n    (choose-model-panel)\n    (patcher\n      :intent :effect\n      :width :fill\n      :height :fill\n      :path \"{path}\"\n      :agent-model (choose-model-current-label)\n      :on-change (lambda (event)\n        (if (= (get event :status) :agentic-choose-model)\n          (choose-model-open)\n          (host-command \"preview-effect-patch\" event))))))\n"
     )
 }
 

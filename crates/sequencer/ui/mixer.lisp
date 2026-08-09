@@ -1294,11 +1294,13 @@
               (label "voices" :font-size 8 :color :dim :bg :transparent)
               (number-picker :value SEQ.tp-max-polyphony :min 1 :max 12 :decimals 0
                 :noui false :font-size 8 :text-color :white
+                :background-color :mixer-strip-bg
+                :border-color :dim
                 :on-change (lambda (v) (do (cool-off-follow)
-                  (if SEQ.tp-is-rack
-                    (host-command "set-rack-slot-max-polyphony"
-                      (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value v))
-                    (seq-set-track-param :voices v))))
+                    (if SEQ.tp-is-rack
+                      (host-command "set-rack-slot-max-polyphony"
+                        (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value v))
+                      (seq-set-track-param :voices v))))
                 :width 3.4 :height 1.15)))))
       (h-stack
         (box :width 3.5)

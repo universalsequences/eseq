@@ -215,6 +215,7 @@ impl Projector {
             width: None,
             param: None,
             inline_inputs: Vec::new(),
+            synthesized: false,
             diagnostic: None,
             source: Some(NodeSource {
                 owner: SourceOwner::Compound {
@@ -390,6 +391,7 @@ impl Projector {
                 width: None,
                 param: None,
                 inline_inputs: Vec::new(),
+                synthesized: false,
                 diagnostic: None,
                 source: Some(NodeSource {
                     owner: SourceOwner::MacroParameter {
@@ -497,6 +499,7 @@ impl Projector {
                     width: None,
                     param: None,
                     inline_inputs: Vec::new(),
+                    synthesized: false,
                     diagnostic: None,
                     source: Some(NodeSource {
                         owner: SourceOwner::TopLevelForm {
@@ -550,6 +553,7 @@ impl Projector {
                 width: None,
                 param: None,
                 inline_inputs: Vec::new(),
+                synthesized: false,
                 diagnostic: None,
                 source: Some(NodeSource {
                     owner: SourceOwner::TopLevelForm {
@@ -781,6 +785,7 @@ impl Projector {
             width: None,
             param: param_node_info(&op, items),
             inline_inputs: Vec::new(),
+            synthesized: false,
             diagnostic: self.operator_diagnostic(&op, kind),
             source: Some(NodeSource {
                 owner,
@@ -975,6 +980,7 @@ impl Projector {
             width: None,
             param: None,
             inline_inputs: Vec::new(),
+            synthesized: false,
             diagnostic: None,
             source,
         });
@@ -1129,6 +1135,7 @@ impl Projector {
             width: None,
             param: None,
             inline_inputs: Vec::new(),
+            synthesized: false,
             diagnostic: Some(reason.to_string()),
             source: Some(NodeSource {
                 owner: SourceOwner::CodeIsland {

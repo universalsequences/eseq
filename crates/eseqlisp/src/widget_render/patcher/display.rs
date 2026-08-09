@@ -6,6 +6,7 @@ use super::metrics::{
 use super::model::{ArgValue, NodeKind, PatchNode};
 #[cfg(target_os = "macos")]
 use super::text_metrics::measured_text_width;
+use std::ops::Range;
 
 const MISSING_INPUT_SENTINEL: &str = "__patcher_missing_input__";
 
@@ -21,43 +22,85 @@ pub(super) fn preview(text: &str, max_chars: usize) -> String {
     out
 }
 
+/// A node label together with the char range each displayed argument occupies in it.
+///
+/// Token order in the label is not argument order — slots are skipped and some
+/// arguments render nothing at all — so the spans are recorded by the one loop
+/// that builds the text rather than recovered by re-tokenizing it afterwards.
+pub(super) struct NodeDisplayLabel {
+    pub(super) text: String,
+    pub(super) arg_spans: Vec<(usize, Range<usize>)>,
+}
+
 pub(super) fn node_display_label(node: &PatchNode) -> String {
+    build_node_display_label(node).text
+}
+
+/// Char ranges, in `node_display_label(node)`, of each argument token the label
+/// draws, paired with that argument's index. Inlined literals draw no port, so
+/// this is the only handle hover has on which inlet they are.
+pub(super) fn node_display_label_arg_spans(node: &PatchNode) -> Vec<(usize, Range<usize>)> {
+    build_node_display_label(node).arg_spans
+}
+
+fn push_arg_token(
+    label: &mut String,
+    arg_spans: &mut Vec<(usize, Range<usize>)>,
+    arg_index: usize,
+    token: &str,
+) {
+    label.push(' ');
+    let start = label.chars().count();
+    label.push_str(token);
+    arg_spans.push((arg_index, start..label.chars().count()));
+}
+
+pub(super) fn build_node_display_label(node: &PatchNode) -> NodeDisplayLabel {
+    let bare = |text: String| NodeDisplayLabel {
+        text,
+        arg_spans: Vec::new(),
+    };
     // `base` is either the bare op — in which case the label's attributes have to be
     // reattached below — or a full label that already carries them (`param`, `in`, `out`).
     let (base, base_carries_attributes) = match node.kind {
-        NodeKind::Out if node.label.contains("@modulator") => return node.label.clone(),
+        NodeKind::Out if node.label.contains("@modulator") => return bare(node.label.clone()),
         NodeKind::Builtin | NodeKind::MacroInstance | NodeKind::Out | NodeKind::Constant => {
             (node.op.as_str(), false)
         }
-        NodeKind::In => return node.label.clone(),
+        NodeKind::In => return bare(node.label.clone()),
         _ => (node.label.as_str(), true),
     };
     let mut label = base.to_string();
+    let mut arg_spans = Vec::new();
     for idx in node_display_input_slots(node) {
         if let Some(inline) = node.inline_inputs.get(idx).and_then(|input| input.as_ref()) {
-            label.push(' ');
-            label.push_str(&inline.label());
+            push_arg_token(&mut label, &mut arg_spans, idx, &inline.label());
             continue;
         }
         match &node.args[idx] {
             ArgValue::Literal(value) if value == MISSING_INPUT_SENTINEL => {
-                label.push_str(" ?");
+                push_arg_token(&mut label, &mut arg_spans, idx, "?");
             }
             ArgValue::Literal(value) if value != "<expr>" => {
-                label.push(' ');
-                label.push_str(value);
+                push_arg_token(&mut label, &mut arg_spans, idx, value);
             }
             ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr => {
-                label.push_str(" ?");
+                push_arg_token(&mut label, &mut arg_spans, idx, "?");
             }
             _ => {}
         }
     }
-    if !base_carries_attributes {
+    // A node being typed into is projected as a bare builtin whose op is the
+    // whole typed text, attributes and all, so re-attaching the suffix doubled
+    // the label — and with it the node's width — for every keystroke.
+    if !base_carries_attributes && base != node.label {
         // Attributes trail the inputs, matching the source form the label was built from.
         label.push_str(&label_attributes_suffix(&node.label));
     }
-    label
+    NodeDisplayLabel {
+        text: label,
+        arg_spans,
+    }
 }
 
 pub(super) fn node_display_input_slots(node: &PatchNode) -> Vec<usize> {

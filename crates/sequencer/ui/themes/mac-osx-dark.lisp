@@ -168,6 +168,26 @@
       :patcher-tooltip-bg '(0.09 0.09 0.11)
       :patcher-tooltip-border '(0.18 0.19 0.21)
       :patcher-tooltip-text '(0.82 0.84 0.87)
+      ;; Agentic bubbles (cmd+k). The card is drawn flat (AGENTIC_CARD_FLATNESS),
+      ;; so unlike the node colours these land close to as authored. The card's
+      ;; own alpha is max(border, bg), so dim its border in RGB rather than by
+      ;; lowering alpha -- that constraint is the card only; box and chip
+      ;; borders go through a shader that mixes alpha properly.
+      :patcher-agentic-card-bg '(0.165 0.160 0.152 0.975)
+      :patcher-agentic-card-border '(0.11 0.11 0.11 0.975)
+      :patcher-agentic-card-border-active '(0.21 0.21 0.21 0.975)
+      :patcher-agentic-card-error-bg '(0.20 0.12 0.12 0.975)
+      :patcher-agentic-box-bg '(0.235 0.230 0.230)
+      :patcher-agentic-box-border '(0.27 0.27 0.28)
+      :patcher-agentic-header-text '(0.82 0.83 0.86)
+      :patcher-agentic-body-text '(0.98 0.98 0.99)
+      :patcher-agentic-placeholder-text '(0.78 0.79 0.72)
+      :patcher-agentic-chip-bg '(0.52 0.53 0.56 0.42)
+      :patcher-agentic-chip-border '(0.32 0.33 0.36 0.88)
+      :patcher-agentic-chip-text '(0.82 0.83 0.86)
+      :patcher-agentic-send-bg '(0.12 0.13 0.16 0.80)
+      :patcher-agentic-send-glyph '(0.92 0.92 0.94)
+      :patcher-agentic-spinner '(0.22 0.83 0.66)
       :patcher-back-button-bg '(0.14 0.14 0.15)
       :patcher-back-button-hover-bg '(0.16 0.20 0.28)
       :patcher-back-button-border '(0.36 0.36 0.39)

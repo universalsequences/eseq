@@ -16,6 +16,27 @@ The aim is **co-discovery, not delegation** — fast enough that the user stays 
 6. **Use** — When the resolved bubble's output wire is connected to anything downstream, the macro is logged to the library with its prompt, signature, and timestamp.
 7. **Variant** — A small `another` button on the resolved bubble spawns a sibling next to it with the same prompt + a "different approach" nudge. Originals remain.
 
+## Follow-ups (answer bubbles)
+
+A bubble opened on an existing macro can come back with an `answer` rather than
+a macro edit. A settled answer keeps a **follow-up composer** under its body —
+a hairline rule, a "Send a follow-up" placeholder, and a caret — so the next
+question can be typed without reopening anything:
+
+- While an answer is on screen, plain keystrokes go to the composer. Command
+  chords (`cmd+k`, `cmd+z`, …) are deliberately left to the patcher, so the
+  composer can never swallow a shortcut.
+- Enter retires the answered exchange into the bubble's `turns` and re-submits
+  in place: the bubble bumps its generation and goes back to `pending`.
+- Escape still dismisses the bubble, discarding the conversation with it.
+
+Prior turns ride along on the submit payload as a flat list of alternating
+question/answer strings under `history`, and the host replays them as
+`User`/`Assistant` messages ahead of the current prompt. Only the final user
+message carries the macro context and the output contract, so a validation
+retry still restates them. History lives on the bubble alone — nothing is
+persisted, and dismissing the bubble ends the conversation.
+
 ## Signature (Hybrid)
 
 At submit time, the bubble's signature is derived as follows:

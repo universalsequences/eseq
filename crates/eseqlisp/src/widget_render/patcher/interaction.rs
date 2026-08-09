@@ -13,12 +13,12 @@ use super::display::{
 use super::emit::debug_log_patch_lisp;
 use super::geometry::{
     connection_endpoints, hit_patcher_cable, hit_patcher_cable_handle, hit_patcher_input_port,
-    hit_patcher_node, hit_patcher_node_resize_handle, hit_patcher_output_port,
-    hit_patcher_segmented_cable_horizontal_segment, nearest_patcher_input_port,
-    nearest_patcher_output_port, patch_content_size, patch_input_indices, patch_input_slot_counts,
-    patch_node_rects, patch_output_counts, patcher_back_button_rect, patcher_breadcrumb_rect,
-    patcher_origin, patcher_zoom, port_center, rect_contains, rect_from_points, rects_intersect,
-    screen_to_model,
+    hit_patcher_label_arg, hit_patcher_node, hit_patcher_node_resize_handle,
+    hit_patcher_output_port, hit_patcher_segmented_cable_horizontal_segment,
+    nearest_patcher_input_port, nearest_patcher_output_port, patch_content_size,
+    patch_input_indices, patch_input_slot_counts, patch_node_rects, patch_output_counts,
+    patcher_back_button_rect, patcher_breadcrumb_rect, patcher_origin, patcher_zoom, port_center,
+    rect_contains, rect_from_points, rects_intersect, screen_to_model,
 };
 use super::metrics::{
     CREATED_NODE_BELOW_GAP_CELLS, PATCH_ORIGIN_COL_OFFSET, PATCH_ORIGIN_ROW_OFFSET,
@@ -132,7 +132,9 @@ pub(super) fn zoom_patcher_by_magnify(
     true
 }
 
-fn load_interactive_patch_for_node(node: &LayoutNode) -> Option<(Patch, PatcherPanState, String)> {
+pub(super) fn load_interactive_patch_for_node(
+    node: &LayoutNode,
+) -> Option<(Patch, PatcherPanState, String)> {
     let key = patcher_state_key(node);
     let mut interaction_state = get_patcher_interaction_state(key);
     let (_, root_patch) = load_patch_from_props(&node.props).ok()?;
@@ -925,6 +927,20 @@ pub(super) fn handle_patcher_pointer_moved(
     } else {
         None
     };
+    // A port is the more specific target, so it wins whenever both would hit.
+    state.hovered_label_arg =
+        if state.hovered_input_port.is_none() && state.hovered_output_port.is_none() {
+            hit_patcher_label_arg(
+                &patch,
+                &ordered_nodes,
+                node.rect,
+                &pan_state,
+                local_col,
+                local_row,
+            )
+        } else {
+            None
+        };
     set_patcher_interaction_state(key, state);
 }
 

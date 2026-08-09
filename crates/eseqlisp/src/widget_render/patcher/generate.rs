@@ -748,6 +748,14 @@ impl<'a> ScopeEmitter<'a> {
             .any(|later| self.inbound.contains_key(&(node.id.as_str(), later)))
     }
 
+    /// The declared param name of `node_id`, if it is a param node.
+    fn param_name_for(&self, node_id: &str) -> Option<String> {
+        self.nodes
+            .get(node_id)
+            .and_then(|node| node.param.as_ref())
+            .map(|param| param.name.clone())
+    }
+
     fn reference_expr(&mut self, connection: &'a PatchConnection) -> Result<String, String> {
         let Some(from) = self.nodes.get(connection.from_node.as_str()).copied() else {
             return Ok(MISSING_INPUT_SENTINEL.to_string());
@@ -756,6 +764,19 @@ impl<'a> ScopeEmitter<'a> {
             Some(NodeRole::History) => Ok(format!("(read-history {})", self.names[&from.id])),
             Some(NodeRole::InlineMod) => {
                 let inner = match self.inbound.get(&(from.id.as_str(), 0)).copied() {
+                    // `(mod X)` resolves only against a top-level `(param X …)`
+                    // form, so it must name the PARAM — not the binding. A param
+                    // bound under a different name (`(def value (param embouchure
+                    // …))`, which the emitter keeps def-wrapped) is referenced as
+                    // `value` everywhere else but modulated as `(mod embouchure)`;
+                    // emitting the binding produced "'value' does not reference a
+                    // parameter" at compile time.
+                    Some(inner_connection) if from.op == "mod" => {
+                        match self.param_name_for(&inner_connection.from_node) {
+                            Some(param_name) => param_name,
+                            None => self.reference_expr(inner_connection)?,
+                        }
+                    }
                     Some(inner_connection) => self.reference_expr(inner_connection)?,
                     None => MISSING_INPUT_SENTINEL.to_string(),
                 };
@@ -965,6 +986,22 @@ fn is_interaction_created_id(id: &str) -> bool {
 /// Binding base for a single-output node: source-derived ids keep their name;
 /// interaction-created ids get a deterministic, op-derived name instead.
 fn binding_base_for_node(node: &PatchNode) -> String {
+    // A modulatable param has to be emitted as a BARE top-level `(param X …)`,
+    // because `(mod X)` resolves only against that form — a def-wrapped
+    // `(def value (param embouchure …))` is invisible to it. So its binding
+    // must be the param name itself; `emit_role_lines` then drops the wrapper.
+    // Params are named first, so they win the name before anything else can
+    // claim it. The rename is invisible to the editor: the graph payload keys
+    // nodes by model id, and the source is only a build artifact.
+    if node.kind == NodeKind::Param
+        && let Some(param) = node.param.as_ref()
+        && param.modulatable
+    {
+        let name = sanitize_binding(&param.name);
+        if !name.is_empty() {
+            return name;
+        }
+    }
     if !is_interaction_created_id(&node.id) {
         return sanitize_binding(&node.id);
     }

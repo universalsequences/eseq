@@ -37,6 +37,13 @@
             Ok(Value::String("gpt-5.5".to_string()))
         });
         runtime.register_native("agent/set-model", |_args, _ctx| Ok(Value::Nil));
+        // The `M-x choose-model` picker reads these while the *transport*
+        // buffer's widget tree is built, so they must exist even though the
+        // modal itself is closed.
+        runtime.register_native("agent/patch-model", |_args, _ctx| {
+            Ok(Value::String(String::new()))
+        });
+        runtime.register_native("agent/set-patch-model", |_args, _ctx| Ok(Value::Bool(true)));
         runtime.register_native("agent/models", |_args, _ctx| {
             Ok(agent_test_string_list(&["gpt-5.5", "gemini-2.5-pro"]))
         });
@@ -834,6 +841,7 @@
             "ui/piano-roll.lisp",
             "ui/mixer.lisp",
             "ui/patch-macros.lisp",
+            "ui/choose-model.lisp",
             "ui/transport.lisp",
             "ui/agent.lisp",
             "ui/step-grid.lisp",
@@ -14948,6 +14956,90 @@
             Some(Value::Number(2.0))
         );
         assert_eq!(editor.active_buffer().cursor, (0, 0));
+    }
+
+    /// `M-x choose-model` opens its picker inside the patch editor's own
+    /// buffer. Mounting it there rather than in a sibling tile is what makes
+    /// the dropdown clickable: overlay pointer events resolve against the
+    /// *active* tile's layout, and the patcher canvas is the active tile.
+    #[test]
+    fn metal_seq_choose_model_picker_renders_inside_the_patcher_buffer() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(&crate::edit_sessions::instrument_patcher_buffer_source(
+                "*instrument-patcher:test*",
+                std::path::Path::new("instruments/test/dsp.lisp"),
+            ))
+            .expect("build patcher buffer");
+        editor.refresh_runtime_side_effects();
+        let patcher_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*instrument-patcher:test*")
+            .expect("patcher buffer should exist")
+            .id;
+        editor.set_active_buffer(patcher_id);
+        editor.set_layout_viewport(140, 36);
+
+        // Closed: zero footprint, so the picker contributes no layout node.
+        let layout = editor.widget_layout().expect("patcher layout");
+        assert!(
+            find_layout_node_by_stable_key(&layout, "choose-model-dropdown").is_none(),
+            "picker must not render while closed"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(choose-model)")
+            .expect("M-x choose-model");
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(140, 36);
+
+        let layout = editor.widget_layout().expect("patcher layout with picker");
+        assert_finite_layout_tree(&layout);
+        let dropdown = find_layout_node_by_stable_key(&layout, "choose-model-dropdown")
+            .expect("model dropdown should render once the picker is open");
+        assert!(
+            dropdown.rect.width > 0.0 && dropdown.rect.height > 0.0,
+            "dropdown should occupy real space; got {:?}",
+            dropdown.rect
+        );
+    }
+
+    /// The picker writes through `agent/set-patch-model` and re-reads the
+    /// choice, so the selected row survives the round trip.
+    #[test]
+    fn metal_seq_choose_model_select_writes_through_and_closes() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str("(choose-model)")
+            .expect("open picker");
+        assert_eq!(
+            editor.runtime_mut().eval_str("choose-model-open?").unwrap(),
+            Some(Value::Bool(true))
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(choose-model-select "gpt-5.5")"#)
+            .expect("select a model");
+        assert_eq!(
+            editor.runtime_mut().eval_str("choose-model-open?").unwrap(),
+            Some(Value::Bool(false)),
+            "selecting a model should close the picker"
+        );
+
+        // The sentinel row maps to the empty string, i.e. "no explicit choice".
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(choose-model-current)")
+                .unwrap(),
+            Some(Value::String("Default (auto)".to_string())),
+            "the stubbed native reports no choice, so the sentinel row is current"
+        );
     }
 
     #[test]

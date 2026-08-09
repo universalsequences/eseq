@@ -18,7 +18,7 @@ use super::project::{dgenlisp_operator_documentation, dgenlisp_operator_names};
 use super::render::*;
 use super::state::*;
 use super::text::{apply_patcher_autocomplete, patcher_autocomplete_suggestions};
-use super::text_metrics::{cache_text_widths, measured_text_width};
+use super::text_metrics::{cache_text_widths, measured_cursor_offset, measured_text_width};
 use super::writeback::{
     WriteBackError, emit_patch_writeback, emit_patch_writeback_result,
     emit_patch_writeback_result_with_library,
@@ -726,6 +726,94 @@ fn library_macro_autosave_keeps_package_macro_when_adding_library_dependency() {
 }
 
 #[test]
+fn save_macro_to_library_does_not_replay_edits_already_in_the_emitted_source() {
+    let library = temp_defmacro_library("save-emitted", &[]);
+    let path = temp_patcher_dsp_path("patcher-save-macro-emitted-source");
+    fs::write(
+        &path,
+        "(defmacro shape (x) (* x 2))\n(def input (in 1))\n(def out1 (shape input))\n(out out1 1)",
+    )
+    .unwrap();
+    let mut node = patcher_test_node(&path);
+    node.stable_widget_id = Some(778_899);
+    node.props.insert(
+        "defmacro-library-root".to_string(),
+        Value::String(library.root().display().to_string()),
+    );
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState {
+        active_macro: Some("shape".to_string()),
+        ..PatcherInteractionState::default()
+    };
+    state.edit_state.nodes.insert(
+        node_edit_key("root", "created-0"),
+        PatcherNodeEdit {
+            view_key: "root".to_string(),
+            id: "created-0".to_string(),
+            origin: PatcherNodeOrigin::Created {
+                created_id: "created-0".to_string(),
+            },
+            text: "0.74".to_string(),
+            position: (40.0, 60.0),
+            width: None,
+        },
+    );
+    set_patcher_interaction_state(key, state.clone());
+
+    // What the editor session holds as `last_valid_source`: the emitted
+    // revision, pending edits already baked in.
+    let Value::Map(payload) = patcher_writeback_payload(&node) else {
+        panic!("expected payload map");
+    };
+    let payload_string = |field: &str| {
+        payload
+            .get(field)
+            .and_then(|value| match &*value.borrow() {
+                Value::String(value) => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("payload is missing `{field}`"))
+    };
+    let emitted_source = payload_string("source");
+    let emitted_layout = payload_string("layout");
+    assert_eq!(
+        emitted_source.matches("0.74").count(),
+        1,
+        "emitted source should already carry the created node once:\n{emitted_source}"
+    );
+
+    let action = ActiveMacroLibraryAction {
+        macro_name: "shape".to_string(),
+        kind: MacroLibraryActionKind::SaveToLibrary,
+    };
+    let result = apply_macro_library_action_for_emitted_source(
+        &path,
+        &emitted_source,
+        Some(&emitted_layout),
+        PatcherIntent::Instrument,
+        &library,
+        &action,
+        &state,
+    )
+    .unwrap();
+
+    assert!(result.source.contains("(use-defmacro shape)"));
+    assert!(!result.source.contains("(defmacro shape"));
+    assert_eq!(
+        result.source.matches("0.74").count(),
+        1,
+        "saving to the library must not re-apply edits the emitted source already has:\n{}",
+        result.source
+    );
+    assert_eq!(
+        result.source.matches("(shape ").count(),
+        1,
+        "the macro call site must not be duplicated:\n{}",
+        result.source
+    );
+}
+
+#[test]
 fn save_local_macro_to_library_replaces_local_def_with_import() {
     let library = temp_defmacro_library("save-action", &[]);
     let path = temp_patcher_dsp_path("patcher-save-macro-to-library");
@@ -1202,7 +1290,7 @@ fn missing_layout_sidecar_is_not_written_on_load() {
     save_layout_sidecar_for(&path);
     let sidecar = fs::read_to_string(&sidecar_path).expect("explicit save writes the sidecar");
     let json: serde_json::Value = serde_json::from_str(&sidecar).unwrap();
-    assert_eq!(json["version"], 2);
+    assert_eq!(json["version"], 3);
     assert_eq!(
         json["authored"], true,
         "saved sidecars mark the item as patch-authored"
@@ -1228,6 +1316,12 @@ fn existing_layout_sidecar_preserves_positions_without_materializing_new_nodes()
     let mut json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
     json["root"]["nodes"]["phase"] = serde_json::json!({ "x": 123.0, "y": 45.0 });
+    // Layout-vs-source reconciliation only happens on the projecting paths
+    // (pre-v3 migration, promotion, agentic edits): once a graph payload
+    // exists it is authoritative and source edits behind it are out of
+    // contract (spec §4.1b). Drop the payload so this exercises that path.
+    json["version"] = serde_json::json!(2);
+    json.as_object_mut().unwrap().remove("graph");
     fs::write(&sidecar_path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
 
     fs::write(
@@ -2708,6 +2802,7 @@ fn node_size_uses_cached_proportional_character_widths() {
         width: None,
         param: None,
         inline_inputs: Vec::new(),
+        synthesized: false,
         diagnostic: None,
         source: None,
     };
@@ -2786,17 +2881,39 @@ fn escape_dismisses_agentic_bubble_through_a_shrink_out_before_dropping_it() {
         "a dismissed bubble must release text capture immediately, not when it finishes animating"
     );
 
-    // Once the shrink-out has played out, the next state write drops it.
-    let mut state = get_patcher_interaction_state(key);
-    let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
-    bubble.closing_at = Some(Instant::now() - Duration::from_secs_f32(AGENTIC_CLOSE_SECS + 0.01));
-    set_patcher_interaction_state(key, state);
+    // The shrink-out has played out, but the frame that draws the bubble *gone*
+    // has not landed yet. Both the bubble and its claim on animation frames
+    // have to outlive that gap: a widget's cached primitive run is only
+    // refreshed while it animates, so pruning here would strand the last
+    // shrinking frame on screen as a ghost until an unrelated event marked the
+    // patcher dirty.
+    let backdate = |ago: f32| {
+        let mut state = get_patcher_interaction_state(key);
+        if let Some(bubble) = state.agentic_bubbles.get_mut(&bubble_id) {
+            bubble.closing_at = Some(Instant::now() - Duration::from_secs_f32(ago));
+        }
+        set_patcher_interaction_state(key, state);
+    };
 
+    backdate(AGENTIC_CLOSE_SECS + 0.01);
+    assert!(
+        get_patcher_interaction_state(key)
+            .agentic_bubbles
+            .contains_key(&bubble_id),
+        "a bubble outlives the end of its shrink-out until the erase frame lands"
+    );
+    assert!(
+        PATCHER_WIDGET.wants_animation_frames(&node),
+        "frames must keep coming past the shrink-out so the bubble is drawn gone"
+    );
+
+    // Settled: the erase frame has had time to render, so it can go.
+    backdate(AGENTIC_CLOSE_SECS + AGENTIC_ANIMATION_SETTLE_SECS + 0.01);
     assert!(
         !get_patcher_interaction_state(key)
             .agentic_bubbles
             .contains_key(&bubble_id),
-        "a finished shrink-out is pruned on the next state write"
+        "a settled shrink-out is pruned on the next state write"
     );
     assert!(!PATCHER_WIDGET.wants_animation_frames(&node));
 }
@@ -2877,6 +2994,210 @@ fn agentic_bubble_enter_emits_submit_payload_and_pending_state() {
     let state = get_patcher_interaction_state(key);
     let bubble = state.agentic_bubbles.get(&bubble_id).expect("bubble");
     assert!(matches!(bubble.state, AgenticBubbleState::Pending { .. }));
+}
+
+/// Clicking the send chevron submits exactly as Enter does. The chevron's hit
+/// rect is recorded by the render pass, so the bubble has to be drawn first.
+#[cfg(target_os = "macos")]
+#[test]
+fn clicking_the_agentic_send_chevron_submits_the_prompt() {
+    let path = temp_patcher_source_path("agentic-bubble-send-click");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut pan = PatcherPanState::default();
+    pan.zoom = 1.0;
+    pan.content_width = 100.0;
+    pan.content_height = 100.0;
+    set_patcher_pan_state(key, pan);
+    let mut state = PatcherInteractionState::default();
+    allocate_agentic_bubble(&mut state, (2.0, 3.0));
+    settle_agentic_bubbles(&mut state);
+    let bubble_id = editing_agentic_bubble_id(&state).expect("editing bubble");
+    state
+        .agentic_bubbles
+        .get_mut(&bubble_id)
+        .expect("bubble")
+        .prompt = "warm folded sine".to_string();
+    set_patcher_interaction_state(key, state);
+    let measurer = VariableWidthTextMeasurer;
+    cache_text_widths(
+        "warm folded sine".to_string(),
+        13.0,
+        &MeasureCtx {
+            text_measurer: Some(&measurer),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            inherited_font_size: 13.0,
+        },
+    );
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let _ = build_metal_primitives_for_patcher(&node, viewport);
+
+    let button = super::state::agentic_buttons_for_test()
+        .into_iter()
+        .find(|button| button.bubble_id == bubble_id)
+        .expect("render records a send chevron for an editable prompt");
+    let (col, row, width, height) = button.rect;
+
+    let click = |col: f32, row: f32| -> Option<WidgetEvent> {
+        match PATCHER_WIDGET.mouse_event(
+            &node,
+            MouseEventKind::Down(MouseButton::Left),
+            col,
+            row,
+            None,
+            None,
+            KeyModifiers::NONE,
+            10.0,
+            20.0,
+        ) {
+            MouseEventOutcome::Dispatch(event) => Some(event),
+            _ => None,
+        }
+    };
+
+    // A click just outside the disc is the canvas's, not the button's.
+    assert!(
+        click(col - 4.0, row + height * 0.5).is_none(),
+        "a click away from the chevron must fall through to the patcher"
+    );
+    assert!(matches!(
+        get_patcher_interaction_state(key)
+            .agentic_bubbles
+            .get(&bubble_id)
+            .expect("bubble")
+            .state,
+        AgenticBubbleState::Editing
+    ));
+
+    let event = click(col + width * 0.5, row + height * 0.5)
+        .expect("clicking the chevron dispatches a submit event");
+    let output = PATCHER_WIDGET
+        .handle_event(&node, event)
+        .expect("on-change output");
+    let Value::Map(map) = &output.args[0] else {
+        panic!("submit payload should be a map");
+    };
+    assert!(matches!(
+        &*map.get("status").expect("status").borrow(),
+        Value::Keyword(status) if status == "agentic-submit"
+    ));
+    assert!(matches!(
+        &*map.get("prompt").expect("prompt").borrow(),
+        Value::String(prompt) if prompt == "warm folded sine"
+    ));
+    let state = get_patcher_interaction_state(key);
+    let bubble = state.agentic_bubbles.get(&bubble_id).expect("bubble");
+    assert!(
+        matches!(bubble.state, AgenticBubbleState::Pending { .. }),
+        "the clicked bubble goes pending just as Enter would leave it"
+    );
+}
+
+/// The header's model chip names the model the bubble will run on, and clicking
+/// it asks the host to open `M-x choose-model`. The picker itself is the host's
+/// — the patcher only raises the request.
+#[cfg(target_os = "macos")]
+#[test]
+fn clicking_the_agentic_model_chip_asks_the_host_for_the_picker() {
+    let path = temp_patcher_source_path("agentic-bubble-model-chip");
+    fs::write(&path, "(out 0)").expect("write source");
+    let mut node = patcher_test_node(&path);
+    node.props.insert(
+        "agent-model".to_string(),
+        Value::String("claude-opus-5".to_string()),
+    );
+    let key = patcher_state_key(&node);
+    let mut pan = PatcherPanState::default();
+    pan.zoom = 1.0;
+    pan.content_width = 100.0;
+    pan.content_height = 100.0;
+    set_patcher_pan_state(key, pan);
+    let mut state = PatcherInteractionState::default();
+    allocate_agentic_bubble(&mut state, (2.0, 3.0));
+    settle_agentic_bubbles(&mut state);
+    let bubble_id = editing_agentic_bubble_id(&state).expect("editing bubble");
+    set_patcher_interaction_state(key, state);
+    let measurer = VariableWidthTextMeasurer;
+    cache_text_widths(
+        "what do you want to build?".to_string(),
+        13.0,
+        &MeasureCtx {
+            text_measurer: Some(&measurer),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            inherited_font_size: 13.0,
+        },
+    );
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 40.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let _ = build_metal_primitives_for_patcher(&node, viewport);
+
+    let chip = super::state::agentic_buttons_for_test()
+        .into_iter()
+        .find(|button| {
+            button.bubble_id == bubble_id
+                && button.kind == super::state::AgenticButtonKind::ChooseModel
+        })
+        .expect("an editable bubble with a model prop draws a model chip");
+    let (col, row, width, height) = chip.rect;
+
+    let outcome = PATCHER_WIDGET.mouse_event(
+        &node,
+        MouseEventKind::Down(MouseButton::Left),
+        col + width * 0.5,
+        row + height * 0.5,
+        None,
+        None,
+        KeyModifiers::NONE,
+        10.0,
+        20.0,
+    );
+    let MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Map(map))) = outcome else {
+        panic!("clicking the model chip should dispatch a custom event");
+    };
+    // The host reads this with `(get event :status)`, which looks the keyword up
+    // as a plain string key — so the key must be "status", not ":status".
+    assert!(
+        matches!(
+            &*map.get("status").expect("status key").borrow(),
+            Value::Keyword(status) if status == super::AGENTIC_CHOOSE_MODEL_STATUS
+        ),
+        "the chip raises the choose-model request the host branches on"
+    );
+    // Asking for the picker must not disturb the prompt being typed.
+    assert!(matches!(
+        get_patcher_interaction_state(key)
+            .agentic_bubbles
+            .get(&bubble_id)
+            .expect("bubble")
+            .state,
+        AgenticBubbleState::Editing
+    ));
 }
 
 #[test]
@@ -3087,6 +3408,64 @@ fn agentic_bubble_resolve_ignores_unrelated_invalid_created_nodes() {
     );
 }
 
+/// A library macro is imported, not defined in the patch, so scanning the
+/// file's text for its `defmacro` finds nothing. That miss used to read as "no
+/// macro is selected", silently downgrading Cmd+K into the create-a-new-macro
+/// flow instead of asking about the macro under the cursor.
+#[test]
+fn cmd_k_on_a_library_macro_targets_that_macro_rather_than_creating_a_new_one() {
+    let Some(root) = crate::defmacro_library::default_library_root() else {
+        panic!("the shared defmacro library should be present in the repo");
+    };
+    let library = crate::defmacro_library::DefmacroLibrary::load(&root).expect("load library");
+    let Some(package) = library.packages().values().next().cloned() else {
+        panic!("the shared defmacro library should contain at least one macro");
+    };
+    let args = package
+        .params
+        .iter()
+        .map(|_| "0".to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let path = temp_patcher_source_path("agentic-bubble-library-macro");
+    fs::write(
+        &path,
+        format!(
+            "(use-defmacro {})\n(def voiced ({} {}))\n(out voiced)",
+            package.name, package.name, args
+        ),
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert("voiced".to_string());
+    set_patcher_interaction_state(key, state);
+
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+
+    let state = get_patcher_interaction_state(key);
+    let bubble = state.agentic_bubbles.values().next().expect("bubble");
+    match &bubble.target {
+        AgenticBubbleTarget::EditMacro {
+            macro_name, source, ..
+        } => {
+            assert_eq!(macro_name, &package.name);
+            assert!(
+                source.contains(&format!("(defmacro {}", package.name)),
+                "the bubble must carry the library macro's source, got {source:?}"
+            );
+        }
+        other => panic!("cmd+k on a library macro must target it, got {other:?}"),
+    }
+}
+
 #[test]
 fn agentic_bubble_cmd_k_on_selected_macro_creates_edit_target() {
     let path = temp_patcher_source_path("agentic-bubble-edit-target");
@@ -3202,6 +3581,74 @@ fn agentic_bubble_bound_to_a_macro_names_it_in_the_header() {
     );
 }
 
+/// A settled answer carries a follow-up composer under its body, below the last
+/// answer line, so the conversation reads as still open.
+#[cfg(target_os = "macos")]
+#[test]
+fn agentic_bubble_answer_renders_a_follow_up_composer_below_its_body() {
+    let path = temp_patcher_source_path("agentic-bubble-follow-up-render");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut pan = PatcherPanState::default();
+    pan.zoom = 1.0;
+    pan.content_width = 100.0;
+    pan.content_height = 100.0;
+    set_patcher_pan_state(key, pan);
+    let mut state = PatcherInteractionState::default();
+    let bubble_id = allocate_agentic_bubble(&mut state, (2.0, 3.0));
+    let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    bubble.state = AgenticBubbleState::Answer {
+        text: "It crossfades toward amt.".to_string(),
+        answered_at: Instant::now() - Duration::from_secs_f32(AGENTIC_ANSWER_RESIZE_SECS + 0.01),
+    };
+    let measurer = VariableWidthTextMeasurer;
+    cache_agentic_bubble_text_widths(
+        bubble,
+        &MeasureCtx {
+            text_measurer: Some(&measurer),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            inherited_font_size: 13.0,
+        },
+    );
+    settle_agentic_bubbles(&mut state);
+    set_patcher_interaction_state(key, state);
+
+    let prims = build_metal_primitives_for_patcher(
+        &node,
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 40.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+    );
+
+    let row_of = |needle: &str| {
+        prims
+            .iter()
+            .find_map(|prim| match inner_prim(prim) {
+                MetalPrimitive::ProportionalText(text) if text.text.contains(needle) => {
+                    Some(text.row)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected text containing {needle:?}"))
+    };
+    assert!(
+        row_of("Send a follow-up") > row_of("crossfades"),
+        "the follow-up composer sits below the answer body"
+    );
+}
+
 #[test]
 fn agentic_bubble_edit_submit_payload_includes_macro_context() {
     let path = temp_patcher_source_path("agentic-bubble-edit-submit");
@@ -3309,6 +3756,135 @@ fn agentic_bubble_answer_resolution_keeps_source_unchanged() {
     );
 }
 
+/// Typing at a settled answer composes a follow-up, and Enter sends it as the
+/// next turn of the same conversation: the answered exchange rides along as
+/// history so the agent is not asked the question cold.
+#[test]
+fn agentic_bubble_follow_up_submits_with_prior_turn_as_history() {
+    let path = temp_patcher_source_path("agentic-bubble-follow-up");
+    fs::write(
+        &path,
+        "(defmacro smooth (sig amt) (mix sig amt 0.5))\n(def input (in 1))\n(def shaped (smooth input 0.25))\n(out shaped)",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    let bubble_id = allocate_agentic_bubble_with_target(
+        &mut state,
+        (1.0, 1.0),
+        AgenticBubbleTarget::EditMacro {
+            instance_node_id: "shaped".to_string(),
+            macro_name: "smooth".to_string(),
+            params: vec!["sig".to_string(), "amt".to_string()],
+            source: "(defmacro smooth (sig amt) (mix sig amt 0.5))".to_string(),
+        },
+    );
+    let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    bubble.prompt = "what does it do?".to_string();
+    bubble.generation = 1;
+    bubble.state = AgenticBubbleState::Pending {
+        started_at: Instant::now(),
+    };
+    set_patcher_interaction_state(key, state);
+    resolve_agentic_bubble_answer(&path, &bubble_id, 1, "It crossfades toward amt.");
+
+    for ch in "why?".chars() {
+        PATCHER_WIDGET.key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Char(ch),
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+    }
+    let typed = get_patcher_interaction_state(key);
+    let typed = typed.agentic_bubbles.get(&bubble_id).expect("bubble");
+    assert_eq!(typed.follow_up, "why?");
+    assert!(
+        matches!(&typed.state, AgenticBubbleState::Answer { text, .. } if text.contains("crossfades")),
+        "the answer stays on screen while the follow-up is composed"
+    );
+
+    let event = PATCHER_WIDGET
+        .key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE,
+            },
+        )
+        .expect("submit event");
+    let output = PATCHER_WIDGET
+        .handle_event(&node, event)
+        .expect("on-change output");
+    let Value::Map(map) = &output.args[0] else {
+        panic!("submit payload should be a map");
+    };
+    assert!(matches!(
+        &*map.get("prompt").expect("prompt").borrow(),
+        Value::String(prompt) if prompt == "why?"
+    ));
+    let Value::List(history) = &*map.get("history").expect("history").borrow() else {
+        panic!("history should be a list");
+    };
+    let history: Vec<String> = history
+        .iter()
+        .map(|item| match &*item.borrow() {
+            Value::String(text) => text.clone(),
+            other => panic!("history entries should be strings, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        history,
+        vec![
+            "what does it do?".to_string(),
+            "It crossfades toward amt.".to_string()
+        ]
+    );
+
+    let state = get_patcher_interaction_state(key);
+    let bubble = state.agentic_bubbles.get(&bubble_id).expect("bubble");
+    assert!(matches!(bubble.state, AgenticBubbleState::Pending { .. }));
+    assert_eq!(bubble.generation, 2);
+    assert!(
+        bubble.follow_up.is_empty(),
+        "the composer clears once its follow-up is sent"
+    );
+}
+
+/// Command chords keep working with an answer on screen, so the follow-up box
+/// cannot swallow the patcher's own shortcuts.
+#[test]
+fn agentic_bubble_follow_up_leaves_command_chords_to_the_patcher() {
+    let path = temp_patcher_source_path("agentic-bubble-follow-up-chords");
+    fs::write(&path, "(out 0)").expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    let bubble_id = allocate_agentic_bubble(&mut state, (1.0, 1.0));
+    let bubble = state.agentic_bubbles.get_mut(&bubble_id).expect("bubble");
+    bubble.state = AgenticBubbleState::Answer {
+        text: "an answer".to_string(),
+        answered_at: Instant::now(),
+    };
+    set_patcher_interaction_state(key, state);
+
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::SUPER,
+        },
+    );
+    let state = get_patcher_interaction_state(key);
+    let bubble = state.agentic_bubbles.get(&bubble_id).expect("bubble");
+    assert!(
+        bubble.follow_up.is_empty(),
+        "cmd+c must not type into the follow-up box"
+    );
+}
+
 #[test]
 fn agentic_bubble_macro_edit_resolution_replaces_macro_and_keeps_instance() {
     let path = temp_patcher_source_path("agentic-bubble-edit-resolve");
@@ -3412,9 +3988,10 @@ fn agentic_bubble_grows_into_its_box_on_open() {
         (grown.width - rect.width).abs() < 0.5,
         "grow-in lands on the settled box, got {grown:?}"
     );
+    let resting = agentic_card_corner_radius(rect, viewport, 1.0);
     assert!(
-        (corner - SQUARE_CORNER_RADIUS).abs() < 0.01,
-        "grow-in ends square, got {corner}"
+        (corner - resting).abs() < 0.02,
+        "grow-in settles on the card's resting radius {resting}, got {corner}"
     );
     assert!((faded.a - fill.a).abs() < 1e-3, "fade completes early");
     assert!(text_visible, "prompt text is shown once the box has formed");
@@ -3531,7 +4108,7 @@ fn agentic_completion_morph_interpolates_bubble_box_into_node_chrome() {
         from: Some(pose),
     };
 
-    let (rect, corner, fill, _) = agentic_morph_chrome(
+    let (rect, corner, fill, _, flatness) = agentic_morph_chrome(
         &morph_at(Duration::ZERO),
         node_rect,
         bg,
@@ -3545,16 +4122,21 @@ fn agentic_completion_morph_interpolates_bubble_box_into_node_chrome() {
         (rect.col - 5.0).abs() < 0.2 && (rect.width - 18.0).abs() < 0.2,
         "morph starts at the bubble's rect, got {rect:?}"
     );
+    let bubble_resting = agentic_card_corner_radius(rect, viewport, zoom);
     assert!(
-        (corner - SQUARE_CORNER_RADIUS).abs() < 1e-4,
-        "morph starts square, got {corner}"
+        (corner - bubble_resting).abs() < 1e-3,
+        "morph starts at the card's resting radius {bubble_resting}, got {corner}"
     );
     assert!(
         (fill.r - pose.fill[0]).abs() < 0.02,
         "morph starts at the bubble's fill"
     );
+    assert!(
+        (flatness - AGENTIC_CARD_FLATNESS).abs() < 1e-3,
+        "morph starts as flat as the card it came from, got {flatness}"
+    );
 
-    let (rect, corner, fill, _) = agentic_morph_chrome(
+    let (rect, corner, fill, _, landed_flatness) = agentic_morph_chrome(
         &morph_at(Duration::from_secs_f32(AGENTIC_MORPH_SHAPE_SECS)),
         node_rect,
         bg,
@@ -3569,12 +4151,16 @@ fn agentic_completion_morph_interpolates_bubble_box_into_node_chrome() {
         "shape lands on the node's rect, got {rect:?}"
     );
     assert!(
-        corner > SQUARE_CORNER_RADIUS * 10.0,
-        "shape lands rounded, got {corner}"
+        corner > bubble_resting * 1.5,
+        "shape opens up past the card's radius {bubble_resting} into the node's, got {corner}"
     );
     assert!(
         (fill.r - bg.r).abs() < 0.01,
         "colour lands on the node's background"
+    );
+    assert!(
+        (landed_flatness - NODE_CHROME_FLATNESS).abs() < 1e-3,
+        "the node's bevel has fully arrived by the end of the shape window, got {landed_flatness}"
     );
 
     assert!(
@@ -5960,6 +6546,7 @@ fn debug_emit_uses_macro_parameter_names_for_edited_connections() {
         width: None,
         param: None,
         inline_inputs: Vec::new(),
+        synthesized: false,
         diagnostic: None,
         source: None,
     });
@@ -10862,6 +11449,338 @@ fn port_tooltips_use_macro_parameter_and_output_names() {
     );
 }
 
+fn inline_arg_tooltip_patch_source() -> &'static str {
+    "(defmacro fm-operator (carrier modulator index) (+ carrier (* modulator index)))\n\
+     (def pitch (in 1 @name pitch))\n\
+     (def fm1 (fm-operator pitch (phasor 2) 1.0))\n\
+     (def fm2 (fm-operator pitch 0.5 1.0))\n\
+     (out fm1 1)"
+}
+
+#[test]
+fn label_arg_spans_track_argument_indices_not_token_order() {
+    let mut patch = parse(inline_arg_tooltip_patch_source());
+
+    // A connected argument still draws a `?`, so both of fm1's displayed
+    // arguments are spanned and here token order happens to match arg order.
+    let fm1 = patch.nodes.iter().find(|node| node.id == "fm1").unwrap();
+    assert_eq!(node_display_label(fm1), "fm-operator ? 1");
+    assert_eq!(
+        node_display_label_arg_spans(fm1),
+        vec![(1, 12..13), (2, 14..15)]
+    );
+
+    // An argument the projector could not represent renders nothing at all, so
+    // the label's first token is the node's *third* argument.
+    let fm2 = patch
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "fm2")
+        .unwrap();
+    fm2.args[1] = ArgValue::Literal("<expr>".to_string());
+    let label = node_display_label(fm2);
+    let spans = node_display_label_arg_spans(fm2);
+    assert_eq!(label, "fm-operator 1");
+    assert_eq!(spans, vec![(2, 12..13)]);
+    let (_, span) = spans[0].clone();
+    assert_eq!(
+        label
+            .chars()
+            .skip(span.start)
+            .take(span.len())
+            .collect::<String>(),
+        "1",
+        "the span must select the token the label actually drew"
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn cache_inline_arg_label_widths(patch: &Patch, node_id: &str) -> String {
+    let measurer = VariableWidthTextMeasurer;
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: NODE_FONT_SIZE,
+    };
+    let node = patch.nodes.iter().find(|node| node.id == node_id).unwrap();
+    let label = node_display_label(node);
+    cache_text_widths(label.clone(), NODE_FONT_SIZE, &measure_ctx);
+    label
+}
+
+/// Center of the `arg_index` token of `label`, in the same coordinates the
+/// renderer draws it at.
+#[cfg(target_os = "macos")]
+fn label_arg_center_col(
+    label: &str,
+    spans: &[(usize, std::ops::Range<usize>)],
+    arg_index: usize,
+    node_rect: Rect,
+    zoom: f32,
+) -> f32 {
+    let (_, span) = spans.iter().find(|(idx, _)| *idx == arg_index).unwrap();
+    let start = measured_cursor_offset(label, NODE_FONT_SIZE, span.start).unwrap();
+    let end = measured_cursor_offset(label, NODE_FONT_SIZE, span.end).unwrap();
+    node_rect.col + NODE_TEXT_COL_OFFSET * zoom + (start + end) * 0.5 * zoom
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn hit_patcher_label_arg_picks_the_token_under_the_pointer() {
+    let patch = parse(inline_arg_tooltip_patch_source());
+    let label = cache_inline_arg_label_widths(&patch, "fm2");
+    let spans =
+        node_display_label_arg_spans(patch.nodes.iter().find(|node| node.id == "fm2").unwrap());
+
+    let state = PatcherInteractionState::default();
+    let ordered = ordered_patch_nodes(&patch, &state, "root");
+    let draw_rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 100.0,
+        height: 100.0,
+    };
+    let pan = PatcherPanState::default();
+    let zoom = patcher_zoom(&pan);
+    let node_rect = patch_node_rects(&patch, draw_rect, &pan)["fm2"];
+    let row = node_rect.row + node_rect.height * 0.5;
+
+    for arg_index in [1usize, 2usize] {
+        let col = label_arg_center_col(&label, &spans, arg_index, node_rect, zoom);
+        assert_eq!(
+            hit_patcher_label_arg(&patch, &ordered, draw_rect, &pan, col, row)
+                .map(|arg| (arg.node_id, arg.input_index)),
+            Some(("fm2".to_string(), arg_index)),
+            "pointer over the token for argument {arg_index} must hit it"
+        );
+    }
+
+    assert_eq!(
+        hit_patcher_label_arg(
+            &patch,
+            &ordered,
+            draw_rect,
+            &pan,
+            node_rect.col + NODE_TEXT_COL_OFFSET * zoom,
+            row,
+        ),
+        None,
+        "the operator name is not an argument token"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn hovered_port_wins_over_the_label_token_under_the_same_pointer() {
+    let path = temp_patcher_source_path("label-arg-hover-precedence");
+    fs::write(&path, inline_arg_tooltip_patch_source()).expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let parsed = parse(inline_arg_tooltip_patch_source());
+    let label = cache_inline_arg_label_widths(&parsed, "fm1");
+    let spans =
+        node_display_label_arg_spans(parsed.nodes.iter().find(|node| node.id == "fm1").unwrap());
+
+    let (patch, pan, _view_key) =
+        load_interactive_patch_for_node(&node).expect("interactive patch");
+    let zoom = patcher_zoom(&pan);
+    let node_rect = patch_node_rects(&patch, node.rect, &pan)["fm1"];
+    // The `?` token for argument 1 sits under the node's top edge, where its
+    // input port is also drawn.
+    let col = label_arg_center_col(&label, &spans, 1, node_rect, zoom);
+
+    // Tiny cells blow the port's pixel hit radius up to cover the whole node,
+    // so both targets are live at this one point.
+    handle_patcher_pointer_moved(&node, col, node_rect.row, 0.5, 0.5);
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        state.hovered_input_port.is_some(),
+        "the port must be hovered at this point for the precedence check to mean anything"
+    );
+    assert_eq!(
+        state.hovered_label_arg, None,
+        "a hovered port is the more specific target and must win"
+    );
+
+    // With large cells only the label token is in range.
+    handle_patcher_pointer_moved(&node, col, node_rect.row, 1000.0, 1000.0);
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(state.hovered_input_port, None);
+    assert_eq!(
+        state
+            .hovered_label_arg
+            .map(|arg| (arg.node_id, arg.input_index)),
+        Some(("fm1".to_string(), 1))
+    );
+
+    let _ = fs::remove_file(path);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn hovered_inline_arg_renders_the_same_tooltip_as_its_port() {
+    let patch = parse(inline_arg_tooltip_patch_source());
+    let label = cache_inline_arg_label_widths(&patch, "fm2");
+    let expected = input_port_tooltip(
+        &patch,
+        &InputPortRef {
+            node_id: "fm2".to_string(),
+            input_index: 1,
+        },
+    )
+    .expect("port tooltip");
+    assert_eq!(expected, "in 2: modulator");
+
+    let measurer = VariableWidthTextMeasurer;
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: NODE_FONT_SIZE,
+    };
+    cache_text_widths(preview(&expected, 48), 10.5, &measure_ctx);
+
+    let state = PatcherInteractionState {
+        hovered_label_arg: Some(InputPortRef {
+            node_id: "fm2".to_string(),
+            input_index: 1,
+        }),
+        ..PatcherInteractionState::default()
+    };
+    let draw_rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 100.0,
+        height: 100.0,
+    };
+    let pan = PatcherPanState::default();
+    let zoom = patcher_zoom(&pan);
+    let node_rect = patch_node_rects(&patch, draw_rect, &pan)["fm2"];
+    let mut prims = Vec::new();
+    draw_patch(
+        &mut prims,
+        &patch,
+        draw_rect,
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 100.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+        &pan,
+        &state,
+    );
+
+    let tooltips = prims
+        .iter()
+        .filter_map(|prim| match inner_prim(prim) {
+            MetalPrimitive::ProportionalText(text) if text.text == expected => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tooltips.len(),
+        1,
+        "hovering an inlined argument must draw exactly one tooltip"
+    );
+    let spans =
+        node_display_label_arg_spans(patch.nodes.iter().find(|node| node.id == "fm2").unwrap());
+    let token_col = label_arg_center_col(&label, &spans, 1, node_rect, zoom);
+    assert!(
+        (tooltips[0].col - token_col).abs() < node_rect.width,
+        "the tooltip must be anchored over the token, not at the node origin"
+    );
+    assert!(
+        tooltips[0].row < node_rect.row,
+        "the tooltip sits above the node like the input port tooltip does"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn hovered_inline_arg_token_is_tinted_apart_from_the_rest_of_the_label() {
+    let patch = parse(inline_arg_tooltip_patch_source());
+    let label = cache_inline_arg_label_widths(&patch, "fm2");
+    assert_eq!(label, "fm-operator 0.5 1");
+
+    let draw_rect = Rect {
+        row: 0.0,
+        col: 0.0,
+        width: 100.0,
+        height: 100.0,
+    };
+    let pan = PatcherPanState::default();
+    let viewport = WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 20.0,
+        vp_w: 1000.0,
+        vp_h: 800.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        overlay_viewport_bottom: 100.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let label_runs = |state: &PatcherInteractionState| {
+        let mut prims = Vec::new();
+        draw_patch(&mut prims, &patch, draw_rect, viewport, &pan, state);
+        prims
+            .iter()
+            .filter_map(|prim| match inner_prim(prim) {
+                MetalPrimitive::ProportionalText(text)
+                    if "fm-operator 0.5 1".contains(text.text.trim())
+                        && !text.text.trim().is_empty() =>
+                {
+                    Some((text.text.clone(), text.fg.to_rgba()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let unhovered = label_runs(&PatcherInteractionState::default());
+    assert!(
+        !unhovered
+            .iter()
+            .any(|(_, color)| *color == theme::PATCHER_NODE_TAIL_TEXT_HOVER().to_rgba()),
+        "nothing is tinted while no argument is hovered: {unhovered:?}"
+    );
+
+    let hovered = label_runs(&PatcherInteractionState {
+        hovered_label_arg: Some(InputPortRef {
+            node_id: "fm2".to_string(),
+            input_index: 1,
+        }),
+        ..PatcherInteractionState::default()
+    });
+    let tinted = hovered
+        .iter()
+        .filter(|(_, color)| *color == theme::PATCHER_NODE_TAIL_TEXT_HOVER().to_rgba())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tinted.len(),
+        1,
+        "exactly the hovered token is tinted: {hovered:?}"
+    );
+    assert_eq!(tinted[0].0, "0.5");
+    assert!(
+        hovered.iter().any(|(text, color)| text.trim() == "1"
+            && *color == theme::PATCHER_NODE_TAIL_TEXT().to_rgba()),
+        "the rest of the tail keeps the ordinary color: {hovered:?}"
+    );
+}
+
 #[test]
 fn instrument_signature_modulator_inputs_are_hidden_boilerplate() {
     let patch = parse(
@@ -14355,6 +15274,21 @@ fn patcher_reports_text_capture_only_while_node_text_edit_is_active() {
     });
     set_patcher_interaction_state(key, state);
     assert!(patcher_has_text_edit(&node));
+
+    // A follow-up composer counts as text entry too, or the editor treats the
+    // space bar as a transport key and words run together as they are typed.
+    let mut state = PatcherInteractionState::default();
+    let bubble_id = allocate_agentic_bubble(&mut state, (1.0, 1.0));
+    state
+        .agentic_bubbles
+        .get_mut(&bubble_id)
+        .expect("bubble")
+        .state = AgenticBubbleState::Answer {
+        text: "an answer".to_string(),
+        answered_at: Instant::now(),
+    };
+    set_patcher_interaction_state(key, state);
+    assert!(patcher_has_text_edit(&node));
 }
 
 #[test]
@@ -17218,7 +18152,7 @@ fn metal_render_emits_agentic_bubble_body_as_foreground_overlay() {
     set_patcher_interaction_state(key, state);
     let measurer = VariableWidthTextMeasurer;
     cache_text_widths(
-        "cmd+k prompt".to_string(),
+        "what do you want to build?".to_string(),
         13.0,
         &MeasureCtx {
             text_measurer: Some(&measurer),
@@ -17798,6 +18732,7 @@ fn metal_render_places_committed_node_tail_after_measured_space_width() {
             width: None,
             param: None,
             inline_inputs: Vec::new(),
+            synthesized: false,
             diagnostic: None,
             source: None,
         }],
@@ -18132,7 +19067,7 @@ fn eject_flips_authored_flag_but_keeps_layout_for_repromotion() {
     let after: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
     assert_eq!(after["authored"], serde_json::json!(false));
-    assert_eq!(after["version"], serde_json::json!(2));
+    assert_eq!(after["version"], serde_json::json!(3));
     assert_eq!(
         after["root"]["nodes"], before["root"]["nodes"],
         "eject must keep layout data for re-promotion"
@@ -19433,6 +20368,37 @@ fn estimated_label_width_calibrates_against_measured_advances() {
         (0.9..=1.2).contains(&ratio),
         "an unmeasured label should be estimated from the measured advances: \
          estimated={estimated} expected={expected} ratio={ratio}"
+    );
+}
+
+/// The bubble header shares one row between the status (which widens as the
+/// elapsed counter ticks) and the bound macro name, so the name has to be cut
+/// to whatever is left instead of running under the status text.
+#[test]
+#[cfg(target_os = "macos")]
+fn bound_macro_name_is_truncated_to_the_header_space_left() {
+    let name = "a-very-long-macro-name-that-cannot-fit";
+    let full = estimated_label_width_cells(name, AGENTIC_HEADER_FONT_SIZE);
+
+    assert_eq!(
+        truncated_to_width_cells(name, AGENTIC_HEADER_FONT_SIZE, full + 1.0).as_deref(),
+        Some(name),
+        "a name with room to spare should render whole"
+    );
+
+    let fitted = truncated_to_width_cells(name, AGENTIC_HEADER_FONT_SIZE, full * 0.4)
+        .expect("a partial name still fits");
+    assert!(fitted.ends_with('…'), "a cut name should be marked: {fitted}");
+    assert!(fitted.chars().count() > 1, "some of the name should survive");
+    assert!(
+        estimated_label_width_cells(&fitted, AGENTIC_HEADER_FONT_SIZE) <= full * 0.4,
+        "the truncated name should fit the space given: {fitted}"
+    );
+
+    assert_eq!(
+        truncated_to_width_cells(name, AGENTIC_HEADER_FONT_SIZE, 0.0),
+        None,
+        "with no room at all the name should be dropped rather than clipped"
     );
 }
 
@@ -21678,4 +22644,410 @@ fn resolving_a_connect_plan_reaches_the_patcher_on_change_callback() {
         !editor.notify_patcher_semantic_change(std::path::Path::new("/nope/dsp.lisp")),
         "an unrelated path notifies nothing"
     );
+}
+
+/// A node being typed into is projected as a bare builtin carrying the whole
+/// typed text as its op, so re-attaching the attribute suffix doubled its label
+/// and stretched the node to roughly twice the width of the text it showed.
+#[test]
+fn editing_node_label_does_not_repeat_its_attributes() {
+    let macro_arities = HashMap::new();
+    let text = "param breath @min 0.25 @max 1 @default 0.5";
+    let editing = node_from_editor_text("p", text, (0.0, 0.0), &macro_arities, true);
+    assert_eq!(node_display_label(&editing), text);
+
+    let committed = node_from_editor_text("p", text, (0.0, 0.0), &macro_arities, false);
+    assert_eq!(node_display_label(&committed), text);
+    assert_eq!(
+        super::display::node_size(&editing).0,
+        super::display::node_size(&committed).0,
+        "a node should not resize just because it is being edited"
+    );
+}
+
+
+/// The motivating bug for spec §4.1b: a node typed as `mymacro ? 0.3 ? 0.9`
+/// reopened with `0.3` as a separate number node cabled into the inlet.
+///
+/// Generated lisp cannot distinguish an inline literal from a wired constant
+/// node — both print as `(mymacro pitch 0.3 pitch 0.9)` — so the projector
+/// resolves it by rule and pulls any literal followed by a connected argument
+/// out into a constant node. The graph payload records the model itself, so
+/// the distinction no longer has to survive a parse.
+#[test]
+fn graph_payload_keeps_inline_literals_next_to_cabled_inputs() {
+    let path = temp_patcher_dsp_path("patcher-payload-inline-args");
+    let source = "(defmacro mymacro (a b c d) (* (+ a b) (+ c d)))\n\
+                  (def pitch (in 1 @name pitch))\n\
+                  (def voice (mymacro pitch 0.3 pitch 0.9))\n\
+                  (out voice 1 @name audio)";
+    fs::write(&path, source).unwrap();
+
+    // Projecting the source is lossy in exactly this way; that is the behavior
+    // the payload exists to bypass, so assert it rather than assume it.
+    let (_, projected) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    assert!(
+        projected
+            .nodes
+            .iter()
+            .any(|node| node.kind == NodeKind::Constant && node.op == "0.3"),
+        "projecting the source pulls the inline literal out into a constant node"
+    );
+
+    // The model the user actually authored: `0.3` typed inline in the box.
+    let mut patch = projected.clone();
+    patch
+        .nodes
+        .retain(|node| !(node.kind == NodeKind::Constant && node.op == "0.3"));
+    patch
+        .connections
+        .retain(|connection| connection.from_node != "0.3");
+    let voice = patch
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "voice")
+        .unwrap();
+    voice.args[1] = ArgValue::Literal("0.3".to_string());
+
+    sidecar::save_current_layout(&path, &patch, &PatcherInteractionState::default()).unwrap();
+
+    let (_, reloaded) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    let voice = reloaded
+        .nodes
+        .iter()
+        .find(|node| node.id == "voice")
+        .expect("macro instance survives the round trip");
+    assert_eq!(
+        voice.args[1],
+        ArgValue::Literal("0.3".to_string()),
+        "inline literal stays inline: args were {:?}",
+        voice.args
+    );
+    assert_eq!(
+        voice.args[3],
+        ArgValue::Literal("0.9".to_string()),
+        "the trailing literal is unaffected"
+    );
+    assert!(
+        !reloaded
+            .nodes
+            .iter()
+            .any(|node| node.kind == NodeKind::Constant),
+        "no constant node is materialized for an inline literal"
+    );
+    assert!(
+        !reloaded
+            .connections
+            .iter()
+            .any(|connection| connection.to_node == "voice" && connection.to_input == 1),
+        "and nothing is cabled into the inlet the literal fills"
+    );
+}
+
+/// A v2 sidecar has no graph payload: it must still load by projecting the
+/// source (spec §4.1b migration), and materialize a payload on the next save.
+#[test]
+fn pre_v3_sidecars_load_by_projecting_and_migrate_on_save() {
+    let path = temp_patcher_dsp_path("patcher-payload-migration");
+    let source = "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)";
+    fs::write(&path, source).unwrap();
+    save_layout_sidecar_for(&path);
+
+    let sidecar_path = sidecar::sidecar_path_for_source(&path);
+    let mut json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    assert!(
+        json.get("graph").is_some(),
+        "a patch-editor save writes a graph payload"
+    );
+    json["version"] = serde_json::json!(2);
+    json.as_object_mut().unwrap().remove("graph");
+    fs::write(&sidecar_path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+    let (_, patch) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    assert!(
+        patch.nodes.iter().any(|node| node.id == "phase"),
+        "v2 sidecar still opens by projecting the source"
+    );
+
+    save_layout_sidecar_for(&path);
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    assert_eq!(json["version"], serde_json::json!(3));
+    assert!(json.get("graph").is_some(), "next save materializes v3");
+}
+
+/// The payload is gated on `authored` (spec §3.2): agent-authored instruments
+/// have no sidecar and open from source, and an ejected item's payload is
+/// stale by design and must not be consulted.
+#[test]
+fn graph_payload_is_ignored_for_unauthored_items() {
+    let path = temp_patcher_dsp_path("patcher-payload-unauthored");
+    let source = "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(out phase 1 @name audio)";
+    fs::write(&path, source).unwrap();
+    save_layout_sidecar_for(&path);
+
+    // Eject, then hand-edit the code the way the code editor would.
+    sidecar::set_sidecar_authored(&path, false).unwrap();
+    let edited = "(def pitch (in 1 @name pitch))\n(def phase (phasor pitch))\n(def shaped (* phase 0.5))\n(out shaped 1 @name audio)";
+    fs::write(&path, edited).unwrap();
+
+    let (_, patch) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+    assert!(
+        patch.nodes.iter().any(|node| node.id == "shaped"),
+        "an unauthored item projects the edited source, never the stale payload"
+    );
+}
+
+
+
+
+
+/// A payload can be written from a projection that had no defmacro library in
+/// hand — the call then sits in the model as an unknown-operator `Builtin`.
+/// Before rev 3 every open re-projected and the mistake healed itself; now that
+/// loads trust the payload, operator resolution has to be recomputed against
+/// the library instead of frozen (spec §4.1b).
+#[test]
+fn payload_load_reresolves_library_macros_and_stale_diagnostics() {
+    let library_root = std::env::temp_dir().join(format!(
+        "patcher-payload-library-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(library_root.join("shape")).unwrap();
+    fs::write(
+        library_root.join("shape").join("macro.lisp"),
+        "(defmacro shape (x) (* x 2))",
+    )
+    .unwrap();
+
+    let path = temp_patcher_dsp_path("patcher-payload-library");
+    let source = "(use-defmacro shape)\n(def input (in 1 @name pitch))\n(def out1 (shape input))\n(out out1 1 @name audio)";
+    fs::write(&path, source).unwrap();
+
+    // Save a sidecar from a library-less projection: `shape` is an unknown
+    // operator, and no library macro exists in the model at all.
+    let unresolved = parse_patch_source(source, PatcherIntent::Instrument).unwrap();
+    let call = unresolved
+        .nodes
+        .iter()
+        .find(|node| node.op == "shape")
+        .expect("the call projects even without the library");
+    assert_eq!(call.kind, NodeKind::Builtin);
+    assert!(call.diagnostic.is_some(), "and carries a stale diagnostic");
+    sidecar::save_current_layout(&path, &unresolved, &PatcherInteractionState::default()).unwrap();
+
+    let mut props = patcher_props_for_path(&path);
+    props.insert(
+        "defmacro-library-root".to_string(),
+        Value::String(library_root.to_string_lossy().into()),
+    );
+    let (_, reloaded) = load_patch_from_props(&props).unwrap();
+
+    let call = reloaded
+        .nodes
+        .iter()
+        .find(|node| node.op == "shape")
+        .expect("call survives the payload round trip");
+    assert_eq!(
+        call.kind,
+        NodeKind::MacroInstance,
+        "the library macro resolves on load"
+    );
+    assert_eq!(call.diagnostic, None, "and the stale diagnostic clears");
+    assert!(
+        reloaded.macros.iter().any(|macro_patch| {
+            macro_patch.name == "shape" && matches!(macro_patch.origin, MacroOrigin::Library { .. })
+        }),
+        "library packages are available even when the payload carried none"
+    );
+
+    let generated = generate::generate_patch_source(&reloaded, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(use-defmacro shape)"),
+        "and regeneration still imports it:\n{}",
+        generated.source
+    );
+}
+
+
+
+
+
+/// "Save macro to library" used to rebuild the root model by parsing the
+/// emitted source, so every inline literal came back as a standalone constant
+/// node with no saved position — the patch visibly re-laid itself out the
+/// moment a macro was saved. The action now works off the layout's graph
+/// payload, which is the model the patcher actually holds (spec §4.1b).
+#[test]
+fn save_macro_to_library_preserves_inline_literals_and_drops_local_definition() {
+    let library = temp_defmacro_library("save-preserves-inline", &[]);
+    let path = temp_patcher_dsp_path("save-preserves-inline");
+    // `mix` takes an inline literal followed by a cabled argument — the shape
+    // the projector rewrites into a constant node.
+    let source = "(defmacro shape (x)\n  (* x 2))\n\
+                  (def input (in 1 @name pitch))\n\
+                  (def other (in 2 @name other))\n\
+                  (def mixed (mix input 0.3 other))\n\
+                  (def out1 (shape mixed))\n\
+                  (out out1 1 @name audio)";
+    fs::write(&path, source).unwrap();
+    let mut props = patcher_props_for_path(&path);
+    props.insert(
+        "defmacro-library-root".to_string(),
+        Value::String(library.root().to_string_lossy().into()),
+    );
+
+    // The model as the patcher holds it: `0.3` inline, no constant node.
+    let mut live = load_patch_from_props(&props).unwrap().1;
+    live.nodes
+        .retain(|node| !(node.kind == NodeKind::Constant && node.op == "0.3"));
+    live.connections
+        .retain(|connection| connection.from_node != "0.3");
+    let mixed = live.nodes.iter_mut().find(|node| node.id == "mixed").unwrap();
+    mixed.args[1] = ArgValue::Literal("0.3".to_string());
+    sidecar::save_current_layout(&path, &live, &PatcherInteractionState::default()).unwrap();
+    let before = fs::read_to_string(sidecar::sidecar_path_for_source(&path)).unwrap();
+
+    let action = ActiveMacroLibraryAction {
+        kind: MacroLibraryActionKind::SaveToLibrary,
+        macro_name: "shape".to_string(),
+    };
+    let result = apply_macro_library_action_for_emitted_source(
+        &path,
+        source,
+        Some(&before),
+        PatcherIntent::Instrument,
+        &library,
+        &action,
+        &PatcherInteractionState::default(),
+    )
+    .unwrap();
+
+    let after: serde_json::Value = serde_json::from_str(&result.layout).unwrap();
+    let nodes = after["graph"]["nodes"].as_array().unwrap();
+    assert!(
+        !nodes.iter().any(|node| node["kind"] == "constant"),
+        "the inline literal must not be re-materialized as a constant node: {:?}",
+        nodes.iter().map(|node| node["id"].clone()).collect::<Vec<_>>()
+    );
+    let mixed = nodes
+        .iter()
+        .find(|node| node["id"] == "mixed")
+        .expect("the mix node survives");
+    assert_eq!(
+        mixed["args"][1],
+        serde_json::json!({ "kind": "literal", "value": "0.3" }),
+        "and stays inline in its argument slot"
+    );
+    assert!(
+        after["graph"]["macros"]
+            .as_array()
+            .is_none_or(|macros| macros.iter().all(|entry| entry["name"] != "shape")),
+        "the saved macro's local definition is dropped from the payload; the \
+         package reattaches with Library origin on the next load"
+    );
+    assert!(result.source.contains("(use-defmacro shape)"));
+    assert!(!result.source.contains("(defmacro shape"));
+}
+
+#[test]
+fn retyping_an_inline_mod_slot_releases_its_accessor_cable() {
+    let source = "(defmacro bank (a b c d)\n  (+ a b c d))\n\
+                  (param freq @default 1 @min 0 @max 2 @mod true)\n\
+                  (param stretch @default 1 @min 0 @max 2 @mod true)\n\
+                  (def input (in 1 @name pitch))\n\
+                  (def voice (bank input (mod freq) (mod stretch) (mod stretch)))\n\
+                  (out voice 1 @name audio)";
+    let patch = parse(source);
+    let node = patch.nodes.iter().find(|node| node.id == "voice").unwrap();
+    let base = node_display_label(node);
+    assert_eq!(base, "bank freq~ stretch~ stretch~");
+
+    let retype = |text: &str| {
+        let mut state = PatcherInteractionState::default();
+        set_node_edit_position(&mut state, "root", node, node.position, base.clone());
+        state
+            .edit_state
+            .nodes
+            .get_mut(&node_edit_key("root", "voice"))
+            .unwrap()
+            .text = text.to_string();
+        patch_with_interaction_state(patch.clone(), &state, "root")
+    };
+
+    let applied = retype("bank 2 stretch~ stretch~");
+    let voice = applied.nodes.iter().find(|node| node.id == "voice").unwrap();
+    assert_eq!(
+        node_display_label(voice),
+        "bank 2 stretch~ stretch~",
+        "the typed literal must win over the stale accessor cable"
+    );
+    assert!(
+        !applied.connections.iter().any(|connection| {
+            connection.to_node == "voice"
+                && connection.to_input == 1
+                && connection.presentation == InputPresentation::InlineModParam
+        }),
+        "and the accessor cable into that slot is gone"
+    );
+
+    // Retyping one param to another rebuilds the accessor against the new one.
+    let applied = retype("bank stretch~ stretch~ stretch~");
+    let voice = applied.nodes.iter().find(|node| node.id == "voice").unwrap();
+    assert_eq!(node_display_label(voice), "bank stretch~ stretch~ stretch~");
+    assert_eq!(
+        voice.inline_inputs.get(1).and_then(|input| input.as_ref()),
+        Some(&super::model::InlineInput::ModParam("stretch".to_string())),
+    );
+}
+
+/// `(mod X)` resolves only against a BARE top-level `(param X …)` form, so a
+/// param the source bound under another name — `(def value (param embouchure
+/// …))` — has to shed its wrapper once it becomes modulatable. Emitting
+/// `(mod value)`, or keeping the wrapper and emitting `(mod embouchure)`, both
+/// failed to compile with "does not reference a parameter".
+#[test]
+fn modulating_a_def_wrapped_param_emits_a_bare_param_form() {
+    let source = "(defmacro jet (a b c d)\n  (+ a b c d))\n\
+                  (def value (param embouchure @default 1 @min 0 @max 2))\n\
+                  (def input (in 1 @name pitch))\n\
+                  (def voice (jet input embouchure 0.5 0.25))\n\
+                  (out voice 1 @name audio)";
+    let patch = parse(source);
+    let node = patch.nodes.iter().find(|node| node.id == "voice").unwrap();
+    let base = node_display_label(node);
+
+    let mut state = PatcherInteractionState::default();
+    set_node_edit_position(&mut state, "root", node, node.position, base.clone());
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "voice"))
+        .unwrap()
+        .text = base.replacen("embouchure", "embouchure~", 1);
+    let applied = patch_with_interaction_state(patch.clone(), &state, "root");
+
+    let generated = generate::generate_patch_source(&applied, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(param embouchure"),
+        "the modulatable param is emitted bare, not def-wrapped:\n{}",
+        generated.source
+    );
+    assert!(
+        !generated.source.contains("(def value (param"),
+        "the `def value` wrapper must not survive:\n{}",
+        generated.source
+    );
+    assert!(
+        generated.source.contains("(mod embouchure)"),
+        "and the accessor names the param, not the binding:\n{}",
+        generated.source
+    );
+    compile_patch_source_with_dgenlisp(&generated.source)
+        .expect("the regenerated patch must compile");
 }

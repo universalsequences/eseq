@@ -1,7 +1,8 @@
 # Patch Editor vs Code Editor Split
 
-Status: rev 2 — Phases 1 + 2 BUILT (commits 7df57e8d, 64814000, 72624fbc on
-`patch-code-editor-split`); remaining: Phase 1b, 3, 4 + §8 deferred tail
+Status: rev 3 — Phases 1 + 2 + 3 BUILT (commits 7df57e8d, 64814000, 72624fbc,
+d9947253, 660340d8 on `patch-code-editor-split`); rev 3 adds Phase 5 (§4.1b
+graph payload as load SOT), remaining: Phase 1b, 4, 5 + §8 deferred tail
 Scope: editor selection + kill write-back. Bottom-panel layout redesign is explicitly OUT of scope (separate effort).
 
 ## 1. Motivation
@@ -37,7 +38,7 @@ Two editing surfaces, one deterministic decision:
 | | Patch editor | Code editor |
 |---|---|---|
 | Who | patch-authored content + all *new* creations | everything else (agent-authored, hand-coded) |
-| Source of truth | in-memory patch model; disk = **canonical generated `dsp.lisp`** + layout sidecar | `dsp.lisp` text, verbatim |
+| Source of truth | in-memory patch model; disk = **serialized graph payload** in the sidecar (authoritative, §4.1b) + generated `dsp.lisp` (compiler/human artifact) | `dsp.lisp` text, verbatim |
 | Code direction | one-way: patch → code (full regeneration, deterministic) | n/a (code *is* the artifact) |
 | Compile trigger | automatic on every semantic edit (unchanged) | explicit "evaluate" (shortcut + button) |
 | Write-back (code → patch) | **deleted** | n/a |
@@ -87,10 +88,15 @@ opening — worst case you always get a working text editor.
 ### 3.3 Manual promotion ("Open as patch")
 
 An explicit action (editor-header button or browser context action) on a
-code-authored item: run the parse; if zero code islands, stamp the v2
+code-authored item: run the parse; if zero code islands, stamp the
 `authored: true` sidecar (materializing default layout) and reopen in the patcher.
 If code islands exist, refuse with the diagnostic list. This is the recovery path for
 the user's genuinely hand-patched pre-v2 items, opt-in per item.
+
+**Rev 3:** promotion writes a fresh v3 graph payload from the projection it just
+ran, and reuses only *positions* from any pre-existing sidecar — a stale `graph`
+must be discarded, else promoting after an eject-and-edit resurrects the
+pre-eject model (§4.1b).
 
 ### 3.4 Demotion / "Eject to code"
 
@@ -98,6 +104,11 @@ Explicit action in the patch editor: set `authored: false` (keep the sidecar for
 possible re-promotion), reopen in the code editor. The generated `dsp.lisp` is already
 on disk and canonical, so ejecting is free and lossless. One-way in spirit: after
 hand-editing, re-promotion only succeeds if the code still parses cleanly.
+
+**Rev 3:** eject is the *only* sanctioned way a patch-authored item's source gets
+hand-edited, and that is what lets §4.1b skip drift detection entirely. While
+`authored: false` the graph payload is stale by design and never consulted;
+re-promotion rebuilds it from the edited source.
 
 ### 3.5 Stop auto-materializing sidecars
 
@@ -111,12 +122,87 @@ sidecars are harmless (they're v1 → code editor) and can be deleted at leisure
 ### 4.1 New model
 
 `dsp.lisp` for a patch-authored item is a **build artifact of the patch model**,
-regenerated *in full* on every semantic edit. The pair
-(canonical `dsp.lisp`, `dsp.layout.json`) is the durable SOT; the in-memory `Patch`
-is loaded by parsing the canonical file — which always succeeds with zero code
-islands because the generator only emits the projector-supported subset. Parsing
-machinery (`parse_patch_source`, `Projector`) is kept unchanged; only the
-*reverse surgical* machinery dies.
+regenerated *in full* on every semantic edit. Parsing machinery
+(`parse_patch_source`, `Projector`) is kept unchanged; only the *reverse
+surgical* machinery dies.
+
+Rev 1–2 made `dsp.lisp` + layout sidecar the durable SOT and loaded the model by
+re-parsing the file. Rev 3 supersedes that: see §4.1b. The durable SOT is the
+serialized graph payload; `dsp.lisp` remains the compiler input and the artifact
+humans and agents read, but is no longer parsed to reconstruct the editor model.
+
+### 4.1b The graph payload is the load SOT (rev 3)
+
+**Rule: the serialized patch model is authoritative on load. Every path that
+produces a model by *projecting from source* writes a fresh payload in the same
+step.**
+
+Rev 1–2 made only one direction deterministic — model → source. The reverse
+(source → model, `Projector::project`) stayed heuristic, because the generated
+lisp is a lossy encoding of the model: distinct models can print to identical
+text. The consequences were not theoretical, and were being paid for in the
+generator:
+
+- **Inline literals vs constant nodes.** `(mymacro a 0.3 b)` is textually
+  identical whether `0.3` was typed inline in the node box or fed by a separate
+  constant node. The projector resolves it by rule
+  (`flush_pending_constant_args`, `project.rs:916`): an inline numeric literal
+  becomes a wired `NodeKind::Constant` as soon as *any later argument in the
+  same call is connected*. To keep round-trips stable, the generator preemptively
+  conceded — `literal_needs_hoisting` (`generate.rs:741`) hoists such a literal
+  into a standalone `(def …)`. Net effect: saving `mymacro ? 0.3 ? 0.9` and
+  reopening it yields a number node cabled into the inlet. The round-trip
+  property held; the model was degraded to make it hold.
+- **Nodes absent from the source.** §4.2b's dead+incomplete nodes are already
+  persisted through the sidecar and re-added on load
+  (`overlay_scope_visible_layout`, `sidecar.rs:654-669`) — so the sidecar was
+  *already* a partial graph store, carrying just enough to be load-bearing and
+  not enough to be authoritative.
+- **Input presentation.** Inline-vs-cable is sidecar-recorded but re-validated on
+  load and silently downgraded to `Cable` when it cannot be resolved
+  (`refresh_patch_inline_inputs`, `model.rs:316-354`), which no constant node
+  ever can (`param: None`).
+
+Under rev 3 the sidecar carries a complete `Patch` serialization (§4.1c) and the
+load path deserializes it directly. Distinctions the lisp cannot express no
+longer need to survive a parse, so the generator stops distorting its output to
+carry them.
+
+**Drift is handled by precedence, not detection.** There is deliberately no hash,
+no divergence check, and no reconciliation. A patch-authored item's `dsp.lisp` is
+not hand-edited: to edit code you eject (§3.4), which sets `authored: false` and
+routes the item to the code editor, where the payload is simply not consulted.
+Re-promotion (§3.3) re-projects the *edited* source and writes a fresh payload —
+hand edits therefore land in the graph by the ordinary promotion path.
+
+The projecting paths that must write a payload are exactly three:
+
+1. **Promotion** (`promote_source_to_patch`, `mod.rs:104`). Reuses pre-existing
+   sidecar *positions* only — it MUST discard any stale `graph`, or promoting
+   after an eject-and-edit resurrects the pre-eject model and discards the code
+   edits it was supposed to absorb.
+2. **The agentic macro-edit flow** (`rematerialize_edited_macro_layout`,
+   `mod.rs:489`), which projects source the Cmd-K bubble has just rewritten.
+   Without a payload write, a stale payload would silently revert agent edits on
+   the next open.
+3. **First open of a pre-rev-3 sidecar** — project once, materialize the payload
+   on next save. Same self-healing shape as the v1 → v2 step (§3.2).
+
+### 4.1c Sidecar v3 format
+
+`ScopeLayout` (`sidecar.rs:56`) gains a `graph` payload holding the full `Patch`:
+nodes (`id`, `kind`, `op`, `args`, `label`, `param`, `width`), connections
+(including `presentation`), macro scopes, and `host_modulators`. Positions and
+cable layout stay where they are. Version bumps to 3; v1 and v2 continue to load
+(v1 still counts as unauthored per §3.2), a v2 sidecar simply has no `graph` and
+takes the project-once migration path above.
+
+Once the payload is authoritative, three pieces of scaffolding lose their reason
+to exist and are removed: `literal_needs_hoisting` and its call site
+(`generate.rs:700-708`, `:741`) — the generator emits inline literals as inline
+text; the omitted-node re-add in `overlay_scope_visible_layout`
+(`sidecar.rs:654-669`); and the inline-presentation downgrade in
+`refresh_patch_inline_inputs` (`model.rs:326-342`).
 
 ### 4.1a No source mapping — the hard rule
 
@@ -161,7 +247,13 @@ New emitter (seed: `emit.rs::emit_patch_debug_lisp`, currently debug-only) repla
   connections, input presentations, local `defmacro`s, staged defmacro-library
   imports (`compile-source` materialization stays as today, mod.rs ~2409).
 - Round-trip invariant (test): `parse(generate(patch)) == patch` (modulo layout),
-  and `generate(parse(generate(patch))) == generate(patch)`.
+  and `generate(parse(generate(patch))) == generate(patch)`. **Rev 3:** this is no
+  longer the correctness contract for *editing* — the editing contract is
+  `deserialize(serialize(patch)) == patch` (§4.1b). The parse round-trip is
+  retained as the fidelity contract for the projecting paths (import, promotion,
+  agentic edits), and is expected to lose distinctions the lisp cannot express
+  (inline literal vs constant node) rather than force the generator to encode
+  them.
 
 ### 4.2a Created-node identity never persists
 
@@ -367,6 +459,12 @@ only for true special forms. Doc-panel rendering in the text editor (the patcher
   copy/paste (Cmd+C/Cmd+V, process-local clipboard with internal-wire remap)
   landed alongside.
 - **Phase 4 — polish.** Text-editor doc panel, "new via code" if wanted. Not started.
+- **Phase 5 — graph payload as load SOT** (§4.1b/§4.1c, rev 3). Sidecar v3 with a
+  full `Patch` serialization; load path deserializes instead of projecting;
+  payload writes on the three projecting paths; delete `literal_needs_hoisting`,
+  the `overlay_scope_visible_layout` omitted-node re-add, and the
+  `refresh_patch_inline_inputs` downgrade. Motivating bug: inline macro args
+  (`mymacro ? 0.3 ? 0.9`) reopening as cabled number nodes.
 
 ### Deferred tail (known, deliberate)
 

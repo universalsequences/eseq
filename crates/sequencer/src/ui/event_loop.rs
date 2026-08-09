@@ -1939,6 +1939,43 @@ pub(crate) fn run_event_loop(
                             &source,
                         ) {
                             Ok(()) => {
+                                // The edit landed in dsp.lisp without touching
+                                // interaction state, so no writeback payload
+                                // (and therefore no compile) is coming from the
+                                // patcher — kick one here or the new macro is
+                                // visible but silent until an unrelated edit.
+                                match std::fs::read_to_string(&pending.path) {
+                                    Ok(source) => match pending.intent {
+                                        eseqlisp::widget_render::patcher::PatcherIntent::Instrument => {
+                                            if let Some(session) =
+                                                sessions.instrument_edit_session.as_mut()
+                                            {
+                                                edit_sessions::queue_instrument_preview_compile(
+                                                    session,
+                                                    &mut sessions.pending_instrument_preview,
+                                                    source,
+                                                    app.graph.sample_rate,
+                                                );
+                                            }
+                                        }
+                                        eseqlisp::widget_render::patcher::PatcherIntent::Effect => {
+                                            if let Some(session) =
+                                                sessions.effect_edit_session.as_mut()
+                                            {
+                                                edit_sessions::queue_effect_preview_compile(
+                                                    session,
+                                                    &mut sessions.pending_effect_preview,
+                                                    source,
+                                                    app.graph.sample_rate,
+                                                );
+                                            }
+                                        }
+                                    },
+                                    Err(error) => eprintln!(
+                                        "[agentic-bubble] macro edit recompile skipped path={} error={error}",
+                                        pending.path.display()
+                                    ),
+                                }
                                 editor.refresh_runtime_side_effects();
                                 editor.mark_needs_redraw();
                                 editor.handle_host_event(HostEvent::Status(format!(

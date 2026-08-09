@@ -7,7 +7,9 @@ use super::model::{
     ConnectionKind, MacroOrigin, MacroPatch, MacroSignature, NodeKind, OperatorPortShape, Patch,
     PatcherIntent,
 };
-use super::project::{Projector, dgenlisp_constant_names, dgenlisp_operator_port_shapes};
+use super::project::{
+    Projector, dgenlisp_constant_names, dgenlisp_operator_names, dgenlisp_operator_port_shapes,
+};
 use super::sidecar;
 
 pub fn parse_patch_source(source: &str, intent: PatcherIntent) -> Result<Patch, String> {
@@ -45,6 +47,107 @@ pub fn parse_patch_source_with_library(
             .push(project_library_macro_patch(package, &macros, intent)?);
     }
     Ok(patch)
+}
+
+/// Bring a payload-loaded patch's library macros in line with the library on
+/// disk, mirroring what `parse_patch_source_with_library` does for the parse
+/// path: every package becomes an available `MacroPatch`, and any body already
+/// in the payload is replaced by a fresh projection.
+///
+/// Both halves matter. Replacing is what makes a library macro edit show up in
+/// every consumer — a stored body is only a fallback for when the package is
+/// gone. Adding is what recovers a patch whose payload was serialized from a
+/// projection that had no library in hand: the call sits there as an
+/// unknown-operator `Builtin`, and without the package it would stay that way
+/// forever now that loads no longer re-project.
+pub(super) fn resolve_library_macros(
+    patch: &mut Patch,
+    library: &DefmacroLibrary,
+    intent: PatcherIntent,
+) {
+    let mut signatures = patch
+        .macros
+        .iter()
+        .map(|macro_patch| {
+            (
+                macro_patch.name.clone(),
+                MacroSignature {
+                    params: macro_patch.params.clone(),
+                    outputs: macro_patch.outputs.clone(),
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    for package in library.packages().values() {
+        signatures
+            .entry(package.name.clone())
+            .or_insert_with(|| MacroSignature {
+                params: package.params.clone(),
+                outputs: package.outputs.clone(),
+            });
+    }
+    for package in library.packages().values() {
+        let projected = match project_library_macro_patch(package, &signatures, intent) {
+            Ok(projected) => projected,
+            Err(error) => {
+                eprintln!(
+                    "failed to project library macro '{}': {error}",
+                    package.name
+                );
+                continue;
+            }
+        };
+        match patch
+            .macros
+            .iter_mut()
+            .find(|macro_patch| macro_patch.name == package.name)
+        {
+            // A local macro shadows a same-named package, exactly as in
+            // `parse_patch_source_with_library` (which skips packages already
+            // present). Overwriting it would undo a fork the instant the
+            // forked patch reloaded.
+            Some(existing) if matches!(existing.origin, MacroOrigin::Local) => {}
+            Some(existing) => *existing = projected,
+            None => patch.macros.push(projected),
+        }
+    }
+}
+
+/// Recompute per-node operator resolution after the macro set is settled.
+///
+/// The parse path derives a node's kind and its unknown-operator diagnostic
+/// from the macro signatures in scope. A payload records whatever was true when
+/// it was written, which may predate the library being available — so a call to
+/// a library macro can come back as a `Builtin` carrying a stale
+/// "unknown DGenLisp operator" diagnostic. Both are derived facts, so they are
+/// recomputed here rather than trusted.
+pub(super) fn resolve_node_operators(patch: &mut Patch) {
+    let macro_names = patch
+        .macros
+        .iter()
+        .map(|macro_patch| macro_patch.name.clone())
+        .collect::<HashSet<_>>();
+    resolve_scope_node_operators(patch, &macro_names);
+    for macro_patch in &mut patch.macros {
+        resolve_scope_node_operators(&mut macro_patch.patch, &macro_names);
+    }
+}
+
+fn resolve_scope_node_operators(patch: &mut Patch, macro_names: &HashSet<String>) {
+    let known_ops = dgenlisp_operator_names();
+    for node in &mut patch.nodes {
+        if node.kind == NodeKind::Builtin && macro_names.contains(&node.op) {
+            node.kind = NodeKind::MacroInstance;
+        }
+        node.diagnostic = if node.kind != NodeKind::Builtin
+            || known_ops.contains(&node.op)
+            || macro_names.contains(&node.op)
+        {
+            None
+        } else {
+            Some(format!("unknown DGenLisp operator `{}`", node.op))
+        };
+    }
 }
 
 fn parse_source_exprs(source: &str) -> Result<Vec<Expression>, String> {

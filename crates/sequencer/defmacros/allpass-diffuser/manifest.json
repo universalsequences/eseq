@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "name": "allpass-diffuser",
+  "params": [
+    "in_l",
+    "in_r",
+    "gain",
+    "size"
+  ],
+  "outputs": [
+    "out",
+    "out2"
+  ]
+}

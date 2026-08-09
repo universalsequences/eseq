@@ -2,19 +2,22 @@ use std::collections::{HashMap, HashSet};
 
 use crate::layout::Rect;
 
-use super::display::node_size_for_ports;
+use super::display::{
+    node_display_label, node_display_label_arg_spans, node_font_size, node_size_for_ports,
+};
 use super::metrics::{
     CABLE_HANDLE_DISTANCE_CELLS, CABLE_HANDLE_HIT_RADIUS_CELLS, CABLE_HANDLE_MAX_SPAN_FRACTION,
     CABLE_HIT_RADIUS_CELLS, CABLE_TARGET_RADIUS_CELLS, MIN_ZOOM, NODE_HEIGHT,
-    NODE_RESIZE_HANDLE_HIT_SIZE_CELLS, PATCH_ORIGIN_COL_OFFSET, PATCH_ORIGIN_ROW_OFFSET,
-    PORT_EDGE_PADDING_CELLS, PORT_OUTER_DIAMETER_PX, SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
-    VIEW_PADDING_X, VIEW_PADDING_Y,
+    NODE_RESIZE_HANDLE_HIT_SIZE_CELLS, NODE_TEXT_COL_OFFSET, PATCH_ORIGIN_COL_OFFSET,
+    PATCH_ORIGIN_ROW_OFFSET, PORT_EDGE_PADDING_CELLS, PORT_OUTER_DIAMETER_PX,
+    SEGMENTED_CABLE_CORNER_RADIUS_CELLS, VIEW_PADDING_X, VIEW_PADDING_Y,
 };
 use super::model::{
     ArgValue, CableEndpoint, InputPortRef, InputPresentation, OutputPortRef, Patch,
     PatchConnection, PatchNode, connection_touches_hidden_inline_node, hidden_inline_node_ids,
 };
 use super::state::{NodeResizeCorner, PatcherPanState, source_connection_id};
+use super::text_metrics::measured_cursor_offset;
 
 pub(super) fn patch_content_size(patch: &Patch) -> (f32, f32) {
     let input_indices = patch_input_indices(patch);
@@ -365,6 +368,45 @@ pub(super) fn hit_patcher_input_port(
                 input_index: *input_index,
             })
         })
+    })
+}
+
+/// Hit-test the argument tokens drawn inside node labels.
+///
+/// An argument inlined as a literal draws no port, so hovering its text is the
+/// only way to discover which inlet it is; tokens that do have a port are hit
+/// here too so hovering either surface behaves the same. Returns `None` for a
+/// label whose glyph advances the measure pass has not cached yet.
+pub(super) fn hit_patcher_label_arg(
+    patch: &Patch,
+    ordered_nodes: &[&PatchNode],
+    rect: Rect,
+    pan_state: &PatcherPanState,
+    local_col: f32,
+    local_row: f32,
+) -> Option<InputPortRef> {
+    let node_rects = patch_node_rects(patch, rect, pan_state);
+    let zoom = patcher_zoom(pan_state);
+    ordered_nodes.iter().rev().find_map(|node| {
+        let node_rect = *node_rects.get(&node.id)?;
+        if !rect_contains(node_rect, local_col, local_row) {
+            return None;
+        }
+        let label = node_display_label(node);
+        let font_size = node_font_size(node);
+        let text_col = node_rect.col + NODE_TEXT_COL_OFFSET * zoom;
+        node_display_label_arg_spans(node)
+            .into_iter()
+            .find_map(|(arg_index, span)| {
+                let start = measured_cursor_offset(&label, font_size, span.start)?;
+                let end = measured_cursor_offset(&label, font_size, span.end)?;
+                (local_col >= text_col + start * zoom && local_col <= text_col + end * zoom).then(
+                    || InputPortRef {
+                        node_id: node.id.clone(),
+                        input_index: arg_index,
+                    },
+                )
+            })
     })
 }
 

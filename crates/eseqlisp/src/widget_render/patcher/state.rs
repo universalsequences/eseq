@@ -17,7 +17,7 @@ use super::lisp::{
     parse_patch_source,
 };
 use super::metrics::{
-    AGENTIC_CLOSE_SECS, DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM, PAN_OVERSCROLL_MIN_CELLS,
+    AGENTIC_ANIMATION_SETTLE_SECS, AGENTIC_CLOSE_SECS, DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM, PAN_OVERSCROLL_MIN_CELLS,
     PAN_OVERSCROLL_VIEWPORT_FACTOR,
 };
 use super::model::{
@@ -125,6 +125,10 @@ pub(super) struct PatcherInteractionState {
     pub(super) hovered_node: Option<String>,
     pub(super) hovered_input_port: Option<InputPortRef>,
     pub(super) hovered_output_port: Option<OutputPortRef>,
+    /// Argument token hovered inside a node's label. Inlined literals draw no
+    /// port, so the text is the only place their inlet can be named; the ref
+    /// carries the argument index so it resolves through the port tooltip.
+    pub(super) hovered_label_arg: Option<InputPortRef>,
     pub(super) hover_back_button: bool,
     pub(super) selected_cable: Option<String>,
     pub(super) edit_state: PatchEditState,
@@ -206,6 +210,14 @@ pub(super) struct AgenticBubble {
     pub(super) state: AgenticBubbleState,
     pub(super) generation: u64,
     pub(super) macro_name: String,
+    /// What the user is typing into the follow-up box under a settled answer.
+    /// Kept separate from `prompt` so the answer that is being followed up on
+    /// stays on screen while the next question is composed.
+    pub(super) follow_up: String,
+    pub(super) follow_up_text_state: TextInputState,
+    /// Prior turns of this bubble's conversation, oldest first. Sent back with
+    /// each follow-up so the agent answers in context rather than cold.
+    pub(super) turns: Vec<AgenticTurn>,
     /// When the bubble was opened, which drives its grow-in animation. Distinct
     /// from `AgenticBubbleState::Pending::started_at`, which resets on submit.
     pub(super) created_at: Instant,
@@ -213,6 +225,13 @@ pub(super) struct AgenticBubble {
     /// is dropped by `set_patcher_interaction_state` once that finishes. It
     /// counts as gone the moment this is set — see `is_dismissed`.
     pub(super) closing_at: Option<Instant>,
+}
+
+/// One completed question/answer exchange on a bubble.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct AgenticTurn {
+    pub(super) prompt: String,
+    pub(super) answer: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -294,6 +313,30 @@ pub(super) struct AgenticMorph {
     pub(super) from: Option<AgenticBubblePose>,
 }
 
+/// What a recorded hit rect on a bubble does when clicked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AgenticButtonKind {
+    /// The chevron on an editable prompt box.
+    SendPrompt,
+    /// The chevron on the follow-up composer under a settled answer.
+    SendFollowUp,
+    /// The header chip naming the model the bubble will run on.
+    ChooseModel,
+}
+
+/// A clickable control as it was last drawn: enough to route a click on it back
+/// to the bubble and the control that owns it.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct AgenticBubbleButton {
+    pub(super) bubble_id: String,
+    pub(super) kind: AgenticButtonKind,
+    /// `(col, row, width, height)` in the same widget-local space the pointer
+    /// handlers work in, like `patcher_back_button_rect`. Screen space rather
+    /// than model space is right here: unlike a morph start pose, a hit rect is
+    /// only ever consulted against the frame that drew it.
+    pub(super) rect: (f32, f32, f32, f32),
+}
+
 thread_local! {
     /// Poses of the bubbles drawn in the most recent frame, keyed by bubble id.
     /// The renderer rebuilds this every frame, which also prunes bubbles that
@@ -306,6 +349,42 @@ thread_local! {
     /// the widget-state generation on every tick.
     static AGENTIC_BUBBLE_POSES: RefCell<HashMap<String, AgenticBubblePose>> =
         RefCell::new(HashMap::new());
+
+    /// Clickable bubble controls drawn in the most recent frame. Same side-channel
+    /// reasoning as the poses above: it is render-derived geometry, and it must
+    /// not bump the widget-state generation every tick.
+    static AGENTIC_BUBBLE_BUTTONS: RefCell<Vec<AgenticBubbleButton>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(super) fn set_agentic_bubble_buttons(buttons: Vec<AgenticBubbleButton>) {
+    AGENTIC_BUBBLE_BUTTONS.with(|cell| *cell.borrow_mut() = buttons);
+}
+
+/// The controls the last frame drew, so a test can click one where it landed
+/// rather than recomputing the layout it came from.
+#[cfg(test)]
+pub(super) fn agentic_buttons_for_test() -> Vec<AgenticBubbleButton> {
+    AGENTIC_BUBBLE_BUTTONS.with(|cell| cell.borrow().clone())
+}
+
+/// The bubble control under `(col, row)`, if the last frame drew one there.
+/// The rect is padded out a little: these are small targets, and a click that
+/// lands a pixel outside one should still hit rather than fall through to the
+/// canvas.
+pub(super) fn agentic_button_at(col: f32, row: f32) -> Option<AgenticBubbleButton> {
+    const HIT_PAD_CELLS: f32 = 0.22;
+    AGENTIC_BUBBLE_BUTTONS.with(|cell| {
+        cell.borrow()
+            .iter()
+            .find(|button| {
+                let (bx, by, bw, bh) = button.rect;
+                col >= bx - HIT_PAD_CELLS
+                    && col <= bx + bw + HIT_PAD_CELLS
+                    && row >= by - HIT_PAD_CELLS
+                    && row <= by + bh + HIT_PAD_CELLS
+            })
+            .cloned()
+    })
 }
 
 pub(super) fn set_agentic_bubble_poses(poses: HashMap<String, AgenticBubblePose>) {
@@ -341,11 +420,26 @@ impl AgenticBubble {
                 AgenticBubbleTarget::ConnectNode { .. } => {
                     "connect this node into the patch".to_string()
                 }
-                AgenticBubbleTarget::CreateMacro => "cmd+k prompt".to_string(),
+                AgenticBubbleTarget::CreateMacro => "what do you want to build?".to_string(),
             }
         } else {
             self.prompt.clone()
         }
+    }
+
+    /// What the follow-up box under a settled answer shows: what has been typed
+    /// so far, or its placeholder. Same measure-pass contract as `prompt_text`.
+    pub(super) fn follow_up_text(&self) -> String {
+        if self.follow_up.is_empty() {
+            "Send a follow-up".to_string()
+        } else {
+            self.follow_up.clone()
+        }
+    }
+
+    /// Whether the follow-up box is showing its placeholder rather than typing.
+    pub(super) fn follow_up_is_placeholder(&self) -> bool {
+        self.follow_up.is_empty()
     }
 
     /// The text the body settles on for the bubble's current state.
@@ -362,9 +456,22 @@ impl AgenticBubble {
         self.closing_at.is_some()
     }
 
+    /// The shrink-out has played out, so there is nothing left to draw.
     pub(super) fn close_finished(&self) -> bool {
         self.closing_at
             .is_some_and(|at| at.elapsed().as_secs_f32() >= AGENTIC_CLOSE_SECS)
+    }
+
+    /// The shrink-out is done *and* the frames that draw the bubble gone have
+    /// had time to land. Dropping a bubble at `close_finished` instead is what
+    /// stranded a ghost: the widget's cached primitive run is only refreshed
+    /// while it animates, so a bubble pruned before the settle window closes
+    /// takes its "keep animating" vote with it and the last shrinking frame is
+    /// left on screen. See `AGENTIC_ANIMATION_SETTLE_SECS`.
+    pub(super) fn close_settled(&self) -> bool {
+        self.closing_at.is_some_and(|at| {
+            at.elapsed().as_secs_f32() >= AGENTIC_CLOSE_SECS + AGENTIC_ANIMATION_SETTLE_SECS
+        })
     }
 
     pub(super) fn elapsed(&self) -> Option<Duration> {
@@ -530,18 +637,19 @@ pub(super) fn set_patcher_interaction_state(key: u64, mut state: PatcherInteract
     }
 }
 
-/// Drop bubbles whose shrink-out has played to the end. Rendering already skips
-/// them, so this is bookkeeping rather than a visual change; doing it on write
-/// gives a single choke point instead of mutating state from the render path.
+/// Drop bubbles whose shrink-out has played out *and* settled. Rendering
+/// already skips them from `close_finished`, so this is bookkeeping rather than
+/// a visual change; doing it on write gives a single choke point instead of
+/// mutating state from the render path.
 fn prune_closed_agentic_bubbles(state: &mut PatcherInteractionState) {
     if state
         .agentic_bubbles
         .values()
-        .any(|bubble| bubble.close_finished())
+        .any(|bubble| bubble.close_settled())
     {
         state
             .agentic_bubbles
-            .retain(|_, bubble| !bubble.close_finished());
+            .retain(|_, bubble| !bubble.close_settled());
     }
 }
 
@@ -1105,6 +1213,9 @@ pub(super) fn allocate_agentic_bubble_with_target(
             id: id.clone(),
             prompt: String::new(),
             text_state: TextInputState::default(),
+            follow_up: String::new(),
+            follow_up_text_state: TextInputState::default(),
+            turns: Vec::new(),
             position,
             target,
             state: AgenticBubbleState::Editing,
@@ -1127,6 +1238,19 @@ pub(super) fn editing_agentic_bubble_id(state: &PatcherInteractionState) -> Opti
         .values()
         .find(|bubble| {
             !bubble.is_dismissed() && matches!(bubble.state, AgenticBubbleState::Editing)
+        })
+        .map(|bubble| bubble.id.clone())
+}
+
+/// The bubble whose follow-up box is taking keystrokes: one showing a settled
+/// answer. Answer bubbles capture typing the same way an editing bubble does,
+/// so a follow-up can be typed without any extra click or shortcut.
+pub(super) fn answering_agentic_bubble_id(state: &PatcherInteractionState) -> Option<String> {
+    state
+        .agentic_bubbles
+        .values()
+        .find(|bubble| {
+            !bubble.is_dismissed() && matches!(bubble.state, AgenticBubbleState::Answer { .. })
         })
         .map(|bubble| bubble.id.clone())
 }
@@ -1587,6 +1711,7 @@ pub(super) fn patch_with_interaction_state(
             }),
     );
     infer_modulatable_params(&mut patch);
+    prune_retyped_inline_mod_slots(&mut patch);
     desugar_editor_mod_suffix_args(&mut patch);
     drop_orphaned_inline_mod_nodes(&mut patch);
     refresh_patch_inline_inputs(&mut patch);
@@ -1713,6 +1838,69 @@ fn modulation_demanded_param_names(patch: &Patch) -> HashSet<String> {
 /// edge, so typing `* gain~` must replace that plain reference with the
 /// accessor. Only a reference to that same param is replaced — an unrelated
 /// cable into the slot still wins, exactly as it does over a typed literal.
+/// Release argument slots whose `param~` text was typed away.
+///
+/// A slot showing `freq~` is not backed by its argument: the sugar desugars
+/// into a hidden `(mod freq)` accessor cabled into the slot with
+/// `InlineModParam` presentation, and `build_node_display_label` renders that
+/// cable in preference to the argument. So retyping the slot to anything else
+/// looked like it did nothing — the argument became `2`, the cable stayed, and
+/// the box redrew as `freq~`.
+///
+/// Runs before `desugar_editor_mod_suffix_args` so a slot retyped from one
+/// param to another (`freq~` → `stretch~`) is free by the time the new
+/// accessor is built; `drop_orphaned_inline_mod_nodes` then collects whichever
+/// accessors lost their only consumer.
+fn prune_retyped_inline_mod_slots(patch: &mut Patch) {
+    let param_names = patch
+        .nodes
+        .iter()
+        .filter_map(|node| Some((node.id.clone(), node.param.as_ref()?.name.clone())))
+        .collect::<HashMap<_, _>>();
+    let accessor_sources = patch
+        .connections
+        .iter()
+        .filter(|connection| connection.to_input == 0)
+        .filter_map(|connection| {
+            let param = param_names.get(&connection.from_node)?;
+            Some((connection.to_node.clone(), param.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    let nodes_by_id = patch
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
+
+    let stale = patch
+        .connections
+        .iter()
+        .filter(|connection| connection.presentation == InputPresentation::InlineModParam)
+        .filter(|connection| {
+            let Some(param) = accessor_sources.get(&connection.from_node) else {
+                return false;
+            };
+            let Some(node) = nodes_by_id.get(connection.to_node.as_str()) else {
+                return false;
+            };
+            // Only a literal argument means the slot was typed into: the
+            // desugared form leaves `ConnectedExpr` behind.
+            match node.args.get(connection.to_input) {
+                Some(ArgValue::Literal(value)) => mod_suffix_base(value).as_deref() != Some(param),
+                _ => false,
+            }
+        })
+        .map(|connection| (connection.to_node.clone(), connection.to_input))
+        .collect::<HashSet<_>>();
+    if stale.is_empty() {
+        return;
+    }
+    patch.connections.retain(|connection| {
+        connection.presentation != InputPresentation::InlineModParam
+            || !stale.contains(&(connection.to_node.clone(), connection.to_input))
+    });
+}
+
 fn desugar_editor_mod_suffix_args(patch: &mut Patch) {
     if !patch.nodes.iter().any(|node| {
         node.args
@@ -1833,6 +2021,7 @@ fn inline_mod_accessor_node(id: &str, position: (f32, f32)) -> PatchNode {
         width: None,
         param: None,
         inline_inputs: vec![None],
+        synthesized: true,
         diagnostic: None,
         source: Some(NodeSource {
             owner: SourceOwner::NestedExpr {
@@ -2270,6 +2459,7 @@ pub(super) fn node_from_editor_text(
             width: None,
             param: None,
             inline_inputs: Vec::new(),
+            synthesized: false,
             diagnostic: None,
             source: None,
         };
@@ -2333,6 +2523,7 @@ pub(super) fn node_from_editor_text(
         width: None,
         param,
         inline_inputs: Vec::new(),
+        synthesized: false,
         diagnostic: parse_diagnostic.or_else(|| {
             let known =
                 dgenlisp_operator_names().contains(&op) || macro_signatures.contains_key(&op);

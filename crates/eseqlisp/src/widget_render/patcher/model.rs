@@ -200,6 +200,14 @@ pub struct PatchNode {
     pub inline_inputs: Vec<Option<InlineInput>>,
     pub diagnostic: Option<String>,
     pub source: Option<NodeSource>,
+    /// Projector-synthesized helper node (today: the hidden `(mod p)` accessor
+    /// behind the `p~` sugar) rather than something the user authored.
+    ///
+    /// When a patch is projected from source this is implied by the node's
+    /// `SourceOwner::NestedExpr` owner. A patch deserialized from a graph
+    /// payload has no source data at all (spec §4.1a/§4.1c), so the fact has to
+    /// be carried explicitly — it is semantic, not positional.
+    pub synthesized: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -398,10 +406,12 @@ fn inline_mod_accessor_param<'a>(patch: &'a Patch, node_id: &str) -> Option<&'a 
     }
     // A user-authored `(def m (mod gain))` is a BindingValue, not a nested
     // expression: it is a real node and must never be garbage-collected.
-    if !matches!(
-        mod_node.source.as_ref().map(|source| &source.owner),
-        Some(SourceOwner::NestedExpr { .. })
-    ) {
+    let is_synthesized = mod_node.synthesized
+        || matches!(
+            mod_node.source.as_ref().map(|source| &source.owner),
+            Some(SourceOwner::NestedExpr { .. })
+        );
+    if !is_synthesized {
         return None;
     }
     let inbound = patch
