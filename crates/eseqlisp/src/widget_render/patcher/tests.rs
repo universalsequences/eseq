@@ -3123,7 +3123,7 @@ fn agentic_bubble_cmd_k_on_selected_macro_creates_edit_target() {
             assert_eq!(params, &vec!["sig".to_string(), "amt".to_string()]);
             assert!(source.contains("(defmacro smooth"));
         }
-        AgenticBubbleTarget::CreateMacro => panic!("expected edit target"),
+        other => panic!("expected edit target, got {other:?}"),
     }
 }
 
@@ -20949,4 +20949,733 @@ fn auto_layout_keeps_generated_cable_lanes_clear_of_nodes() {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Agentic connect (docs/patcher-agentic-connect-spec.md)
+// ---------------------------------------------------------------------------
+
+const CONNECT_TEST_SOURCE: &str = "\
+(defmacro voice (trig freq decay) (* trig (* freq decay)))
+(def cutoff (param cutoff @default 500 @min 20 @max 12000))
+(def sig (in 1))
+(def filtered (svf sig cutoff 0.7 0))
+(out filtered)";
+
+/// A patcher holding `CONNECT_TEST_SOURCE` plus an unwired `voice` instance,
+/// which is the shape the create bubble leaves behind.
+fn connect_test_node(name: &str) -> (LayoutNode, u64, String) {
+    let path = temp_patcher_source_path(name);
+    fs::write(&path, CONNECT_TEST_SOURCE).expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    let instance = allocate_created_node(&mut state, "root", (10.0, 10.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &instance))
+        .expect("created node edit")
+        .text = "voice".to_string();
+    set_patcher_interaction_state(key, state);
+    (node, key, instance)
+}
+
+fn connect_test_patch(node: &LayoutNode, key: u64) -> Patch {
+    let state = get_patcher_interaction_state(key);
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let view_key = active_patcher_view_key(&state);
+    let patch = active_patcher_patch(&root_patch, &state);
+    patch_with_interaction_state(patch, &state, &view_key)
+}
+
+fn connect_op_connect(from: &str, from_outlet: usize, to: &str, to_arg: usize) -> PatcherConnectOp {
+    PatcherConnectOp::Connect {
+        from_node: from.to_string(),
+        from_outlet,
+        to_node: to.to_string(),
+        to_arg,
+        why: "test".to_string(),
+    }
+}
+
+fn connect_op_inline(value: &str, to: &str, to_arg: usize) -> PatcherConnectOp {
+    PatcherConnectOp::Inline {
+        value: value.to_string(),
+        to_node: to.to_string(),
+        to_arg,
+        why: "test".to_string(),
+    }
+}
+
+fn apply_connect_ops(key: u64, patch: &Patch, ops: &[PatcherConnectOp]) -> PatcherConnectReport {
+    let mut state = get_patcher_interaction_state(key);
+    let view_key = active_patcher_view_key(&state);
+    let report = connect::apply_connect_plan(&mut state, patch, &view_key, ops);
+    set_patcher_interaction_state(key, state);
+    report
+}
+
+#[test]
+fn cmd_shift_k_opens_a_connect_bubble_for_the_selected_macro_instance() {
+    let (node, key, instance) = connect_test_node("connect-open-bubble");
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert(instance.clone());
+    set_patcher_interaction_state(key, state);
+
+    let event = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('K'),
+            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        },
+    );
+
+    assert!(event.is_some(), "cmd+shift+k should be consumed");
+    let state = get_patcher_interaction_state(key);
+    let bubble = state
+        .agentic_bubbles
+        .values()
+        .next()
+        .expect("connect bubble");
+    match &bubble.target {
+        AgenticBubbleTarget::ConnectNode {
+            instance_node_id,
+            subject:
+                ConnectSubject::Macro {
+                    name,
+                    params,
+                    source,
+                },
+        } => {
+            assert_eq!(instance_node_id, &instance);
+            assert_eq!(name, "voice");
+            assert_eq!(
+                params,
+                &vec!["trig".to_string(), "freq".to_string(), "decay".to_string()]
+            );
+            assert!(source.contains("(defmacro voice"));
+        }
+        other => panic!("expected a macro connect target, got {other:?}"),
+    }
+    assert_eq!(bubble.bound_macro_name(), Some("voice"));
+}
+
+#[test]
+fn cmd_shift_k_without_a_single_selection_is_not_consumed() {
+    let (node, key, instance) = connect_test_node("connect-no-selection");
+    let event = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('K'),
+            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        },
+    );
+    assert!(event.is_none(), "no selection should not open a bubble");
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert(instance);
+    state.selected_nodes.insert("filtered".to_string());
+    set_patcher_interaction_state(key, state);
+    let event = PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('K'),
+            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        },
+    );
+    assert!(event.is_none(), "multi-selection should not open a bubble");
+    assert!(
+        get_patcher_interaction_state(key)
+            .agentic_bubbles
+            .is_empty(),
+        "no bubble should exist"
+    );
+}
+
+#[test]
+fn connect_context_reports_every_argument_occupancy() {
+    let (node, key, instance) = connect_test_node("connect-context");
+    let patch = connect_test_patch(&node, key);
+    let context = connect::connect_context(
+        &patch,
+        &instance,
+        &ConnectSubject::Macro {
+            name: "voice".to_string(),
+            params: vec!["trig".to_string(), "freq".to_string(), "decay".to_string()],
+            source: "(defmacro voice (trig freq decay) body)".to_string(),
+        },
+    );
+
+    assert!(context.contains(&format!("subject: node {instance}")));
+    assert!(context.contains("(defmacro voice (trig freq decay) body)"));
+    // All four §5.4 states, from one patch.
+    assert!(
+        context.contains("in  0  input  cabled from sig:0"),
+        "cabled inlet missing:\n{context}"
+    );
+    assert!(
+        context.contains("in  1  cutoff  inline param cutoff"),
+        "inline param inlet missing:\n{context}"
+    );
+    assert!(
+        context.contains("in  2  q  literal \"0.7\""),
+        "literal inlet missing:\n{context}"
+    );
+    assert!(
+        context.contains("in  0  trig  free"),
+        "free inlet missing:\n{context}"
+    );
+    assert!(
+        context.contains("out 0  out"),
+        "outlets missing:\n{context}"
+    );
+}
+
+#[test]
+fn connect_plan_wires_a_cable_and_inlines_a_literal() {
+    let (node, key, instance) = connect_test_node("connect-apply");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(
+        key,
+        &patch,
+        &[
+            connect_op_connect("sig", 0, &instance, 0),
+            connect_op_inline("0.8", &instance, 2),
+        ],
+    );
+    assert_eq!(report.applied.len(), 2, "{report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
+
+    let patch = connect_test_patch(&node, key);
+    assert!(
+        patch.connections.iter().any(|connection| {
+            connection.from_node == "sig"
+                && connection.to_node == instance
+                && connection.to_input == 0
+                && connection.presentation == InputPresentation::Cable
+        }),
+        "cable missing"
+    );
+    let wired = patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == instance)
+        .expect("instance node");
+    assert_eq!(wired.args[2], ArgValue::Literal("0.8".to_string()));
+    // Inlining takes the port away rather than adding a node or a cable.
+    let ports = patch_input_indices(&patch);
+    assert_eq!(ports.get(&instance), Some(&vec![0, 1]));
+}
+
+#[test]
+fn connect_plan_rejects_ops_that_do_not_target_a_free_argument() {
+    let (node, key, instance) = connect_test_node("connect-validation");
+    let patch = connect_test_patch(&node, key);
+    let cases = vec![
+        (connect_op_connect("sig", 0, "nope", 0), "no node `nope`"),
+        (
+            connect_op_connect("nope", 0, &instance, 0),
+            "no node `nope`",
+        ),
+        (connect_op_connect("sig", 0, &instance, 9), "out of range"),
+        (connect_op_connect("sig", 4, &instance, 0), "out of range"),
+        (
+            connect_op_connect(&instance, 0, &instance, 0),
+            "self-connection",
+        ),
+        (
+            connect_op_connect("sig", 0, "filtered", 0),
+            "cabled from sig:0",
+        ),
+        (
+            connect_op_connect("sig", 0, "filtered", 1),
+            "inline param cutoff",
+        ),
+        (
+            connect_op_connect("sig", 0, "filtered", 2),
+            "literal \"0.7\"",
+        ),
+        (connect_op_inline("(* 2 2)", &instance, 1), "not a number"),
+        (connect_op_inline("gain", &instance, 1), "not a number"),
+        // The first input slot is the implicit signal inlet: the editor's own
+        // text round trip cannot address it.
+        (
+            connect_op_inline("0.5", &instance, 0),
+            "cannot hold an inline literal",
+        ),
+    ];
+    for (op, expected) in cases {
+        let report = apply_connect_ops(key, &patch, std::slice::from_ref(&op));
+        assert!(report.applied.is_empty(), "{op:?} should not apply");
+        assert_eq!(report.skipped.len(), 1, "{op:?}");
+        assert!(
+            report.skipped[0].contains(expected),
+            "{op:?} skipped for the wrong reason: {}",
+            report.skipped[0]
+        );
+    }
+}
+
+#[test]
+fn connect_plan_rejects_a_second_op_for_the_same_argument() {
+    let (node, key, instance) = connect_test_node("connect-duplicate-arg");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(
+        key,
+        &patch,
+        &[
+            connect_op_connect("sig", 0, &instance, 1),
+            connect_op_inline("440", &instance, 1),
+        ],
+    );
+    assert_eq!(report.applied.len(), 1, "{report:?}");
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(
+        report.skipped[0].contains("another op already targets this argument"),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn connect_plan_applies_valid_ops_and_skips_the_rest() {
+    let (node, key, instance) = connect_test_node("connect-partial");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(
+        key,
+        &patch,
+        &[
+            connect_op_connect("sig", 0, &instance, 0),
+            connect_op_connect("sig", 0, "filtered", 0),
+            connect_op_inline("0.5", &instance, 2),
+        ],
+    );
+    assert_eq!(report.applied.len(), 2, "{report:?}");
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+
+    let patch = connect_test_patch(&node, key);
+    let wired = patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == instance)
+        .expect("instance node");
+    assert_eq!(wired.args[2], ArgValue::Literal("0.5".to_string()));
+    assert_eq!(
+        patch
+            .connections
+            .iter()
+            .filter(|connection| connection.to_node == "filtered" && connection.to_input == 0)
+            .count(),
+        1,
+        "the occupied inlet must keep exactly its original cable"
+    );
+}
+
+#[test]
+fn a_whole_connect_plan_is_one_undo_step() {
+    let (node, key, instance) = connect_test_node("connect-undo");
+    let before = get_patcher_interaction_state(key).edit_state.clone();
+    let patch = connect_test_patch(&node, key);
+    apply_connect_ops(
+        key,
+        &patch,
+        &[
+            connect_op_connect("sig", 0, &instance, 0),
+            connect_op_connect("filtered", 0, &instance, 1),
+            connect_op_inline("0.8", &instance, 2),
+        ],
+    );
+
+    let mut state = get_patcher_interaction_state(key);
+    assert!(
+        apply_patcher_history_step(key, &mut state, false),
+        "the plan should have pushed an undo step"
+    );
+    set_patcher_interaction_state_without_history(key, state.clone());
+    // Allocation counters deliberately survive an undo so ids are never reused.
+    assert_eq!(state.edit_state.connections, before.connections);
+    assert_eq!(state.edit_state.nodes, before.nodes);
+    assert_eq!(
+        state.edit_state.input_presentations,
+        before.input_presentations
+    );
+    // One step, not three: the node the plan wired is still there.
+    assert!(
+        state
+            .edit_state
+            .nodes
+            .contains_key(&node_edit_key("root", &instance)),
+        "one undo must not reach past the plan"
+    );
+}
+
+#[test]
+fn resolving_a_connect_bubble_applies_the_plan_and_closes_it() {
+    let (node, key, instance) = connect_test_node("connect-resolve");
+    let path = prop_str(&node.props, "path").expect("path");
+    let mut state = get_patcher_interaction_state(key);
+    state::register_patcher_path_key(std::path::Path::new(&path), key);
+    let bubble_id = allocate_agentic_bubble_with_target(
+        &mut state,
+        (10.0, 10.0),
+        AgenticBubbleTarget::ConnectNode {
+            instance_node_id: instance.clone(),
+            subject: ConnectSubject::Macro {
+                name: "voice".to_string(),
+                params: vec!["trig".to_string(), "freq".to_string(), "decay".to_string()],
+                source: "(defmacro voice (trig freq decay) body)".to_string(),
+            },
+        },
+    );
+    set_patcher_interaction_state(key, state);
+
+    let report = resolve_agentic_bubble_connections(
+        &path,
+        PatcherIntent::Instrument,
+        &bubble_id,
+        0,
+        &[
+            connect_op_connect("sig", 0, &instance, 0),
+            connect_op_connect("nope", 0, &instance, 1),
+        ],
+    )
+    .expect("plan applies");
+    assert_eq!(report.applied.len(), 1, "{report:?}");
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+
+    let state = get_patcher_interaction_state(key);
+    assert!(
+        !state.agentic_bubbles.contains_key(&bubble_id),
+        "a resolved connect bubble should be gone"
+    );
+    // The plan never writes source (spec §1).
+    assert_eq!(
+        fs::read_to_string(&path).expect("read source"),
+        CONNECT_TEST_SOURCE
+    );
+}
+
+#[test]
+fn a_connect_plan_with_no_valid_op_leaves_the_bubble_for_retry() {
+    let (node, key, instance) = connect_test_node("connect-resolve-refused");
+    let path = prop_str(&node.props, "path").expect("path");
+    let mut state = get_patcher_interaction_state(key);
+    state::register_patcher_path_key(std::path::Path::new(&path), key);
+    let bubble_id = allocate_agentic_bubble_with_target(
+        &mut state,
+        (10.0, 10.0),
+        AgenticBubbleTarget::ConnectNode {
+            instance_node_id: instance.clone(),
+            subject: ConnectSubject::Operator {
+                op: "voice".to_string(),
+            },
+        },
+    );
+    set_patcher_interaction_state(key, state);
+
+    let error = resolve_agentic_bubble_connections(
+        &path,
+        PatcherIntent::Instrument,
+        &bubble_id,
+        0,
+        &[connect_op_connect("sig", 0, "filtered", 0)],
+    )
+    .expect_err("nothing should apply");
+    assert!(error.contains("cabled from sig:0"), "{error}");
+    assert!(
+        get_patcher_interaction_state(key)
+            .agentic_bubbles
+            .contains_key(&bubble_id),
+        "the bubble must survive so cmd+r can retry"
+    );
+}
+
+#[test]
+fn connect_bubble_submit_payload_carries_the_patch_context() {
+    let (node, key, instance) = connect_test_node("connect-submit");
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert(instance.clone());
+    set_patcher_interaction_state(key, state);
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('K'),
+            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        },
+    );
+    let mut state = get_patcher_interaction_state(key);
+    let bubble_id = editing_agentic_bubble_id(&state).expect("editing bubble");
+    state
+        .agentic_bubbles
+        .get_mut(&bubble_id)
+        .expect("bubble")
+        .prompt = "connect it".to_string();
+    set_patcher_interaction_state(key, state);
+
+    let event = PATCHER_WIDGET
+        .key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE,
+            },
+        )
+        .expect("submit event");
+    let output = PATCHER_WIDGET
+        .handle_event(&node, event)
+        .expect("on-change output");
+    let Value::Map(map) = &output.args[0] else {
+        panic!("submit payload should be a map");
+    };
+    assert!(matches!(
+        &*map.get("target").expect("target").borrow(),
+        Value::Keyword(target) if target == "connect-node"
+    ));
+    assert!(matches!(
+        &*map.get("target-node-id").expect("target node id").borrow(),
+        Value::String(id) if id == &instance
+    ));
+    let context = map.get("connect-context").expect("connect context");
+    let Value::String(context) = &*context.borrow() else {
+        panic!("connect context should be a string");
+    };
+    assert!(context.contains("in  0  trig  free"), "{context}");
+    assert!(context.contains("cabled from sig:0"), "{context}");
+}
+
+/// The renderer can only wrap text a measure pass has cached, so a bubble whose
+/// placeholder is not measured silently disappears.
+#[cfg(target_os = "macos")]
+#[test]
+fn connect_bubble_renders_its_placeholder_and_subject_badge() {
+    let (node, key, instance) = connect_test_node("connect-render");
+    let mut pan = PatcherPanState::default();
+    pan.zoom = 1.0;
+    pan.content_width = 100.0;
+    pan.content_height = 100.0;
+    set_patcher_pan_state(key, pan);
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes.insert(instance);
+    set_patcher_interaction_state(key, state);
+    PATCHER_WIDGET.key_event(
+        &node,
+        WidgetKeyEvent {
+            code: KeyCode::Char('K'),
+            modifiers: KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        },
+    );
+
+    let mut state = get_patcher_interaction_state(key);
+    let bubble = state
+        .agentic_bubbles
+        .values()
+        .next()
+        .expect("connect bubble");
+    let measurer = VariableWidthTextMeasurer;
+    cache_agentic_bubble_text_widths(
+        bubble,
+        &MeasureCtx {
+            text_measurer: Some(&measurer),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            inherited_font_size: 13.0,
+        },
+    );
+    settle_agentic_bubbles(&mut state);
+    set_patcher_interaction_state(key, state);
+
+    let prims = build_metal_primitives_for_patcher(
+        &node,
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 800.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 40.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        },
+    );
+
+    assert!(
+        prims.iter().any(|prim| matches!(
+            inner_prim(prim),
+            MetalPrimitive::ProportionalText(text) if text.text.contains("connect this node")
+        )),
+        "the connect placeholder must be measured, or the bubble draws nothing"
+    );
+    assert!(
+        prims.iter().any(|prim| matches!(
+            inner_prim(prim),
+            MetalPrimitive::ProportionalText(text)
+                if text.text.contains("voice") && text.h_align > 0.5
+        )),
+        "a connect bubble names its subject on the header line"
+    );
+}
+
+/// Two literals on one node are one text edit. Composed separately, the second
+/// would overwrite the first while the report still claimed both landed.
+#[test]
+fn two_inline_ops_on_one_node_both_survive() {
+    let (node, key, instance) = connect_test_node("connect-two-inlines");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(
+        key,
+        &patch,
+        &[
+            connect_op_inline("0.8", &instance, 1),
+            connect_op_inline("0.3", &instance, 2),
+        ],
+    );
+    assert_eq!(report.applied.len(), 2, "{report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
+
+    let patch = connect_test_patch(&node, key);
+    let wired = patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == instance)
+        .expect("instance node");
+    assert_eq!(wired.args[1], ArgValue::Literal("0.8".to_string()));
+    assert_eq!(wired.args[2], ArgValue::Literal("0.3".to_string()));
+}
+
+/// All-or-nothing per node: a composed text that will not round-trip must not
+/// land a subset of its literals while reporting all of them applied.
+#[test]
+fn inline_ops_that_cannot_compose_are_all_skipped() {
+    let (node, key, instance) = connect_test_node("connect-inline-compose-refused");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(
+        key,
+        &patch,
+        &[
+            // Argument 0 is the implicit signal inlet, which no node text can
+            // address, so neither op may land.
+            connect_op_inline("0.8", &instance, 0),
+            connect_op_inline("0.3", &instance, 2),
+        ],
+    );
+    assert!(report.applied.is_empty(), "{report:?}");
+    assert_eq!(report.skipped.len(), 2, "{report:?}");
+
+    let patch = connect_test_patch(&node, key);
+    let wired = patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == instance)
+        .expect("instance node");
+    assert!(
+        wired
+            .args
+            .iter()
+            .all(|arg| matches!(arg, ArgValue::ConnectedExpr)),
+        "no literal should have landed, got {:?}",
+        wired.args
+    );
+}
+
+/// The patcher's `:on-change` callback is the only thing that recompiles a
+/// patch. A plan applied from the host never passes through the widget's own
+/// event handling, so without an explicit notification the cables appear and
+/// the patch stays silent.
+#[test]
+fn resolving_a_connect_plan_reaches_the_patcher_on_change_callback() {
+    let path = temp_patcher_source_path("connect-on-change");
+    fs::write(
+        &path,
+        "(def sig (in 1))\n(def shaped (* sig __patcher_missing_input__))\n(out shaped 1)",
+    )
+    .expect("write source");
+    let escaped_path = path
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(80, 30);
+    editor
+        .runtime_mut()
+        .eval_str(&format!(
+            r#"(def changes (state 0))
+(effect-buffer "*patcher-connect-test*"
+  (patcher :intent :instrument :width :fill :height :fill :path "{escaped_path}"
+    :on-change (lambda (event) (set! changes (+ changes 1)))))"#
+        ))
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    let patcher_buffer_id = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*patcher-connect-test*")
+        .expect("patcher buffer")
+        .id;
+    editor.set_active_buffer(patcher_buffer_id);
+    editor.update_tile_rects(80, 30);
+    editor.sync_layout_to_active_leaf();
+    let layout = editor.widget_layout().expect("patcher layout");
+    let key = patcher_state_key(&layout);
+
+    let mut state = get_patcher_interaction_state(key);
+    state::register_patcher_path_key(&path, key);
+    let bubble_id = allocate_agentic_bubble_with_target(
+        &mut state,
+        (2.0, 3.0),
+        AgenticBubbleTarget::ConnectNode {
+            instance_node_id: "shaped".to_string(),
+            subject: ConnectSubject::Operator {
+                op: "*".to_string(),
+            },
+        },
+    );
+    set_patcher_interaction_state(key, state);
+
+    let changes = |editor: &mut Editor| {
+        editor
+            .runtime_mut()
+            .eval_str("changes")
+            .expect("read changes")
+            .expect("changes value")
+    };
+    let before = changes(&mut editor);
+
+    let report = resolve_agentic_bubble_connections(
+        &path,
+        PatcherIntent::Instrument,
+        &bubble_id,
+        0,
+        &[connect_op_inline("0.5", "shaped", 1)],
+    )
+    .expect("plan applies");
+    assert_eq!(report.applied.len(), 1, "{report:?}");
+    assert_eq!(
+        changes(&mut editor),
+        before,
+        "applying a plan does not itself notify the callback"
+    );
+
+    assert!(
+        editor.notify_patcher_semantic_change(&path),
+        "the patcher showing this path should be found"
+    );
+    let Value::Number(after) = changes(&mut editor) else {
+        panic!("changes should be a number");
+    };
+    let Value::Number(before) = before else {
+        panic!("changes should be a number");
+    };
+    assert!(
+        after > before,
+        "the connect plan must reach the on-change callback that recompiles"
+    );
+    assert!(
+        !editor.notify_patcher_semantic_change(std::path::Path::new("/nope/dsp.lisp")),
+        "an unrelated path notifies nothing"
+    );
 }

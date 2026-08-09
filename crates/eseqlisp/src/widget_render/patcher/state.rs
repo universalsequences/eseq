@@ -224,6 +224,37 @@ pub(super) enum AgenticBubbleTarget {
         params: Vec<String>,
         source: String,
     },
+    /// Wire an existing node into the surrounding patch
+    /// (docs/patcher-agentic-connect-spec.md §3). The variant is what keeps the
+    /// three bubbles isolated: it selects both the prompt template and the
+    /// output type the agent is allowed to return.
+    ConnectNode {
+        instance_node_id: String,
+        subject: ConnectSubject,
+    },
+}
+
+/// What the connect bubble's subject node is, and therefore what the agent is
+/// told about its inlets (spec §5.2).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum ConnectSubject {
+    Macro {
+        name: String,
+        params: Vec<String>,
+        source: String,
+    },
+    Operator {
+        op: String,
+    },
+}
+
+impl ConnectSubject {
+    pub(super) fn name(&self) -> &str {
+        match self {
+            ConnectSubject::Macro { name, .. } => name.as_str(),
+            ConnectSubject::Operator { op } => op.as_str(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -291,6 +322,7 @@ impl AgenticBubble {
     pub(super) fn bound_macro_name(&self) -> Option<&str> {
         match &self.target {
             AgenticBubbleTarget::EditMacro { macro_name, .. } => Some(macro_name.as_str()),
+            AgenticBubbleTarget::ConnectNode { subject, .. } => Some(subject.name()),
             AgenticBubbleTarget::CreateMacro => None,
         }
     }
@@ -306,6 +338,9 @@ impl AgenticBubble {
         if self.prompt.trim().is_empty() {
             match self.target {
                 AgenticBubbleTarget::EditMacro { .. } => "ask about or edit this macro".to_string(),
+                AgenticBubbleTarget::ConnectNode { .. } => {
+                    "connect this node into the patch".to_string()
+                }
                 AgenticBubbleTarget::CreateMacro => "cmd+k prompt".to_string(),
             }
         } else {
@@ -1062,6 +1097,7 @@ pub(super) fn allocate_agentic_bubble_with_target(
     let macro_name = match &target {
         AgenticBubbleTarget::CreateMacro => format!("agentic-{}", id.replace('_', "-")),
         AgenticBubbleTarget::EditMacro { macro_name, .. } => macro_name.clone(),
+        AgenticBubbleTarget::ConnectNode { subject, .. } => subject.name().to_string(),
     };
     state.agentic_bubbles.insert(
         id.clone(),
@@ -1906,7 +1942,7 @@ pub(super) fn patch_with_created_macros(
     patch
 }
 
-fn macro_signatures_with_visual_edits(
+pub(super) fn macro_signatures_with_visual_edits(
     patch: &Patch,
     interaction_state: &PatcherInteractionState,
 ) -> HashMap<String, MacroSignature> {

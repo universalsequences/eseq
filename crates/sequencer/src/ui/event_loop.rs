@@ -1961,6 +1961,52 @@ pub(crate) fn run_event_loop(
                             }
                         }
                     }
+                    sequencer::agent::agentic_bubble::AgenticBubbleOutput::Connections { ops } => {
+                        match eseqlisp::widget_render::patcher::resolve_agentic_bubble_connections(
+                            &pending.path,
+                            pending.intent,
+                            &pending.bubble_id,
+                            pending.generation,
+                            &ops,
+                        ) {
+                            Ok(report) => {
+                                // The plan bypassed the widget's own event
+                                // handling, so nothing has told the patch to
+                                // recompile. Fire the same semantic change a
+                                // mouse-drawn cable does, or the cables appear
+                                // and the patch stays silent.
+                                editor.notify_patcher_semantic_change(&pending.path);
+                                // The applied cables and inlined values are text
+                                // the patcher has never measured, and it only
+                                // wraps text whose glyph widths a measure pass
+                                // cached.
+                                editor.runtime_mut().invalidate_layout_deferred();
+                                editor.refresh_runtime_side_effects();
+                                editor.mark_needs_redraw();
+                                let mut status = report.applied.join("; ");
+                                if !report.skipped.is_empty() {
+                                    status.push_str(&format!(
+                                        " (skipped: {})",
+                                        report.skipped.join("; ")
+                                    ));
+                                }
+                                editor.handle_host_event(HostEvent::Status(status));
+                            }
+                            Err(error) => {
+                                eseqlisp::widget_render::patcher::fail_agentic_bubble(
+                                    &pending.path,
+                                    &pending.bubble_id,
+                                    pending.generation,
+                                    "connection plan rejected",
+                                    error.clone(),
+                                );
+                                editor.mark_needs_redraw();
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Agentic bubble failed: {error}"
+                                )));
+                            }
+                        }
+                    }
                     sequencer::agent::agentic_bubble::AgenticBubbleOutput::Answer { text } => {
                         eseqlisp::widget_render::patcher::resolve_agentic_bubble_answer(
                             &pending.path,

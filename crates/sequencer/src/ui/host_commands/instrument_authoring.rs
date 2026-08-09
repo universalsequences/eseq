@@ -1368,10 +1368,27 @@ pub(super) fn handle(
                 } else {
                     None
                 };
+                // A connect bubble carries the patch context the patcher
+                // assembled (docs/patcher-agentic-connect-spec.md §5); it never
+                // asks for source.
+                let connect = if target == "connect-node" {
+                    Some(sequencer::agent::agentic_bubble::AgenticBubbleConnect {
+                        subject_node_id: extract_string_from_payload(
+                            &payload,
+                            "target-node-id",
+                        )
+                        .unwrap_or_default(),
+                        context: extract_string_from_payload(&payload, "connect-context")
+                            .unwrap_or_default(),
+                    })
+                } else {
+                    None
+                };
                 let request = sequencer::agent::agentic_bubble::AgenticBubbleRequest {
                     prompt,
                     suggested_macro_name: macro_name.clone(),
                     follow_up,
+                    connect,
                 };
                 std::thread::spawn(move || {
                     let result =
@@ -1524,10 +1541,27 @@ pub(super) fn handle(
                 } else {
                     None
                 };
+                // A connect bubble carries the patch context the patcher
+                // assembled (docs/patcher-agentic-connect-spec.md §5); it never
+                // asks for source.
+                let connect = if target == "connect-node" {
+                    Some(sequencer::agent::agentic_bubble::AgenticBubbleConnect {
+                        subject_node_id: extract_string_from_payload(
+                            &payload,
+                            "target-node-id",
+                        )
+                        .unwrap_or_default(),
+                        context: extract_string_from_payload(&payload, "connect-context")
+                            .unwrap_or_default(),
+                    })
+                } else {
+                    None
+                };
                 let request = sequencer::agent::agentic_bubble::AgenticBubbleRequest {
                     prompt,
                     suggested_macro_name: macro_name,
                     follow_up,
+                    connect,
                 };
                 std::thread::spawn(move || {
                     let result =

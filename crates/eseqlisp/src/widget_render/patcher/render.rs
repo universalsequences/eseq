@@ -327,6 +327,9 @@ fn draw_agentic_bubbles(
         let (mut x, y) = match &bubble.target {
             AgenticBubbleTarget::EditMacro {
                 instance_node_id, ..
+            }
+            | AgenticBubbleTarget::ConnectNode {
+                instance_node_id, ..
             } => node_rects
                 .get(instance_node_id)
                 .map(|node_rect| (node_rect.col, node_rect.row))

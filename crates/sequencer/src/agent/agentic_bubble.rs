@@ -1,4 +1,5 @@
 use eseqlisp::parser::{format_expression, ASTParser, Expression, Parser};
+use eseqlisp::widget_render::patcher::PatcherConnectOp;
 use std::collections::HashSet;
 
 use super::network::AgentNetworkClient;
@@ -25,6 +26,7 @@ pub struct AgenticBubbleRequest {
     pub prompt: String,
     pub suggested_macro_name: String,
     pub follow_up: Option<AgenticBubbleFollowUp>,
+    pub connect: Option<AgenticBubbleConnect>,
 }
 
 #[derive(Debug, Clone)]
@@ -34,11 +36,20 @@ pub struct AgenticBubbleFollowUp {
     pub source: String,
 }
 
+/// A connect bubble's payload: the node to wire and the surrounding patch, as
+/// assembled by the patcher (docs/patcher-agentic-connect-spec.md §5).
+#[derive(Debug, Clone)]
+pub struct AgenticBubbleConnect {
+    pub subject_node_id: String,
+    pub context: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum AgenticBubbleOutput {
     Macro { macro_name: String, source: String },
     MacroEdit { source: String },
     Answer { text: String },
+    Connections { ops: Vec<PatcherConnectOp> },
 }
 
 pub fn generate_agentic_bubble_macro(
@@ -55,8 +66,16 @@ pub fn generate_agentic_bubble_macro(
     let mut validation_error = None::<String>;
     let mut raw = String::new();
     for attempt in 0..=MAX_RETRIES {
-        let system_prompt = system_prompt(request.follow_up.is_some());
-        let prompt = user_prompt(&request, validation_error.as_deref());
+        // A connect bubble shares no prompt text with the create and edit
+        // bubbles, so neither can bleed context into the other (spec §3).
+        let system_prompt = match &request.connect {
+            Some(_) => connect_system_prompt(),
+            None => system_prompt(request.follow_up.is_some()),
+        };
+        let prompt = match &request.connect {
+            Some(connect) => connect_user_prompt(&request, connect, validation_error.as_deref()),
+            None => user_prompt(&request, validation_error.as_deref()),
+        };
         let messages = vec![AgentMessage {
             role: AgentMessageRole::User,
             content: prompt,
@@ -262,10 +281,131 @@ fn user_prompt(request: &AgenticBubbleRequest, validation_error: Option<&str>) -
     )
 }
 
+fn connect_system_prompt() -> String {
+    "\
+You wire an existing node into an existing audio patch. You never write code.
+
+Output contract:
+- Output exactly one JSON object: {\"ops\": [ ... ]}.
+- No prose, no explanation, no markdown fences.
+- Each op is either
+  {\"op\": \"connect\", \"from_node\": \"<id>\", \"from_outlet\": <int>,
+   \"to_node\": \"<id>\", \"to_arg\": <int>, \"why\": \"<short reason>\"}
+  or
+  {\"op\": \"inline\", \"value\": <number>, \"to_node\": \"<id>\",
+   \"to_arg\": <int>, \"why\": \"<short reason>\"}.
+- Use node ids exactly as given. Labels are decoration and are not accepted.
+- Address inlets by argument index (the `in <index>` lines), never by drawn port
+  position.
+- Only target inlets the context marks `free`. An inlet that is cabled, holds a
+  literal, or holds an inline param already has a value; leave it alone.
+- Prefer `inline` for constants: a number belongs inside the node, not on the
+  end of a cable. Use `connect` when a signal should flow.
+- Emit no op at all for an inlet you have no good reason to fill. A short
+  correct plan beats a complete one.
+- An empty plan is {\"ops\": []}."
+        .to_string()
+}
+
+fn connect_user_prompt(
+    request: &AgenticBubbleRequest,
+    connect: &AgenticBubbleConnect,
+    validation_error: Option<&str>,
+) -> String {
+    let retry = validation_error
+        .map(|error| format!("\nPrevious output was invalid: {error}\nReturn a corrected plan."))
+        .unwrap_or_default();
+    format!(
+        "Prompt: {}\n\nWire node {} into this patch.\n\n{}{}",
+        request.prompt.trim(),
+        connect.subject_node_id,
+        connect.context,
+        retry
+    )
+}
+
+fn validate_connect_response(raw: &str) -> Result<AgenticBubbleOutput, String> {
+    let source = extract_json_source(raw);
+    let value: serde_json::Value = serde_json::from_str(&source)
+        .map_err(|error| format!("connection plan is not valid JSON: {error}"))?;
+    let items = value
+        .get("ops")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "connection plan must be {\"ops\": [...]}".to_string())?;
+    let ops = items
+        .iter()
+        .map(parse_connect_op)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AgenticBubbleOutput::Connections { ops })
+}
+
+fn parse_connect_op(value: &serde_json::Value) -> Result<PatcherConnectOp, String> {
+    let field = |key: &str| -> Result<String, String> {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("op is missing string field `{key}`"))
+    };
+    let index = |key: &str| -> Result<usize, String> {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .map(|index| index as usize)
+            .ok_or_else(|| format!("op is missing integer field `{key}`"))
+    };
+    let why = value
+        .get("why")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    match field("op")?.as_str() {
+        "connect" => Ok(PatcherConnectOp::Connect {
+            from_node: field("from_node")?,
+            from_outlet: index("from_outlet")?,
+            to_node: field("to_node")?,
+            to_arg: index("to_arg")?,
+            why,
+        }),
+        "inline" => Ok(PatcherConnectOp::Inline {
+            // Numbers are accepted unquoted; the host canonicalizes the literal.
+            value: value
+                .get("value")
+                .and_then(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_string)
+                        .or_else(|| value.as_f64().map(|value| value.to_string()))
+                })
+                .ok_or_else(|| "inline op is missing `value`".to_string())?,
+            to_node: field("to_node")?,
+            to_arg: index("to_arg")?,
+            why,
+        }),
+        other => Err(format!("unknown op `{other}`")),
+    }
+}
+
+fn extract_json_source(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(start) = trimmed.find("```") {
+        let after = &trimmed[start + 3..];
+        let after = after.strip_prefix("json").unwrap_or(after);
+        let after = after.strip_prefix('\n').unwrap_or(after);
+        if let Some(end) = after.find("```") {
+            return after[..end].trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 fn validate_agentic_response(
     request: &AgenticBubbleRequest,
     raw: &str,
 ) -> Result<AgenticBubbleOutput, String> {
+    if request.connect.is_some() {
+        return validate_connect_response(raw);
+    }
     if let Some(follow_up) = &request.follow_up {
         validate_follow_up_response(raw, follow_up)
     } else {
@@ -559,8 +699,10 @@ fn available_dgenlisp_names() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        system_prompt, user_prompt, validate_follow_up_response, validate_macro_response,
-        AgenticBubbleFollowUp, AgenticBubbleOutput, AgenticBubbleRequest,
+        connect_system_prompt, connect_user_prompt, system_prompt, user_prompt,
+        validate_connect_response, validate_follow_up_response, validate_macro_response,
+        AgenticBubbleConnect, AgenticBubbleFollowUp, AgenticBubbleOutput, AgenticBubbleRequest,
+        PatcherConnectOp,
     };
 
     #[test]
@@ -621,6 +763,7 @@ mod tests {
             prompt: "create a formant bank".to_string(),
             suggested_macro_name: "agentic-formants".to_string(),
             follow_up: None,
+            connect: None,
         };
         let system = system_prompt(false);
         let user = user_prompt(&request, None);
@@ -645,6 +788,7 @@ mod tests {
             prompt: "make a helper that returns dry, wet, and mixed outputs".to_string(),
             suggested_macro_name: "split-drive".to_string(),
             follow_up: None,
+            connect: None,
         };
         let user = user_prompt(&request, None);
         assert!(user.contains("use a final `(tuple ...)`"));
@@ -717,5 +861,66 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("unknown symbol filtered"));
+    }
+
+    #[test]
+    fn connect_plan_parses_both_op_kinds() {
+        let raw = "```json\n{\"ops\": [\
+{\"op\": \"connect\", \"from_node\": \"trig-in\", \"from_outlet\": 0, \
+ \"to_node\": \"created-3\", \"to_arg\": 0, \"why\": \"trigger\"}, \
+{\"op\": \"inline\", \"value\": 0.8, \"to_node\": \"created-3\", \
+ \"to_arg\": 2, \"why\": \"decay needs a value\"}]}\n```";
+        let AgenticBubbleOutput::Connections { ops } =
+            validate_connect_response(raw).expect("valid plan")
+        else {
+            panic!("expected a connection plan");
+        };
+        assert_eq!(
+            ops[0],
+            PatcherConnectOp::Connect {
+                from_node: "trig-in".to_string(),
+                from_outlet: 0,
+                to_node: "created-3".to_string(),
+                to_arg: 0,
+                why: "trigger".to_string(),
+            }
+        );
+        assert_eq!(
+            ops[1],
+            PatcherConnectOp::Inline {
+                value: "0.8".to_string(),
+                to_node: "created-3".to_string(),
+                to_arg: 2,
+                why: "decay needs a value".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn connect_plan_rejects_defmacro_output() {
+        let error =
+            validate_connect_response("(defmacro smooth (sig amt) (mix sig amt 0.5))").unwrap_err();
+        assert!(error.contains("not valid JSON"), "{error}");
+    }
+
+    #[test]
+    fn connect_prompt_shares_no_text_with_the_create_prompt() {
+        let request = AgenticBubbleRequest {
+            prompt: "connect it".to_string(),
+            suggested_macro_name: "voice".to_string(),
+            follow_up: None,
+            connect: Some(AgenticBubbleConnect {
+                subject_node_id: "created-3".to_string(),
+                context: "created-3  voice  kind=MacroInstance\n  in  0  trig  free\n".to_string(),
+            }),
+        };
+        let connect = request.connect.clone().expect("connect");
+        let system = connect_system_prompt();
+        let user = connect_user_prompt(&request, &connect, None);
+        assert!(system.contains("{\"ops\": [ ... ]}"));
+        assert!(system.contains("marks `free`"));
+        assert!(!system.contains("defmacro"));
+        assert!(user.contains("Wire node created-3"));
+        assert!(user.contains("in  0  trig  free"));
     }
 }

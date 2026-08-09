@@ -1,4 +1,5 @@
 mod alignment;
+mod connect;
 mod display;
 mod emit;
 mod encapsulate;
@@ -28,6 +29,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use crate::defmacro_library::{DefmacroLibrary, DefmacroPackage};
 
+pub use connect::{PatcherConnectOp, PatcherConnectReport};
 pub use lisp::{parse_patch_source, parse_patch_source_with_library};
 pub use model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CableSegmentInfo,
@@ -517,6 +519,63 @@ pub fn resolve_agentic_bubble_answer(
     }
 }
 
+/// Apply an agent connection plan to the patcher for `path`
+/// (docs/patcher-agentic-connect-spec.md §7-§9).
+///
+/// Unlike the create and edit bubbles this writes no source: every op is an
+/// edit the canvas already makes, and the whole plan lands in a single
+/// interaction-state write so one Cmd+Z undoes the wiring.
+pub fn resolve_agentic_bubble_connections(
+    path: impl AsRef<std::path::Path>,
+    intent: PatcherIntent,
+    bubble_id: &str,
+    generation: u64,
+    ops: &[PatcherConnectOp],
+) -> Result<PatcherConnectReport, String> {
+    let path = path.as_ref();
+    let keys = state::patcher_keys_for_path(path);
+    if keys.is_empty() {
+        return Ok(PatcherConnectReport::default());
+    }
+    let source = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
+    let root_patch = parse_source_with_default_library(&source, intent)?;
+    let mut matched = false;
+    let mut report = None;
+    let mut refusal = None;
+    for key in keys {
+        let mut interaction = state::get_patcher_interaction_state(key);
+        let Some(bubble) = interaction.agentic_bubbles.get(bubble_id).cloned() else {
+            continue;
+        };
+        if bubble.generation != generation
+            || !matches!(bubble.target, AgenticBubbleTarget::ConnectNode { .. })
+        {
+            continue;
+        }
+        matched = true;
+        let view_key = active_patcher_view_key(&interaction);
+        let patch = active_patcher_patch(&root_patch, &interaction);
+        let patch = patch_with_interaction_state(patch, &interaction, &view_key);
+        let applied = connect::apply_connect_plan(&mut interaction, &patch, &view_key, ops);
+        if applied.applied.is_empty() {
+            // Nothing survived validation: leave the bubble alone so the
+            // existing Cmd+R retry works against the reported reasons.
+            refusal = Some(applied.skipped.join("; "));
+            continue;
+        }
+        interaction.agentic_bubbles.remove(bubble_id);
+        state::set_patcher_interaction_state(key, interaction);
+        report.get_or_insert(applied);
+    }
+    match (report, refusal) {
+        (Some(report), _) => Ok(report),
+        (None, Some(refusal)) => Err(refusal),
+        (None, None) if matched => Err("connection plan was empty".to_string()),
+        (None, None) => Ok(PatcherConnectReport::default()),
+    }
+}
+
 struct MaterializedAgenticMacro {
     instance_node_id: String,
     writeback_state: state::PatcherInteractionState,
@@ -858,13 +917,13 @@ use interaction::{
 };
 use metrics::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TOUCHPAD_PAN_SPEED_CELLS_PER_PIXEL};
 use state::{
-    AgenticBubbleState, AgenticBubbleTarget, active_patcher_patch, active_patcher_view_key,
-    allocate_agentic_bubble, allocate_agentic_bubble_with_target, apply_patcher_history_step,
-    debug_log_edit_event, debug_log_writeback_event, delete_connection_edit_or_mark_deleted,
-    delete_selected_nodes, editing_agentic_bubble_id, get_patcher_interaction_state,
-    patch_with_interaction_state, patcher_state_key, patcher_state_key_from_parts,
-    prune_unreferenced_created_macros, set_connection_segment_edit, set_patcher_interaction_state,
-    set_patcher_interaction_state_without_history,
+    AgenticBubbleState, AgenticBubbleTarget, ConnectSubject, active_patcher_patch,
+    active_patcher_view_key, allocate_agentic_bubble, allocate_agentic_bubble_with_target,
+    apply_patcher_history_step, debug_log_edit_event, debug_log_writeback_event,
+    delete_connection_edit_or_mark_deleted, delete_selected_nodes, editing_agentic_bubble_id,
+    get_patcher_interaction_state, patch_with_interaction_state, patcher_state_key,
+    patcher_state_key_from_parts, prune_unreferenced_created_macros, set_connection_segment_edit,
+    set_patcher_interaction_state, set_patcher_interaction_state_without_history,
 };
 use text::{
     apply_patcher_autocomplete, cancel_patcher_text_edit,
@@ -1164,14 +1223,15 @@ impl WidgetDefinition for PatcherWidget {
                                 && matches!(bubble.state, AgenticBubbleState::Error { .. })
                         })
                         .map(|bubble| bubble.id.clone())?;
-                    let payload = {
+                    let retried = {
                         let bubble = state.agentic_bubbles.get_mut(&bubble_id)?;
                         bubble.generation = bubble.generation.wrapping_add(1);
                         bubble.state = AgenticBubbleState::Pending {
                             started_at: Instant::now(),
                         };
-                        agentic_submit_payload(node, bubble)
+                        bubble.clone()
                     };
+                    let payload = agentic_submit_payload(node, &retried, &state);
                     set_patcher_interaction_state(key, state);
                     Some(WidgetEvent::Custom(payload))
                 }
@@ -1186,8 +1246,30 @@ impl WidgetDefinition for PatcherWidget {
                     set_patcher_interaction_state(key, state);
                     Some(WidgetEvent::Custom(Value::Nil))
                 }
+                // Cmd+Shift+K: ask the agent to wire the selected node into the
+                // surrounding patch (docs/patcher-agentic-connect-spec.md §2).
+                // A distinct binding rather than intent-detection on the prompt
+                // text: a modifier key is unambiguous.
                 KeyCode::Char('k') | KeyCode::Char('K')
-                    if key_event.modifiers.contains(KeyModifiers::SUPER) =>
+                    if key_event.modifiers.contains(KeyModifiers::SUPER)
+                        && key_event.modifiers.contains(KeyModifiers::SHIFT) =>
+                {
+                    let (instance_node_id, subject, position) =
+                        selected_connect_target(node, &state)?;
+                    allocate_agentic_bubble_with_target(
+                        &mut state,
+                        position,
+                        AgenticBubbleTarget::ConnectNode {
+                            instance_node_id,
+                            subject,
+                        },
+                    );
+                    set_patcher_interaction_state(key, state);
+                    Some(WidgetEvent::Custom(Value::Nil))
+                }
+                KeyCode::Char('k') | KeyCode::Char('K')
+                    if key_event.modifiers.contains(KeyModifiers::SUPER)
+                        && !key_event.modifiers.contains(KeyModifiers::SHIFT) =>
                 {
                     open_agentic_bubble_for_context(node, key, &mut state)?;
                     set_patcher_interaction_state(key, state);
@@ -1426,19 +1508,22 @@ fn handle_agentic_bubble_edit_key(
 ) -> Option<WidgetEvent> {
     match key_event.code {
         KeyCode::Enter => {
-            let payload = {
+            let submitted = {
                 let bubble = state.agentic_bubbles.get_mut(&bubble_id)?;
                 let prompt = bubble.prompt.trim().to_string();
                 if prompt.is_empty() {
                     return Some(WidgetEvent::Custom(Value::Nil));
                 }
                 bubble.generation = bubble.generation.wrapping_add(1);
-                bubble.macro_name = slug_agentic_macro_name(&prompt);
+                if !matches!(bubble.target, AgenticBubbleTarget::ConnectNode { .. }) {
+                    bubble.macro_name = slug_agentic_macro_name(&prompt);
+                }
                 bubble.state = AgenticBubbleState::Pending {
                     started_at: Instant::now(),
                 };
-                agentic_submit_payload(node, bubble)
+                bubble.clone()
             };
+            let payload = agentic_submit_payload(node, &submitted, &state);
             set_patcher_interaction_state(key, state);
             Some(WidgetEvent::Custom(payload))
         }
@@ -1491,7 +1576,11 @@ fn dismissable_agentic_bubble_id(state: &state::PatcherInteractionState) -> Opti
         .map(|bubble| bubble.id.clone())
 }
 
-fn agentic_submit_payload(node: &LayoutNode, bubble: &state::AgenticBubble) -> Value {
+fn agentic_submit_payload(
+    node: &LayoutNode,
+    bubble: &state::AgenticBubble,
+    state: &state::PatcherInteractionState,
+) -> Value {
     let path = prop_str(&node.props, "path").or_else(|| prop_str(&node.props, "file"));
     let intent = match patcher_intent_from_props(&node.props) {
         PatcherIntent::Effect => "effect",
@@ -1524,8 +1613,37 @@ fn agentic_submit_payload(node: &LayoutNode, bubble: &state::AgenticBubble) -> V
             entries.push(("existing-macro-params", Value::String(params.join(" "))));
             entries.push(("existing-macro-source", Value::String(source.clone())));
         }
+        AgenticBubbleTarget::ConnectNode {
+            instance_node_id,
+            subject,
+        } => {
+            entries.push(("target", Value::Keyword("connect-node".to_string())));
+            entries.push(("target-node-id", Value::String(instance_node_id.clone())));
+            entries.push((
+                "connect-context",
+                Value::String(
+                    connect_context_for_node(node, state, instance_node_id, subject)
+                        .unwrap_or_default(),
+                ),
+            ));
+        }
     }
     map_value(entries)
+}
+
+/// The §5 context payload for a connect bubble, assembled fresh at submit so a
+/// retry sees the patch as it is now.
+fn connect_context_for_node(
+    node: &LayoutNode,
+    state: &state::PatcherInteractionState,
+    instance_node_id: &str,
+    subject: &ConnectSubject,
+) -> Option<String> {
+    let (_, root_patch) = load_patch_from_props(&node.props).ok()?;
+    let view_key = active_patcher_view_key(state);
+    let patch = active_patcher_patch(&root_patch, state);
+    let patch = patch_with_interaction_state(patch, state, &view_key);
+    Some(connect::connect_context(&patch, instance_node_id, subject))
 }
 
 fn open_agentic_bubble_for_context(
@@ -1567,6 +1685,57 @@ fn open_agentic_bubble_for_context(
         }
         SelectedMacroTarget::Ambiguous => None,
     }
+}
+
+/// The single selected node a connect bubble would wire up, its subject
+/// (spec §5.2) and where the bubble opens. `None` unless exactly one node is
+/// selected, which leaves Cmd+Shift+K unconsumed.
+fn selected_connect_target(
+    node: &LayoutNode,
+    state: &state::PatcherInteractionState,
+) -> Option<(String, ConnectSubject, (f32, f32))> {
+    let (path, root_patch) = load_patch_from_props(&node.props).ok()?;
+    let view_key = active_patcher_view_key(state);
+    let patch = active_patcher_patch(&root_patch, state);
+    let patch = patch_with_interaction_state(patch, state, &view_key);
+    let selected = patch
+        .nodes
+        .iter()
+        .filter(|patch_node| state.selected_nodes.contains(&patch_node.id))
+        .collect::<Vec<_>>();
+    let [patch_node] = selected.as_slice() else {
+        return None;
+    };
+    let subject = if patch_node.kind == NodeKind::MacroInstance {
+        let macro_name = patch_node.op.clone();
+        let params = state::patch_with_created_macros(root_patch, state)
+            .macros
+            .iter()
+            .find(|macro_patch| macro_patch.name == macro_name)
+            .map(|macro_patch| macro_patch.params.clone())
+            .unwrap_or_default();
+        let source = state
+            .edit_state
+            .created_macros
+            .get(&macro_name)
+            .and_then(|edit| edit.source.clone())
+            .or_else(|| {
+                std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|source| macro_source(&source, &macro_name))
+            })
+            .unwrap_or_default();
+        ConnectSubject::Macro {
+            name: macro_name,
+            params,
+            source,
+        }
+    } else {
+        ConnectSubject::Operator {
+            op: patch_node.op.clone(),
+        }
+    };
+    Some((patch_node.id.clone(), subject, patch_node.position))
 }
 
 enum SelectedMacroTarget {
