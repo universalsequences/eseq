@@ -46667,3 +46667,74 @@
 
         assert_eq!(before, signature(&app));
     }
+
+    /// A theme file that names a key with no matching `theme_slots!` entry is
+    /// ignored *silently* — the surface it was meant to colour quietly falls
+    /// back to the hardcoded Rust default. That is how the boot theme lost the
+    /// completion popup when `patcher-autocomplete-*` was folded into `comp-*`.
+    /// Walk every shipped theme and fail loudly on any key that no longer
+    /// resolves to a registered slot.
+    #[test]
+    fn every_shipped_theme_key_resolves_to_a_registered_theme_slot() {
+        let themes_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/themes");
+        let mut checked_files = 0;
+        let mut checked_keys = 0;
+        for entry in std::fs::read_dir(&themes_dir).expect("read ui/themes") {
+            let path = entry.expect("theme dir entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("lisp") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read theme file");
+            checked_files += 1;
+            for line in source.lines() {
+                // Theme entries are `:some-key '(r g b [a])` inside the dict;
+                // anything else on the line is a comment or plain code.
+                let trimmed = line.trim_start();
+                let Some(rest) = trimmed.strip_prefix(':') else {
+                    continue;
+                };
+                let key: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                if key.is_empty() || !rest[key.len()..].trim_start().starts_with("'(") {
+                    continue;
+                }
+                checked_keys += 1;
+                assert!(
+                    eseqlisp::theme::named_color(&key).is_some(),
+                    "{}: `:{key}` is not a registered theme slot — it is silently ignored",
+                    path.display()
+                );
+            }
+        }
+        assert!(checked_files >= 2, "expected several shipped themes");
+        assert!(checked_keys > 100, "expected the themes to set many keys");
+    }
+
+    /// The boot theme (`ui/main.lisp` calls `seq-theme-mac-osx-dark`) has to
+    /// carry the shared completion palette, or the code editor and the patcher
+    /// node editor both come up on the Rust fallback colours.
+    #[test]
+    fn the_boot_theme_defines_the_shared_completion_palette() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("ui/themes/mac-osx-dark.lisp");
+        let source = std::fs::read_to_string(&path).expect("read mac-osx-dark theme");
+        for key in [
+            "comp-unselected-bg",
+            "comp-selected-bg",
+            "comp-border",
+            "comp-fg",
+            "comp-selected-fg",
+            "comp-category-fg",
+            "comp-doc-bg",
+            "comp-doc-border",
+            "comp-doc-fg",
+            "comp-doc-title-fg",
+        ] {
+            assert!(
+                source.contains(&format!(":{key} ")),
+                "mac-osx-dark is the boot theme and must set `:{key}`"
+            );
+        }
+    }

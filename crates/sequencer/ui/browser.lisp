@@ -32,7 +32,11 @@
 (defstate sbrowser-script-save-mode "")  ;; "" or "new-script"
 
 (defwidget editor-spinner
-  :width 6.0 :height 4.25
+  ;; Sized to sit inside `sbrowser-editor-status-row`'s 1.35-row height — the
+  ;; row does not clip, so an oversized spinner paints over its neighbours.
+  ;; The dot row spans x = -0.72..0.72 in local space, so keep the box wider
+  ;; than it is tall or the outer dots run off the edges.
+  :width 3.0 :height 1.25
   :animates true
   :shader
   (let ((phase (* itime 5.4))
@@ -59,8 +63,10 @@
         (material :color (rgba 0.22 0.52 1.0 (+ 0.35 (* 0.65 p4))))))))
 
 (def sbrowser-editor-status-row (text color)
-  (h-stack :width :fill :height 1.35 :gap 0.5 :align :baseline
-    (editor-spinner :width 6.8 :height 4.15)
+  ;; :center, not :baseline — the spinner is a bare SDF with no text baseline
+  ;; to align against.
+  (h-stack :width :fill :height 1.35 :gap 0.5 :align :center
+    (editor-spinner :width 2.8 :height 1.15)
     (label text
       :font-size 9
       :color color

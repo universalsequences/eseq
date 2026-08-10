@@ -152,6 +152,7 @@ pub(super) fn handle(
                 temp_dir,
                 draft_track,
                 original_track,
+                EditorSurface::Patch,
             ));
             let rt = editor.runtime_mut();
             let _ = rt.eval_str("(set! sbrowser-editor-name \"\")");
@@ -298,20 +299,44 @@ pub(super) fn handle(
                 return;
             };
 
-            let buf_name = "*instrument-patcher:new-instrument*".to_string();
-            editor.remove_buffer_by_name(&buf_name);
-            editor.create_scratch_buffer(&buf_name, "", BufferMode::ESeqLisp);
-            let patcher_source = instrument_patcher_buffer_source(&buf_name, &file_path);
-            if let Err(error) = editor.runtime_mut().eval_str(&patcher_source) {
-                let _ = app.graph_controller().delete_track(draft_track);
-                let _ = std::fs::remove_dir_all(&temp_dir);
-                editor.handle_host_event(HostEvent::Error(format!(
-                    "Failed to build patch editor: {error:?}"
-                )));
-                editor.remove_buffer_by_name(&buf_name);
-                return;
-            }
-            reset_instrument_patcher_state(&file_path);
+            // A fork inherits the source's surface: forking a hand-written
+            // instrument with no authored sidecar (core/triton) must open the
+            // code editor, not scramble it through the patcher.
+            let surface = editor_surface_for_existing(
+                &file_path,
+                &starter_source,
+                eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+            );
+            let buf_name = match surface {
+                EditorSurface::Patch => {
+                    let buf_name = "*instrument-patcher:new-instrument*".to_string();
+                    editor.remove_buffer_by_name(&buf_name);
+                    editor.create_scratch_buffer(&buf_name, "", BufferMode::ESeqLisp);
+                    let patcher_source =
+                        instrument_patcher_buffer_source(&buf_name, &file_path);
+                    if let Err(error) = editor.runtime_mut().eval_str(&patcher_source) {
+                        let _ = app.graph_controller().delete_track(draft_track);
+                        let _ = std::fs::remove_dir_all(&temp_dir);
+                        editor.handle_host_event(HostEvent::Error(format!(
+                            "Failed to build patch editor: {error:?}"
+                        )));
+                        editor.remove_buffer_by_name(&buf_name);
+                        return;
+                    }
+                    reset_instrument_patcher_state(&file_path);
+                    buf_name
+                }
+                EditorSurface::Code => {
+                    let buf_name = instrument_code_buffer_name(NEW_INSTRUMENT_DRAFT_NAME);
+                    editor.remove_buffer_by_name(&buf_name);
+                    editor.create_scratch_buffer(
+                        &buf_name,
+                        &starter_source,
+                        BufferMode::DGenLisp,
+                    );
+                    buf_name
+                }
+            };
             let layout_source = show_instrument_patcher_layout_source(&buf_name);
             if let Err(error) = editor.runtime_mut().eval_str(&layout_source) {
                 let _ = app.graph_controller().delete_track(draft_track);
@@ -333,6 +358,7 @@ pub(super) fn handle(
                 temp_dir,
                 draft_track,
                 original_track,
+                surface,
             );
             session.run_mode = run_mode;
             ctx.sessions.instrument_edit_session = Some(session);
@@ -361,7 +387,7 @@ pub(super) fn handle(
             rt.set_reactive(
                 "SEQ",
                 "editor-surface",
-                Value::String("patch".to_string()),
+                Value::String(editor_surface_label(surface).to_string()),
             );
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -554,7 +580,12 @@ pub(super) fn handle(
                             editor.refresh_runtime_side_effects();
                             return;
                         }
-                        if !session.visible_revision_valid {
+                        // A draft can sit on the code surface — `fork-editor-session`
+                        // over a hand-written instrument, or a fork of one. Those
+                        // sessions have no patcher revision and no staged macro
+                        // edits, exactly like `update-instrument` treats them.
+                        let code_surface = session.surface == EditorSurface::Code;
+                        if !code_surface && !session.visible_revision_valid {
                             let rt = editor.runtime_mut();
                             rt.set_reactive(
                                 "SEQ",
@@ -569,7 +600,9 @@ pub(super) fn handle(
                             return;
                         }
 
-                        let flushed_macros =
+                        let flushed_macros = if code_surface {
+                            Vec::new()
+                        } else {
                             match flush_staged_instrument_library_macro_edits(session) {
                                 Ok(macros) => macros,
                                 Err(error) => {
@@ -585,7 +618,8 @@ pub(super) fn handle(
                                     editor.refresh_runtime_side_effects();
                                     return;
                                 }
-                            };
+                            }
+                        };
 
                         let final_slug =
                             sequencer::agent::actions::normalize_patch_name(
@@ -609,7 +643,25 @@ pub(super) fn handle(
                             return;
                         }
 
-                        let source = session.last_valid_source.clone();
+                        // Code sessions finalize the buffer text, not the last
+                        // patcher emission — everything typed since the fork
+                        // would otherwise be silently dropped. The source is
+                        // compiled below by `replace_custom_instrument_track_sync`,
+                        // so there is nothing "unevaluated" to warn about.
+                        let source = if code_surface {
+                            match editor.read_buffer_text(&session.buffer_name) {
+                                Some(text) => text,
+                                None => {
+                                    editor.handle_host_event(HostEvent::Error(format!(
+                                        "Code buffer '{}' is missing",
+                                        session.buffer_name
+                                    )));
+                                    return;
+                                }
+                            }
+                        } else {
+                            session.last_valid_source.clone()
+                        };
                         let (draft_track, draft_temp_dir) = match &session.mode {
                             InstrumentEditMode::CreateDraft {
                                 draft_track,
@@ -721,12 +773,10 @@ pub(super) fn handle(
                             &final_name,
                             &source,
                         ) {
+                            // The forked preset bank lives *inside* final_dir
+                            // (that is where the loader resolves "<slug>/"), so
+                            // removing the directory takes it with it.
                             let _ = std::fs::remove_dir_all(&final_dir);
-                            if let Some(bank) =
-                                sequencer::patch_fork::preset_bank_sibling_path(&final_dir)
-                            {
-                                let _ = std::fs::remove_file(bank);
-                            }
                             let rt = editor.runtime_mut();
                             rt.set_reactive(
                                 "SEQ",
@@ -1102,7 +1152,15 @@ pub(super) fn handle(
                                 editor.refresh_runtime_side_effects();
                                 return;
                             }
-                            if let Some(layout) = session.last_valid_layout.as_deref() {
+                            // Only the patch surface owns the sidecar: every
+                            // layout the patcher emits carries `authored: true`,
+                            // so writing one from a code session would silently
+                            // re-promote a hand-edited dsp.lisp.
+                            if let Some(layout) = session
+                                .last_valid_layout
+                                .as_deref()
+                                .filter(|_| !code_surface)
+                            {
                                 if let Err(e) =
                                     write_patcher_layout_sidecar(&session.path, layout)
                                 {
@@ -1966,6 +2024,11 @@ pub(super) fn handle(
                 editor.remove_buffer_by_name(&old_buf);
                 session.buffer_name = buf_name.clone();
                 session.surface = EditorSurface::Code;
+                // Every patcher-produced layout carries `authored: true`, so a
+                // later save that re-stamped this one would undo the eject and
+                // route the instrument straight back into the patch editor.
+                // The sidecar on disk keeps the layout data for re-promotion.
+                session.last_valid_layout = None;
                 ctx.sessions.editor_buffer_name = Some(buf_name.clone());
                 let rt = editor.runtime_mut();
                 rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
@@ -2033,6 +2096,9 @@ pub(super) fn handle(
                 editor.remove_buffer_by_name(&old_buf);
                 session.buffer_name = buf_name.clone();
                 session.surface = EditorSurface::Code;
+                // Same as the instrument arm: keeping the authored layout
+                // around would let the next save re-promote the ejected effect.
+                session.last_valid_layout = None;
                 ctx.sessions.editor_buffer_name = Some(buf_name.clone());
                 let rt = editor.runtime_mut();
                 rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
@@ -2245,6 +2311,7 @@ pub(super) fn handle(
                 EffectEditTarget::Track { track, slot },
                 sequencer::lisp_host::EFFECT_TEMPLATE.to_string(),
                 temp_dir,
+                EditorSurface::Patch,
             ));
             let rt = editor.runtime_mut();
             let _ = rt.eval_str("(set! sbrowser-editor-name \"\")");
@@ -2400,22 +2467,45 @@ pub(super) fn handle(
                 return;
             }
 
-            let buf_name = "*effect-patcher:new-effect*".to_string();
-            editor.remove_buffer_by_name(&buf_name);
-            editor.create_scratch_buffer(&buf_name, "", BufferMode::ESeqLisp);
-            let patcher_source = effect_patcher_buffer_source(&buf_name, &file_path);
-            if let Err(error) = editor.runtime_mut().eval_str(&patcher_source) {
-                let _ = app
-                    .graph_controller()
-                    .delete_custom_effect_slot(track, slot);
-                let _ = std::fs::remove_dir_all(&temp_dir);
-                editor.handle_host_event(HostEvent::Error(format!(
-                    "Failed to build patch editor: {error:?}"
-                )));
-                editor.remove_buffer_by_name(&buf_name);
-                return;
-            }
-            reset_effect_patcher_state(&file_path);
+            // Same as the instrument fork: inherit the source's surface rather
+            // than assuming the patcher can represent it.
+            let surface = editor_surface_for_existing(
+                &file_path,
+                &starter_source,
+                eseqlisp::widget_render::patcher::PatcherIntent::Effect,
+            );
+            let buf_name = match surface {
+                EditorSurface::Patch => {
+                    let buf_name = "*effect-patcher:new-effect*".to_string();
+                    editor.remove_buffer_by_name(&buf_name);
+                    editor.create_scratch_buffer(&buf_name, "", BufferMode::ESeqLisp);
+                    let patcher_source =
+                        effect_patcher_buffer_source(&buf_name, &file_path);
+                    if let Err(error) = editor.runtime_mut().eval_str(&patcher_source) {
+                        let _ = app
+                            .graph_controller()
+                            .delete_custom_effect_slot(track, slot);
+                        let _ = std::fs::remove_dir_all(&temp_dir);
+                        editor.handle_host_event(HostEvent::Error(format!(
+                            "Failed to build patch editor: {error:?}"
+                        )));
+                        editor.remove_buffer_by_name(&buf_name);
+                        return;
+                    }
+                    reset_effect_patcher_state(&file_path);
+                    buf_name
+                }
+                EditorSurface::Code => {
+                    let buf_name = effect_code_buffer_name(NEW_EFFECT_DRAFT_NAME);
+                    editor.remove_buffer_by_name(&buf_name);
+                    editor.create_scratch_buffer(
+                        &buf_name,
+                        &starter_source,
+                        BufferMode::DGenLisp,
+                    );
+                    buf_name
+                }
+            };
             let layout_source = show_instrument_patcher_layout_source(&buf_name);
             if let Err(error) = editor.runtime_mut().eval_str(&layout_source) {
                 let _ = app
@@ -2437,6 +2527,7 @@ pub(super) fn handle(
                 EffectEditTarget::Track { track, slot },
                 starter_source,
                 temp_dir,
+                surface,
             ));
             let rt = editor.runtime_mut();
             let _ = rt.eval_str("(set! sbrowser-editor-name \"\")");
@@ -2448,7 +2539,11 @@ pub(super) fn handle(
                 "editor-buffer-name",
                 Value::String(buf_name.clone()),
             );
-            rt.set_reactive("SEQ", "editor-surface", Value::String("patch".to_string()));
+            rt.set_reactive(
+                "SEQ",
+                "editor-surface",
+                Value::String(editor_surface_label(surface).to_string()),
+            );
             rt.set_reactive(
                 "SEQ",
                 "effects",
@@ -2513,7 +2608,10 @@ pub(super) fn handle(
                             editor.refresh_runtime_side_effects();
                             return;
                         }
-                        if !session.visible_revision_valid {
+                        // See `save-new-instrument`: draft effects can sit on
+                        // the code surface too.
+                        let code_surface = session.surface == EditorSurface::Code;
+                        if !code_surface && !session.visible_revision_valid {
                             let rt = editor.runtime_mut();
                             rt.set_reactive(
                                 "SEQ",
@@ -2528,7 +2626,9 @@ pub(super) fn handle(
                             return;
                         }
 
-                        let flushed_macros =
+                        let flushed_macros = if code_surface {
+                            Vec::new()
+                        } else {
                             match flush_staged_effect_library_macro_edits(session) {
                                 Ok(macros) => macros,
                                 Err(error) => {
@@ -2544,7 +2644,8 @@ pub(super) fn handle(
                                     editor.refresh_runtime_side_effects();
                                     return;
                                 }
-                            };
+                            }
+                        };
 
                         let final_slug =
                             sequencer::agent::actions::normalize_patch_name(
@@ -2568,7 +2669,23 @@ pub(super) fn handle(
                             return;
                         }
 
-                        let source = session.last_valid_source.clone();
+                        // Code sessions finalize the buffer text — see the
+                        // instrument twin. `load_saved_effect_to_slot_sync`
+                        // below compiles what we just wrote.
+                        let source = if code_surface {
+                            match editor.read_buffer_text(&session.buffer_name) {
+                                Some(text) => text,
+                                None => {
+                                    editor.handle_host_event(HostEvent::Error(format!(
+                                        "Code buffer '{}' is missing",
+                                        session.buffer_name
+                                    )));
+                                    return;
+                                }
+                            }
+                        } else {
+                            session.last_valid_source.clone()
+                        };
                         if let Err(e) =
                             sequencer::lisp_host::save_effect(&final_name, &source)
                         {
@@ -2963,7 +3080,12 @@ pub(super) fn handle(
                 editor.refresh_runtime_side_effects();
                 return;
             }
-            if let Some(layout) = session.last_valid_layout.as_deref() {
+            // Patch surface only — see the instrument twin in `update-instrument`.
+            if let Some(layout) = session
+                .last_valid_layout
+                .as_deref()
+                .filter(|_| !code_surface)
+            {
                 if let Err(e) = write_patcher_layout_sidecar(&session.path, layout) {
                     let rt = editor.runtime_mut();
                     rt.set_reactive(
@@ -3404,6 +3526,7 @@ pub(super) fn handle(
                             Some(PendingInstrumentCancelRestore {
                                 session,
                                 persisted_source,
+                                fork_draft_dir: None,
                                 receiver: rx,
                             });
                         let rt = editor.runtime_mut();
@@ -3427,7 +3550,6 @@ pub(super) fn handle(
                         // a REAL track. Deleting it would take the user's track
                         // with it; restore the original instrument instead.
                         if let Some(restore) = session.fork_restore.clone() {
-                            let _ = std::fs::remove_dir_all(&temp_dir);
                             let source = restore.persisted_source.clone();
                             let sample_rate = app.graph.sample_rate;
                             let asset_base = restore
@@ -3443,12 +3565,15 @@ pub(super) fn handle(
                                 );
                                 let _ = tx.send(result);
                             });
-                            let mut session = session;
-                            session.path = restore.origin_path;
+                            // The session is left pointing at the draft: if the
+                            // restore compile fails it goes back into the
+                            // editor as-is, still a usable draft. The draft dir
+                            // is removed only once the restore lands.
                             ctx.sessions.pending_instrument_cancel_restore =
                                 Some(PendingInstrumentCancelRestore {
                                     session,
                                     persisted_source: restore.persisted_source,
+                                    fork_draft_dir: Some(temp_dir),
                                     receiver: rx,
                                 });
                             let rt = editor.runtime_mut();
@@ -3542,6 +3667,7 @@ pub(super) fn handle(
                         ctx.sessions.pending_effect_cancel_restore =
                             Some(PendingEffectCancelRestore {
                                 session,
+                                fork_draft_dir: None,
                                 receiver: rx,
                             });
                         let rt = editor.runtime_mut();
@@ -3561,7 +3687,6 @@ pub(super) fn handle(
                         // the slot the original effect was in, so cancel restores
                         // the original rather than deleting the slot.
                         if let Some(restore) = session.fork_restore.clone() {
-                            let _ = std::fs::remove_dir_all(&temp_dir);
                             let source = restore.persisted_source.clone();
                             let sample_rate = app.graph.sample_rate;
                             let asset_base = restore
@@ -3578,11 +3703,12 @@ pub(super) fn handle(
                                     );
                                 let _ = tx.send(result);
                             });
-                            let mut session = session;
-                            session.path = restore.origin_path;
+                            // Same deal as instruments: delete the draft dir
+                            // only once the restore compile lands.
                             ctx.sessions.pending_effect_cancel_restore =
                                 Some(PendingEffectCancelRestore {
                                     session,
+                                    fork_draft_dir: Some(temp_dir),
                                     receiver: rx,
                                 });
                             let rt = editor.runtime_mut();

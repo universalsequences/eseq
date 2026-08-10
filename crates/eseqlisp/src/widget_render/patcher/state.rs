@@ -211,6 +211,11 @@ pub(super) struct AgenticBubble {
     pub(super) state: AgenticBubbleState,
     pub(super) generation: u64,
     pub(super) macro_name: String,
+    /// The view (`root` or `macro:<name>`) the bubble's last submission was
+    /// composed against. Node ids are only unique per scope, so a response that
+    /// lands after the canvas drilled somewhere else must not be applied — see
+    /// `resolve_agentic_bubble_connections`.
+    pub(super) view_key: String,
     /// What the user is typing into the follow-up box under a settled answer.
     /// Kept separate from `prompt` so the answer that is being followed up on
     /// stays on screen while the next question is composed.
@@ -1203,6 +1208,7 @@ pub(super) fn allocate_agentic_bubble_with_target(
 ) -> String {
     let id = format!("bubble-{}", state.edit_state.next_created_node);
     state.edit_state.next_created_node += 1;
+    let view_key = active_patcher_view_key(state);
     let macro_name = match &target {
         AgenticBubbleTarget::CreateMacro => format!("agentic-{}", id.replace('_', "-")),
         AgenticBubbleTarget::EditMacro { macro_name, .. } => macro_name.clone(),
@@ -1222,6 +1228,7 @@ pub(super) fn allocate_agentic_bubble_with_target(
             state: AgenticBubbleState::Editing,
             generation: 0,
             macro_name,
+            view_key,
             created_at: Instant::now(),
             closing_at: None,
         },

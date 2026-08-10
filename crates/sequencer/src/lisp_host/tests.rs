@@ -11611,6 +11611,26 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             !emitted.contains("(def created-"),
             "interaction-created ids must not leak into generated source:\n{emitted}"
         );
+        // The frequency the interaction typed has to reach the emission. It
+        // lands as its own value binding (`(def value 5)`), so match on the
+        // binding rather than a bare "5.0" literal — but still require the
+        // created phasor to read *that* binding, or an emission of
+        // `(phasor 0)` would slip through.
+        let frequency_bindings = emitted
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("(def ")?;
+                let (name, value) = rest.split_once(' ')?;
+                (value.trim_end_matches(')').trim() == "5").then(|| name.to_string())
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            frequency_bindings
+                .iter()
+                .any(|name| emitted.contains(&format!("(phasor {name})"))),
+            "the created phasor should read a binding holding the requested frequency 5, \
+             found bindings {frequency_bindings:?}:\n{emitted}"
+        );
         compile_instrument_with_asset_base(&emitted, 44_100, path.parent()).unwrap_or_else(
             |error| panic!("patcher-edited instrument source should compile:\n{error}\n{emitted}"),
         );

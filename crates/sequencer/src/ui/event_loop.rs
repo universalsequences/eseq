@@ -1481,6 +1481,12 @@ pub(crate) fn run_event_loop(
                     result,
                 ) {
                     Ok(()) => {
+                        // A fork-cancel discards its draft only now that the
+                        // original is audible again; a failed restore below
+                        // hands the draft session back intact.
+                        if let Some(draft_dir) = pending.fork_draft_dir.as_deref() {
+                            let _ = std::fs::remove_dir_all(draft_dir);
+                        }
                         if let Some(buf_name) = sessions.editor_buffer_name.take() {
                             if let Err(error) = editor
                                 .runtime_mut()
@@ -1570,6 +1576,11 @@ pub(crate) fn run_event_loop(
                         result,
                     ) {
                         Ok(()) => {
+                            // See the instrument restore above: the forked
+                            // draft dir outlives a failed restore.
+                            if let Some(draft_dir) = pending.fork_draft_dir.as_deref() {
+                                let _ = std::fs::remove_dir_all(draft_dir);
+                            }
                             if let Some(buf_name) = sessions.editor_buffer_name.take() {
                                 if let Err(error) = editor
                                     .runtime_mut()

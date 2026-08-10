@@ -6,6 +6,7 @@ use super::metrics::{
 use super::model::{ArgValue, NodeKind, PatchNode};
 #[cfg(target_os = "macos")]
 use super::text_metrics::measured_text_width;
+use std::collections::HashSet;
 use std::ops::Range;
 
 const MISSING_INPUT_SENTINEL: &str = "__patcher_missing_input__";
@@ -70,9 +71,23 @@ pub(super) fn build_node_display_label(node: &PatchNode) -> NodeDisplayLabel {
         NodeKind::In => return bare(node.label.clone()),
         _ => (node.label.as_str(), true),
     };
+    build_label_over_slots(
+        node,
+        base,
+        base_carries_attributes,
+        node_display_input_slots(node),
+    )
+}
+
+fn build_label_over_slots(
+    node: &PatchNode,
+    base: &str,
+    base_carries_attributes: bool,
+    slots: Vec<usize>,
+) -> NodeDisplayLabel {
     let mut label = base.to_string();
     let mut arg_spans = Vec::new();
-    for idx in node_display_input_slots(node) {
+    for idx in slots {
         if let Some(inline) = node.inline_inputs.get(idx).and_then(|input| input.as_ref()) {
             push_arg_token(&mut label, &mut arg_spans, idx, &inline.label());
             continue;
@@ -103,8 +118,10 @@ pub(super) fn build_node_display_label(node: &PatchNode) -> NodeDisplayLabel {
     }
 }
 
-pub(super) fn node_display_input_slots(node: &PatchNode) -> Vec<usize> {
-    let display_start = if matches!(
+/// The first argument the label draws. A node whose slot 0 is a cable slot
+/// starts at 1 — that slot's port is drawn, not written.
+fn node_display_start(node: &PatchNode) -> usize {
+    if matches!(
         node.args.first(),
         Some(ArgValue::SymbolRef(_) | ArgValue::ConnectedExpr)
     ) || matches!(
@@ -114,7 +131,11 @@ pub(super) fn node_display_input_slots(node: &PatchNode) -> Vec<usize> {
         1
     } else {
         0
-    };
+    }
+}
+
+pub(super) fn node_display_input_slots(node: &PatchNode) -> Vec<usize> {
+    let display_start = node_display_start(node);
     let last_displayed = node
         .args
         .iter()
@@ -160,6 +181,70 @@ pub(super) fn node_display_input_slots(node: &PatchNode) -> Vec<usize> {
             }
         })
         .collect()
+}
+
+/// The text a node hands to the editor — double-click, and the patcher
+/// clipboard — chosen so the node rebuilt from it keeps the original's
+/// argument indices.
+///
+/// `node_display_label` alone is not enough: it stops at the last literal or
+/// inline slot, so a node whose trailing slots are all cabled (a two-cable
+/// `(- a b)`) renders as a bare `-`. Rebuilding that text sizes the node from
+/// the operator's documented arity — one input for `-` — and the second cable
+/// is dropped with no diagnostic. Every slot up to the highest one carrying
+/// anything, cables included, therefore gets an explicit token, `?` standing in
+/// for a cable.
+///
+/// `inbound_slots` is the set of argument indices this node has cables landing
+/// on.
+pub(super) fn editable_node_text(node: &PatchNode, inbound_slots: &HashSet<usize>) -> String {
+    let Some(slots) = editable_input_slots(node, inbound_slots) else {
+        return node_display_label(node);
+    };
+    build_label_over_slots(node, node.op.as_str(), false, slots).text
+}
+
+/// The padded slot list `editable_node_text` writes out, or `None` when this
+/// node's text cannot be padded without shifting its arguments.
+///
+/// Editor text reserves slot 0 for the implicit cable (`node_from_editor_text`
+/// places the first written token at index 1), so a node whose slot 0 holds a
+/// literal would have every argument shifted by padding — those keep the
+/// display label unchanged, as does any node with an undrawn `<expr>` slot in
+/// the middle of the run, which would leave a hole in the token sequence.
+fn editable_input_slots(node: &PatchNode, inbound_slots: &HashSet<usize>) -> Option<Vec<usize>> {
+    if !matches!(node.kind, NodeKind::Builtin | NodeKind::MacroInstance) {
+        return None;
+    }
+    if node_display_start(node) != 1 {
+        return None;
+    }
+    let has_inline = |idx: usize| {
+        node.inline_inputs
+            .get(idx)
+            .and_then(|input| input.as_ref())
+            .is_some()
+    };
+    let carries = |idx: usize| {
+        inbound_slots.contains(&idx)
+            || has_inline(idx)
+            || matches!(
+                node.args.get(idx),
+                Some(ArgValue::Literal(value)) if value != "<expr>" && value != MISSING_INPUT_SENTINEL
+            )
+    };
+    let highest_used = (1..node.args.len())
+        .filter(|idx| carries(*idx))
+        .next_back()?;
+    // A slot the label draws nothing for would leave a hole that shifts every
+    // later token onto the wrong argument.
+    if (1..=highest_used).any(|idx| {
+        !has_inline(idx)
+            && matches!(node.args.get(idx), Some(ArgValue::Literal(value)) if value == "<expr>")
+    }) {
+        return None;
+    }
+    Some((1..=highest_used).collect())
 }
 
 pub(super) fn node_size(node: &PatchNode) -> (f32, f32) {

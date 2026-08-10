@@ -1123,6 +1123,63 @@ impl TextMeasurer for FixedWidthTextMeasurer {
     }
 }
 
+/// One cell-width-times-`PRIMED_GLYPH_ADVANCE_CELLS` per character, whatever
+/// the text: the geometry fixtures below are written against a uniform advance.
+#[cfg(target_os = "macos")]
+struct MonospaceTextMeasurer;
+
+/// Glyph advance, in layout cells per character, the patcher geometry fixtures
+/// are dimensioned for.
+#[cfg(target_os = "macos")]
+const PRIMED_GLYPH_ADVANCE_CELLS: f32 = 1.16;
+
+#[cfg(target_os = "macos")]
+impl TextMeasurer for MonospaceTextMeasurer {
+    fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
+        text.chars().count() as f32 * PRIMED_GLYPH_ADVANCE_CELLS * 10.0
+    }
+
+    fn line_height_px(&self, _font_size: f32) -> f32 {
+        20.0
+    }
+}
+
+/// Node geometry — and the text hit test, which returns `None` outright on a
+/// miss — reads exact glyph advances out of the cache the measure pass fills.
+/// That pass never runs under test, so a fixture that computes node rects or
+/// double-clicks a node has to prime the cache itself.
+///
+/// Every node's drawn label and its editable text go in, which also pins the
+/// average advance the width estimator calibrates against, so labels not listed
+/// here come out at the same uniform advance.
+#[cfg(target_os = "macos")]
+fn prime_patcher_text_metrics(patch: &Patch) {
+    let measurer = MonospaceTextMeasurer;
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: NODE_FONT_SIZE,
+    };
+    for node in &patch.nodes {
+        let inbound = patch
+            .connections
+            .iter()
+            .filter(|connection| connection.to_node == node.id)
+            .map(|connection| connection.to_input)
+            .collect::<HashSet<_>>();
+        for text in [
+            node_display_label(node),
+            editable_node_text(node, &inbound),
+        ] {
+            cache_text_widths(text, node_font_size(node), &measure_ctx);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn prime_patcher_text_metrics(_patch: &Patch) {}
+
 struct VariableWidthTextMeasurer;
 
 impl TextMeasurer for VariableWidthTextMeasurer {
@@ -14198,6 +14255,7 @@ fn patcher_alignment_snaps_dragged_output_to_other_input_x() {
         .find(|node| node.id == "b")
         .unwrap()
         .width = Some(20.0);
+    prime_patcher_text_metrics(&patch);
     let mut snap = AlignmentSnapState::default();
     let selected = HashSet::from(["a".to_string()]);
 
@@ -14699,6 +14757,7 @@ fn double_clicking_macro_instance_edits_text_and_breadcrumb_returns_to_root() {
     let key = patcher_state_key(&node);
     set_patcher_interaction_state(key, PatcherInteractionState::default());
 
+    prime_patcher_text_metrics(&root_patch);
     let rects = patch_node_rects(&root_patch, node.rect, &PatcherPanState::default());
     let macro_rect = rects.get(&macro_node.id).unwrap();
     assert!(handle_patcher_double_click(
@@ -15118,6 +15177,7 @@ fn double_clicking_node_edits_display_text_in_memory() {
     let key = patcher_state_key(&node);
     set_patcher_interaction_state(key, PatcherInteractionState::default());
 
+    prime_patcher_text_metrics(&root_patch);
     let rects = patch_node_rects(&root_patch, node.rect, &PatcherPanState::default());
     let pitch_rect = rects.get(&pitch.id).unwrap();
     assert!(handle_patcher_double_click(
@@ -23374,3 +23434,296 @@ fn modulating_a_def_wrapped_param_emits_a_bare_param_form() {
         .expect("the regenerated patch must compile");
 }
 
+
+// ---------------------------------------------------------------------------
+// Editable node text keeps cabled slots (regression: a two-cable `-` retyped
+// as a bare `-` lost its second cable)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn editable_node_text_spells_out_trailing_cabled_slots() {
+    let patch = parse("(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def d (- a b))");
+    let subtract = patch.nodes.iter().find(|node| node.id == "d").unwrap();
+    let inbound = patch
+        .connections
+        .iter()
+        .filter(|connection| connection.to_node == "d")
+        .map(|connection| connection.to_input)
+        .collect::<HashSet<_>>();
+    assert_eq!(inbound, HashSet::from([0, 1]));
+
+    // The drawn label stops at the last written argument. Editable text cannot:
+    // `-` documents a single input, so a bare `-` rebuilds as a one-slot node
+    // and the second cable is dropped with no diagnostic.
+    assert_eq!(node_display_label(subtract), "-");
+    let text = editable_node_text(subtract, &inbound);
+    assert_eq!(text, "- ?");
+    let rebuilt = node_from_editor_text("d", &text, (0.0, 0.0), &HashMap::new(), false);
+    assert_eq!(rebuilt.args.len(), 2, "{rebuilt:?}");
+}
+
+#[test]
+fn double_clicking_a_two_cable_operator_opens_editable_text_with_both_slots() {
+    let source = "(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def d (- a b))\n(out d 1)";
+    let path = temp_patcher_source_path("patcher-edit-two-cable");
+    fs::write(&path, source).unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    let (_, root_patch) = load_patch_from_props(&node.props).unwrap();
+    prime_patcher_text_metrics(&root_patch);
+
+    let rects = patch_node_rects(&root_patch, node.rect, &PatcherPanState::default());
+    let subtract_rect = rects.get("d").unwrap();
+    assert!(handle_patcher_double_click(
+        &node,
+        subtract_rect.col + NODE_TEXT_COL_OFFSET,
+        subtract_rect.row + subtract_rect.height * 0.5,
+    ));
+
+    let state = get_patcher_interaction_state(key);
+    assert_eq!(
+        state.text_edit.as_ref().map(|edit| edit.text.as_str()),
+        Some("- ?")
+    );
+    assert_eq!(
+        state
+            .edit_state
+            .nodes
+            .get(&node_edit_key("root", "d"))
+            .map(|edit| edit.text.as_str()),
+        Some("- ?")
+    );
+    reset_patcher_widget_state(key);
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn copying_a_two_cable_operator_pastes_it_with_both_cables() {
+    let source = "(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def d (- a b))\n(out d 1)";
+    let path = temp_patcher_source_path("patcher-copy-two-cable");
+    fs::write(&path, source).unwrap();
+    let node = patcher_test_node(&path);
+    let (_, root_patch) = load_patch_from_props(&node.props).unwrap();
+
+    let mut state = PatcherInteractionState::default();
+    state.selected_nodes = HashSet::from(["a".to_string(), "b".to_string(), "d".to_string()]);
+    assert!(copy_selected_patcher_nodes(&node, &state, "root"));
+    assert!(paste_patcher_clipboard(&node, &mut state, "root"));
+
+    let pasted = patch_with_interaction_state(root_patch, &state, "root");
+    let subtract = pasted
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.op == "-" && state.selected_nodes.contains(&patch_node.id))
+        .expect("pasted subtract node");
+    assert_eq!(subtract.args.len(), 2, "{subtract:?}");
+    let inbound = pasted
+        .connections
+        .iter()
+        .filter(|connection| connection.to_node == subtract.id)
+        .map(|connection| connection.to_input)
+        .collect::<HashSet<_>>();
+    assert_eq!(inbound, HashSet::from([0, 1]), "{:?}", pasted.connections);
+    let _ = fs::remove_file(path);
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate cables (an inlet sums, so a repeated edge doubles the signal)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dragging_the_same_cable_twice_does_not_add_a_second_connection() {
+    let source = "(def pitch (in 1 @name pitch))\n\
+                  (def gate (in 2 @name gate))\n\
+                  (def tone (phasor pitch))\n\
+                  (out tone 1)";
+    let path = temp_patcher_source_path("patcher-duplicate-cable");
+    fs::write(&path, source).unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    let (_, root_patch) = load_patch_from_props(&node.props).unwrap();
+    prime_patcher_text_metrics(&root_patch);
+
+    let pan = PatcherPanState::default();
+    let rects = patch_node_rects(&root_patch, node.rect, &pan);
+    let input_indices = patch_input_indices(&root_patch);
+    let input_slot_counts = patch_input_slot_counts(&root_patch, &input_indices);
+    let output_counts = patch_output_counts(&root_patch);
+    let gate_output = port_center(*rects.get("gate").unwrap(), 0, output_counts["gate"], false);
+    let tone_input = port_center(
+        *rects.get("tone").unwrap(),
+        0,
+        input_slot_counts["tone"],
+        true,
+    );
+
+    let drag_once = || {
+        handle_patcher_pointer_down(
+            &node,
+            gate_output.0,
+            gate_output.1,
+            KeyModifiers::empty(),
+            10.0,
+            20.0,
+        );
+        handle_patcher_pointer_drag(
+            &node,
+            tone_input.0,
+            tone_input.1,
+            KeyModifiers::empty(),
+            10.0,
+            20.0,
+        );
+        handle_patcher_pointer_up(&node, tone_input.0, tone_input.1);
+    };
+    drag_once();
+    let after_first = patch_with_interaction_state(
+        root_patch.clone(),
+        &get_patcher_interaction_state(key),
+        "root",
+    );
+    let count_of = |patch: &Patch| {
+        patch
+            .connections
+            .iter()
+            .filter(|connection| connection.from_node == "gate" && connection.to_node == "tone")
+            .count()
+    };
+    assert_eq!(count_of(&after_first), 1, "the first drag must wire once");
+
+    drag_once();
+    let after_second =
+        patch_with_interaction_state(root_patch, &get_patcher_interaction_state(key), "root");
+    assert_eq!(
+        count_of(&after_second),
+        1,
+        "a repeated drag must not double the inlet's summed signal"
+    );
+    reset_patcher_widget_state(key);
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn connect_plan_rejects_a_cable_the_patch_already_carries() {
+    let (node, key, _instance) = connect_test_node("connect-existing-cable");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(key, &patch, &[connect_op_connect("sig", 0, "filtered", 0)]);
+
+    assert!(report.applied.is_empty(), "{report:?}");
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(
+        report.skipped[0].contains("already connected"),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn connect_plan_rejects_wiring_a_hidden_inline_accessor() {
+    let patch = parse(
+        r#"
+            (def signal (in 1))
+            (param gain @default 0.5 @mod true @mod-mode additive)
+            (def scaled (* signal (mod gain)))
+            "#,
+    );
+    let hidden = hidden_inline_node_ids(&patch)
+        .into_iter()
+        .next()
+        .expect("the `gain~` sugar projects a hidden inline accessor");
+
+    // The agent is never offered it as an endpoint in the first place.
+    let context = connect::connect_context(
+        &patch,
+        "scaled",
+        &ConnectSubject::Operator {
+            op: "*".to_string(),
+        },
+    );
+    assert!(
+        !context.contains(&hidden),
+        "hidden accessor {hidden} must not be listed:\n{context}"
+    );
+
+    // And a plan naming it anyway is skipped rather than applied as an
+    // undrawable cable.
+    let mut state = PatcherInteractionState::default();
+    let report = connect::apply_connect_plan(
+        &mut state,
+        &patch,
+        "root",
+        &[connect_op_connect(&hidden, 0, "scaled", 0)],
+    );
+    assert!(report.applied.is_empty(), "{report:?}");
+    assert!(
+        report.skipped[0].contains("inline parameter accessor"),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn a_rejected_op_does_not_poison_its_argument_for_a_later_valid_one() {
+    let (node, key, instance) = connect_test_node("connect-claim-rollback");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(
+        key,
+        &patch,
+        &[
+            // Not a number: rejected, and must leave the slot claimable.
+            connect_op_inline("gain", &instance, 1),
+            connect_op_connect("sig", 0, &instance, 1),
+        ],
+    );
+
+    assert_eq!(report.applied.len(), 1, "{report:?}");
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(report.skipped[0].contains("not a number"), "{report:?}");
+    let wired = connect_test_patch(&node, key);
+    assert!(
+        wired.connections.iter().any(|connection| {
+            connection.from_node == "sig"
+                && connection.to_node == instance
+                && connection.to_input == 1
+        }),
+        "the valid op must still have been applied"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// History writes sum like any other inlet
+// ---------------------------------------------------------------------------
+
+#[test]
+fn two_cables_into_one_history_emit_a_single_summed_write() {
+    let source = "(make-history h)\n\
+                  (def sig (in 1 @name sig))\n\
+                  (def other (in 2 @name other))\n\
+                  (def delta (- sig (read-history h)))\n\
+                  (out delta 1)\n\
+                  (write-history h sig)";
+    let patch = parse(source);
+    let history = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::History)
+        .unwrap()
+        .id
+        .clone();
+    let mut state = PatcherInteractionState::default();
+    connect_output_to_input(&mut state, "root", "other", &history, 0);
+
+    let visible = sidecar::root_patch_with_interaction(&patch, &state);
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert_eq!(
+        generated.source.matches("(write-history").count(),
+        1,
+        "a history's cables sum into one write:\n{}",
+        generated.source
+    );
+    assert!(
+        generated.source.contains("(write-history h (+ "),
+        "the two cables must be summed:\n{}",
+        generated.source
+    );
+}

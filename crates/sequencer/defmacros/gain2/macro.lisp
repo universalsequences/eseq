@@ -1,0 +1,1 @@
+(defmacro gain2 (x) (* x 0.45))

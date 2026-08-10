@@ -582,7 +582,6 @@ pub fn resolve_agentic_bubble_connections(
     let source = std::fs::read_to_string(path)
         .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
     let root_patch = parse_source_with_default_library(&source, intent)?;
-    let mut matched = false;
     let mut report = None;
     let mut refusal = None;
     for key in keys {
@@ -595,25 +594,38 @@ pub fn resolve_agentic_bubble_connections(
         {
             continue;
         }
-        matched = true;
         let view_key = active_patcher_view_key(&interaction);
+        if view_key != bubble.view_key {
+            // Node ids are only unique per scope, so a plan composed against
+            // another view would wire the wrong nodes. Leave the bubble in
+            // place for Cmd+R once the canvas is back where it was.
+            refusal = Some(
+                "the patcher moved to a different view — press Cmd+R to retry from the view the \
+                 node lives in"
+                    .to_string(),
+            );
+            continue;
+        }
         let patch = active_patcher_patch(&root_patch, &interaction);
         let patch = patch_with_interaction_state(patch, &interaction, &view_key);
         let applied = connect::apply_connect_plan(&mut interaction, &patch, &view_key, ops);
-        if applied.applied.is_empty() {
+        if applied.applied.is_empty() && !applied.skipped.is_empty() {
             // Nothing survived validation: leave the bubble alone so the
             // existing Cmd+R retry works against the reported reasons.
             refusal = Some(applied.skipped.join("; "));
             continue;
         }
+        // An empty plan is the agent saying "nothing to wire": close the
+        // bubble as a success rather than reporting a reasonless failure.
         interaction.agentic_bubbles.remove(bubble_id);
         state::set_patcher_interaction_state(key, interaction);
         report.get_or_insert(applied);
     }
+    // A matched bubble always leaves either a report or a refusal behind, so
+    // the empty-empty case is only "no bubble here", which is not an error.
     match (report, refusal) {
         (Some(report), _) => Ok(report),
         (None, Some(refusal)) => Err(refusal),
-        (None, None) if matched => Err("connection plan was empty".to_string()),
         (None, None) => Ok(PatcherConnectReport::default()),
     }
 }
@@ -1285,9 +1297,13 @@ impl WidgetDefinition for PatcherWidget {
                                 && matches!(bubble.state, AgenticBubbleState::Error { .. })
                         })
                         .map(|bubble| bubble.id.clone())?;
+                    let view_key = active_patcher_view_key(&state);
                     let retried = {
                         let bubble = state.agentic_bubbles.get_mut(&bubble_id)?;
                         bubble.generation = bubble.generation.wrapping_add(1);
+                        // The context is rebuilt from the view the retry is
+                        // fired in, so the recorded view moves with it.
+                        bubble.view_key = view_key;
                         bubble.state = AgenticBubbleState::Pending {
                             started_at: Instant::now(),
                         };
@@ -1658,6 +1674,7 @@ fn submit_agentic_bubble_prompt(
     mut state: state::PatcherInteractionState,
     bubble_id: &str,
 ) -> Option<WidgetEvent> {
+    let view_key = active_patcher_view_key(&state);
     let submitted = {
         let bubble = state.agentic_bubbles.get_mut(bubble_id)?;
         let prompt = bubble.prompt.trim().to_string();
@@ -1665,6 +1682,7 @@ fn submit_agentic_bubble_prompt(
             return Some(WidgetEvent::Custom(Value::Nil));
         }
         bubble.generation = bubble.generation.wrapping_add(1);
+        bubble.view_key = view_key;
         if !matches!(bubble.target, AgenticBubbleTarget::ConnectNode { .. }) {
             bubble.macro_name = slug_agentic_macro_name(&prompt);
         }
@@ -1686,6 +1704,7 @@ fn submit_agentic_bubble_follow_up(
     mut state: state::PatcherInteractionState,
     bubble_id: &str,
 ) -> Option<WidgetEvent> {
+    let view_key = active_patcher_view_key(&state);
     let submitted = {
         let bubble = state.agentic_bubbles.get_mut(bubble_id)?;
         let follow_up = bubble.follow_up.trim().to_string();
@@ -1707,6 +1726,7 @@ fn submit_agentic_bubble_follow_up(
         bubble.follow_up.clear();
         bubble.follow_up_text_state = Default::default();
         bubble.generation = bubble.generation.wrapping_add(1);
+        bubble.view_key = view_key;
         bubble.state = AgenticBubbleState::Pending {
             started_at: Instant::now(),
         };

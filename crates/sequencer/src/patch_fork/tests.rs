@@ -162,6 +162,51 @@ fn forking_a_flat_legacy_instrument_normalizes_it_into_the_folder_layout() {
     assert!(draft.join(STAGED_PRESET_BANK_FILE).is_file());
 }
 
+/// Folder instruments (`instruments/flutefab/`) keep their bank *inside* the
+/// directory as `.presets`. It rides along in the recursive copy, but
+/// `materialize_forked_assets` skips dot-files, so unless it is also staged the
+/// fork finalizes with zero presets and no warning.
+#[test]
+fn forking_stages_and_materializes_an_in_directory_preset_bank() {
+    let scratch = Scratch::new("in-dir-bank");
+    let source = scratch.path().join("flutefab");
+    let draft = scratch.path().join("draft");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("dsp.lisp"), "(out 0 1)\n").unwrap();
+    std::fs::write(
+        source.join(PRESET_BANK_FILE),
+        "{\"version\":1,\"engine_name\":\"flutefab/\",\
+         \"source_file\":\"instruments/flutefab/.lisp\",\
+         \"presets\":[{\"name\":\"breathy\"}]}",
+    )
+    .unwrap();
+
+    fork_patch_files(&source, &draft).expect("fork folder instrument");
+    assert!(
+        draft.join(STAGED_PRESET_BANK_FILE).is_file(),
+        "the in-directory bank must be staged under the name finalize looks for"
+    );
+
+    let final_dir = scratch.path().join("instruments").join("my-flute");
+    std::fs::create_dir_all(&final_dir).unwrap();
+    materialize_forked_assets(&draft, &final_dir, "my-flute/").expect("materialize");
+
+    // Where `resolve_instrument_storage_path("my-flute/", "presets")` looks.
+    let bank_path = final_dir.join(PRESET_BANK_FILE);
+    assert!(
+        bank_path.is_file(),
+        "the finalized fork must expose its presets where the loader resolves them"
+    );
+    let bank: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&bank_path).unwrap()).unwrap();
+    assert_eq!(bank["engine_name"], "my-flute/");
+    assert_eq!(bank["presets"][0]["name"], "breathy");
+    assert!(
+        !final_dir.join(STAGED_PRESET_BANK_FILE).exists(),
+        "the staging file is an implementation detail and must not ship"
+    );
+}
+
 #[test]
 fn fork_patch_source_dispatches_folder_style_sources_to_their_directory() {
     let scratch = Scratch::new("dispatch");
@@ -199,7 +244,7 @@ fn rewriting_rejects_non_object_banks() {
 }
 
 #[test]
-fn materializing_moves_assets_out_and_writes_the_rewritten_bank_sibling() {
+fn materializing_moves_assets_out_and_writes_the_rewritten_bank() {
     let scratch = Scratch::new("materialize");
     let draft = scratch.path().join("draft");
     let source = instruments_root().join("core/triton");
@@ -239,10 +284,10 @@ fn materializing_moves_assets_out_and_writes_the_rewritten_bank_sibling() {
         "run mode is written by save_instrument_run_mode, not copied from the draft"
     );
 
-    let bank_path = scratch.path().join("instruments").join("my-triton.presets");
+    let bank_path = final_dir.join(PRESET_BANK_FILE);
     assert!(
         bank_path.is_file(),
-        "the bank lands as a sibling of the dir"
+        "the bank lands inside the dir, where the loader resolves '<slug>/' exactly"
     );
     let bank: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&bank_path).unwrap()).unwrap();

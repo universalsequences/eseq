@@ -11,17 +11,22 @@ Three pieces live here:
 
 * [`fork_patch_files`] seeds a draft directory from a source directory. It
   copies the whole directory (`dsp.lisp`, `dsp.layout.json`, `ui.lisp`,
-  `instrument.json`, asset dirs such as `waves/`) and *stages* the sibling
-  `<name>.presets` bank inside the draft as [`STAGED_PRESET_BANK_FILE`],
-  because the bank is a sibling of the directory and has nowhere else to live
-  while the fork is a temp dir.
+  `instrument.json`, asset dirs such as `waves/`) and *stages* the source's
+  preset bank inside the draft as [`STAGED_PRESET_BANK_FILE`], because the bank
+  carries the old engine name and has to be rewritten at finalize. Both on-disk
+  forms are probed: the sibling `<name>.presets` and the in-directory
+  [`PRESET_BANK_FILE`] (`<name>/.presets`, which is what
+  `resolve_instrument_storage_path` produces for a trailing-slash engine name
+  and therefore what folder instruments actually ship).
 * [`rewrite_preset_bank_json`] repoints a bank's `engine_name` / `source_file`
   at the fork. Those two fields embed the *old* instrument name.
 * [`materialize_forked_assets`] is the finalize-time other half: the existing
   `save-new-instrument` path only writes `dsp.lisp` plus the layout sidecar, so
   every other artifact the fork carried has to be copied out of the draft into
-  the finalized directory, and the staged bank written back out as the sibling
-  `<slug>.presets`.
+  the finalized directory, and the staged bank written back out as
+  `<final_dir>/.presets` — the path the loader resolves *exactly* for the
+  finalized `"<slug>/"` engine name, rather than the sibling form it can only
+  reach through the ambiguous directory walk.
 
 The layout sidecar is copied when it exists. The spec calls it mandatory, but
 several shipped instruments (e.g. `core/triton`) have no authored sidecar at
@@ -35,6 +40,11 @@ use std::path::{Path, PathBuf};
 /// draft directory. Hidden so the patcher/asset scans ignore it, and stripped
 /// again by [`materialize_forked_assets`].
 pub const STAGED_PRESET_BANK_FILE: &str = ".fork-staged.presets";
+
+/// The bank file *inside* a folder-style patch dir. `instruments/flutefab/`
+/// stores its presets at `instruments/flutefab/.presets`, which is exactly
+/// what `resolve_instrument_storage_path("flutefab/", "presets")` builds.
+pub const PRESET_BANK_FILE: &str = ".presets";
 
 /// Files the finalize path writes itself; copying them out of the draft would
 /// clobber the freshly compiled emission, its layout, or the run mode the
@@ -104,16 +114,22 @@ pub fn fork_patch_files(source_dir: &Path, draft_dir: &Path) -> Result<(), Strin
     }
     copy_dir_recursive(source_dir, draft_dir)?;
 
-    if let Some(bank_path) = preset_bank_sibling_path(source_dir) {
-        if bank_path.is_file() {
-            let staged = draft_dir.join(STAGED_PRESET_BANK_FILE);
-            std::fs::copy(&bank_path, &staged).map_err(|error| {
-                format!(
-                    "Failed to stage preset bank '{}': {error}",
-                    bank_path.display()
-                )
-            })?;
-        }
+    // Folder instruments keep the bank *inside* the directory
+    // (`instruments/flutefab/.presets`); older ones keep it as a sibling. The
+    // in-directory copy already rode along in `copy_dir_recursive`, but
+    // `materialize_forked_assets` skips dot-files, so it still has to be
+    // staged under the name finalize looks for.
+    let bank_path = preset_bank_sibling_path(source_dir)
+        .filter(|path| path.is_file())
+        .or_else(|| Some(source_dir.join(PRESET_BANK_FILE)).filter(|path| path.is_file()));
+    if let Some(bank_path) = bank_path {
+        let staged = draft_dir.join(STAGED_PRESET_BANK_FILE);
+        std::fs::copy(&bank_path, &staged).map_err(|error| {
+            format!(
+                "Failed to stage preset bank '{}': {error}",
+                bank_path.display()
+            )
+        })?;
     }
     Ok(())
 }
@@ -187,8 +203,13 @@ pub fn rewrite_preset_bank_json(bank_json: &str, new_engine_name: &str) -> Resul
 
 /// Finalize half of a fork: copy everything the draft carried beyond
 /// `dsp.lisp` / `dsp.layout.json` into `final_dir`, and write the staged
-/// preset bank back out as `final_dir`'s `<name>.presets` sibling, repointed
-/// at `final_engine_name`.
+/// preset bank back out as `final_dir/.presets`, repointed at
+/// `final_engine_name`.
+///
+/// The in-directory form is deliberate: finalized forks are folder-style, so
+/// their engine name is `"<slug>/"` and `resolve_instrument_storage_path`
+/// resolves the bank to `instruments/<slug>/.presets` without touching the
+/// directory walk.
 ///
 /// A no-op for drafts that were never forked (nothing but `dsp.lisp` and its
 /// sidecar in them), so the finalize path can call it unconditionally.
@@ -239,12 +260,7 @@ pub fn materialize_forked_assets(
     let Some(staged_bank) = staged_bank else {
         return Ok(());
     };
-    let Some(target_bank) = preset_bank_sibling_path(final_dir) else {
-        return Err(format!(
-            "Cannot derive a preset bank path for '{}'",
-            final_dir.display()
-        ));
-    };
+    let target_bank = final_dir.join(PRESET_BANK_FILE);
     let raw = std::fs::read_to_string(&staged_bank).map_err(|error| {
         format!(
             "Failed to read staged preset bank '{}': {error}",

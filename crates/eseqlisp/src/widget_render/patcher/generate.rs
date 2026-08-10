@@ -865,6 +865,10 @@ impl<'a> ScopeEmitter<'a> {
                 connection.from_output,
             )
         });
+        // A history inlet sums its cables like any other, so the writes are
+        // grouped per history node and emitted as one summed `write-history`
+        // rather than as competing writes that overwrite each other.
+        let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
         for connection in connections {
             if self.roles.get(connection.to_node.as_str()) != Some(&NodeRole::History) {
                 continue;
@@ -873,14 +877,28 @@ impl<'a> ScopeEmitter<'a> {
             if self.omitted.contains(&connection.from_node) {
                 continue;
             }
-            let history = self.names[&connection.to_node].clone();
             let reference = match self.nodes.get(connection.from_node.as_str()) {
                 Some(_) => self
                     .reference_expr_for_write(connection)
                     .unwrap_or_else(|_| MISSING_INPUT_SENTINEL.to_string()),
                 None => MISSING_INPUT_SENTINEL.to_string(),
             };
-            writes.push(format!("(write-history {history} {reference})"));
+            match grouped
+                .iter_mut()
+                .find(|(node_id, _)| node_id == &connection.to_node)
+            {
+                Some((_, terms)) => terms.push(reference),
+                None => grouped.push((connection.to_node.clone(), vec![reference])),
+            }
+        }
+        for (node_id, mut terms) in grouped {
+            let history = self.names[&node_id].clone();
+            let value = match terms.len() {
+                0 => MISSING_INPUT_SENTINEL.to_string(),
+                1 => terms.remove(0),
+                _ => format!("(+ {})", terms.join(" ")),
+            };
+            writes.push(format!("(write-history {history} {value})"));
         }
         writes
     }

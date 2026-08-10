@@ -6,11 +6,19 @@
 ;; process-global setting, owned by Rust (agent::model_choice) and persisted
 ;; to .eseq/prefs.json. This file is only the picker.
 ;;
-;; Mounted in the *transport* buffer (see main.lisp): the modal anchors to the
-;; whole-window frame viewport, not to the tile it is laid out in, so a strip
-;; tile is a perfectly good host — and the transport strip is present in every
-;; layout that shows the patch editor. Mount it in exactly ONE buffer: a second
-;; mount would render a second panel whenever both buffers are on screen.
+;; Mounted by the two Rust-generated patcher buffer templates in
+;; src/ui/edit_sessions.rs — `instrument_patcher_buffer_source` and
+;; `effect_patcher_buffer_source` — which each wrap their `patcher` in a
+;; v-stack with `(choose-model-panel)`. main.lisp only guarantees this file
+;; loads before those buffers exist. The panel lives in the patcher's own
+;; buffer because a modal only receives pointer input through the *active*
+;; tile, and the patch canvas is the active tile; closed, it costs no layout.
+;;
+;; The two mounts share the single global `choose-model-open?` below, which is
+;; safe because an instrument patcher buffer and an effect patcher buffer are
+;; never on screen together — entering either edit session replaces the other's
+;; tile. Adding a third mount in a buffer that CAN coexist with a patcher would
+;; render two panels off one flag; scope the state per buffer first if so.
 
 ;; Modal visibility is pure UI state, so it lives here rather than in Rust.
 (defstate choose-model-open? false)

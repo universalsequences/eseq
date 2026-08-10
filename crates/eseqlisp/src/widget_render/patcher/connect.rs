@@ -14,6 +14,7 @@ use super::geometry::patch_input_indices;
 use super::lisp::{is_numeric_literal, parse_editor_node_text};
 use super::model::{
     ArgValue, InputPortRef, InputPresentation, MacroSignature, OutputPortRef, Patch, PatchNode,
+    hidden_inline_node_ids,
 };
 use super::project::dgenlisp_operator_documentation;
 use super::state::{
@@ -192,7 +193,14 @@ pub(super) fn connect_context(
     }
     let _ = writeln!(out, "\npatch:");
     let drawn_ports = patch_input_indices(patch);
+    // Inline parameter accessors are not drawn, and render.rs skips any cable
+    // touching one — offering them as wire endpoints would produce an
+    // applied-but-invisible edge.
+    let hidden_node_ids = hidden_inline_node_ids(patch);
     for node in &patch.nodes {
+        if hidden_node_ids.contains(&node.id) {
+            continue;
+        }
         let _ = writeln!(
             out,
             "{}  {}  kind={:?}",
@@ -251,6 +259,7 @@ pub(super) fn apply_connect_plan(
     ops: &[PatcherConnectOp],
 ) -> PatcherConnectReport {
     let drawn_ports = patch_input_indices(patch);
+    let hidden_node_ids = hidden_inline_node_ids(patch);
     let signatures = macro_signatures_with_visual_edits(patch, state);
     let mut claimed: HashMap<(String, usize), ArgClaim> = HashMap::new();
     // Reported in plan order, whatever order the work happens in.
@@ -262,7 +271,7 @@ pub(super) fn apply_connect_plan(
     // each one from the original node would let the last write erase the rest.
     let mut inlined: HashMap<&str, Vec<InlineSet>> = HashMap::new();
     for (index, op) in ops.iter().enumerate() {
-        match validate_op(patch, &drawn_ports, &mut claimed, op) {
+        match validate_op(patch, &drawn_ports, &hidden_node_ids, &mut claimed, op) {
             Ok(None) => valid.push((index, op)),
             Ok(Some((arg, value))) => {
                 inlined
@@ -371,6 +380,7 @@ enum ArgClaim {
 fn validate_op(
     patch: &Patch,
     drawn_ports: &HashMap<String, Vec<usize>>,
+    hidden_node_ids: &HashSet<String>,
     claimed: &mut HashMap<(String, usize), ArgClaim>,
     op: &PatcherConnectOp,
 ) -> Result<Option<(usize, String)>, String> {
@@ -379,6 +389,12 @@ fn validate_op(
         .iter()
         .find(|node| node.id == op.to_node())
         .ok_or_else(|| format!("no node `{}` at this level", op.to_node()))?;
+    if hidden_node_ids.contains(&target.id) {
+        return Err(format!(
+            "node `{}` is an inline parameter accessor",
+            target.id
+        ));
+    }
     if op.to_arg() >= target.args.len() {
         return Err(format!(
             "argument {} is out of range for `{}`",
@@ -396,7 +412,8 @@ fn validate_op(
     {
         return Err("another op already targets this argument".to_string());
     }
-    claimed.insert(slot, claim);
+    // The claim is only recorded once the op is known to be valid: an op that
+    // fails below must not poison the slot for a later valid op in the plan.
     let occupancy = arg_occupancies(patch, target, drawn_ports)
         .into_iter()
         .nth(op.to_arg())
@@ -426,17 +443,48 @@ fn validate_op(
                 .iter()
                 .find(|node| &node.id == from_node)
                 .ok_or_else(|| format!("no node `{from_node}` at this level"))?;
+            if hidden_node_ids.contains(&source.id) {
+                return Err(format!(
+                    "node `{from_node}` is an inline parameter accessor"
+                ));
+            }
             if *from_outlet >= source.outputs.len() {
                 return Err(format!(
                     "outlet {from_outlet} is out of range for `{from_node}`"
                 ));
             }
+            // A slot sums its cables, so a duplicate edge would silently double
+            // the signal rather than add anything.
+            if connection_exists(patch, from_node, *from_outlet, &target.id, op.to_arg()) {
+                return Err("already connected".to_string());
+            }
+            claimed.insert(slot, claim);
             Ok(None)
         }
         PatcherConnectOp::Inline { value, to_arg, .. } => {
-            Ok(Some((*to_arg, canonical_inline_value(value)?)))
+            let value = canonical_inline_value(value)?;
+            claimed.insert(slot, claim);
+            Ok(Some((*to_arg, value)))
         }
     }
+}
+
+/// Whether `patch` already carries this exact edge. A re-drawn cable must be a
+/// no-op: `slot_value_expr` sums an inlet's cables, so a duplicate doubles the
+/// signal instead of changing nothing.
+pub(super) fn connection_exists(
+    patch: &Patch,
+    from_node: &str,
+    from_output: usize,
+    to_node: &str,
+    to_input: usize,
+) -> bool {
+    patch.connections.iter().any(|connection| {
+        connection.from_node == from_node
+            && connection.from_output == from_output
+            && connection.to_node == to_node
+            && connection.to_input == to_input
+    })
 }
 
 /// The literal as the node editor would round-trip it.

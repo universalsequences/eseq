@@ -752,10 +752,15 @@
       (seq-refresh-current-layout))
     nil))
 
+;; Bound to C-x m below: dragging the macro sidebar past the collapse threshold
+;; calls `seq-hide-patch-macros-panel`, so without a discoverable toggle the
+;; only way back is M-x.
 (def seq-toggle-patch-macros-panel ()
   (do
     (set! patch-macros-panel-visible (not patch-macros-panel-visible))
     (seq-refresh-current-layout)))
+
+(bind-key "C-x m" "seq-toggle-patch-macros-panel")
 
 (def seq-toggle-samples-sidebar ()
   (do

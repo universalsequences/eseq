@@ -1,0 +1,6 @@
+(defmacro simp10 (input)
+  (def phasor1 (phasor input))
+  (def triangle1 (triangle phasor1 0.5))
+  (def mul1 (* triangle1 twopi))
+  (def cos1 (cos mul1))
+  cos1)

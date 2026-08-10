@@ -81,13 +81,18 @@ pub fn agentic_model() -> Option<String> {
     cell().lock().ok().and_then(|guard| guard.clone())
 }
 
-/// The provider that serves `agentic_model()`, resolved from the preset table.
-pub fn agentic_provider() -> Option<AgentProviderKind> {
-    let model = agentic_model()?;
+/// The provider that serves a model id, resolved from the preset table. Pure —
+/// no global state — so it is directly testable.
+fn provider_for_model(id: &str) -> Option<AgentProviderKind> {
     default_model_presets()
         .into_iter()
-        .find(|preset| preset.id == model)
+        .find(|preset| preset.id == id)
         .map(|preset| preset.provider)
+}
+
+/// The provider that serves `agentic_model()`, resolved from the preset table.
+pub fn agentic_provider() -> Option<AgentProviderKind> {
+    provider_for_model(&agentic_model()?)
 }
 
 /// Record a choice. An id absent from `default_model_presets` is rejected so a
@@ -134,16 +139,47 @@ mod tests {
 
     #[test]
     fn provider_resolves_from_the_preset_table() {
-        // Pure lookup over the preset table — no global state touched, so this
-        // stays independent of whatever the developer's prefs.json holds.
-        let preset = default_model_presets()
-            .into_iter()
-            .next()
-            .expect("preset table is non-empty");
-        let resolved = default_model_presets()
-            .into_iter()
-            .find(|entry| entry.id == preset.id)
-            .map(|entry| entry.provider);
-        assert_eq!(resolved, Some(preset.provider));
+        // `provider_for_model` is what `agentic_provider()` delegates to, and
+        // it is pure — no global state touched, so this stays independent of
+        // whatever the developer's prefs.json holds. Routing a model to the
+        // wrong provider sends the request to an API that 404s on the id, so
+        // pin the expected provider per id rather than comparing the table to
+        // itself.
+        let expected = [
+            ("gpt-5.5", AgentProviderKind::OpenAi),
+            ("gpt-5.6-luna", AgentProviderKind::OpenAi),
+            ("gpt-5-mini", AgentProviderKind::OpenAi),
+            ("gpt-5-nano", AgentProviderKind::OpenAi),
+            ("gemini-3-flash-preview", AgentProviderKind::Gemini),
+            ("gemini-3.5-flash", AgentProviderKind::Gemini),
+            ("gemini-2.5-pro", AgentProviderKind::Gemini),
+            ("gemini-2.5-flash", AgentProviderKind::Gemini),
+            ("gemini-2.5-flash-lite", AgentProviderKind::Gemini),
+            ("claude-opus-5", AgentProviderKind::Anthropic),
+            ("claude-fable-5", AgentProviderKind::Anthropic),
+            ("claude-sonnet-5", AgentProviderKind::Anthropic),
+            ("claude-haiku-4-5", AgentProviderKind::Anthropic),
+            ("deepseek-v4-pro", AgentProviderKind::DeepSeek),
+            ("deepseek-v4-flash", AgentProviderKind::DeepSeek),
+        ];
+
+        for (id, provider) in expected {
+            assert_eq!(
+                provider_for_model(id),
+                Some(provider),
+                "{id} must resolve to {provider:?}"
+            );
+        }
+
+        // Every preset has to be covered, so a new model cannot land unrouted.
+        for preset in default_model_presets() {
+            assert!(
+                expected.iter().any(|(id, _)| *id == preset.id),
+                "{} is a preset with no expected provider in this test",
+                preset.id
+            );
+        }
+
+        assert_eq!(provider_for_model("not-a-real-model"), None);
     }
 }

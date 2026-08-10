@@ -146,6 +146,7 @@ impl InstrumentEditSession {
         temp_dir: PathBuf,
         draft_track: usize,
         original_track: usize,
+        surface: EditorSurface,
     ) -> Self {
         Self {
             name,
@@ -158,7 +159,7 @@ impl InstrumentEditSession {
             visible_revision_valid: true,
             preview_generation: 0,
             run_mode: CustomInstrumentRunMode::Instrument,
-            surface: EditorSurface::Patch,
+            surface,
             mode: InstrumentEditMode::CreateDraft {
                 temp_dir,
                 draft_track,
@@ -179,6 +180,16 @@ pub(super) struct PendingInstrumentPreview {
 pub(super) struct PendingInstrumentCancelRestore {
     pub(super) session: InstrumentEditSession,
     pub(super) persisted_source: String,
+    /// Draft dir of a `fork-editor-session` draft being cancelled, deleted
+    /// only once the restore compile lands.
+    ///
+    /// Cancelling a forked draft used to rewrite `session.path` back to the
+    /// original and delete the draft dir up front. When the restore compile
+    /// then failed, the session pushed back into the editor still said
+    /// `CreateDraft { temp_dir }` for a directory that no longer existed while
+    /// its path pointed at the original patch, so a retry had nowhere to write.
+    /// The session is now left untouched and this is applied on success only.
+    pub(super) fork_draft_dir: Option<PathBuf>,
     pub(super) receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
 }
 
@@ -409,6 +420,7 @@ impl EffectEditSession {
         target: EffectEditTarget,
         source: String,
         temp_dir: PathBuf,
+        surface: EditorSurface,
     ) -> Self {
         Self {
             name,
@@ -419,7 +431,7 @@ impl EffectEditSession {
             last_valid_layout: None,
             visible_revision_valid: true,
             preview_generation: 0,
-            surface: EditorSurface::Patch,
+            surface,
             mode: EffectEditMode::CreateDraft { temp_dir },
             fork_restore: None,
         }
@@ -659,6 +671,9 @@ pub(super) fn staged_library_macro_flush_status(macros: &[String]) -> Option<Str
 
 pub(super) struct PendingEffectCancelRestore {
     pub(super) session: EffectEditSession,
+    /// Draft dir of a `fork-editor-session` draft being cancelled — see
+    /// [`PendingInstrumentCancelRestore::fork_draft_dir`].
+    pub(super) fork_draft_dir: Option<PathBuf>,
     pub(super) receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
 }
 

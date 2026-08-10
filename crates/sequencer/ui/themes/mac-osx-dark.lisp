@@ -155,19 +155,23 @@
       :patcher-port-output  '(1.00 0.58 0.12)
       :patcher-edit-selection '(0.00 0.48 0.95 0.35)
       :patcher-edit-cursor  '(1.00 1.00 1.00)
-      ;; Flat (Zed-style) completion menu + port tooltips
-      :patcher-autocomplete-bg '(0.15 0.15 0.16)
-      :patcher-autocomplete-border '(0.23 0.24 0.25)
-      :patcher-autocomplete-selected-bg '(0.20 0.21 0.24)
-      :patcher-autocomplete-text '(0.30 0.98 0.75)
-      :patcher-autocomplete-selected-text '(0.46 1.00 0.82)
-      :patcher-autocomplete-category-text '(0.45 0.47 0.51)
-      :patcher-autocomplete-doc-bg '(0.09 0.09 0.11)
-      :patcher-autocomplete-doc-border '(0.23 0.24 0.25)
-      :patcher-autocomplete-doc-text '(0.66 0.67 0.72)
+      ;; Flat (Zed-style) completion menu, shared by the code editor and the
+      ;; patcher node editor -- one `comp-*` palette drives both surfaces.
+      :comp-unselected-bg '(0.15 0.15 0.16)
+      :comp-selected-bg '(0.20 0.21 0.24)
+      :comp-border '(0.23 0.24 0.25)
+      :comp-fg '(0.30 0.98 0.75)
+      :comp-selected-fg '(0.46 1.00 0.82)
+      :comp-category-fg '(0.45 0.47 0.51)
+      :comp-doc-bg '(0.09 0.09 0.11)
+      :comp-doc-border '(0.23 0.24 0.25)
+      :comp-doc-fg '(0.66 0.67 0.72)
+      :comp-doc-title-fg '(0.46 1.00 0.82)
+      ;; Port tooltips
       :patcher-tooltip-bg '(0.09 0.09 0.11)
       :patcher-tooltip-border '(0.18 0.19 0.21)
       :patcher-tooltip-text '(0.82 0.84 0.87)
+      :patcher-node-tail-text-hover '(1.00 0.80 0.00)
       ;; Agentic bubbles (cmd+k). The card is drawn flat (AGENTIC_CARD_FLATNESS),
       ;; so unlike the node colours these land close to as authored. The card's
       ;; own alpha is max(border, bg), so dim its border in RGB rather than by
