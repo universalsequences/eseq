@@ -1,6 +1,4 @@
-(use-defmacro simp2)
 (use-defmacro simp11)
-(use-defmacro gain2)
 (def value1 0.3)
 (def gate (in 1 @name gate))
 (def pitch (in 2 @name pitch))

@@ -70,8 +70,6 @@
   (def amp (+ 0.3 (* 0.7 accent)))
   (tanh (* out_mix amp 1.6)))
 (use-defmacro pitch-transpose)
-(use-defmacro simp2)
-(use-defmacro gain2)
 (param marimba-semi @min -12.0 @max 12.0)
 (param marimbamix)
 (def value8 1.0)

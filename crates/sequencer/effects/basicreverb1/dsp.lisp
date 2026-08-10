@@ -18,8 +18,6 @@
   d-out)
 (def value1 0.7)
 (use-defmacro schroeder-allpass)
-(use-defmacro simp2)
-(use-defmacro gain2)
 (param dampening @min 50.0 @max 5000.0)
 (def input_r (in 2 @name Right))
 (def mod1 (in 3 @name mod1 @modulator 1))
