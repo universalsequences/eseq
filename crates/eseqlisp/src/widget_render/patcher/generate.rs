@@ -283,8 +283,16 @@ struct ScopeEmitter<'a> {
     /// unused defs so they survive a save + reload.
     omitted: HashSet<String>,
     nodes: HashMap<&'a str, &'a PatchNode>,
-    /// (to_node, to_input) -> connection, deterministic pick.
-    inbound: BTreeMap<(&'a str, usize), &'a PatchConnection>,
+    /// (to_node, to_input) -> every connection landing on that inlet, in a
+    /// deterministic order.
+    ///
+    /// An inlet may take more than one cable (Max/gen~ summing inlets): the
+    /// slot then emits `(+ a b …)`. Every dgenlisp inlet is a float or a
+    /// tensor and both sum, so this is allowed on every inlet rather than
+    /// opted into per operator. Slots holding an inline literal or an inline
+    /// `param~` draw no port at all (geometry.rs `patch_input_indices`), so a
+    /// summed slot is always made of cables only.
+    inbound: BTreeMap<(&'a str, usize), Vec<&'a PatchConnection>>,
     /// binding (or reference) name per node id.
     names: HashMap<String, String>,
     /// destructured output names for multi-output value nodes.
@@ -332,8 +340,11 @@ impl<'a> ScopeEmitter<'a> {
             };
             roles.insert(node.id.as_str(), role);
         }
-        let mut inbound: BTreeMap<(&str, usize), &PatchConnection> = BTreeMap::new();
+        let mut inbound: BTreeMap<(&str, usize), Vec<&PatchConnection>> = BTreeMap::new();
         let mut sorted_connections = patch.connections.iter().collect::<Vec<_>>();
+        // Summed inlets emit their terms in this order, so it decides the
+        // generated text: sorting by endpoint (never by the patch's connection
+        // order, which drag order perturbs) keeps saves byte-stable.
         sorted_connections.sort_by_key(|connection| {
             (
                 connection.to_node.as_str(),
@@ -345,7 +356,8 @@ impl<'a> ScopeEmitter<'a> {
         for connection in sorted_connections {
             inbound
                 .entry((connection.to_node.as_str(), connection.to_input))
-                .or_insert(connection);
+                .or_default()
+                .push(connection);
         }
         let omitted = omitted_dead_node_ids(patch, &roles, &inbound);
         let mut emitter = Self {
@@ -621,27 +633,31 @@ impl<'a> ScopeEmitter<'a> {
     /// Emission dependencies of a node: sources of its inbound forward
     /// connections, looking through inline-emitted `mod` nodes.
     fn collect_value_deps(&self, node: &PatchNode, deps: &mut HashSet<&'a str>) {
-        for ((to_node, _), connection) in self
+        // Every cable on a slot is a dependency, not just the first: a summed
+        // inlet's terms all have to be bound before the consumer is emitted.
+        for ((to_node, _), connections) in self
             .inbound
             .range((node.id.as_str(), 0)..=(node.id.as_str(), usize::MAX))
         {
             debug_assert_eq!(*to_node, node.id.as_str());
-            if connection.kind == ConnectionKind::Feedback {
-                continue;
-            }
-            let Some(from) = self.nodes.get(connection.from_node.as_str()) else {
-                continue;
-            };
-            if self.roles.get(from.id.as_str()) == Some(&NodeRole::InlineMod) {
-                deps.insert(from.id.as_str());
-                self.collect_value_deps(from, deps);
-                // the inline node itself is not emitted; depend on its inputs
-                let mut inline_deps = HashSet::new();
-                self.collect_value_deps(from, &mut inline_deps);
-                deps.remove(from.id.as_str());
-                deps.extend(inline_deps);
-            } else {
-                deps.insert(from.id.as_str());
+            for connection in connections {
+                if connection.kind == ConnectionKind::Feedback {
+                    continue;
+                }
+                let Some(from) = self.nodes.get(connection.from_node.as_str()) else {
+                    continue;
+                };
+                if self.roles.get(from.id.as_str()) == Some(&NodeRole::InlineMod) {
+                    deps.insert(from.id.as_str());
+                    self.collect_value_deps(from, deps);
+                    // the inline node itself is not emitted; depend on its inputs
+                    let mut inline_deps = HashSet::new();
+                    self.collect_value_deps(from, &mut inline_deps);
+                    deps.remove(from.id.as_str());
+                    deps.extend(inline_deps);
+                } else {
+                    deps.insert(from.id.as_str());
+                }
             }
         }
         // Bare symbol arguments (e.g. a created node typed as `mix phase 0.25`)
@@ -690,10 +706,8 @@ impl<'a> ScopeEmitter<'a> {
             .filter(|arity| *arity > 0)
             .map_or(trimmed_count, |arity| arity.max(trimmed_count));
         for idx in 0..emit_count {
-            let connection = self.inbound.get(&(node.id.as_str(), idx)).copied();
-            if let Some(connection) = connection {
-                let reference = self.reference_expr(connection)?;
-                parts.push(reference);
+            if let Some(value) = self.slot_value_expr(node.id.as_str(), idx)? {
+                parts.push(value);
                 continue;
             }
             match node.args.get(idx) {
@@ -748,6 +762,38 @@ impl<'a> ScopeEmitter<'a> {
             .any(|later| self.inbound.contains_key(&(node.id.as_str(), later)))
     }
 
+    /// Every cable landing on one inlet, in emission order.
+    fn slot_connections(&self, node_id: &'a str, idx: usize) -> Vec<&'a PatchConnection> {
+        self.inbound
+            .get(&(node_id, idx))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The single cable on an inlet that cannot meaningfully sum — the
+    /// synthesized `(mod p)` accessor's own input, which is always exactly one
+    /// edge from a param node.
+    fn slot_primary(&self, node_id: &'a str, idx: usize) -> Option<&'a PatchConnection> {
+        self.inbound
+            .get(&(node_id, idx))
+            .and_then(|connections| connections.first().copied())
+    }
+
+    /// The expression feeding one inlet: the reference itself for a single
+    /// cable, `(+ …)` for several. `None` when nothing is cabled.
+    fn slot_value_expr(&mut self, node_id: &'a str, idx: usize) -> Result<Option<String>, String> {
+        let connections = self.slot_connections(node_id, idx);
+        let mut terms = Vec::with_capacity(connections.len());
+        for connection in connections {
+            terms.push(self.reference_expr(connection)?);
+        }
+        Ok(match terms.len() {
+            0 => None,
+            1 => Some(terms.remove(0)),
+            _ => Some(format!("(+ {})", terms.join(" "))),
+        })
+    }
+
     /// The declared param name of `node_id`, if it is a param node.
     fn param_name_for(&self, node_id: &str) -> Option<String> {
         self.nodes
@@ -763,7 +809,7 @@ impl<'a> ScopeEmitter<'a> {
         match self.roles.get(from.id.as_str()) {
             Some(NodeRole::History) => Ok(format!("(read-history {})", self.names[&from.id])),
             Some(NodeRole::InlineMod) => {
-                let inner = match self.inbound.get(&(from.id.as_str(), 0)).copied() {
+                let inner = match self.slot_primary(from.id.as_str(), 0) {
                     // `(mod X)` resolves only against a top-level `(param X …)`
                     // form, so it must name the PARAM — not the binding. A param
                     // bound under a different name (`(def value (param embouchure
@@ -882,10 +928,9 @@ impl<'a> ScopeEmitter<'a> {
         let mut values = Vec::new();
         for channel in 1..=max_channel {
             let value = match by_channel.get(&channel) {
-                Some(out) => match self.inbound.get(&(out.id.as_str(), 0)).copied() {
-                    Some(connection) => self.reference_expr(connection)?,
-                    None => MISSING_INPUT_SENTINEL.to_string(),
-                },
+                Some(out) => self
+                    .slot_value_expr(out.id.as_str(), 0)?
+                    .unwrap_or_else(|| MISSING_INPUT_SENTINEL.to_string()),
                 None => MISSING_INPUT_SENTINEL.to_string(),
             };
             values.push(value);
@@ -911,10 +956,9 @@ impl<'a> ScopeEmitter<'a> {
         for out in self.nodes_in_role_order(NodeRole::Out) {
             let name = self.names[&out.id].clone();
             let channel = node_channel(out).max(1);
-            let value = match self.inbound.get(&(out.id.as_str(), 0)).copied() {
-                Some(connection) => self.reference_expr(connection)?,
-                None => MISSING_INPUT_SENTINEL.to_string(),
-            };
+            let value = self
+                .slot_value_expr(out.id.as_str(), 0)?
+                .unwrap_or_else(|| MISSING_INPUT_SENTINEL.to_string());
             let modulator = out_modulator_attr(out);
             let modulator_attr = modulator
                 .map(|slot| format!(" @modulator {slot}"))
@@ -1041,7 +1085,7 @@ fn binding_base_for_node(node: &PatchNode) -> String {
 fn omitted_dead_node_ids(
     patch: &Patch,
     roles: &HashMap<&str, NodeRole>,
-    inbound: &BTreeMap<(&str, usize), &PatchConnection>,
+    inbound: &BTreeMap<(&str, usize), Vec<&PatchConnection>>,
 ) -> HashSet<String> {
     let live = live_node_ids(patch, roles);
     let orphaned_inline_mods = orphaned_inline_mod_node_ids(patch);
@@ -1066,9 +1110,12 @@ fn omitted_dead_node_ids(
             {
                 continue;
             }
+            // Any omitted term poisons the whole slot: a summed inlet whose
+            // `(+ …)` names a binding that was never emitted is just as broken.
             let references_omitted = inbound
                 .range((node.id.as_str(), 0)..=(node.id.as_str(), usize::MAX))
-                .any(|(_, connection)| omitted.contains(&connection.from_node));
+                .flat_map(|(_, connections)| connections)
+                .any(|connection| omitted.contains(&connection.from_node));
             if references_omitted {
                 omitted.insert(node.id.clone());
                 grew = true;
@@ -1142,7 +1189,7 @@ fn fixed_macro_arity(patch: &Patch, node: &PatchNode) -> Option<usize> {
 
 fn node_call_is_incomplete(
     patch: &Patch,
-    inbound: &BTreeMap<(&str, usize), &PatchConnection>,
+    inbound: &BTreeMap<(&str, usize), Vec<&PatchConnection>>,
     node: &PatchNode,
 ) -> bool {
     if node.op.trim().is_empty() || node.diagnostic.is_some() {
@@ -1183,7 +1230,7 @@ fn label_items(label: &str) -> Option<Vec<Expression>> {
     }
 }
 
-fn label_attribute(label: &str, attribute: &str) -> Option<String> {
+pub(super) fn label_attribute(label: &str, attribute: &str) -> Option<String> {
     let items = label_items(label)?;
     let values = attribute_value_items(&items, attribute)?;
     Some(

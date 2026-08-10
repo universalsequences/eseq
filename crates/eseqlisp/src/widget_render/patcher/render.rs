@@ -484,7 +484,7 @@ fn draw_agentic_bubbles(
                 theme::PATCHER_AGENTIC_CARD_BG(),
                 theme::PATCHER_AGENTIC_CARD_BORDER_ACTIVE(),
                 match bubble.target {
-                    AgenticBubbleTarget::CreateMacro => "new macro",
+                    AgenticBubbleTarget::CreateMacro => "macro builder",
                     _ => "prompt",
                 },
             ),

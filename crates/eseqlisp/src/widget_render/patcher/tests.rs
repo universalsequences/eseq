@@ -21384,6 +21384,79 @@ fn encapsulation_with_two_outlets_returns_a_tuple() {
     );
 }
 
+/// A macro created in this session keeps its whole body in the interaction
+/// state, so its projected `MacroSignature` has no parameters — the port names
+/// have to come from the body's `in` / `out` nodes and their `@name`, or every
+/// inlet on the instance reads as the bare `in N` fallback.
+#[test]
+fn session_created_macro_ports_use_their_body_name_attributes() {
+    let path = temp_patcher_source_path("encapsulate-port-names");
+    fs::write(
+        &path,
+        "(def g (in 1 @name gate))\n\
+         (def h (in 2 @name pitch))\n\
+         (def a (* g h))\n\
+         (def b (+ a 1))\n\
+         (out 1 b)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    state.selected_nodes = ["a".to_string(), "b".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    encapsulate_via_key_event(&node);
+
+    let mut state = get_patcher_interaction_state(key);
+    let instance_id = state.edit_state.created_macros["sub1"]
+        .instance_node_id
+        .clone();
+
+    // The encapsulator's own `@name`s, before the file is ever regenerated.
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let visible = patch_with_interaction_state(root_patch.clone(), &state, "root");
+    assert_eq!(
+        input_port_tooltip(
+            &visible,
+            &InputPortRef {
+                node_id: instance_id.clone(),
+                input_index: 1,
+            },
+        ),
+        Some("in 2: input2".to_string())
+    );
+
+    // Renaming the inlet inside the macro view must show up on the instance.
+    let inlet_edit_id = state
+        .edit_state
+        .nodes
+        .values()
+        .find(|edit| edit.view_key == "macro:sub1" && edit.text.starts_with("in 2"))
+        .map(|edit| edit.id.clone())
+        .expect("inlet 2 body edit");
+    for edit in state.edit_state.nodes.values_mut() {
+        if edit.id == inlet_edit_id {
+            edit.text = "in 2 @name fmod".to_string();
+        }
+    }
+
+    let visible = patch_with_interaction_state(root_patch, &state, "root");
+    assert_eq!(
+        input_port_tooltip(
+            &visible,
+            &InputPortRef {
+                node_id: instance_id,
+                input_index: 1,
+            },
+        ),
+        Some("in 2: fmod".to_string()),
+        "the inlet's @name is the port name"
+    );
+
+    let _ = fs::remove_file(path);
+}
+
 #[test]
 fn encapsulating_a_node_fed_by_param_sugar_keeps_the_mod_accessor_outside() {
     // `gain~` is UI sugar for a hidden `(mod gain)` accessor node. `mod` needs a
@@ -22150,10 +22223,9 @@ fn connect_plan_rejects_ops_that_do_not_target_a_free_argument() {
             connect_op_connect(&instance, 0, &instance, 0),
             "self-connection",
         ),
-        (
-            connect_op_connect("sig", 0, "filtered", 0),
-            "cabled from sig:0",
-        ),
+        // A cabled inlet is NOT rejected — it sums (see
+        // `connect_plan_fans_two_cables_into_one_inlet`). The slots below have
+        // no drawn port at all, so they remain invalid wiring targets.
         (
             connect_op_connect("sig", 0, "filtered", 1),
             "inline param cutoff",
@@ -22212,7 +22284,9 @@ fn connect_plan_applies_valid_ops_and_skips_the_rest() {
         &patch,
         &[
             connect_op_connect("sig", 0, &instance, 0),
-            connect_op_connect("sig", 0, "filtered", 0),
+            // `filtered`'s arg 2 holds the literal 0.7: no port is drawn, so it
+            // is not a wiring target.
+            connect_op_connect("sig", 0, "filtered", 2),
             connect_op_inline("0.5", &instance, 2),
         ],
     );
@@ -22226,14 +22300,68 @@ fn connect_plan_applies_valid_ops_and_skips_the_rest() {
         .find(|patch_node| patch_node.id == instance)
         .expect("instance node");
     assert_eq!(wired.args[2], ArgValue::Literal("0.5".to_string()));
-    assert_eq!(
-        patch
+    assert!(
+        !patch
             .connections
             .iter()
-            .filter(|connection| connection.to_node == "filtered" && connection.to_input == 0)
-            .count(),
-        1,
-        "the occupied inlet must keep exactly its original cable"
+            .any(|connection| connection.to_node == "filtered" && connection.to_input == 2),
+        "the skipped op must not have cabled the literal slot"
+    );
+}
+
+/// An inlet sums its cables, so a plan may fan several sources into one — the
+/// agentic path gets the same affordance a cable drag has.
+#[test]
+fn connect_plan_fans_two_cables_into_one_inlet() {
+    let (node, key, instance) = connect_test_node("connect-fan-in");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(
+        key,
+        &patch,
+        &[
+            connect_op_connect("sig", 0, &instance, 0),
+            connect_op_connect("filtered", 0, &instance, 0),
+        ],
+    );
+    assert_eq!(report.applied.len(), 2, "{report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
+
+    let patch = connect_test_patch(&node, key);
+    let mut sources = patch
+        .connections
+        .iter()
+        .filter(|connection| connection.to_node == instance && connection.to_input == 0)
+        .map(|connection| connection.from_node.clone())
+        .collect::<Vec<_>>();
+    sources.sort();
+    assert_eq!(
+        sources,
+        vec!["filtered".to_string(), "sig".to_string()],
+        "both cables land on the one inlet"
+    );
+    // What they generate is `two_cables_on_one_inlet_emit_a_sum`'s job; this
+    // instance is dead-code-pruned (§4.2b) and never reaches the source.
+}
+
+/// An `inline` op rewrites the slot's literal, so it still cannot share an
+/// argument with anything — including a `connect` that would otherwise sum.
+#[test]
+fn connect_plan_still_rejects_an_inline_sharing_an_argument_with_a_cable() {
+    let (node, key, instance) = connect_test_node("connect-inline-conflict");
+    let patch = connect_test_patch(&node, key);
+    let report = apply_connect_ops(
+        key,
+        &patch,
+        &[
+            connect_op_connect("sig", 0, &instance, 1),
+            connect_op_inline("440", &instance, 1),
+        ],
+    );
+    assert_eq!(report.applied.len(), 1, "{report:?}");
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(
+        report.skipped[0].contains("another op already targets this argument"),
+        "{report:?}"
     );
 }
 
@@ -22344,10 +22472,12 @@ fn a_connect_plan_with_no_valid_op_leaves_the_bubble_for_retry() {
         PatcherIntent::Instrument,
         &bubble_id,
         0,
-        &[connect_op_connect("sig", 0, "filtered", 0)],
+        // A cabled inlet would sum; `filtered`'s arg 2 holds the literal 0.7
+        // and draws no port, so it is a wiring target nothing can rescue.
+        &[connect_op_connect("sig", 0, "filtered", 2)],
     )
     .expect_err("nothing should apply");
-    assert!(error.contains("cabled from sig:0"), "{error}");
+    assert!(error.contains("literal \"0.7\""), "{error}");
     assert!(
         get_patcher_interaction_state(key)
             .agentic_bubbles
@@ -22744,6 +22874,141 @@ fn graph_payload_keeps_inline_literals_next_to_cabled_inputs() {
     );
 }
 
+/// A patch with `extra` cabled into `mixed`'s inlet 0 on top of `base`, which
+/// is the Max/gen~ summing-inlet shape: two cables landing on one inlet.
+fn patch_with_summed_inlet() -> Patch {
+    let mut patch = parse(
+        r#"
+(def pitch (in 1 @name pitch))
+(def base (* pitch 0.5))
+(def extra (* pitch 0.25))
+(def mixed (phasor base))
+(out mixed 1 @name audio)
+"#,
+    );
+    patch.connections.push(PatchConnection {
+        from_node: "extra".to_string(),
+        from_output: 0,
+        to_node: "mixed".to_string(),
+        to_input: 0,
+        kind: ConnectionKind::Forward,
+        segment: None,
+        presentation: InputPresentation::Cable,
+        presentation_override: None,
+        source: None,
+    });
+    patch
+}
+
+/// Max/gen~ inlets sum their cables. Every dgenlisp inlet is a float or a
+/// tensor and both sum, so this holds on any inlet rather than an opted-in set.
+#[test]
+fn two_cables_on_one_inlet_emit_a_sum() {
+    let patch = patch_with_summed_inlet();
+    let generated =
+        generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(phasor (+ base extra))"),
+        "both cables must reach the inlet as a sum:\n{}",
+        generated.source
+    );
+}
+
+/// The sum's terms are ordered by endpoint, not by the patch's connection
+/// order — which drag order perturbs — so saving an untouched patch is a no-op.
+#[test]
+fn summed_inlet_emission_order_is_stable_across_connection_order() {
+    let patch = patch_with_summed_inlet();
+    let forward =
+        generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+
+    let mut reversed = patch.clone();
+    reversed.connections.reverse();
+    let reversed =
+        generate::generate_patch_source(&reversed, PatcherIntent::Instrument).unwrap();
+
+    assert_eq!(
+        forward.source, reversed.source,
+        "connection order must not change the generated text"
+    );
+}
+
+/// `out` is an inlet like any other: two cables into it sum. Terms are ordered
+/// by source binding (`extra` before `mixed`), not by drop order — `+` is
+/// commutative, and a stable order is what keeps saves byte-identical.
+#[test]
+fn two_cables_on_an_out_inlet_emit_a_sum() {
+    let mut patch = patch_with_summed_inlet();
+    patch.connections.retain(|connection| {
+        !(connection.from_node == "extra" && connection.to_node == "mixed")
+    });
+    patch.connections.push(PatchConnection {
+        from_node: "extra".to_string(),
+        from_output: 0,
+        to_node: "audio".to_string(),
+        to_input: 0,
+        kind: ConnectionKind::Forward,
+        segment: None,
+        presentation: InputPresentation::Cable,
+        presentation_override: None,
+        source: None,
+    });
+    let generated =
+        generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("(out (+ extra mixed) 1"),
+        "an out taking two cables sums them:\n{}",
+        generated.source
+    );
+}
+
+/// The generated `(+ base extra)` reparses into a visible `+` node that has no
+/// counterpart in the model, so a summed inlet only round-trips through the
+/// graph payload — which, per spec §4.1b, is the load SOT for authored patches.
+#[test]
+fn summed_inlet_survives_the_graph_payload_round_trip() {
+    let path = temp_patcher_dsp_path("patcher-summed-inlet");
+    let patch = patch_with_summed_inlet();
+    let generated =
+        generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+    fs::write(&path, &generated.source).unwrap();
+
+    // Projecting the generated source is lossy in exactly this way; that is
+    // what the payload exists to bypass, so assert it rather than assume it.
+    let projected = parse_patch_source(&generated.source, PatcherIntent::Instrument).unwrap();
+    assert!(
+        projected.nodes.iter().any(|node| node.op == "+"),
+        "reparsing the sum materializes a `+` node that the model never had"
+    );
+
+    sidecar::save_current_layout(&path, &patch, &PatcherInteractionState::default()).unwrap();
+    let (_, reloaded) = load_patch_from_props(&patcher_props_for_path(&path)).unwrap();
+
+    assert!(
+        !reloaded.nodes.iter().any(|node| node.op == "+"),
+        "the payload reloads the authored model, with no phantom `+` node"
+    );
+    let inlet_cables = reloaded
+        .connections
+        .iter()
+        .filter(|connection| connection.to_node == "mixed" && connection.to_input == 0)
+        .map(|connection| connection.from_node.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        inlet_cables,
+        vec!["base", "extra"],
+        "both cables come back on the same inlet"
+    );
+
+    // And the model that comes back regenerates the same source.
+    let regenerated =
+        generate::generate_patch_source(&reloaded, PatcherIntent::Instrument).unwrap();
+    assert_eq!(
+        generated.source, regenerated.source,
+        "a summed inlet reaches a byte-identical fixpoint through the payload"
+    );
+}
+
 /// A v2 sidecar has no graph payload: it must still load by projecting the
 /// source (spec §4.1b migration), and materialize a payload on the next save.
 #[test]
@@ -23006,6 +23271,63 @@ fn retyping_an_inline_mod_slot_releases_its_accessor_cable() {
     );
 }
 
+/// Typing `param~` into a slot an unrelated cable already owns must replace the
+/// cable. This used to bail: the box rendered the typed `stiffness~` while the
+/// cable silently won the generated call, so you got a modulatable param that
+/// nothing read and an inlet still drawn on a slot showing inline text.
+#[test]
+fn typing_a_mod_suffix_over_an_unrelated_cable_replaces_it() {
+    let source = "(defmacro sax-bore (a b c d f)\n  (+ a b c d f))\n\
+                  (param stiffness @min 0 @max 1 @default 0.8)\n\
+                  (def input (in 1 @name pitch))\n\
+                  (def voice (sax-bore input input 0.1 0.03 0.2))\n\
+                  (out voice 1 @name audio)";
+    let patch = parse(source);
+    let node = patch.nodes.iter().find(|node| node.id == "voice").unwrap();
+    let base = node_display_label(node);
+    // The cabled slot renders as `?`; that is the token being typed over.
+    assert_eq!(base, "sax-bore ? 0.1 0.03 0.2");
+
+    let mut state = PatcherInteractionState::default();
+    set_node_edit_position(&mut state, "root", node, node.position, base.clone());
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", "voice"))
+        .unwrap()
+        .text = base.replacen('?', "stiffness~", 1);
+    let applied = patch_with_interaction_state(patch.clone(), &state, "root");
+
+    let voice = applied.nodes.iter().find(|node| node.id == "voice").unwrap();
+    assert_eq!(
+        voice.inline_inputs.get(1).and_then(|input| input.as_ref()),
+        Some(&super::model::InlineInput::ModParam("stiffness".to_string())),
+        "the typed sugar must desugar even though a cable held the slot"
+    );
+    assert!(
+        !applied.connections.iter().any(|connection| {
+            connection.to_node == "voice"
+                && connection.to_input == 1
+                && connection.from_node == "input"
+        }),
+        "and the cable it replaced is gone"
+    );
+    assert_eq!(
+        patch_input_indices(&applied).get("voice"),
+        Some(&vec![0]),
+        "an inline slot draws no inlet"
+    );
+
+    let generated = generate::generate_patch_source(&applied, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated
+            .source
+            .contains("(sax-bore input (mod stiffness) 0.1 0.03 0.2)"),
+        "the generated call must read the param, not the replaced cable:\n{}",
+        generated.source
+    );
+}
+
 /// `(mod X)` resolves only against a BARE top-level `(param X …)` form, so a
 /// param the source bound under another name — `(def value (param embouchure
 /// …))` — has to shed its wrapper once it becomes modulatable. Emitting
@@ -23051,3 +23373,4 @@ fn modulating_a_def_wrapped_param_emits_a_bare_param_form() {
     compile_patch_source_with_dgenlisp(&generated.source)
         .expect("the regenerated patch must compile");
 }
+

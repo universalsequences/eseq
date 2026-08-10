@@ -12,6 +12,7 @@ use crate::layout::LayoutNode;
 use crate::parser::{ASTParser, Expression, Parser};
 use crate::vm::Value;
 
+use super::generate::{label_attribute, sanitize_binding};
 use super::lisp::{
     editor_node_port_shape, node_kind_for_op, normalize_editor_node_text, parse_editor_node_text,
     parse_patch_source,
@@ -1604,6 +1605,16 @@ pub(super) fn patch_with_interaction_state(
 ) -> Patch {
     patch = patch_with_created_macros(patch, interaction_state);
     let macro_signatures = macro_signatures_with_visual_edits(&patch, interaction_state);
+    // Port tooltips and the agent's connect context read a macro instance's
+    // port names off `patch.macros`, so the visually resolved signature has to
+    // land there too — otherwise a session-created macro's `@name`d inlets read
+    // as `in N` until the file is regenerated and reparsed.
+    for macro_patch in &mut patch.macros {
+        if let Some(signature) = macro_signatures.get(&macro_patch.name) {
+            macro_patch.params = signature.params.clone();
+            macro_patch.outputs = signature.outputs.clone();
+        }
+    }
     patch.nodes.retain(|node| {
         !interaction_state
             .edit_state
@@ -1836,8 +1847,18 @@ fn modulation_demanded_param_names(patch: &Patch) -> HashSet<String> {
 ///
 /// The common flow is a *retype*: `(* x gain)` already projects a `gain -> node`
 /// edge, so typing `* gain~` must replace that plain reference with the
-/// accessor. Only a reference to that same param is replaced — an unrelated
-/// cable into the slot still wins, exactly as it does over a typed literal.
+/// accessor. Whatever already occupies the slot is replaced, including a cable
+/// from an unrelated node: typed text wins, matching
+/// `prune_retyped_inline_mod_slots` below, which releases an accessor cable the
+/// moment its slot is typed away from.
+///
+/// This used to bail when an unrelated cable owned the slot, on the reasoning
+/// that a slot holds exactly one thing and the cable got there first. The box
+/// went on rendering the typed `gain~` while the cable silently won the
+/// generated call, so the label lied about what compiled. Only a *typed* slot
+/// is replaced: a `name~` argument can only come from the editor, since
+/// DGenLisp source spells it `(mod name)` and projection leaves `ConnectedExpr`
+/// behind.
 /// Release argument slots whose `param~` text was typed away.
 ///
 /// A slot showing `freq~` is not backed by its argument: the sugar desugars
@@ -1947,12 +1968,9 @@ fn desugar_editor_mod_suffix_args(patch: &mut Patch) {
             };
             let param_node = param_nodes.get(&name);
             let existing = inbound.get(&(node.id.clone(), idx));
-            // An unrelated cable owns the slot; leave the text alone.
-            if let Some(from) = existing
-                && param_node.is_none_or(|(param_node_id, _)| param_node_id != from)
-            {
-                continue;
-            }
+            // A `name~` that resolves to nothing modulatable falls through to
+            // the diagnostic below and leaves the slot — and any cable on it —
+            // untouched. Only a real accessor displaces what is already there.
             let Some((param_node_id, true)) = param_node else {
                 if node.diagnostic.is_none() {
                     node.diagnostic = Some(format!(
@@ -2157,45 +2175,120 @@ pub(super) fn macro_signatures_with_visual_edits(
         }
     }
 
-    for edit in interaction_state
-        .edit_state
-        .nodes
-        .values()
-        .filter(|edit| matches!(edit.origin, PatcherNodeOrigin::Created { .. }))
-    {
+    // A macro's inlet/outlet names live on the `@name` of its body's `in` /
+    // `out` nodes — that is what the generator writes into the `(defmacro …)`
+    // parameter list. Reading them back here is what makes those names visible
+    // before the file is regenerated and reparsed: a macro created in this
+    // session (Cmd+E encapsulation seeds `(defmacro name ())` and keeps the
+    // whole body in the edit state) has no projected parameters at all, so
+    // every port would otherwise fall back to `in N` / `out N`.
+    for macro_patch in &patch.macros {
+        let signature = macro_signatures
+            .entry(macro_patch.name.clone())
+            .or_insert_with(|| MacroSignature {
+                params: Vec::new(),
+                outputs: default_output_names(1),
+            });
+        for node in &macro_patch.patch.nodes {
+            match node.kind {
+                NodeKind::In => apply_interface_name(
+                    &mut signature.params,
+                    macro_interface_channel(node),
+                    label_attribute(&node.label, "@name"),
+                    "input",
+                    true,
+                ),
+                NodeKind::Out => apply_interface_name(
+                    &mut signature.outputs,
+                    macro_interface_channel(node),
+                    label_attribute(&node.label, "@name"),
+                    "out",
+                    false,
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    for edit in interaction_state.edit_state.nodes.values() {
         let Some(macro_name) = edit.view_key.strip_prefix("macro:") else {
             continue;
         };
         let Ok((op, inline_args)) = parse_editor_node_text(edit.text.trim()) else {
             continue;
         };
-        if op != "in" {
+        if op != "in" && op != "out" {
             continue;
         }
-        let Some(channel) = inline_args
+        let channel = inline_args
             .first()
             .and_then(|arg| arg.parse::<usize>().ok())
-            .filter(|channel| *channel > 0)
-        else {
-            continue;
-        };
-        macro_signatures
+            .filter(|channel| *channel > 0);
+        let name = label_attribute(&edit.text, "@name");
+        let signature = macro_signatures
             .entry(macro_name.to_string())
-            .and_modify(|signature| {
-                while signature.params.len() < channel {
-                    signature
-                        .params
-                        .push(format!("input{}", signature.params.len() + 1));
-                }
-            })
             .or_insert_with(|| MacroSignature {
-                params: (0..channel)
-                    .map(|idx| format!("input{}", idx + 1))
-                    .collect(),
+                params: Vec::new(),
                 outputs: default_output_names(1),
             });
+        if op == "in" {
+            // Only inlets grow the signature: an `in K` node *is* parameter K,
+            // while the outlet count stays owned by `visual_macro_output_count`.
+            apply_interface_name(&mut signature.params, channel, name, "input", true);
+        } else {
+            apply_interface_name(&mut signature.outputs, channel, name, "out", false);
+        }
     }
     macro_signatures
+}
+
+/// The channel an `in` / `out` node inside a macro body declares, from its
+/// first positional argument and then its label text.
+fn macro_interface_channel(node: &PatchNode) -> Option<usize> {
+    output_channel_from_node(node).or_else(|| {
+        node.label
+            .split_whitespace()
+            .nth(1)
+            .and_then(|token| token.parse::<usize>().ok())
+            .filter(|channel| *channel > 0)
+    })
+}
+
+/// Name slot `channel` (1-based) of a macro's interface. `grow` extends the
+/// list with generic placeholders so a later slot can be named at all; without
+/// it an existing slot is renamed but the list never resizes.
+fn apply_interface_name(
+    slots: &mut Vec<String>,
+    channel: Option<usize>,
+    name: Option<String>,
+    placeholder: &str,
+    grow: bool,
+) {
+    let Some(channel) = channel else {
+        return;
+    };
+    if grow {
+        while slots.len() < channel {
+            slots.push(default_interface_slot_name(placeholder, slots.len() + 1));
+        }
+    }
+    let Some(name) = name
+        .map(|name| sanitize_binding(&name))
+        .filter(|name| !name.is_empty())
+    else {
+        return;
+    };
+    if let Some(slot) = slots.get_mut(channel - 1) {
+        *slot = name;
+    }
+}
+
+fn default_interface_slot_name(placeholder: &str, channel: usize) -> String {
+    if placeholder == "out" && channel == 1 {
+        "out".to_string()
+    } else {
+        format!("{placeholder}{channel}")
+    }
 }
 
 fn visual_macro_output_count(

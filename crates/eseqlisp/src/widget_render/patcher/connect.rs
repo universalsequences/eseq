@@ -252,7 +252,7 @@ pub(super) fn apply_connect_plan(
 ) -> PatcherConnectReport {
     let drawn_ports = patch_input_indices(patch);
     let signatures = macro_signatures_with_visual_edits(patch, state);
-    let mut claimed: HashSet<(String, usize)> = HashSet::new();
+    let mut claimed: HashMap<(String, usize), ArgClaim> = HashMap::new();
     // Reported in plan order, whatever order the work happens in.
     let mut applied: Vec<(usize, String)> = Vec::new();
     let mut skipped: Vec<(usize, String)> = Vec::new();
@@ -357,12 +357,21 @@ struct InlineSet {
     value: String,
 }
 
+/// How an accepted op holds its argument slot. An inlet sums its cables, so
+/// several `connect` ops may share one; an `inline` op rewrites the slot's
+/// literal and cannot share with anything.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArgClaim {
+    Cable,
+    Exclusive,
+}
+
 /// Spec §7. Returns the argument and canonical literal an `inline` op will set,
 /// which its node composes with the plan's other inline ops.
 fn validate_op(
     patch: &Patch,
     drawn_ports: &HashMap<String, Vec<usize>>,
-    claimed: &mut HashSet<(String, usize)>,
+    claimed: &mut HashMap<(String, usize), ArgClaim>,
     op: &PatcherConnectOp,
 ) -> Result<Option<(usize, String)>, String> {
     let target = patch
@@ -377,14 +386,30 @@ fn validate_op(
             target.id
         ));
     }
-    if !claimed.insert((target.id.clone(), op.to_arg())) {
+    let slot = (target.id.clone(), op.to_arg());
+    let claim = match op {
+        PatcherConnectOp::Connect { .. } => ArgClaim::Cable,
+        PatcherConnectOp::Inline { .. } => ArgClaim::Exclusive,
+    };
+    if let Some(existing) = claimed.get(&slot)
+        && (claim == ArgClaim::Exclusive || *existing == ArgClaim::Exclusive)
+    {
         return Err("another op already targets this argument".to_string());
     }
+    claimed.insert(slot, claim);
     let occupancy = arg_occupancies(patch, target, drawn_ports)
         .into_iter()
         .nth(op.to_arg())
         .unwrap_or(ArgOccupancy::Occupied);
-    if occupancy != ArgOccupancy::Free {
+    // A cabled inlet still accepts another cable — the slot sums. Everything
+    // else (a literal, an inline param, a nested expression) has no drawn port
+    // and is not a wiring target at all.
+    let accepts = match (op, &occupancy) {
+        (_, ArgOccupancy::Free) => true,
+        (PatcherConnectOp::Connect { .. }, ArgOccupancy::Cabled { .. }) => true,
+        _ => false,
+    };
+    if !accepts {
         return Err(format!("argument is not free ({})", occupancy.describe()));
     }
     match op {
